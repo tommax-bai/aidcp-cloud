@@ -34,21 +34,23 @@ function stateOf(accountId: string, status: RiskState['status']): RiskState {
   };
 }
 
-// ── PgRiskStore.saveState 的条件写：并发接管即作废先写方 ──────────────────────────
+// ── PgRiskStore.saveState 的属主谓词：先经端口问归属，命中才在本域内写 ──────────────
+//
+// change risk-ownership-via-port：原先是一条 join `accounts` 的单语句条件写。`accounts` 属 api 域，
+// 物理拆库后 automation 库里没有它 ⇒ dev / ol 上 saveState 全数报 relation "accounts" does not exist。
+// 现在属主谓词经 AccountOwnershipPort 的三态读取值，写回到本域内的无谓词 upsert。
 
-/** 只回答两种查询：条件写（rowCount 由用例给）与接管方回读。 */
-function fakePool(opts: { conditionalRowCount: number; owner: string | null; accountExists?: boolean }) {
+/** 本域池：只认 risk_state 的写。**任何提到 accounts 的 SQL 都当场炸**——那正是要根除的形态。 */
+function fakePool() {
   const queries: string[] = [];
   return {
     queries,
     pool: {
       query: async (sql: string) => {
         queries.push(sql);
-        if (sql.includes('WITH owner AS')) return { rowCount: opts.conditionalRowCount, rows: [] };
-        if (sql.startsWith('SELECT execution_target')) {
-          return opts.accountExists === false
-            ? { rowCount: 0, rows: [] }
-            : { rowCount: 1, rows: [{ execution_target: opts.owner }] };
+        if (/\baccounts\b/.test(sql)) {
+          // 拆库后 automation 库里真的没有这张表，PG 就是这么报的。桩逐字复刻，防回归。
+          throw new Error('relation "accounts" does not exist');
         }
         return { rowCount: 1, rows: [] };
       },
@@ -56,27 +58,49 @@ function fakePool(opts: { conditionalRowCount: number; owner: string | null; acc
   };
 }
 
-test('条件写命中（rowCount>0）→ 正常返回，不回读归属、不再多写一次', async () => {
-  const { pool, queries } = fakePool({ conditionalRowCount: 1, owner: 'dev' });
-  const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer, executionTarget: 'dev' });
+/** 归属读口的桩：三态照实回答，并记录被问了几次。 */
+function fakeOwnershipReader(resolution: { outcome: 'owned'; target: 'dev' | 'ol' } | { outcome: 'unowned' } | { outcome: 'account_not_found' }) {
+  const asked: string[] = [];
+  return {
+    asked,
+    reader: {
+      resolveExecutionTarget: async (accountId: string) => {
+        asked.push(accountId);
+        return resolution;
+      },
+    },
+  };
+}
+
+test('归属命中 → 本域内一次 upsert；**全程不对本域池发任何 accounts 查询**', async () => {
+  const { pool, queries } = fakePool();
+  const { reader, asked } = fakeOwnershipReader({ outcome: 'owned', target: 'dev' });
+  const store = new PgRiskStore({
+    pool,
+    schemaEnsurer: readySchemaEnsurer,
+    executionTarget: 'dev',
+    ownershipReader: reader,
+  });
   await store.saveState(stateOf('acc-1', 'restricted'));
-  assert.equal(queries.filter((q) => q.includes('WITH owner AS')).length, 1, '走带谓词的条件写');
-  assert.equal(queries.filter((q) => q.startsWith('SELECT execution_target')).length, 0, '命中就不回读');
-  assert.equal(
-    queries.filter((q) => q.includes('INSERT INTO risk_state') && !q.includes('WITH owner AS')).length,
-    0,
-    '命中就不额外补一次无谓词 upsert',
-  );
+  assert.deepEqual(asked, ['acc-1'], '属主谓词经端口取值，问且只问一次');
+  assert.equal(queries.filter((q) => q.includes('INSERT INTO risk_state')).length, 1, '本域内写且只写一次');
+  assert.equal(queries.filter((q) => /\baccounts\b/.test(q)).length, 0, '绝不在 automation 池上碰 api 属主表');
 });
 
-test('并发接管：条件写 0 行 → 抛 RiskStateNotOwnedError，三种原因可区分', async () => {
-  for (const [scenario, opts, cause, owner] of [
-    ['已被别的 target 接管', { conditionalRowCount: 0, owner: 'ol' }, 'owned_by_other', 'ol'],
-    ['归属被清空', { conditionalRowCount: 0, owner: null }, 'unowned', null],
-    ['账号不存在', { conditionalRowCount: 0, owner: null, accountExists: false }, 'account_not_found', undefined],
+test('归属不是本进程 → 抛 RiskStateNotOwnedError，三种原因可区分', async () => {
+  for (const [scenario, resolution, cause, owner] of [
+    ['已被别的 target 接管', { outcome: 'owned', target: 'ol' }, 'owned_by_other', 'ol'],
+    ['归属被清空', { outcome: 'unowned' }, 'unowned', null],
+    ['账号不存在', { outcome: 'account_not_found' }, 'account_not_found', undefined],
   ] as const) {
-    const { pool } = fakePool(opts);
-    const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer, executionTarget: 'dev' });
+    const { pool } = fakePool();
+    const { reader } = fakeOwnershipReader(resolution);
+    const store = new PgRiskStore({
+      pool,
+      schemaEnsurer: readySchemaEnsurer,
+      executionTarget: 'dev',
+      ownershipReader: reader,
+    });
     await assert.rejects(
       () => store.saveState(stateOf('acc-1', 'normal')),
       (err: unknown) => {
@@ -91,22 +115,46 @@ test('并发接管：条件写 0 行 → 抛 RiskStateNotOwnedError，三种原�
 });
 
 test('被接管后 MUST NOT 回落无谓词写——那正是「先写方盖回接管方」的原路', async () => {
-  const { pool, queries } = fakePool({ conditionalRowCount: 0, owner: 'ol' });
-  const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer, executionTarget: 'dev' });
+  const { pool, queries } = fakePool();
+  const { reader } = fakeOwnershipReader({ outcome: 'owned', target: 'ol' });
+  const store = new PgRiskStore({
+    pool,
+    schemaEnsurer: readySchemaEnsurer,
+    executionTarget: 'dev',
+    ownershipReader: reader,
+  });
   await assert.rejects(() => store.saveState(stateOf('acc-1', 'normal')));
   assert.equal(
-    queries.filter((q) => q.includes('INSERT INTO risk_state') && !q.includes('WITH owner AS')).length,
+    queries.filter((q) => q.includes('INSERT INTO risk_state')).length,
     0,
     '作废先写方即作废，绝不回落到历史无谓词 upsert',
   );
 });
 
-test('未配置 executionTarget → 条件写模式恒 off，走历史无谓词 upsert（回滚/零回归）', async () => {
-  const { pool, queries } = fakePool({ conditionalRowCount: 1, owner: null });
+test('未配置 executionTarget → 归属模式恒 off，走历史无谓词 upsert（回滚/零回归）', async () => {
+  const { pool, queries } = fakePool();
   const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer });
   assert.deepEqual(store.ownership(), { mode: 'off', target: null });
   await store.saveState(stateOf('acc-1', 'normal'));
-  assert.equal(queries.filter((q) => q.includes('WITH owner AS')).length, 0);
+  assert.equal(queries.filter((q) => q.includes('INSERT INTO risk_state')).length, 1);
+});
+
+test('有 target 但未注入归属读口 → 降级为 off 并响亮告警（MUST NOT 静默）', async () => {
+  const { pool, queries } = fakePool();
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '));
+  };
+  try {
+    const store = new PgRiskStore({ pool, schemaEnsurer: readySchemaEnsurer, executionTarget: 'dev' });
+    assert.deepEqual(store.ownership(), { mode: 'off', target: 'dev' }, '缺读口即降级，绝不假装 enforce');
+    await store.saveState(stateOf('acc-1', 'normal'));
+    assert.equal(queries.filter((q) => q.includes('INSERT INTO risk_state')).length, 1, '降级后状态照常持久化');
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(warnings.filter((w) => w.includes('ownershipReader')).length, 1, '降级必须留下可检索的告警');
 });
 
 // ── 注册表：物化、驱逐、驱逐后从库重读 ─────────────────────────────────────────
@@ -280,6 +328,8 @@ function runtimeRegistry(opts: {
       executionTarget: 'dev',
       port: {
         getExecutionTarget: async () => opts.owner,
+        resolveExecutionTarget: async () =>
+          opts.owner ? ({ outcome: 'owned', target: opts.owner } as const) : ({ outcome: 'unowned' } as const),
         claimExecutionTarget: async () => ({ outcome: 'claimed', target: 'dev' }),
         setExecutionTarget: async (accountId) => {
           sets.push(accountId);

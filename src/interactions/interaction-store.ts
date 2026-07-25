@@ -40,6 +40,7 @@ import {
   INTERACTION_AUDIT_OUTBOX_TOPIC,
   type InteractionAuditEventRecord,
 } from '../kernel/interaction-audit-outbox.js';
+import type { AccountPlatformReader } from '../kernel/platform-types.js';
 import { emitOutboxEvent } from '../transport/event-outbox.js';
 import { classifyInteractionSchema, type InteractionSchemaMode } from './schema-capability.js';
 
@@ -107,6 +108,13 @@ export interface InteractionStoreOptions {
    * 走到任何审计写入时当场抛错（fail-loud，绝不把 target 未知的审计静默落进队列）。
    */
   executionTarget?: 'dev' | 'ol';
+  /**
+   * 账号平台读口（change risk-ownership-via-port 的同批修复）。运行控制行的播种守卫原本内联
+   * `SELECT 1 FROM accounts`——`accounts` 是 api 属主表，而本 store 绑 automation 池，
+   * 物理拆库后那条语句必炸（与 `PgRiskStore.saveState` 同形的既存缺陷）。改经本口向 api 域问平台。
+   * 缺省 = 不注入，走到播种守卫时当场抛错（fail-loud：**问不到账号 = 不播种**，绝不当作存在）。
+   */
+  accountPlatform?: AccountPlatformReader;
 }
 
 export interface IngestResult {
@@ -327,6 +335,7 @@ export class InteractionStore implements InteractionStoreReaderPort {
   private readonly apiPurge?: InteractionApiPurgePort;
   private readonly authGate?: InteractionAuthGate;
   private readonly executionTarget?: 'dev' | 'ol';
+  private readonly accountPlatform?: AccountPlatformReader;
 
   constructor(options: InteractionStoreOptions = {}) {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
@@ -336,6 +345,7 @@ export class InteractionStore implements InteractionStoreReaderPort {
     this.apiPurge = options.apiPurge;
     this.authGate = options.authGate;
     this.executionTarget = options.executionTarget;
+    this.accountPlatform = options.accountPlatform;
   }
 
   /** api 属主表清理口：未注入即当场抛错，绝不静默跳过应删的 api 属主数据。 */
@@ -348,6 +358,12 @@ export class InteractionStore implements InteractionStoreReaderPort {
   private requireAuthGate(): InteractionAuthGate {
     if (!this.authGate) throw new Error('interaction_auth_gate_port_not_configured');
     return this.authGate;
+  }
+
+  /** 账号平台读口：未注入即当场抛错。**问不到账号 = 不播种运行控制行**，绝不当作账号存在。 */
+  private requireAccountPlatform(): AccountPlatformReader {
+    if (!this.accountPlatform) throw new Error('interaction_account_platform_port_not_configured');
+    return this.accountPlatform;
   }
 
   /** 审计投递 target：未注入即当场抛错，绝不把归属未知的审计事件写进 outbox。 */
@@ -1397,13 +1413,33 @@ export class InteractionStore implements InteractionStoreReaderPort {
     await this.pool.query(`UPDATE interaction_send_attempts SET risk_recorded_at=NULL WHERE id=$1 AND status='confirmed'`, [attemptId]);
   }
 
+  /**
+   * 读运行控制行，缺行则**按账号真实存在与否**决定要不要播种一行默认值。
+   *
+   * 守卫原本是内联的 `WHERE EXISTS (SELECT 1 FROM accounts …)`——一条语句里同时做「账号在不在、
+   * 是不是本平台」与「播种」。`accounts` 属 api 域、本 store 绑 automation 池：物理拆库后
+   * automation 库里没有这张表，整条 INSERT 必炸（`relation "accounts" does not exist`），
+   * 与 `PgRiskStore.saveState` 是同一个形态、同一批修掉。守卫改为先经端口向 api 域问平台。
+   *
+   * **语义逐位保留**：问不到账号 / 平台不是互动平台 → 不播种 → 下面的 SELECT 空行 → 照旧 404。
+   * 唯一差别是平台比较从「库里裸字符串等值」变成「经 `normalizePlatformId` 归一后等值」，
+   * 即 `channels` / `wechat-channels` 这些同义写法现在也认——它们本来就是同一个平台，
+   * 全仓其余消费方也都走归一。
+   *
+   * **播种与守卫之间存在一个窗口**（账号恰在此刻被删就会播出一行孤儿控制行）：全仓零
+   * `DELETE FROM accounts`、账号存储不暴露删除口 ⇒ 今天构造不出来；账号删除若日后落地，
+   * 由 `src/transport/account-delete-cascade.ts` 的 outbox 级联接管。
+   */
   async getRuntimeControls(accountId: string): Promise<RuntimeControls> {
-    await this.pool.query(
-      `INSERT INTO interaction_runtime_controls (platform,account_id,updated_by)
-       SELECT $1,$2,'system' WHERE EXISTS (SELECT 1 FROM accounts WHERE account_id=$2 AND platform=$1)
-       ON CONFLICT (platform,account_id) DO NOTHING`,
-      [INTERACTION_PLATFORM, accountId],
-    );
+    const platform = await this.requireAccountPlatform().getPlatformOrNull(accountId);
+    if (platform === INTERACTION_PLATFORM) {
+      await this.pool.query(
+        `INSERT INTO interaction_runtime_controls (platform,account_id,updated_by)
+         VALUES ($1,$2,'system')
+         ON CONFLICT (platform,account_id) DO NOTHING`,
+        [INTERACTION_PLATFORM, accountId],
+      );
+    }
     const { rows } = await this.pool.query<{
       account_id: string; env_key: string | null; version: number; comments_read_enabled: boolean;
       comments_reply_enabled: boolean; dm_read_enabled: boolean; dm_send_text_enabled: boolean;

@@ -15,7 +15,7 @@ import { DEFAULT_PG_CONFIG } from './kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './config/mirror-version-store.js';
 import { normalizePlatformId, type PlatformId } from './kernel/platform-types.js';
 import { parseDeploymentTarget, type DeploymentTarget } from './deployment-target.js';
-import type { ClaimExecutionTargetResult } from './kernel/account-ownership-port.js';
+import type { ClaimExecutionTargetResult, ExecutionTargetResolution } from './kernel/account-ownership-port.js';
 import {
   accountDisplayNameCandidates,
   resolveAccountDisplayName,
@@ -209,6 +209,11 @@ export interface AccountStore {
    * `accounts` 由本 store 单写（拆分方案 §5.1），automation 侧只经 AccountOwnershipPort 调用。
    */
   getExecutionTarget?(accountId: string): Promise<DeploymentTarget | null>;
+  /**
+   * 读账号归属，**三态不压平**（change risk-ownership-via-port）：风控条件写的属主谓词经此获取。
+   * 「账号不存在」MUST NOT 被折成「归属为空」——风控告警要靠这个区分说出真实原因。
+   */
+  resolveExecutionTarget?(accountId: string): Promise<ExecutionTargetResolution>;
   /**
    * 归属占位：**仅当归属为空**时原子写入，已被占位即返回真实属主，MUST NOT 覆盖。
    * 照抄内容排期小时格的条件 upsert 占位形态（content-schedule-store 的 `WHERE ... IS NULL`）。
@@ -589,6 +594,22 @@ export class PgAccountStore implements AccountStore {
     );
     if (rows.length === 0) return null;
     return parseDeploymentTarget(rows[0].execution_target);
+  }
+
+  /**
+   * 读账号归属，三态不压平（change risk-ownership-via-port）：与 `getExecutionTarget` 同一条查询，
+   * 只是**不把「缺行」与「NULL」折成同一个 null**。风控条件写的属主谓词经本方法取值：
+   * 拆库后 automation 库里没有 `accounts`，那条谓词只能由本属主（api）回答。
+   * 同样**不缓存**，理由同 `getExecutionTarget`。
+   */
+  async resolveExecutionTarget(accountId: string): Promise<ExecutionTargetResolution> {
+    const { rows } = await this.pool.query<{ execution_target: string | null }>(
+      `SELECT execution_target FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    if (rows.length === 0) return { outcome: 'account_not_found' };
+    const target = parseDeploymentTarget(rows[0].execution_target);
+    return target ? { outcome: 'owned', target } : { outcome: 'unowned' };
   }
 
   /**

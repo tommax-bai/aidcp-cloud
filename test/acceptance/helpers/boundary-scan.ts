@@ -158,8 +158,20 @@ export interface DynamicSqlSite {
   excerpt: string;
 }
 
+/**
+ * 一处读引用（`FROM` / `JOIN` 到的表）。**候选，不是判决**：读模式会顺带命中 CTE 名、子查询别名、
+ * 集合返回函数等一堆非表标识符，故消费方 MUST 先按「是否已知表」过滤再判归属（见 `crossOwnerReads`）。
+ */
+export interface SqlRead {
+  file: string;
+  table: string;
+  kind: 'from' | 'join';
+}
+
 export interface SqlScanResult {
   writes: SqlWrite[];
+  /** 读引用候选（未按已知表过滤）。 */
+  reads: SqlRead[];
   /** 表名由模板插值拼出、静态判不了 —— 定稿 §12 要求 MUST 判失败，除非在解析登记表里具名。 */
   dynamic: DynamicSqlSite[];
 }
@@ -194,6 +206,24 @@ const WRITE_PATTERNS: { op: SqlOp; re: RegExp }[] = [
   { op: 'alter_table', re: /\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)/gi },
 ];
 
+/**
+ * 读模式（AC-OWN-06：跨属主**读**）。写门禁只看 DML/DDL，对「本域池上跑别域属主表的 SELECT」完全无感——
+ * 而物理拆库后那正是**必炸**的形态（`relation "…" does not exist`），已经在生产上中过两次：
+ * 风控最终状态的属主谓词内联 `accounts`（dev/ol 双双写不进库、进程活着靠内存态看着正常），
+ * 互动运行控制行的播种守卫同形。两次都是读，两次都被写门禁放过去了。
+ *
+ * `DELETE FROM` 的负向前瞻是必须的：它是写、由 `WRITE_PATTERNS` 认，不能在这里重复计一次读。
+ * 命中的标识符**只是候选**（CTE 名 / 子查询别名 / `FROM unnest(...)` 都会命中），
+ * 判决前 MUST 按已知表过滤——宁可漏判一个没登记的表，也不能让门禁对着 CTE 名报假违规、逼人关掉它。
+ */
+const READ_PATTERNS: { kind: SqlRead['kind']; re: RegExp }[] = [
+  {
+    kind: 'from',
+    re: /(?<!\bDELETE\s{1,4})\bFROM\s+(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)/gi,
+  },
+  { kind: 'join', re: /\bJOIN\s+(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)/gi },
+];
+
 const DYNAMIC_PATTERNS: { op: SqlOp; re: RegExp }[] = [
   { op: 'insert', re: /\bINSERT\s+INTO\s+\$\{/gi },
   { op: 'update', re: /\bUPDATE\s+\$\{/gi },
@@ -205,8 +235,21 @@ const DYNAMIC_PATTERNS: { op: SqlOp; re: RegExp }[] = [
 export function scanSqlSource(file: string, rawSource: string): SqlScanResult {
   const source = stripSqlLineComments(stripTsComments(rawSource));
   const writes: SqlWrite[] = [];
+  const reads: SqlRead[] = [];
   const dynamic: DynamicSqlSite[] = [];
   const seen = new Set<string>();
+  const seenRead = new Set<string>();
+  for (const { kind, re } of READ_PATTERNS) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) {
+      const table = m[1].toLowerCase();
+      const key = `${kind} ${table}`;
+      if (seenRead.has(key)) continue;
+      seenRead.add(key);
+      reads.push({ file, table, kind });
+    }
+  }
   for (const { op, re } of WRITE_PATTERNS) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
@@ -225,15 +268,18 @@ export function scanSqlSource(file: string, rawSource: string): SqlScanResult {
     }
   }
   writes.sort((a, b) => (a.table === b.table ? a.op.localeCompare(b.op) : a.table.localeCompare(b.table)));
-  return { writes, dynamic };
+  reads.sort((a, b) => (a.table === b.table ? a.kind.localeCompare(b.kind) : a.table.localeCompare(b.table)));
+  return { writes, reads, dynamic };
 }
 
 export function scanSqlWrites(files: string[]): SqlScanResult {
   const writes: SqlWrite[] = [];
+  const reads: SqlRead[] = [];
   const dynamic: DynamicSqlSite[] = [];
   for (const file of files) {
     const result = scanSqlSource(file, readFileSync(repoPath(file), 'utf8'));
     writes.push(...result.writes);
+    reads.push(...result.reads);
     dynamic.push(...result.dynamic);
   }
   writes.sort((a, b) =>
@@ -243,7 +289,14 @@ export function scanSqlWrites(files: string[]): SqlScanResult {
         : a.file.localeCompare(b.file)
       : a.table.localeCompare(b.table),
   );
-  return { writes, dynamic };
+  reads.sort((a, b) =>
+    a.table === b.table
+      ? a.file === b.file
+        ? a.kind.localeCompare(b.kind)
+        : a.file.localeCompare(b.file)
+      : a.table.localeCompare(b.table),
+  );
+  return { writes, reads, dynamic };
 }
 
 /* ------------------------------------------------------------------ 行锁扫描（AC-LOCK-03/04） */
@@ -917,6 +970,12 @@ export interface BoundarySnapshot {
   dynamic: DynamicSqlAudit;
   /** 静态写入 + 动态登记解析出的写入，去重后按表排序。 */
   writes: SqlWrite[];
+  /**
+   * **跨属主读**（AC-OWN-06）：文件所属层 ≠ 该表属主层的 `FROM` / `JOIN`。
+   * 已按「登记在册的属主表」过滤——读模式命中的 CTE 名 / 子查询别名 / 集合返回函数全部在此被剔除。
+   * kernel 不参与（按准入规则它不开池、不写 SQL）。
+   */
+  crossOwnerReads: (SqlRead & { fileLayer: Layer; tableOwner: Layer })[];
   migrationTables: string[];
   tableOwners: Map<string, Layer>;
   exceptionTables: Set<string>;
@@ -943,6 +1002,17 @@ export function boundarySnapshot(): BoundarySnapshot {
     merged.set(`${write.table} ${write.file} ${write.op}`, write);
   }
   const owners = readJson<TableOwnershipFile>('boundaries/table-ownership.json');
+  const tableOwners = new Map(owners.tables.map((t) => [t.table, t.owner]));
+  const crossOwnerReads: (SqlRead & { fileLayer: Layer; tableOwner: Layer })[] = [];
+  for (const read of sql.reads) {
+    const fileLayer = ownership.get(read.file);
+    const tableOwner = tableOwners.get(read.table);
+    if (!fileLayer || !tableOwner || fileLayer === 'kernel' || fileLayer === tableOwner) continue;
+    crossOwnerReads.push({ ...read, fileLayer, tableOwner });
+  }
+  crossOwnerReads.sort((a, b) =>
+    a.file === b.file ? a.table.localeCompare(b.table) : a.file.localeCompare(b.file),
+  );
   const exceptions = readJson<ExceptionTablesFile>('boundaries/exception-tables.json');
   const migrationTables = listMigrationTables();
   const knownTables = new Set<string>([
@@ -965,8 +1035,9 @@ export function boundarySnapshot(): BoundarySnapshot {
           : a.file.localeCompare(b.file)
         : a.table.localeCompare(b.table),
     ),
+    crossOwnerReads,
     migrationTables,
-    tableOwners: new Map(owners.tables.map((t) => [t.table, t.owner])),
+    tableOwners,
     exceptionTables: new Set(exceptions.tables.map((t) => t.table)),
     knownTables,
     rowLocks: scanRowLocks(files, knownTables),

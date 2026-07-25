@@ -8,6 +8,7 @@ import type { InteractionSyncBatchPayload } from '../../src/kernel/interaction-t
 import {
   INTERACTION_TEST_EXECUTION_TARGET,
   allowAllAuthGate,
+  interactionAccountPlatform,
 } from '../helpers/interaction-store-test-deps.js';
 
 function runtimeRow() {
@@ -57,7 +58,8 @@ test('runtime-control CAS resets circuit in the same UPDATE and conflict leaves 
     },
   } as unknown as Pool;
   const store = new InteractionStore({ pool, idGen: (prefix) => `${prefix}-test`,
-    authGate: allowAllAuthGate(), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
+    authGate: allowAllAuthGate(), executionTarget: INTERACTION_TEST_EXECUTION_TARGET,
+    accountPlatform: interactionAccountPlatform() });
   const input = {
     accountId: 'acct-circuit', actor: 'admin', commentsReadEnabled: true,
     commentsReplyEnabled: true, dmReadEnabled: true, dmSendTextEnabled: true,

@@ -78,7 +78,9 @@ console.log(
     migrationTables: snapshot.migrationTables.length,
     exceptionTables: [...snapshot.exceptionTables],
     writeSites: snapshot.writes.length,
+    readSites: snapshot.sql.reads.length,
     crossLayerWrites: violations.length,
+    crossLayerReads: snapshot.crossOwnerReads.length,
     dmlViolations: violations.filter((v) => (DML_OPS as SqlOp[]).includes(v.op)).length,
     ddlViolations: violations.filter((v) => (DDL_OPS as SqlOp[]).includes(v.op)).length,
     exemptionEntries: exemptions.entries.length,
@@ -158,6 +160,34 @@ describe('AC-OWN-* 表写入与建表归属门禁', () => {
       unexempted,
       [],
       `非属主层新增了建表 / 改表语句（回滚时会静默重建空表并分叉写入）：\n${unexempted.join('\n')}`,
+    );
+  });
+
+  /**
+   * AC-OWN-06 跨属主**读**。
+   *
+   * 为什么单列一条而不是并进 AC-OWN-02：那一族只看 DML/DDL，**读被整族放过去了**。
+   * 而拆库之后跨属主读是**必炸**的形态——本进程只对本属主库开池，别域的表压根不在这个库里，
+   * PG 直接回 `relation "…" does not exist`。已经在生产上中过两次：
+   *   ① 风控最终状态的属主谓词内联 `accounts`（api 属主表，store 绑 automation 池）
+   *      → dev 与 ol 双双写不进库；因为先改内存态再落库，**进程活着时行为完全正常**，
+   *        一重启全丢回陈旧表。发现它靠的是一次不相干的端到端跑动，不是门禁。
+   *   ② 互动运行控制行的播种守卫同形（`WHERE EXISTS (SELECT 1 FROM accounts …)`）。
+   * 两次都是读，两次都被写门禁全绿放行。这一条把那个盲区补上。
+   *
+   * **无豁免通道，且这是有意的。** 写在拆库前至少是能跑的，读跨库连跑都跑不起来——
+   * 「先记一笔账、以后再消」在这里不成立。正解永远是经端口向属主域要（见
+   * `src/kernel/account-ownership-port.ts` / `AccountPlatformReader` 两个判例）。
+   */
+  it('AC-OWN-06 无跨属主表读（FROM / JOIN 到别域属主表）', () => {
+    const offenders = snapshot.crossOwnerReads
+      .map((r) => `${r.table} <- ${r.file} [${r.kind}]（表属主 ${r.tableOwner} / 读取方 ${r.fileLayer}）`)
+      .sort();
+    assert.deepEqual(
+      offenders,
+      [],
+      '非属主层直读别域属主表；拆库后这条语句必炸（relation does not exist），'
+        + 'MUST 改经端口向属主域要，MUST NOT 登记豁免：\n' + offenders.join('\n'),
     );
   });
 
@@ -330,5 +360,43 @@ describe('SQL 扫描器保真自检（非 AC 编号）', () => {
       'UPDATE delegated_tasks t SET status=$2 FROM locked WHERE t.id=locked.id',
     ].join('\n');
     assert.deepEqual(tablesOf(sql, 'update'), ['delegated_tasks']);
+  });
+
+  /* ── 读扫描器（AC-OWN-06 的取数口）───────────────────────────────────────── */
+
+  const readsOf = (sql: string): string[] =>
+    scanSqlSource('probe.ts', `const q = \`${sql}\`;`).reads.map((r) => r.table);
+
+  it('读：裸表、别名、AS 别名、ONLY / public. 前缀、各类 JOIN 都 MUST 命中', () => {
+    assert.deepEqual(readsOf('SELECT 1 FROM accounts'), ['accounts']);
+    assert.deepEqual(readsOf('SELECT 1 FROM accounts a WHERE a.id=$1'), ['accounts']);
+    assert.deepEqual(readsOf('SELECT 1 FROM ONLY public.accounts AS a'), ['accounts']);
+    assert.deepEqual(readsOf('SELECT 1 FROM risk_state LEFT JOIN accounts ON true').sort(), ['accounts', 'risk_state']);
+    assert.deepEqual(readsOf('SELECT 1 FROM risk_state r INNER JOIN public.accounts a ON true').sort(), ['accounts', 'risk_state']);
+  });
+
+  it('读：`DELETE FROM` MUST NOT 被当成读（它是写，由写扫描器认，重复计会误报）', () => {
+    assert.deepEqual(readsOf('DELETE FROM accounts WHERE account_id=$1'), []);
+    // 同一段里既删又读时，只有真正的读被认出来。
+    assert.deepEqual(readsOf('DELETE FROM risk_counters WHERE account_id IN (SELECT account_id FROM accounts)'), ['accounts']);
+  });
+
+  it('读：CTE 名与集合返回函数会被命中，但它们不是已登记表 ⇒ 判决时自然出局', () => {
+    // 扫描器故意宽（宁可多认），过滤发生在 boundarySnapshot 的「已知属主表」那一步。
+    const cte = readsOf('WITH owner AS (SELECT 1 FROM accounts) SELECT 1 FROM owner');
+    assert.ok(cte.includes('accounts'), '真表 MUST 认出来');
+    assert.ok(cte.includes('owner'), 'CTE 名也会被命中——这正是判决必须按已知表过滤的原因');
+    assert.equal(
+      snapshot.tableOwners.has('owner'),
+      false,
+      'CTE 名 MUST NOT 是登记在册的属主表，否则这个宽口径就会变成假违规',
+    );
+  });
+
+  it('读：注释里的 SQL MUST NOT 命中（本仓注释密度高，不剥就全是假违规）', () => {
+    assert.deepEqual(
+      scanSqlSource('probe.ts', '// 历史写法：SELECT 1 FROM accounts\nconst q = `SELECT 1 FROM risk_state`;').reads.map((r) => r.table),
+      ['risk_state'],
+    );
   });
 });

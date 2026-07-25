@@ -1,9 +1,16 @@
 # boundaries/ —— 云端拆仓边界的机械执行机构
 
 这里的清单文件是两族门禁的输入。门禁本体在 `test/acceptance/module-boundary.test.ts`（`AC-BOUND-01..06`）
-与 `test/acceptance/table-ownership.test.ts`（`AC-OWN-01..05`），由既有的 `npm run test:acceptance`
+与 `test/acceptance/table-ownership.test.ts`（`AC-OWN-01..06`），由既有的 `npm run test:acceptance`
 与控制仓 `scripts/land-change` 在每次集成前执行。零新依赖、不依赖 CI。
 锁归属另成一族（`AC-LOCK-*`），输入也放在本目录：见下表的 `row-lock-exemptions.json`。
+
+> **`AC-OWN-06`（跨属主**读**）无清单文件、也无豁免通道**——它不读本目录任何输入，
+> 直接对着 `boundaries/table-ownership.json` 判「这个文件所属层有没有 `FROM` / `JOIN` 别域属主表」。
+> 理由：跨层**写**在拆库前至少还能跑，可以先记一笔账慢慢消；跨层**读**在拆库后连跑都跑不起来
+> （本进程只对本属主库开池 ⇒ `relation "…" does not exist`），「以后再消」不成立。
+> 已经在生产上中过两次（风控最终状态的属主谓词、互动运行控制行的播种守卫），
+> **两次都是读、两次都被只看写的 `AC-OWN-02/03` 全绿放过去**。正解一律是经端口向属主域要。
 
 规范位置在控制仓 `docs/cloud-service-decomposition-proposal.md`：
 族名与族内编号见 §12「两族门禁」；文件归属判据见 §4.7；表属主判据见 §5.1；协议归属裁决见 §10.9。

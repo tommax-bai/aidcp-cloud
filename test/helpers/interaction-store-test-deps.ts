@@ -15,6 +15,8 @@ import {
   decodeInteractionAuditEvent,
 } from '../../src/kernel/interaction-audit-outbox.js';
 import type { InteractionAuthGate } from '../../src/kernel/interaction-auth-gate-types.js';
+import { INTERACTION_PLATFORM } from '../../src/kernel/interaction-types.js';
+import type { AccountPlatformReader } from '../../src/kernel/platform-types.js';
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import { OutboxConsumer } from '../../src/transport/event-outbox.js';
 
@@ -37,6 +39,16 @@ export function allowAllAuthGate(): InteractionAuthGate {
     }),
     checkAccountScope: async () => ({ ok: true }),
   };
+}
+
+/**
+ * 「账号存在且是互动平台」的账号平台读桩。
+ * 运行控制行的播种守卫已从内联 `SELECT 1 FROM accounts`（api 属主表，automation 池上必炸）
+ * 改为经端口向 api 域问平台；不测这道守卫的既有用例用本桩保持改动前的判定结果。
+ * 缺账号 / 平台不符与「端口未注入即抛」由 interaction-runtime-controls-ownership.test.ts 专测。
+ */
+export function interactionAccountPlatform(): AccountPlatformReader {
+  return { getPlatformOrNull: async () => INTERACTION_PLATFORM };
 }
 
 /** 排空审计 outbox，返回本次落地的事件条数。载荷解不出即抛错（与生产中继逐字同）。 */

@@ -11,6 +11,20 @@ export type ClaimExecutionTargetResult =
   | { outcome: 'account_not_found' };
 
 /**
+ * 归属读的**三态**结果（change risk-ownership-via-port）。
+ *
+ * `getExecutionTarget` 把「账号不存在」与「归属为空」都压成 `null`，两者同形。风控条件写原先靠
+ * **属主谓词命中 0 行后回读 `accounts`** 自己区分这两者；那条回读是 automation 直拼 api 属主表的
+ * SQL，物理拆库后 automation 库里没有 `accounts`、整条写必炸。改经本口之后，那个区分只能由
+ * **实现方（api 侧）** 给出——否则「账号根本不存在」会被静默降级成「归属为空」，
+ * 风控告警里的原因字段就此失真（本仓红线「静默假成功」的一种）。
+ */
+export type ExecutionTargetResolution =
+  | { outcome: 'owned'; target: DeploymentTarget }
+  | { outcome: 'unowned' }
+  | { outcome: 'account_not_found' };
+
+/**
  * 归属事实的窄读写口（跨边界写入登记，tasks 3.1b 决议①）。
  *
  * 拆分方案 §5.1 把 `accounts` 定为 **aidcp-api 单写**，并明确：automation 在握手路径上占位 / 改写
@@ -22,6 +36,12 @@ export type ClaimExecutionTargetResult =
 export interface AccountOwnershipPort {
   /** 读账号归属；未归属 → null；账号不存在 → null（调用方按「未归属」处理，与 NULL 同形）。 */
   getExecutionTarget(accountId: string): Promise<DeploymentTarget | null>;
+  /**
+   * 读账号归属，**三态不压平**（change risk-ownership-via-port）：风控条件写的属主谓词经此获取。
+   * 与 `getExecutionTarget` 的差别只在「账号不存在」是否与「归属为空」同形——风控要区分，故新增此口，
+   * MUST NOT 让实现方把 `account_not_found` 折成 `unowned`。
+   */
+  resolveExecutionTarget(accountId: string): Promise<ExecutionTargetResolution>;
   /** 仅当归属为空时原子占位。已被占位 → already_owned_by（附真实属主），MUST NOT 覆盖。保留供运维/兼容口，握手路径已改用 setExecutionTarget。 */
   claimExecutionTarget(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult>;
   /**

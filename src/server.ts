@@ -2685,10 +2685,37 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 更新为当前 target；risk_state 条件写据此在「两连接并发接管同一账号」的瞬间作废先写方。
   // 有合法 target 默认启用（安全）；AIDCP_RISK_OWNERSHIP_ENFORCE=false 为秒级回滚闸——退回历史无谓词 upsert。
   const ownershipDisabled = process.env.AIDCP_RISK_OWNERSHIP_ENFORCE === 'false';
-  const ownershipMode: OwnershipMode = !deploymentTarget || ownershipDisabled ? 'off' : 'enforce';
+  // 归属事实的窄读写口（change risk-state-cross-process-integrity，tasks 3.1b 决议①）：
+  // `accounts` 按拆分方案 §5.1 由 api 单写；automation 侧只经本口调用、绝不自己拼 accounts 的 SQL。
+  // 拆进程时把这个对象换成一次内部 HTTP 即可，调用点一行不改。
+  // **构造位置在 riskStore 之前**（change risk-ownership-via-port）：风控条件写的属主谓词要经本口取值，
+  // 它必须先于 riskStore 存在。MUST NOT 挪回下面去——挪回去 riskStore 拿到 undefined 会静默降级成
+  // 无谓词 upsert，跨 target 接管保护无声消失。
+  const ownershipPort: AccountOwnershipPort | undefined =
+    accountStore?.getExecutionTarget &&
+    accountStore.resolveExecutionTarget &&
+    accountStore.claimExecutionTarget &&
+    accountStore.setExecutionTarget
+      ? {
+          getExecutionTarget: (accountId) => accountStore.getExecutionTarget!(accountId),
+          // 三态归属读（change risk-ownership-via-port）：风控写路径的属主谓词经此取值。
+          resolveExecutionTarget: (accountId) => accountStore.resolveExecutionTarget!(accountId),
+          claimExecutionTarget: (accountId, target) => accountStore.claimExecutionTarget!(accountId, target),
+          // 归属跟随当次连接（change risk-target-follows-active-session）：握手用它无条件改写归属。
+          setExecutionTarget: (accountId, target) => accountStore.setExecutionTarget!(accountId, target),
+        }
+      : undefined;
+  // 缺归属读口 ⇒ 属主谓词无从取值 ⇒ 只能退回无谓词 upsert。这里就判掉并说明白，
+  // 免得让 store 内部那道降级（同样响亮）成为唯一的告知点。
+  const ownershipMode: OwnershipMode =
+    !deploymentTarget || ownershipDisabled || !ownershipPort ? 'off' : 'enforce';
   console.log(
     `[aidcp-cloud] 账号归属跟随当次连接：条件写=${ownershipMode}` +
-      (ownershipMode === 'off' && deploymentTarget ? '（AIDCP_RISK_OWNERSHIP_ENFORCE=false 已回滚为无谓词 upsert）' : ''),
+      (ownershipMode === 'off' && deploymentTarget
+        ? ownershipDisabled
+          ? '（AIDCP_RISK_OWNERSHIP_ENFORCE=false 已回滚为无谓词 upsert）'
+          : '（未装配归属读口 → 无谓词 upsert；跨 target 接管保护不生效）'
+        : ''),
   );
 
   // Block③ L3 翻转前置：risk_state / risk_counters / risk_interactions 都是 automation 属主表，
@@ -2702,6 +2729,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     schemaEnsurer: ensureCapabilitySchema,
     ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
     ownershipMode,
+    // 属主谓词的取值口（change risk-ownership-via-port）：MUST 注入，否则 enforce 自动降级为 off。
+    ...(ownershipPort ? { ownershipReader: ownershipPort } : {}),
   });
   // quotaConfigStore 作 QuotaProvider 注入：每账号 controller 的 effectiveQuotas 热加载读限额数字
   // （change safety-quota-config）；init 失败时其镜像为空 → 退化派生写死默认，绝不 brick。
@@ -2721,18 +2750,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           platformFor: (accountId: string) => accountStore.platformFor!(accountId),
           slowStartSinceFor: (accountId: string) => clientUserStore.slowStartSinceFor(accountId),
           createdAtFor: (accountId: string) => accountStore.createdAtFor!(accountId),
-        }
-      : undefined;
-  // 归属事实的窄读写口（change risk-state-cross-process-integrity，tasks 3.1b 决议①）：
-  // `accounts` 按拆分方案 §5.1 由 api 单写；automation 侧只经本口调用、绝不自己拼 accounts 的 SQL。
-  // 拆进程时把这个对象换成一次内部 HTTP 即可，调用点一行不改。
-  const ownershipPort: AccountOwnershipPort | undefined =
-    accountStore?.getExecutionTarget && accountStore.claimExecutionTarget && accountStore.setExecutionTarget
-      ? {
-          getExecutionTarget: (accountId) => accountStore.getExecutionTarget!(accountId),
-          claimExecutionTarget: (accountId, target) => accountStore.claimExecutionTarget!(accountId, target),
-          // 归属跟随当次连接（change risk-target-follows-active-session）：握手用它无条件改写归属。
-          setExecutionTarget: (accountId, target) => accountStore.setExecutionTarget!(accountId, target),
         }
       : undefined;
   // 环境花名册（client_environments）窄回写口（change env-table-write-collection）：
@@ -3047,6 +3064,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       apiPurge: interactionApiWrites,
       authGate: interactionAuthGate,
       ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
+      // 运行控制行的播种守卫经 api 域读平台（原为内联 `SELECT 1 FROM accounts`，拆库后必炸）。
+      // 形态照抄 facebookPublishMediaStore 的 accountPlatformReader。
+      ...(accountStore?.getPlatformOrNull
+        ? { accountPlatform: { getPlatformOrNull: (id: string) => accountStore.getPlatformOrNull!(id) } }
+        : {}),
     });
     // ⚠️ 这两个 store 住在 src/interactions/ 但它们的表**全是 api 属主**
     // （interaction_reply_configs / _versions / _scopes / _scope_versions / _scope_audit /
