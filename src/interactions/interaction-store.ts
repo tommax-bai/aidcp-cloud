@@ -31,6 +31,16 @@ import {
   type ReplyPreviewContext,
   type DetailResult,
 } from '../kernel/interaction-types.js';
+import type {
+  InteractionAuthGate,
+  InteractionAuthGateDenial,
+  InteractionAuthWriteReceipt,
+} from '../kernel/interaction-auth-gate-types.js';
+import {
+  INTERACTION_AUDIT_OUTBOX_TOPIC,
+  type InteractionAuditEventRecord,
+} from '../kernel/interaction-audit-outbox.js';
+import { emitOutboxEvent } from '../transport/event-outbox.js';
 import { classifyInteractionSchema, type InteractionSchemaMode } from './schema-capability.js';
 
 // 收件箱只读投影的纯 DTO（InteractionTestResetResult / ListQuery / ListResult / ReplyPreviewContext /
@@ -68,23 +78,14 @@ export interface InteractionApiPurgePort {
 }
 
 /**
- * 环境级行锁的窄注入端口（change decouple-interaction-api-cluster）—— 消费方在本文件（automation），
- * 实现方是 aidcp-api 的 db/environment-row-lock（`client_environments` / `client_env_scope` 属 api）。
- * 授权首写路径需要锁环境注册行；收口到本端口后不再直接 import api 属主文件，具体实现由 server.ts 注入
- * （结构匹配、不 import、同一组函数同一调用点，行为零变更）。类型全部内联（'locked'|'unregistered' 字面量 +
- * 结构化 client），本端口零跨边界依赖。语义约束（未注册 ⇒ 未加锁、MUST NOT 当作已加锁）见实现文件文档。
+ * 授权闸回执的有效期（ms）。它界定的是**唯一一段覆盖不到的窗口**：闸提交之后、登录态提交之前
+ * 才发生的归属撤销。跨库场景下任何不引入分布式锁的方案都覆盖不了它，只能压短并如实登记。
+ *
+ * 取 10s 而不是更长：两端之间只隔一次 `connect()` + `BEGIN`，正常在毫秒级；
+ * 取不到连接而超时 ⇒ 本次上报被拒（可重试），边缘下一次上报重走一遍闸 —— 这是安全方向。
+ * MUST NOT 为了「少报几次错」放大它：放大的是误放行的窗口，不是可用性。
  */
-export interface EnvironmentRowLockPort {
-  lockEnvironmentRow(
-    client: { query(sql: string, params: unknown[]): Promise<{ rowCount?: number | null }> },
-    envKey: string,
-    logger?: Pick<Console, 'warn'>,
-  ): Promise<'locked' | 'unregistered'>;
-  lockEnvironmentScopeRows(
-    client: { query(sql: string, params: unknown[]): Promise<{ rowCount?: number | null }> },
-    envKey: string,
-  ): Promise<number>;
-}
+const AUTH_GATE_RECEIPT_TTL_MS = 10_000;
 
 export interface InteractionStoreOptions {
   pool?: pg.Pool;
@@ -96,10 +97,16 @@ export interface InteractionStoreOptions {
    */
   apiPurge?: InteractionApiPurgePort;
   /**
-   * 环境级行锁口（change decouple-interaction-api-cluster）。生产由 server.ts 注入；缺省 = 不注入，
-   * 只有真正走到授权首写取锁路径时才当场抛错（fail-loud，绝非静默跳过环境级互斥）。
+   * 环境授权闸（Block③ L3 反方向收口）。生产由 server.ts 注入 api 属主实现；缺省 = 不注入，
+   * 走到授权首写 / 批次入库时当场抛错 —— **拒绝写入，绝不「问不到就当放行」**。
    */
-  envLock?: EnvironmentRowLockPort;
+  authGate?: InteractionAuthGate;
+  /**
+   * 审计投递的归属 target（`AIDCP_DEPLOY_ENV`）。配置面审计属 api 单写，automation 侧经
+   * 本域 outbox 投递，故必须带合法 target（dev 不消费 ol、反之）。缺省 = 不注入，
+   * 走到任何审计写入时当场抛错（fail-loud，绝不把 target 未知的审计静默落进队列）。
+   */
+  executionTarget?: 'dev' | 'ol';
 }
 
 export interface IngestResult {
@@ -318,7 +325,8 @@ export class InteractionStore implements InteractionStoreReaderPort {
   private readonly clock: () => number;
   private readonly idGen: (prefix: string) => string;
   private readonly apiPurge?: InteractionApiPurgePort;
-  private readonly envLock?: EnvironmentRowLockPort;
+  private readonly authGate?: InteractionAuthGate;
+  private readonly executionTarget?: 'dev' | 'ol';
 
   constructor(options: InteractionStoreOptions = {}) {
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
@@ -326,7 +334,8 @@ export class InteractionStore implements InteractionStoreReaderPort {
     this.clock = options.clock ?? Date.now;
     this.idGen = options.idGen ?? ((prefix) => `${prefix}_${randomUUID()}`);
     this.apiPurge = options.apiPurge;
-    this.envLock = options.envLock;
+    this.authGate = options.authGate;
+    this.executionTarget = options.executionTarget;
   }
 
   /** api 属主表清理口：未注入即当场抛错，绝不静默跳过应删的 api 属主数据。 */
@@ -335,10 +344,30 @@ export class InteractionStore implements InteractionStoreReaderPort {
     return this.apiPurge;
   }
 
-  /** 环境级行锁口：未注入即当场抛错，绝不静默跳过环境级互斥（授权首写并发对手可能存在）。 */
-  private requireEnvLock(): EnvironmentRowLockPort {
-    if (!this.envLock) throw new Error('interaction_env_lock_port_not_configured');
-    return this.envLock;
+  /** 环境授权闸：未注入即当场抛错。**问不到答案 = 拒绝写入**，绝不当作放行。 */
+  private requireAuthGate(): InteractionAuthGate {
+    if (!this.authGate) throw new Error('interaction_auth_gate_port_not_configured');
+    return this.authGate;
+  }
+
+  /** 审计投递 target：未注入即当场抛错，绝不把归属未知的审计事件写进 outbox。 */
+  private requireExecutionTarget(): 'dev' | 'ol' {
+    if (!this.executionTarget) throw new Error('interaction_audit_execution_target_not_configured');
+    return this.executionTarget;
+  }
+
+  /**
+   * 闸的拒绝理由 → 对外错误。**逐字保留改动前 `assertAccountScope` 抛的 code / 文案 / HTTP 状态**，
+   * 调用方与前端看到的东西一个字都没变。
+   */
+  private denialError(reason: InteractionAuthGateDenial): InteractionError {
+    if (reason === 'environment_revoked') {
+      return new InteractionError('INTERACTION_FEATURE_DISABLED', '环境归属已撤销，互动清理仍待定位。', 409);
+    }
+    if (reason === 'account_not_found') {
+      return new InteractionError('INTERACTION_NOT_FOUND', '账号不存在。', 404);
+    }
+    return new InteractionError('INTERACTION_SCOPE_MISMATCH', '账号平台与互动请求不匹配。', 409);
   }
 
   /** 每一步 saga 各自独立事务：BEGIN/COMMIT/ROLLBACK 包裹，供离场分步清理跨事务重入。 */
@@ -397,33 +426,42 @@ export class InteractionStore implements InteractionStoreReaderPort {
     });
   }
 
+  /**
+   * 边缘上报的环境登录态首写。
+   *
+   * ## 为什么闸在事务**之外**
+   * 环境级串行 + 账号主数据校验碰的四张表（`client_environments` / `client_env_scope` /
+   * `client_env_revocation_holds` / `accounts`）**全属 api**，被写的 `interaction_auth_state` /
+   * `interaction_runtime_controls` 属 automation。改动前这里在一笔 automation 事务里直接锁那些 api 表 ——
+   * 那是真正的跨属主互斥（对手是 api 的解绑 / 改派 / 撤销对账），拆库当天两边各自加锁都会成功、
+   * 互斥**无声**消失。现在收敛成 api 窄端点：判定与环境级行锁回到 api 的单库单事务里，发一张
+   * 带有效期的条件写回执，本域拿回执才落地。
+   *
+   * 调用点 MUST 在 `BEGIN` 之前：若在 automation 事务里调这个 RPC，就会形成「api 连接等
+   * automation 持有的行、automation 连接等 api 持有的行」的**跨连接**等待环 —— PostgreSQL 的
+   * 死锁检测器看不见它（两条连接在它眼里毫无关系），两边一起挂到超时。
+   *
+   * ## fail-closed
+   * 端口未注入 / 调不通 ⇒ 异常上抛（不写）；闸拒绝 ⇒ 抛与改动前逐字一致的错误；回执过期 ⇒ 拒绝写入。
+   * 绝不「问不到就当放行」——那等于给一个正被撤权的环境重开互动写。
+   */
   async upsertAuthStatus(payload: InteractionAuthStatusPayload): Promise<void> {
+    const authorization = await this.requireAuthGate().authorizeAuthStateWrite({
+      platform: INTERACTION_PLATFORM,
+      accountId: payload.accountId,
+      envKey: payload.envKey,
+      now: this.clock(),
+      ttlMs: AUTH_GATE_RECEIPT_TTL_MS,
+    });
+    if (!authorization.ok) throw this.denialError(authorization.reason);
+    const receipt: InteractionAuthWriteReceipt = authorization.receipt;
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      // 与 ClientUserStore 的环境解绑路径共用**同一把锁**：某环境的首次授权与客户解绑必须观察到同一串行顺序。
-      //
-      // change publish-approval-signal-to-database §5：这把锁过去是库级 advisory lock
-      // （key 命名空间 `interaction-env:`），而它**跨未来服务边界**——写侧属 api、本处属 automation。
-      // 一次拆库、一次读写分离、一次连接指向副本，两侧各自加锁都会成功、互斥静默消失。现改为
-      // `client_environments` 的行锁：锁与被保护数据同表同库，拆库时是响亮的失败而不是静默失效。
-      //
-      // 注册表**没有**这个环境时行锁不成立（命中 0 行、既不加锁也不报错）。本处是被保护的写侧，
-      // 且到达这里并不要求环境已注册（上游校验只查撤销 hold / accounts / interaction_auth_state，
-      // 且握手时的自动登记是 fire-and-forget，存在真实的时间窗）。故回落去锁该环境的客户归属行：
-      // 解绑 / 停用侧正是遍历 `client_env_scope` 找环境的（对注册表只 LEFT JOIN），锁住归属行即可与之串行。
-      // 两者皆无行 ⇒ 解绑侧遍历不到这个环境 ⇒ 确无对手，此时不加锁是**有依据的**，且照样留痕。
-      const envLock = this.requireEnvLock();
-      if ((await envLock.lockEnvironmentRow(client, payload.envKey)) === 'unregistered') {
-        const scoped = await envLock.lockEnvironmentScopeRows(client, payload.envKey);
-        if (scoped === 0) {
-          console.warn(
-            `[interaction] 环境 ${payload.envKey} 既未注册也未归属任何客户：本次授权首写无环境级锁可取`
-            + '（解绑侧遍历不到该环境 ⇒ 无并发对手）。',
-          );
-        }
-      }
-      await this.assertAccountScope(client, payload.accountId, payload.envKey, false, true);
+      // 回执时效校验：**落地前**再验一次，过期即拒绝写入（fail-closed）。回执只是本方法内的局部值，
+      // 签发后立即在同一次调用里用掉、不落库、不出方法作用域，故结构上不可能被第二次写入复用。
+      this.assertReceiptFresh(receipt, payload);
+      await this.assertAuthStateBinding(client, payload.accountId, payload.envKey, false);
       const offboard = await client.query<{ offboard_id: string; state: string }>(
         `SELECT offboard_id,state FROM interaction_offboards
           WHERE platform=$1 AND account_id=$2 AND env_key=$3 AND state <> 'purged' FOR SHARE`,
@@ -489,6 +527,14 @@ export class InteractionStore implements InteractionStoreReaderPort {
         422,
       );
     }
+    // 归属闸（撤销 hold + 账号主数据，全是 api 属主表）先于事务发生：同 upsertAuthStatus，
+    // 在 automation 事务里发这次 RPC 会造出 PostgreSQL 检测不到的跨连接等待环。
+    const scope = await this.requireAuthGate().checkAccountScope({
+      platform: INTERACTION_PLATFORM,
+      accountId: payload.accountId,
+      envKey: payload.envKey,
+    });
+    if (!scope.ok) throw this.denialError(scope.reason);
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -497,7 +543,7 @@ export class InteractionStore implements InteractionStoreReaderPort {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
         `${payload.platform}|${payload.accountId}|${payload.batchId}`,
       ]);
-      await this.assertAccountScope(client, payload.accountId, payload.envKey);
+      await this.assertAuthStateBinding(client, payload.accountId, payload.envKey, true);
       const existing = await client.query<{
         env_key: string; channel: InteractionChannel; scope_external_id: string | null;
         cursor_after: string | null; persisted_threads: number; persisted_messages: number;
@@ -682,28 +728,42 @@ export class InteractionStore implements InteractionStoreReaderPort {
     }
   }
 
-  private async assertAccountScope(
+  /**
+   * 回执时效闸。过期 ⇒ **拒绝写入**（fail-closed）：过期的回执意味着「闸的判定时刻已经太旧，
+   * 这段时间里归属可能已被撤走」，此时按旧回执落地就是给一个可能已被撤权的环境重开互动写。
+   * 宁可让边缘下一次上报重走一遍闸，也不误放行。
+   */
+  private assertReceiptFresh(receipt: InteractionAuthWriteReceipt, payload: InteractionAuthStatusPayload): void {
+    const now = this.clock();
+    if (now <= receipt.expiresAt) return;
+    throw new InteractionError(
+      'INTERACTION_STATE_CONFLICT',
+      '环境授权回执已过期，本次登录态写入被拒绝（请重试）。',
+      409,
+      true,
+      {
+        issues: [{
+          path: 'envKey',
+          code: 'auth_receipt_expired',
+          message: `环境 ${payload.envKey} 的授权回执签发于 ${receipt.issuedAt}、已于 ${receipt.expiresAt} 过期。`,
+        }],
+      },
+    );
+  }
+
+  /**
+   * 绑定闸的 **automation 属主部分**（`interaction_auth_state`，本域本库，行锁照旧有效）。
+   *
+   * 改动前这段与「撤销 hold / 账号主数据」两处 api 属主表的 `FOR SHARE` 挤在同一个
+   * `assertAccountScope` 里 —— 那两处已收口到 api 窄端点（见 `requireAuthGate`），
+   * 剩下的这一段留在本域、语义逐字不变。
+   */
+  private async assertAuthStateBinding(
     queryable: Queryable,
     accountId: string,
     envKey: string,
-    requireBinding = true,
-    allowRevocationHold = false,
+    requireBinding: boolean,
   ): Promise<void> {
-    if (!allowRevocationHold) {
-      const hold = await queryable.query(
-        `SELECT 1 FROM client_env_revocation_holds WHERE env_key=$1 FOR SHARE`, [envKey],
-      );
-      if (hold.rows[0]) {
-        throw new InteractionError('INTERACTION_FEATURE_DISABLED', '环境归属已撤销，互动清理仍待定位。', 409);
-      }
-    }
-    const account = await queryable.query<{ platform: string }>(
-      `SELECT platform FROM accounts WHERE account_id=$1 FOR SHARE`, [accountId],
-    );
-    if (!account.rows[0]) throw new InteractionError('INTERACTION_NOT_FOUND', '账号不存在。', 404);
-    if (account.rows[0].platform !== INTERACTION_PLATFORM) {
-      throw new InteractionError('INTERACTION_SCOPE_MISMATCH', '账号平台与互动请求不匹配。', 409);
-    }
     const conflict = await queryable.query<{ account_id: string; env_key: string }>(
       `SELECT account_id,env_key FROM interaction_auth_state
         WHERE platform=$1 AND (account_id=$2 OR env_key=$3) FOR SHARE`,
@@ -1928,6 +1988,19 @@ export class InteractionStore implements InteractionStoreReaderPort {
     };
   }
 
+  /**
+   * 配置面审计的写入口。**不再直插 api 属主表 `interaction_audit_events`**，改为把同一行内容
+   * 入队到本域 outbox（`event_outbox`，automation 属主），由中继在 api 池上幂等落地。
+   *
+   * ## 为什么不能像同文件的过期 DELETE 那样走写端口
+   * 本方法 7 个内部调用点里有 4 个传的是**调用方的事务句柄**（登录态首写 / 同步批次入库 /
+   * 回复结果落库 / 测试数据重置）——这笔写与 automation 的业务写在**同一笔事务**里。拆库后那是
+   * 跨库事务，端口换得掉连接、换不掉「两个库要一起提交」。事务型 outbox 恰好补上这一块：
+   * 业务回滚 ⇒ 审计事件不存在；业务提交 ⇒ 审计事件必然已入队。
+   *
+   * `queryable` 语义不变：传事务句柄即与该事务同生共死，传池即独立自提交。
+   * `event_id` 在此生成并随载荷带走，既是目标表主键、也是 at-least-once 的幂等键。
+   */
   async audit(
     queryable: Queryable,
     accountId: string,
@@ -1940,13 +2013,25 @@ export class InteractionStore implements InteractionStoreReaderPort {
     summary: string,
     labels: Record<string, unknown>,
   ): Promise<void> {
-    await queryable.query(
-      `INSERT INTO interaction_audit_events
-        (event_id,platform,account_id,env_key,actor,action,config_version,entity_type,entity_id,summary,labels,created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,now())`,
-      [this.idGen('audit'), INTERACTION_PLATFORM, accountId, envKey, actor, action, configVersion,
-        entityType, entityId, summary.slice(0, 512), JSON.stringify(labels)],
-    );
+    const record: InteractionAuditEventRecord = {
+      eventId: this.idGen('audit'),
+      platform: INTERACTION_PLATFORM,
+      accountId,
+      envKey,
+      actor,
+      action,
+      configVersion,
+      entityType,
+      entityId,
+      summary: summary.slice(0, 512),
+      labels,
+      createdAt: this.clock(),
+    };
+    await emitOutboxEvent(queryable, {
+      topic: INTERACTION_AUDIT_OUTBOX_TOPIC,
+      payload: record,
+      executionTarget: this.requireExecutionTarget(),
+    });
   }
 
   /** 供工作流记录不含正文的状态审计；调用方不能拿到 pool，也不能绕开字段约束。 */

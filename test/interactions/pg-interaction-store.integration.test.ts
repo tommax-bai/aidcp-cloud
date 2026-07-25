@@ -5,8 +5,11 @@ import pg from 'pg';
 import type { Envelope } from '../../src/comm/protocol.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
-import { lockEnvironmentRow, lockEnvironmentScopeRows } from '../../src/db/environment-row-lock.js';
-const envLock = { lockEnvironmentRow, lockEnvironmentScopeRows };
+import { PgInteractionAuthGate } from '../../src/interactions/interaction-auth-gate.js';
+import {
+  INTERACTION_TEST_EXECUTION_TARGET,
+  drainInteractionAuditRelay,
+} from '../helpers/interaction-store-test-deps.js';
 import { InteractionInboxService } from '../../src/interactions/interaction-inbox-service.js';
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
 import { ReplyAiService } from '../../src/interactions/reply-ai.js';
@@ -35,12 +38,13 @@ const attemptGate = {
 test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recovery and confirmed result',
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const store = new InteractionStore({ pool, clock: () => 1784044802100, apiPurge: new InteractionApiWrites(), envLock });
+    const store = new InteractionStore({ pool, clock: () => 1784044802100, apiPurge: new InteractionApiWrites(),
+      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
     try {
       await pool.query(`TRUNCATE
         interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
         interaction_messages,interaction_threads,interaction_sync_batches,interaction_sync_cursors,
-        interaction_auth_state,interaction_runtime_controls
+        interaction_auth_state,interaction_runtime_controls,event_outbox,event_outbox_cursor
         RESTART IDENTITY CASCADE`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
         ('acct_wc_demo','mock Edge account','wechat_channels')
@@ -154,6 +158,8 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
         '测试重置必须保留授权');
       assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_runtime_controls WHERE account_id='acct_wc_demo'`)).rows[0].n, 1,
         '测试重置必须保留运行控制');
+      // 配置面审计现走本域 outbox + 中继（跨属主最终一致），断言前 MUST 先排空队列。
+      await drainInteractionAuditRelay(pool);
       assert.equal((await pool.query(`SELECT count(*)::int AS n FROM interaction_audit_events WHERE action='test_data_reset'`)).rows[0].n, 1);
       const replayed = await store.ingestBatch(payload);
       assert.equal(replayed.ack.status, 'accepted', '删除 batch 去重状态后同一真实样本应可重新入箱');
@@ -256,6 +262,7 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
       await store.transitionMessageJob({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo',
         messageId: failedContext.message.id, expectedVersion: 6, to: 'escalated', actor: 'client:user-a',
         reason: '这里可能包含私信或客户正文，审计不得保存原文' });
+      await drainInteractionAuditRelay(pool);
       const escalationAudit = (await pool.query<{ summary: string; labels: Record<string, unknown> }>(
         `SELECT summary,labels FROM interaction_audit_events WHERE action='escalated' ORDER BY created_at DESC LIMIT 1`,
       )).rows[0];
@@ -330,12 +337,14 @@ test('PostgreSQL: circuit reset, replay-safe thread states and periodic classify
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const now = 1_784_044_900_000;
-    const store = new InteractionStore({ pool, clock: () => now, envLock });
+    const store = new InteractionStore({ pool, clock: () => now,
+      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
     try {
       await pool.query(`TRUNCATE
         interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
         interaction_messages,interaction_threads,interaction_sync_batches,interaction_sync_cursors,
-        interaction_auth_state,interaction_runtime_controls RESTART IDENTITY CASCADE`);
+        interaction_auth_state,interaction_runtime_controls,event_outbox,event_outbox_cursor
+        RESTART IDENTITY CASCADE`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
         ('acct_wc_store_circuit','store-circuit','wechat_channels')
         ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
@@ -373,6 +382,7 @@ test('PostgreSQL: circuit reset, replay-safe thread states and periodic classify
       assert.equal(cleared.writePaused, false);
       assert.equal(cleared.consecutiveFailures, 0);
       assert.equal(cleared.circuitOpenedAt, null);
+      await drainInteractionAuditRelay(pool);
       const resetAudit = (await pool.query<{ labels: Record<string, unknown> }>(
         `SELECT labels FROM interaction_audit_events
           WHERE account_id='acct_wc_store_circuit' AND action='runtime_controls_updated'
@@ -535,14 +545,16 @@ test('PostgreSQL: immutable template/config versions, publish CAS and fail-close
 test('PostgreSQL mock Edge E2E: sync → list/detail → generate/approve/send → confirmed',
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const store = new InteractionStore({ pool, clock: () => attemptGate.now, envLock });
+    const store = new InteractionStore({ pool, clock: () => attemptGate.now,
+      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
     const configs = new ReplyConfigStore({ pool });
     try {
       await pool.query(`TRUNCATE
         interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
         interaction_messages,interaction_threads,interaction_sync_batches,interaction_sync_cursors,
         interaction_auth_state,interaction_runtime_controls,reply_rules,reply_templates,account_reply_profiles,
-        interaction_reply_config_versions,interaction_reply_configs RESTART IDENTITY CASCADE`);
+        interaction_reply_config_versions,interaction_reply_configs,event_outbox,event_outbox_cursor
+        RESTART IDENTITY CASCADE`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
         ('acct_wc_e2e','e2e','wechat_channels') ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);
       await store.init();

@@ -357,9 +357,20 @@ import {
   PANEL_EVENT_UNCONSUMED_RETENTION_MS,
 } from './transport/eventbus-outbox-bridge.js';
 // event_outbox 保留期剪裁：outbox 是队列不是账本，没有剪裁就在共库的生产 PG 上无界增长。
-import { EVENT_OUTBOX_NOTIFY_CHANNEL, OutboxRetentionPruner } from './transport/event-outbox.js';
+import {
+  EVENT_OUTBOX_NOTIFY_CHANNEL,
+  OutboxConsumer,
+  OutboxRetentionPruner,
+} from './transport/event-outbox.js';
 import { startOutboxNotifyListener, type NotifyClientLike } from './transport/outbox-notify-listener.js';
 import { startOutboxHealthLog, type OutboxHealthSource } from './transport/outbox-health.js';
+// 互动配置面审计的跨属主投递契约（Block③ L3）：automation 入队 → 中继在 api 池上幂等落地。
+import {
+  INTERACTION_AUDIT_OUTBOX_RETENTION_MS,
+  INTERACTION_AUDIT_OUTBOX_TOPIC,
+  INTERACTION_AUDIT_RELAY_CONSUMER,
+  decodeInteractionAuditEvent,
+} from './kernel/interaction-audit-outbox.js';
 /** automation 内部只读 API 的默认监听端口（可由 AIDCP_AUTOMATION_PORT 覆盖）；api 侧 base URL 由 AIDCP_AUTOMATION_URL 指定。 */
 const DEFAULT_AUTOMATION_READ_API_PORT = 8093;
 /** api 进程内部 API 的默认监听端口（可由 `AIDCP_API_PORT` 覆盖）。 */
@@ -457,6 +468,9 @@ import { InteractionCustomerApi, interactionTestDataResetEnabled } from './inter
 import { InteractionInternalApi, parseInteractionPanelGrants } from './interactions/interaction-internal-api.js';
 import { InteractionScopeInternalApi } from './interactions/interaction-scope-internal-api.js';
 import { buildInteractionPermissionOverview } from './interactions/interaction-panel-permissions.js';
+// 互动域环境授权闸的 api 属主实现（Block③ L3 反方向收口）：持 api 池、自开事务，经 kernel 端口注入 automation。
+import { PgInteractionAuthGate } from './interactions/interaction-auth-gate.js';
+import type { InteractionAuthGate } from './kernel/interaction-auth-gate-types.js';
 // 组合根直接构造 content 的回复生成实现，并作为 ReplyAiPort 注入 ReplyWorkflow（automation 编排层只持接口）。
 import { ReplyAiService } from './interactions/reply-ai.js';
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
@@ -468,8 +482,6 @@ import { PgOffboardCleanupGrantOps } from './interactions/offboard-cleanup-grant
 import type { OffboardCleanupGrantOperations } from './kernel/offboard-cleanup-grant-types.js';
 import type { ClientEnvAutomationReader } from './kernel/client-env-automation-types.js';
 import { InteractionApiWrites } from './interactions/interaction-api-writes.js';
-// 环境级行锁实现（api 属主 client_environments / client_env_scope），由组合根注入 InteractionStore（automation）。
-import { lockEnvironmentRow, lockEnvironmentScopeRows } from './db/environment-row-lock.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
@@ -2946,13 +2958,33 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 回落的 resolveSharedPgConfig 与 resolveEnvPgConfig() 是同一套 env 名 / 同一 DEFAULT 兜底 /
     // 同样 DATABASE_URL 优先 —— 这三个 store 本就跑在那个 resolver 上，故不存在 L2 那批 HOST-param
     // store「接池后开始认 DATABASE_URL」的口径漂移。连接数亦降（三个私有池 → 复用 automationPool）。
-    // ⚠️ 翻转后它们那几处直读 api 表的守卫（client_env_revocation_holds / accounts 的 FOR SHARE、
-    //    经 envLock 锁 client_environments）会**响亮失败**——这是设计意图（见 db/environment-row-lock.ts
-    //    头注释：宁可响亮失败，也不要无声失去互斥），属须监督批，见 cloud-block3-l3-cutover-plan.md §2.1。
+    // Block③ L3 反方向收口（本 change）：那几处「automation 事务里直读 / 直锁 api 属主表」的守卫
+    // （client_env_revocation_holds / accounts 的 FOR SHARE、经 envLock 锁 client_environments）
+    // 已收敛进 api 窄端点 PgInteractionAuthGate —— 判定与环境级行锁跑在 **api 池、api 本地事务**里，
+    // 发一张带有效期的条件写回执，automation 拿回执才落登录态。闸问不到 / 被拒 / 回执过期 ⇒ 拒绝写入。
+    // api 模式（segC 未跑）同样 fail-closed，与同文件 clientEnvAutomationRead / offboardCleanupGrantOps 同范式。
+    const interactionAuthGate: InteractionAuthGate =
+      serviceModeFromEnv() === 'api'
+        ? {
+            authorizeAuthStateWrite: () => Promise.reject(new Error('interaction_auth_gate_unavailable_in_api_mode')),
+            checkAccountScope: () => Promise.reject(new Error('interaction_auth_gate_unavailable_in_api_mode')),
+          }
+        : new PgInteractionAuthGate({ pool: apiPool, logger: console });
+    const interactionApiWrites = new InteractionApiWrites();
+    // 配置面审计（interaction_audit_events 属 api 单写）改走本域 outbox + 中继：那笔 INSERT 与
+    // automation 的业务写同事务，拆库后是跨库事务，端口换不掉「两个库要一起提交」。target 缺失 ⇒
+    // 审计写入当场抛错（连带业务事务回滚），绝不把归属未知的审计静默落进队列。
+    if (!deploymentTarget) {
+      console.error(
+        '[aidcp-cloud] AIDCP_DEPLOY_ENV 缺失或非法 → 互动域配置面审计无法投递（dev/ol 隔离无从判定），'
+        + '互动写入路径将当场失败。MUST 先修 env，绝不静默丢审计。',
+      );
+    }
     interactionStore = new InteractionStore({
       pool: automationPool,
-      apiPurge: new InteractionApiWrites(),
-      envLock: { lockEnvironmentRow, lockEnvironmentScopeRows },
+      apiPurge: interactionApiWrites,
+      authGate: interactionAuthGate,
+      ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
     });
     // ⚠️ 这两个 store 住在 src/interactions/ 但它们的表**全是 api 属主**
     // （interaction_reply_configs / _versions / _scopes / _scope_versions / _scope_audit /
@@ -3005,6 +3037,41 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         console.warn(`[interaction] retention 失败: ${error instanceof Error ? error.message : String(error)}`));
     }, 24 * 60 * 60 * 1_000);
     interactionRetentionTimer.unref?.();
+    // ── 配置面审计中继（Block③ L3）：automation 的 event_outbox → api 属主表 interaction_audit_events ──
+    // 载荷结构不符 ⇒ 抛错让游标停在该条之前，每一轮如实报一次（可见的堵塞），MUST NOT 静默跳过：
+    // 载荷由本仓自己的 emit 侧生成，结构不符即代码缺陷，不该靠丢审计来掩盖。
+    if (deploymentTarget) {
+      const auditRelay = new OutboxConsumer({
+        consumer: INTERACTION_AUDIT_RELAY_CONSUMER,
+        executionTarget: deploymentTarget,
+        pool: automationPool,
+        handlers: new Map([[INTERACTION_AUDIT_OUTBOX_TOPIC, async (event) => {
+          const record = decodeInteractionAuditEvent(event.payload);
+          if (!record) {
+            throw new Error(`interaction_audit_relay_undecodable_payload id=${event.id}`);
+          }
+          await interactionApiWrites.insertAuditEvent(apiPool, record);
+        }]]),
+        logger: console,
+      });
+      auditRelay.start();
+      // 队列剪裁：审计的**账本**是 interaction_audit_events 本身（api 属主、365 天），outbox 只留 24h。
+      // 承重命令类主题 ⇒ MUST NOT 设 unconsumedRetentionMs 兜底强删（未落地就删 = 静默吞审计）。
+      const auditOutboxPruner = new OutboxRetentionPruner({
+        pool: automationPool,
+        executionTarget: deploymentTarget,
+        topics: [{
+          topic: INTERACTION_AUDIT_OUTBOX_TOPIC,
+          retentionMs: INTERACTION_AUDIT_OUTBOX_RETENTION_MS,
+          consumers: [INTERACTION_AUDIT_RELAY_CONSUMER],
+        }],
+        logger: console,
+      });
+      auditOutboxPruner.start();
+      console.log(
+        `[aidcp-cloud] 互动配置面审计中继已启动（topic=${INTERACTION_AUDIT_OUTBOX_TOPIC}, target=${deploymentTarget}）`,
+      );
+    }
     if (
       interactionSchemaMode === 'legacy_read_only' &&
       readEnvString('AIDCP_DEPLOY_ENV') === 'dev'

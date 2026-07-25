@@ -56,6 +56,8 @@
       "src/kernel/risk-read-types.ts",
       "src/kernel/panel-automation-types.ts",
       "src/kernel/client-env-automation-types.ts",
+      "src/kernel/interaction-audit-outbox.ts",
+      "src/kernel/interaction-auth-gate-types.ts",
       "src/kernel/offboard-cleanup-grant-types.ts"
     ]
   },

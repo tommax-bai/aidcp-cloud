@@ -905,6 +905,11 @@
     "note": "§5.1：reply 配置面（reply_templates/reply_rules/account_reply_profiles/interaction_reply_config*）与配置面审计 interaction_audit_events 归 aidcp-api 单写。本文件是 change offboard-saga 里这些 api 属主表在离场/过期清理路径上的 api 侧单写者，automation 经窄接口注入调用。"
   },
   {
+    "path": "src/interactions/interaction-auth-gate.ts",
+    "layer": "api",
+    "note": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：kernel 端口 InteractionAuthGate 的 api 属主实现（PgInteractionAuthGate），持组合根注入的 api 池、**自己开事务**，只读 / 只锁 api 属主表 client_environments / client_env_scope（经同层 db/environment-row-lock）与 client_env_revocation_holds / accounts（§5.1「客户、环境归属和账号绑定」+「账号主数据」全归 api）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件与同目录 reply-config-store / interaction-api-writes 一样，目录位置不是属主判据、它碰的表全是 api 属主，归 api。它是 offboard-cleanup-grant-ops.ts（automation 属主实现、api 侧经端口转调）的**反方向镜像**。请求回写 §4.7 见 docpatch RK-block3"
+  },
+  {
     "path": "src/interactions/interaction-automation-ports.ts",
     "layer": "api",
     "note": "§4.6.1：配置/查询面（api）消费 automation 编排行为的窄注入端口（consumer-owned ports）。change decouple-interaction-api-cluster 新增：把 interaction-customer-api 对 send-orchestrator / reply-workflow 的直接 import type 收窄为端口接口，只引 kernel 契约、由组合根按结构兼容注入 automation 实例，automation 类不 import 本端口。"
@@ -1093,6 +1098,16 @@
     "path": "src/kernel/image-provider-registry.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/image-providers.ts 析出图片厂商注册表纯数据段 + 无状态归一（ImageProviderId / ImageProviderMeta / DEFAULT_IMAGE_PROVIDER / IMAGE_PROVIDERS 字面数据 / isKnownImageProvider / normImageProvider）。零 import、零 SQL / HTTP / LLM、零模块级 Set-Map（IMAGE_PROVIDERS 为字面 Record，归一用 Object.hasOwnProperty）。路由客户端类 RoutingImageProvider（依赖 image-provider.js 的 ImageProvider 客户端接口）留 image-providers.ts（content）并从 kernel 导入等值再导出。供 api 侧面板版本视图 / 配置外观跨边界共导，消 2 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/interaction-audit-outbox.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：配置面审计（interaction_audit_events，§5.1 归 api 单写）的跨属主投递契约 —— outbox 主题名 / 中继消费者名 / 保留期常量 + 审计行纯 DTO + 纯函数解码守卫。零 import、零 SQL / HTTP / LLM / 模块级活状态。被 automation 侧（interaction-store 入队）与 api 侧（interaction-api-writes 落地）共同引用，正是 kernel 段该承载的共享契约。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
+  },
+  {
+    "path": "src/kernel/interaction-auth-gate-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：互动域环境授权闸的**跨域操作**端口契约（InteractionAuthGate 接口 + 回执 / 输入输出纯类型 + 拒绝档与环境串行档字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 offboard-cleanup-grant-types 同族且方向相反：那一条是 api 调 automation，本条是 automation 调 api。文件头载明「闸在 api、写在 automation ⇒ 两笔 + 条件写回执」的判据，以及回执**能**与**不能**保证什么。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
   },
   {
     "path": "src/kernel/interaction-reply-contract.ts",

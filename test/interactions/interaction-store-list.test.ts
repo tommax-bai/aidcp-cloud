@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
+import {
+  INTERACTION_TEST_EXECUTION_TARGET,
+  allowAllAuthGate,
+} from '../helpers/interaction-store-test-deps.js';
 import type { InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
 
 test('pending list filter expands to all actionable reply job states', async () => {
@@ -114,7 +118,8 @@ test('a newer observation of an unchanged empty batch advances evidence but an o
     release: () => {},
   };
   const pool = { connect: async () => client } as unknown as Pool;
-  const store = new InteractionStore({ pool, clock: () => 1_784_044_800_200 });
+  const store = new InteractionStore({ pool, clock: () => 1_784_044_800_200,
+    authGate: allowAllAuthGate(), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
   const payload: InteractionSyncBatchPayload = {
     batchId: 'batch-a', requestId: 'request-a', envKey: 'env-a', accountId: 'acct-a',
     platform: 'wechat_channels', channel: 'comment', scopeExternalId: null,

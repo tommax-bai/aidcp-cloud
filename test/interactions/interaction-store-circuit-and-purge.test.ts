@@ -5,6 +5,10 @@ import type { Pool } from 'pg';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import type { InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
+import {
+  INTERACTION_TEST_EXECUTION_TARGET,
+  allowAllAuthGate,
+} from '../helpers/interaction-store-test-deps.js';
 
 function runtimeRow() {
   return {
@@ -42,14 +46,18 @@ test('runtime-control CAS resets circuit in the same UPDATE and conflict leaves 
         }
         return { rows: [{ version: row.version }] };
       }
-      if (sql.includes('INSERT INTO interaction_audit_events')) {
-        audits.push(JSON.parse(params[10] as string) as Record<string, unknown>);
-        return { rows: [] };
+      // 配置面审计已改走本域 outbox（api 属主表由中继幂等落地）；这里断言的是入队载荷的 labels。
+      if (sql.includes('INSERT INTO event_outbox')) {
+        const record = JSON.parse(params[1] as string) as { labels: Record<string, unknown> };
+        audits.push(record.labels);
+        return { rows: [{ id: audits.length }] };
       }
+      if (sql.includes('pg_notify')) return { rows: [] };
       throw new Error(`unexpected SQL: ${sql}`);
     },
   } as unknown as Pool;
-  const store = new InteractionStore({ pool, idGen: (prefix) => `${prefix}-test` });
+  const store = new InteractionStore({ pool, idGen: (prefix) => `${prefix}-test`,
+    authGate: allowAllAuthGate(), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
   const input = {
     accountId: 'acct-circuit', actor: 'admin', commentsReadEnabled: true,
     commentsReplyEnabled: true, dmReadEnabled: true, dmSendTextEnabled: true,
@@ -93,12 +101,15 @@ test('ingest replay advances timestamps but only a newly inserted job returns it
         threadUpdates.push({ sql, params });
         return { rows: [], rowCount: 1 };
       }
+      // 配置面审计入队（api 属主表由中继落地）：emit 要读回自增 id。
+      if (sql.includes('INSERT INTO event_outbox')) return { rows: [{ id: 1 }], rowCount: 1 };
       return { rows: [], rowCount: 1 };
     },
     release: () => {},
   };
   const pool = { connect: async () => client } as unknown as Pool;
-  const store = new InteractionStore({ pool, clock: () => 1_784_044_900_100, idGen: (prefix) => `${prefix}-test` });
+  const store = new InteractionStore({ pool, clock: () => 1_784_044_900_100, idGen: (prefix) => `${prefix}-test`,
+    authGate: allowAllAuthGate(), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
   const payload: InteractionSyncBatchPayload = {
     batchId: 'batch-replay', requestId: null, envKey: 'env-ingest', accountId: 'acct-ingest',
     platform: 'wechat_channels', channel: 'comment', scopeExternalId: null,
