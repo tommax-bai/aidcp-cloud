@@ -13,6 +13,8 @@ export type {
   DelegatedAction,
   DelegatedActionSupport,
   NoteSupport,
+  IdentityCaptureCommand,
+  IdentityCaptureStrategy,
   CommentPlatformProfile,
   PlatformRegistryEntry,
 } from '../kernel/platform-types.js';
@@ -24,6 +26,7 @@ import type {
   DelegatedActionSupport,
   NoteScopedAction,
   NoteSupport,
+  IdentityCaptureStrategy,
   CommentPlatformProfile,
   PlatformRegistryEntry,
 } from '../kernel/platform-types.js';
@@ -205,6 +208,12 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
       // 小红书没有「群」这个东西——不是没实装，是平台上不存在。
       group_join: { supported: false, reason: 'no_group_concept' },
     },
+    identityCapture: {
+      supported: true,
+      command: 'identity.read_self_profile',
+      restore: 'feed',
+      capability: 'identity_read_self_profile_v1',
+    },
     pacing: {},
     scheduler: {
       comment: {
@@ -272,6 +281,12 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
       // 后台用量表真在按「加群 用了/上限」显示。这条声明只让客户端也看得见同一个数。
       group_join: { supported: true },
     },
+    identityCapture: {
+      supported: true,
+      command: 'identity.read_current',
+      restore: 'none',
+      capability: 'identity_read_current_v1',
+    },
     // 泛化旧 facebookScrollDwellMs 的 7s 扫屏地板（虚拟化/permalink 水合导致 newCount 常算成 0 时的保底停留）。
     pacing: { feedScrollDwellFloorMs: 7_000 },
     scheduler: {
@@ -324,6 +339,7 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
       search: { supported: false, reason: 'interaction_inbox_only' },
       group_join: { supported: false, reason: 'interaction_inbox_only' },
     },
+    identityCapture: { supported: false, reason: 'interaction_auth_identity_only' },
     pacing: {},
     scheduler: { comment: { enabled: false, defaultSort: 'none', defaultTimeWindow: 'none' } },
     scheduledAutomation: {
@@ -350,6 +366,12 @@ export function platformRegistryEntry(platform: string | null | undefined): Plat
   const entry = PLATFORM_REGISTRY[id];
   if (!entry) throw new Error(`platform=${id} has no cloud registry entry`);
   return entry;
+}
+
+export function identityCaptureStrategyForPlatform(
+  platform: string | null | undefined,
+): IdentityCaptureStrategy {
+  return platformRegistryEntry(platform).identityCapture;
 }
 
 /**

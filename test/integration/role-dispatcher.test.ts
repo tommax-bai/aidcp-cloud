@@ -156,7 +156,7 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.endSession();
   });
 
-  it('facebook: 首批 page.cards{startupId} 武装本人昵称采集（profile_open direct）+ 本人 detail 差异写库（change facebook-nickname-capture-timing）', async () => {
+  it('facebook: 首批 page.cards{startupId} 仅就地读取本人身份，不访问 profile、不恢复页面', async () => {
     const commands: EdgeCommand[] = [];
     const setCalls: { accountId: string; nickname: string }[] = [];
     const llm = createMockLlm([]);
@@ -165,6 +165,7 @@ describe('RoleDispatcher Integration', () => {
       llm,
       sendCommand: (cmd) => commands.push(cmd),
       accountPlatform: 'facebook',
+      hasIdentityReadCurrent: () => true,
       getNickname: () => null,
       setNickname: (accountId, nickname) => { setCalls.push({ accountId, nickname }); },
     });
@@ -176,21 +177,53 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.bus.emit('page.cards.arrived', { cards: [], startupId: 'fb-startup-1', ts: Date.now() });
     await new Promise((r) => setTimeout(r, 10));
 
-    const profileOpen = commands.find(
-      (c) => c.action === 'profile_open' && (c.params as { direct?: boolean } | undefined)?.direct === true,
-    );
-    assert.ok(profileOpen, 'FB 首批 page.cards{startupId} 应武装本人昵称采集、下发 profile_open{direct}');
-    assert.equal((profileOpen!.params as { authorId?: string }).authorId, 'fb-acc', 'direct 采集应指向本连接账号');
+    const identityRead = commands.find((c) => c.action === 'identity_read_current');
+    assert.ok(identityRead, 'FB 首批 page.cards{startupId} 应下发无导航身份读取');
+    assert.equal(commands.some((c) => c.action === 'profile_open'), false, '本人身份读取不得复用作者主页命令');
+    const captureId = (identityRead!.params as { captureId?: string }).captureId;
+    assert.ok(captureId);
 
-    // 边缘就地读回本人 detail（authorId === 连接 accountId、非空昵称）→ 云端差异写库。
-    dispatcher.bus.emit('profile.detail.arrived', {
-      detail: { authorId: 'fb-acc', postsCount: 0, followersCount: 0, extracted: false, nickname: '真实FB昵称' },
+    dispatcher.bus.emit('identity.observed.arrived', {
+      observation: {
+        captureId,
+        accountId: 'fb-acc',
+        nickname: '真实FB昵称',
+        source: 'current_page',
+        pageEffect: 'none',
+      },
       accountId: 'fb-acc',
       ts: Date.now(),
     });
     await new Promise((r) => setTimeout(r, 10));
     assert.deepEqual(setCalls, [{ accountId: 'fb-acc', nickname: '真实FB昵称' }], 'FB 就地读回的非空昵称应差异写库');
+    assert.equal(
+      commands.some((c) => c.action === 'back' || c.action === 'refresh'),
+      false,
+      'FB 就地读取完成后不得发页面恢复命令',
+    );
 
+    dispatcher.endSession();
+  });
+
+  it('facebook: 旧 Edge 未声明身份能力时跳过二次采集，不回落 profile.open', async () => {
+    const commands: EdgeCommand[] = [];
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm: createMockLlm([]),
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+    });
+    dispatcher.setCurrentAccountId('fb-old-edge');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.bus.emit('page.cards.arrived', {
+      cards: [],
+      startupId: 'fb-old-startup',
+      ts: Date.now(),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(commands.some((command) => command.action === 'identity_read_current'), false);
+    assert.equal(commands.some((command) => command.action === 'profile_open'), false);
     dispatcher.endSession();
   });
 

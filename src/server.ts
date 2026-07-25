@@ -189,7 +189,12 @@ import { completeSessionUsageCounts, pickDailyUsageCounts, pickSessionUsageCount
 import { buildBrowserStandbyHint, resolveBrowserStandbyConfig } from './comm/browser-standby.js';
 // 客户端指标键清单的**单一来源**（change platform-honest-usage-metrics）：联集由它派生。
 // 别在本文件另写一份数组——那正是本 change 删掉的东西（加键时 typecheck 一声不吭）。
-import { SEARCH_ACTIVITY_RECEIPT_CAPABILITY, UI_DAILY_USAGE_ACTIONS } from './comm/protocol.js';
+import {
+  IDENTITY_READ_CURRENT_CAPABILITY,
+  IDENTITY_READ_SELF_PROFILE_CAPABILITY,
+  SEARCH_ACTIVITY_RECEIPT_CAPABILITY,
+  UI_DAILY_USAGE_ACTIONS,
+} from './comm/protocol.js';
 import type {
   UiDailyUsageAction,
   UiDailyUsageCounts,
@@ -4832,6 +4837,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       hasReelFollow: () => (ctx.capabilities ?? []).includes(FACEBOOK_REEL_FOLLOW_EDGE_CAPABILITY),
       // 搜索事实版本偏斜闸：只有声明能力的新 Edge 才等待终态并延后概念词落态。
       hasSearchActivityReceipt: () => (ctx.capabilities ?? []).includes(SEARCH_ACTIVITY_RECEIPT_CAPABILITY),
+      hasIdentityReadCurrent: () => (ctx.capabilities ?? []).includes(IDENTITY_READ_CURRENT_CAPABILITY),
+      hasIdentityReadSelfProfile: () =>
+        (ctx.capabilities ?? []).includes(IDENTITY_READ_SELF_PROFILE_CAPABILITY),
       // FB 每日在线时长预算（change account-nurture-discipline-spine §4.2）：全局每日时长未设(0)时 FB 账号
       // 回落非零安全日窗（养号「每天在线 0.5-6h」防长挂）。AIDCP_FB_DAILY_ONLINE_MIN 覆盖；缺/非法 → dispatcher 默认 360。
       facebookDailyOnlineMinutes:

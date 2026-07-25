@@ -48,13 +48,13 @@ function memStore(): AnchorStore & { main: Map<string, RemoteAnchor>; staging: M
 const session: EdgeSession = { sessionId: 'sess-test', accountId: 'acc-test' };
 const fixedClock = () => 1000;
 
-function makeHandler(llm: LlmClient, store: AnchorStore) {
+function makeHandler(llm: LlmClient, store: AnchorStore, eventBus = new EventBus()) {
   return new DefaultMessageHandler({
     planner: new SimplePlanner(),
     llm,
     cache: store,
     clock: fixedClock,
-    eventBus: new EventBus(),
+    eventBus,
   });
 }
 
@@ -114,6 +114,33 @@ test('ping → pong', async () => {
   const res = await h.handle(makeEnvelope('ping', 'p1', 1, {}), session);
   assert.equal(res?.type, 'pong');
   assert.equal(res?.id, 'p1');
+});
+
+test('identity.observed → 独立身份观察事件并保留连接账号归属', async () => {
+  const bus = new EventBus();
+  const observations: unknown[] = [];
+  bus.on('identity.observed.arrived', (event) => {
+    observations.push(event);
+  });
+  const h = makeHandler(dummyLlm, memStore(), bus);
+  await h.handle(makeEnvelope('identity.observed', 'identity-1', 1, {
+    captureId: 'capture-1',
+    accountId: 'acc-test',
+    nickname: 'Gi Vo',
+    source: 'current_page',
+    pageEffect: 'none',
+  }), session);
+  assert.deepEqual(observations, [{
+    observation: {
+      captureId: 'capture-1',
+      accountId: 'acc-test',
+      nickname: 'Gi Vo',
+      source: 'current_page',
+      pageEffect: 'none',
+    },
+    accountId: 'acc-test',
+    ts: fixedClock(),
+  }]);
 });
 
 test('plan.request → plan.response（走规则）', async () => {

@@ -21,6 +21,8 @@ export const CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY = 'client_data_plane
 
 /** Edge returns one correlated terminal fact for every platform search command. */
 export const SEARCH_ACTIVITY_RECEIPT_CAPABILITY = 'search_activity_receipt_v1';
+export const IDENTITY_READ_CURRENT_CAPABILITY = 'identity_read_current_v1';
+export const IDENTITY_READ_SELF_PROFILE_CAPABILITY = 'identity_read_self_profile_v1';
 
 export type SearchPurpose = 'discovery' | 'task_targeting' | 'operator';
 export type SearchScope = 'global' | 'container';
@@ -97,6 +99,8 @@ export type MessageType =
   | 'note.browse_images'   // 浏览笔记图片
   | 'note.scroll_comments' // 滚动评论区
   | 'profile.open'         // 进入作者主页（专用指令，取代 open_note{type:'profile'}）
+  | 'identity.read_current' // 运行期就地读取本人身份（禁止导航）
+  | 'identity.read_self_profile' // 进入会话绑定账号本人主页读取身份
   | 'notification.open'             // cloud → edge：导航到通知首页（仅导航，不再复合）
   | 'notification.browse_comments'  // cloud → edge：进「评论和@」+ 滚动 + 抽取
   | 'notification.browse_likes'     // cloud → edge：进「赞和收藏」（v1 看一眼清未读）
@@ -109,6 +113,7 @@ export type MessageType =
   | 'page.cards'           // Edge 上报当前可见卡片列表
   | 'note.detail'          // Edge 上报笔记详情
   | 'profile.detail'       // Edge 上报个人主页数据
+  | 'identity.observed'    // Edge 上报与采集命令关联的本人身份观察
   | 'action.completed'     // Edge 确认 action 执行完成
   // —— Persona 生成（edge → cloud 请求 / cloud → edge 响应，建号关键词驱动，客户自助 onboarding）——
   | 'persona.generate'        // edge → cloud：按关键词选择请求生成 persona
@@ -1580,8 +1585,20 @@ export interface ProfileOpenPayload {
   reason?: string;
   /** 进入主页前犹豫时间中心值（毫秒，可选） */
   thinkMs?: number;
-  /** 云端指定直驱（change account-real-nickname）：true=直接 Page.navigate 到 /user/profile/<authorId>、不抓取当前页第一个作者链；缺省/false 维持点详情页作者头像进入路径逐字不变。边缘对此字段一视同仁、只执行，不含「这是不是自己」判定。 */
-  direct?: boolean;
+}
+
+/** cloud → edge：启动代次内本人身份二次采集；captureId 由 Cloud 生成并要求原样回传。 */
+export interface IdentityReadPayload {
+  captureId: string;
+}
+
+/** edge → cloud：本人身份采集观察；独立于普通作者 profile.detail。 */
+export interface IdentityObservedPayload {
+  captureId: string;
+  accountId: string;
+  nickname?: string;
+  source: 'current_page' | 'self_profile';
+  pageEffect: 'none' | 'navigated_self_profile';
 }
 
 // —— Edge 上报 Payload（edge → cloud）——
@@ -1920,10 +1937,13 @@ export interface PayloadMap {
   'note.browse_images': NoteBrowseImagesPayload;
   'note.scroll_comments': NoteScrollCommentsPayload;
   'profile.open': ProfileOpenPayload;
+  'identity.read_current': IdentityReadPayload;
+  'identity.read_self_profile': IdentityReadPayload;
   // Edge 上报
   'page.cards': PageCardsPayload;
   'note.detail': NoteDetailPayload;
   'profile.detail': ProfileDetailPayload;
+  'identity.observed': IdentityObservedPayload;
   'action.completed': ActionCompletedPayload;
   'notification.open': NotificationOpenPayload;
   'notification.browse_comments': NotificationBrowseCommentsPayload;

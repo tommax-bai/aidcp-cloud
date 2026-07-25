@@ -2,7 +2,13 @@
  * 事件总线类型定义 — 定义系统内所有事件的结构与相关领域类型。
  */
 
-import type { CommentCandidate, Envelope, NoteImagePayload, NotificationItem } from '../comm/protocol.js';
+import type {
+  CommentCandidate,
+  Envelope,
+  IdentityObservedPayload,
+  NoteImagePayload,
+  NotificationItem,
+} from '../comm/protocol.js';
 import type { MandatoryCommentApproval, MandatoryInteractionAction } from '../kernel/soul-types.js';
 
 // Agent 角色枚举
@@ -169,6 +175,7 @@ export interface EventMap {
   /** Refresh-only note detail carrying newly observed carousel images; consumers MUST NOT count it as a new view. */
   'note.image_snapshot.arrived': { detail: NoteDetailData; accountId?: string; ts: number };
   'profile.detail.arrived': { detail: ProfileDetailData; accountId?: string; ts: number };
+  'identity.observed.arrived': { observation: IdentityObservedPayload; accountId?: string; ts: number };
   // noteId/observation（change platform-browse-protocol）：边缘从被点 article 派生的规范 id + 独立见证包（现读被点卡）。
   // 归账仲裁（handler.ts）与迁移落地确认 / observedSurface 审计（dispatcher）消费；缺省=今天行为（回落 currentNoteId）。
   'action.completed': {
@@ -518,10 +525,6 @@ export interface RoleEventMap {
   'profile.browsed': ProfileBrowsedPayload;
   'profile.done': ProfileDonePayload;
   'profile.exit': ProfileExitPayload;
-  /** 本人主页昵称采集意图（change account-real-nickname）：云端内部事件，**NOT 协议消息**——不入 protocol.ts、
-   *  不计 MessageType（计数恒 56）、无四处同步。nickname_enricher 在会话开始(需采集时)emit；
-   *  dispatcher 翻译为 profile_open{direct:true}。payload.accountId = 本人主页 id。 */
-  'self.profile.capture': { accountId: string };
   'search.needed': SearchNeededPayload;
   'search.approved': SearchApprovedPayload;
   'search.skipped': SearchSkippedPayload;

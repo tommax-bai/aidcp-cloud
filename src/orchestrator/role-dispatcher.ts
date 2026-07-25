@@ -31,6 +31,7 @@ import {
   resolveCommentSurface,
   loopClosure,
   commentProfileForPlatform,
+  identityCaptureStrategyForPlatform,
   type PlatformId,
   type NoteScopedAction,
   type Surface,
@@ -409,6 +410,10 @@ export interface RoleDispatcherOptions {
   hasReelFollow?: () => boolean;
   /** 本连接边缘是否声明 `search_activity_receipt_v1`。 */
   hasSearchActivityReceipt?: () => boolean;
+  /** 本连接 Edge 是否支持无导航的当前页身份读取。 */
+  hasIdentityReadCurrent?: () => boolean;
+  /** 本连接 Edge 是否支持导航到绑定账号本人主页的身份读取。 */
+  hasIdentityReadSelfProfile?: () => boolean;
   /**
    * Facebook 每日累计在线分钟默认（change account-nurture-discipline-spine §4.2）：全局每日时长阈值
    * （dailyCaps().maxMinutes）未显式设值（0=不限）时，Facebook 账号回落这个非零安全日窗（养号「每天在线
@@ -460,7 +465,7 @@ export interface RoleDispatcherOptions {
 }
 
 export interface EdgeCommand {
-  action: 'scroll' | 'refresh' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'open_notifications' | 'browse_notification_comments' | 'browse_notification_likes' | 'browse_notification_follows' | 'notification_back_home' | 'pacing_update' | 'session.end';
+  action: 'scroll' | 'refresh' | 'open_note' | 'close_note' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'search' | 'back' | 'browse_images' | 'scroll_comments' | 'profile_open' | 'identity_read_current' | 'identity_read_self_profile' | 'open_notifications' | 'browse_notification_comments' | 'browse_notification_likes' | 'browse_notification_follows' | 'notification_back_home' | 'pacing_update' | 'session.end';
   params?: Record<string, unknown>;
   reason?: string;
 }
@@ -596,6 +601,8 @@ export class RoleDispatcher {
   private readonly hasReelFollow: () => boolean;
   /** 本连接边缘是否回传关联后的搜索终态。 */
   private readonly hasSearchActivityReceipt: () => boolean;
+  private readonly hasIdentityReadCurrent: () => boolean;
+  private readonly hasIdentityReadSelfProfile: () => boolean;
   /** Facebook 每日在线分钟默认（§4.2）；全局未设时 FB 账号回落此非零日窗。 */
   private readonly facebookDailyOnlineMinutes: number;
   /** 同账号并行互动去重 guard（按账号单例）；缺省不去重。 */
@@ -738,6 +745,8 @@ export class RoleDispatcher {
     this.hasInlineTargeting = options.hasInlineTargeting ?? (() => false);
     this.hasReelFollow = options.hasReelFollow ?? (() => false);
     this.hasSearchActivityReceipt = options.hasSearchActivityReceipt ?? (() => false);
+    this.hasIdentityReadCurrent = options.hasIdentityReadCurrent ?? (() => false);
+    this.hasIdentityReadSelfProfile = options.hasIdentityReadSelfProfile ?? (() => false);
     this.facebookDailyOnlineMinutes = options.facebookDailyOnlineMinutes ?? DEFAULT_FB_DAILY_ONLINE_MINUTES;
     this.interactionGuard = options.interactionGuard;
     this.cooldownGate = options.cooldownGate;
@@ -920,7 +929,8 @@ export class RoleDispatcher {
   private isQuotaSleepBypass(command: EdgeCommand): boolean {
     return command.action === 'session.end'
       || this.isExcursionCommand(command.action)
-      || (this.sessionContext.selfCaptureInFlight && command.action === 'profile_open');
+      || (this.sessionContext.selfCaptureInFlight
+        && (command.action === 'identity_read_current' || command.action === 'identity_read_self_profile'));
   }
 
   /**
@@ -1548,7 +1558,7 @@ export class RoleDispatcher {
       ...(this.archiveValuableComment
         ? [this.makeContentRole('valuable_comment_archivist', { ...commonOptions, getNoteData, archive: this.archiveValuableComment })]
         : []),
-      // ProfileOpener 只订 profile.worth_visiting（本人昵称采集走独立的 profile_open{direct}、不经此角色）⇒ 平台不访主页时
+      // ProfileOpener 只订 profile.worth_visiting（本人身份采集走独立 identity.* 命令、不经此角色）⇒ 平台不访主页时
       // 安全不注册（AuthorEvaluator 已抑制 worth_visiting，本就永不触发）。change platform-orchestration-capability-gates。
       ...(this.canVisitProfile() ? [new ProfileOpener(commonOptions)] : []),
       // ProfileBrowser 恒注册（无害）：它处理作者主页的 profile.detail.arrived；FB 经 canVisitProfile 结构不访作者主页
@@ -1658,33 +1668,36 @@ export class RoleDispatcher {
       | SessionMonitorRole
       | undefined;
 
-    // 登录账号真实昵称采集：只由完整浏览器启动后的首批 page.cards{startupId} 触发。
-    // hello / reconnect / session_start 都不再武装采集，避免冷待机云端恢复反复打断浏览器。
-    // 采集体 + 其本人主页命令出口永久接线；真正采集由 startupId 去重和平台闸控制。
-    // 平台闸（change facebook-nickname-capture-timing）：时机统一到「首个 feed 卡片」这套、放宽到 XHS + Facebook；
-    // 读法按平台分叉——XHS 进本人主页读、Facebook 就地读（边端对 profile_open{direct} 就地读身份、不导航）。
-    // 未知平台仍 fail-open 放行（与既有语义一致）。
+    // 登录账号真实昵称采集：平台策略决定固定副作用命令；Edge 能力决定本连接是否可用。
+    // XHS 导航到绑定账号本人主页并恢复 feed；Facebook 只在当前页读身份，不暂停浏览、不发恢复命令。
     this.nicknameEnricher = new NicknameEnricher({
       ...commonOptions,
       sessionContext: this.sessionContext,
       getAccountId: () => this.currentAccountId,
-      isCaptureEligible: () =>
-        this.isDispatchActive() &&
-        (!this.accountPlatform ||
-          this.accountPlatform === 'xiaohongshu' ||
-          this.accountPlatform === 'facebook'),
+      getCapturePlan: () => {
+        if (!this.isDispatchActive() || !this.accountPlatform) return null;
+        const strategy = identityCaptureStrategyForPlatform(this.accountPlatform);
+        if (!strategy.supported) return null;
+        const capable =
+          strategy.command === 'identity.read_current'
+            ? this.hasIdentityReadCurrent()
+            : this.hasIdentityReadSelfProfile();
+        return capable ? { command: strategy.command, restore: strategy.restore } : null;
+      },
+      requestIdentityCapture: ({ command, captureId }) =>
+        this.sendCommand({
+          action:
+            command === 'identity.read_current'
+              ? 'identity_read_current'
+              : 'identity_read_self_profile',
+          params: { captureId },
+        }),
       getNickname: this.getNickname,
       ...(this.setNickname ? { setNickname: this.setNickname } : {}),
       setTimeoutFn: this.setTimeoutFn,
       clearTimeoutFn: this.clearTimeoutFn,
     });
     this.nicknameEnricher.subscribe();
-    // 本人主页采集命令出口（云端内部事件 → profile_open{direct:true}）：永久接线（采集不依赖浏览会话）。
-    // **不复用** profile.entered（它会把自己拖进浏览管线）；direct=true 让边端直驱 /user/profile/<accountId>、纯执行；
-    // 授信经 selfCaptureInFlight 在 chokepoint 放行（见 sendCommand）。
-    this.eventBus.on('self.profile.capture', (payload) => {
-      this.sendCommand({ action: 'profile_open', params: { authorId: payload.accountId, direct: true, thinkMs: this.thinkNow() } });
-    });
 
     // 角色订阅 / 指令翻译 / Edge 事件接线**推迟到会话激活**（startSession / restartSession）才进行——
     // 多租户（multi-account-node-support）：setup() 仅构造角色 + 注册「边缘 hello → 启动闸」入口监听，

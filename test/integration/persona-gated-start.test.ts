@@ -23,6 +23,8 @@ function make(opts: {
     getSoul: () => mockSoul,
     llm: { complete: async () => '-1' },
     sendCommand: (c) => commands.push(c),
+    accountPlatform: 'xiaohongshu',
+    hasIdentityReadSelfProfile: () => true,
     personaBinding: opts.personaBinding,
     isDispatchActive: opts.isDispatchActive,
     onSessionRejected: (accountId, reason) => {
@@ -155,7 +157,7 @@ test('startOnPersonaBound 人设仍未真绑 → 诚实不起、不发重驱（�
 
 // ─── 昵称采集：只在完整启动后的首批 page.cards{startupId} 触发；不被人设闸阻断（但绝不浏览，守红线）───
 
-test('未绑人设但库内真名空：首批 startup page.cards 采真名（恰一次 profile_open{direct}），绝不浏览（无 open_note/like/scroll）——红线', () => {
+test('未绑人设但库内真名空：首批 startup page.cards 采真名（恰一次 identity_read_self_profile），绝不浏览', () => {
   const { d, commands } = make({ personaBinding: () => 'unbound' });
   d.setCurrentAccountId('acctCap');
   d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'acctCap', ts: 1 }); // 启动闸拒绝浏览会话；hello 本身不再武装采集
@@ -166,10 +168,9 @@ test('未绑人设但库内真名空：首批 startup page.cards 采真名（恰
     startupId: 'startup-1',
     ts: 2,
   });
-  const profileOpens = commands.filter((c) => c.action === 'profile_open');
-  assert.equal(profileOpens.length, 1, '登录后恰驱动一次本人主页采集');
-  assert.equal((profileOpens[0].params as { direct?: boolean }).direct, true, 'direct=true 直驱本人主页');
-  assert.equal(commands.filter((c) => c.action !== 'profile_open').length, 0, '红线：未绑人设绝不浏览（无 open_note/like/scroll 等）');
+  const identityReads = commands.filter((c) => c.action === 'identity_read_self_profile');
+  assert.equal(identityReads.length, 1, '登录后恰驱动一次绑定账号本人主页采集');
+  assert.equal(commands.filter((c) => c.action !== 'identity_read_self_profile').length, 0, '红线：未绑人设绝不浏览（无 open_note/like/scroll 等）');
   d.endSession();
 });
 

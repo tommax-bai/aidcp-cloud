@@ -9,6 +9,7 @@ import {
   normalizePlatformId,
   availableScheduledAutomationActionsForPlatform,
   SCHEDULED_AUTOMATION_ACTIONS,
+  identityCaptureStrategyForPlatform,
 } from '../src/platform/index.js';
 import type { NoteScopedAction, PlatformRegistryEntry } from '../src/platform/index.js';
 
@@ -104,6 +105,25 @@ test('platform registry: Video Channels is inbox-only and exposes no proactive d
     assert.equal(support.level, 'unsupported');
     assert.equal('reason' in support && support.reason, 'interaction_inbox_only');
   }
+});
+
+test('platform registry: identity capture strategy is exhaustive and platform-specific', () => {
+  assert.deepEqual(identityCaptureStrategyForPlatform('xiaohongshu'), {
+    supported: true,
+    command: 'identity.read_self_profile',
+    restore: 'feed',
+    capability: 'identity_read_self_profile_v1',
+  });
+  assert.deepEqual(identityCaptureStrategyForPlatform('facebook'), {
+    supported: true,
+    command: 'identity.read_current',
+    restore: 'none',
+    capability: 'identity_read_current_v1',
+  });
+  assert.deepEqual(identityCaptureStrategyForPlatform('wechat_channels'), {
+    supported: false,
+    reason: 'interaction_auth_identity_only',
+  });
 });
 
 test('platform registry: scheduled automation fully covers every platform and action', () => {

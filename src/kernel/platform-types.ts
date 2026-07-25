@@ -64,6 +64,17 @@ export type OrchestrationCapability =
   | 'search'
   | 'group_join';
 
+export type IdentityCaptureCommand = 'identity.read_current' | 'identity.read_self_profile';
+
+export type IdentityCaptureStrategy =
+  | {
+      supported: true;
+      command: IdentityCaptureCommand;
+      restore: 'none' | 'feed';
+      capability: 'identity_read_current_v1' | 'identity_read_self_profile_v1';
+    }
+  | { supported: false; reason: string };
+
 /** Phase-1 user delegated business actions. This is control-plane metadata, not a protocol enum. */
 export type DelegatedAction =
   | 'comment_batch'
@@ -120,6 +131,8 @@ export interface PlatformRegistryEntry {
   noteSurfaces: Record<'read_content' | 'like' | 'comment', Surface>;
   /** 编排能力（只保留有真消费者的词）。 */
   capabilities: Record<OrchestrationCapability, NoteSupport>;
+  /** 启动期本人身份二次采集的固定副作用命令；每个平台必须显式声明，绝不默认回落。 */
+  identityCapture: IdentityCaptureStrategy;
   /** 节奏平台参数：feed 翻页停留地板（消费者 = dispatcher 泛化后的 feedScrollDwellMs，替代旧的 facebook 裸分支）。 */
   pacing: { feedScrollDwellFloorMs?: number };
   scheduler: {

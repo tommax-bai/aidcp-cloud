@@ -33,6 +33,7 @@ import {
   type PageCardsPayload,
   type NoteDetailPayload,
   type ProfileDetailPayload,
+  type IdentityObservedPayload,
   type ActionCompletedPayload,
   type CaptchaDetectedPayload,
   type CaptchaClearedPayload,
@@ -667,6 +668,15 @@ export class DefaultMessageHandler implements MessageHandler {
         // 戳当前作者 id（change interaction-feed-enrichment）：action.completed 发 follow 时据此补 targetId（关注按作者）。
         if (detail.authorId) session.currentAuthorId = detail.authorId;
         this.bus(session).emit('profile.detail.arrived', { detail, accountId: session.accountId, ts: this.clock() });
+        return null;
+      }
+      case 'identity.observed': {
+        const observation = env.payload as IdentityObservedPayload;
+        this.bus(session).emit('identity.observed.arrived', {
+          observation,
+          accountId: session.accountId,
+          ts: this.clock(),
+        });
         return null;
       }
       // —— 通知巡视（消息查看）：边缘上报 → 入口事件转换 ——

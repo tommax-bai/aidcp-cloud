@@ -66,7 +66,8 @@ const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
   'interaction.comment': true, 'interaction.like_comment': true,
   'group.join': true,
   'navigation.back': true, 'note.browse_images': true, 'note.scroll_comments': true, 'profile.open': true,
-  'page.cards': true, 'note.detail': true, 'profile.detail': true, 'action.completed': true,
+  'identity.read_current': true, 'identity.read_self_profile': true,
+  'page.cards': true, 'note.detail': true, 'profile.detail': true, 'identity.observed': true, 'action.completed': true,
   'notification.open': true, 'notification.browse_comments': true, 'notification.browse_likes': true,
   'notification.browse_follows': true, 'notification.back_home': true,
   'notification.detected': true, 'notification.home': true, 'notification.items': true,
@@ -89,8 +90,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 91（增删消息须同步冻结契约 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 91);
+  it('AC-PROTO-02 消息类型总数为 94（增删消息须同步冻结契约 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 94);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {
