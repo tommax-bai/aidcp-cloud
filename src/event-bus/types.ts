@@ -6,10 +6,14 @@ import type {
   CommentCandidate,
   Envelope,
   IdentityObservedPayload,
-  NoteImagePayload,
   NotificationItem,
 } from '../comm/protocol.js';
 import type { MandatoryCommentApproval, MandatoryInteractionAction } from '../kernel/soul-types.js';
+// NoteDetailData / ConceptPool 已抬入 kernel（change cloud-coupling-phase5）：两者都是 content 侧角色
+// 与 store 的载荷类型，留在这里会让 content 仓拆出去后编译不过（那个 src 里没有本文件）。
+// 本文件继续用它们组事件映射（automation→kernel 恒允许），但 MUST NOT 再从这里 re-export：
+// 原位再导出只是换个马甲，跨属主消费方必须直指 kernel。
+import type { NoteDetailData } from '../kernel/note-detail.js';
 
 // Agent 角色枚举
 export type AgentRole = 'session_monitor' | 'feed_scanner' | 'content_curator' | 'interaction_appraiser' | 'comment_reviewer';
@@ -27,32 +31,6 @@ export interface PageCardsData {
   isVideo?: boolean;
 }
 
-export interface NoteDetailData {
-  noteId: string;
-  title: string;
-  content: string;
-  /** 缺省按 image_text 兼容老边端。 */
-  mediaType?: 'image_text' | 'video';
-  author?: string;
-  authorId?: string;
-  likeCount: number;
-  collectCount: number;
-  /** 发布相对时刻原始文本（change feed-hot-lead-group-comment）；云端解析算热度速率。缺则诚实置空。 */
-  publishedAtText?: string;
-  /** 详情页带 xsec_token 的链接（change interaction-feed-enrichment）；缺则诚实置空。 */
-  url?: string;
-  /** Original carousel images observed by edge; empty/missing means unavailable. */
-  images?: NoteImagePayload[];
-  /** Refresh-only image snapshot; not a new view and not a normal browse-detail decision event. */
-  refreshOnly?: boolean;
-  /**
-   * 帖子下他人评论正文样本（change platform-vocabulary-and-thresholds 2.1）：边缘就地读 / 详情深读采到多少报多少，
-   * 采不到即缺省——MUST NOT 伪造。Facebook 图片帖常无正文，这些评论是撰写的主要文字依据。
-   * 协议早有此字段（protocol.ts NoteDetailPayload.comments）、边缘 FB 三条路径均已上报，此前只因本事件类型
-   * 未声明而在云端被静默丢弃。小红书的 note.detail 不带评论，其现场评论走 action.completed{scroll_comments}.candidates。
-   */
-  comments?: string[];
-}
 
 export interface ProfileDetailData {
   authorId: string;
@@ -123,13 +101,6 @@ export interface IncomingNote {
   likeCount: number;
   collectCount: number;
   author?: string;
-}
-
-// 概念池
-export interface ConceptPool {
-  known: string[];
-  candidates: string[];
-  source: Map<string, string>;
 }
 
 // Manager 决策（仲裁器产出）

@@ -19,7 +19,8 @@ import type { EdgeCommand, ConceptStorePort } from '../../src/orchestrator/role-
 import { contentRoleFactories } from '../helpers/role-factories.js';
 import { SessionContext } from '../../src/agents/session-context.js';
 import type { Soul } from '../../src/kernel/soul-types.js';
-import type { ConceptPool, SearchApprovedPayload, SearchSkippedPayload } from '../../src/event-bus/types.js';
+import type { SearchApprovedPayload, SearchSkippedPayload } from '../../src/event-bus/types.js';
+import type { ConceptPool } from '../../src/kernel/concept-pool.js';
 
 const mockSoul: Soul = {
   identity: { name: '小林', role: 'AI工程师', background: '技术博主', tone: '友好' },
@@ -28,14 +29,14 @@ const mockSoul: Soul = {
 
 const llmReturning = (s: string) => ({ complete: async () => s });
 const llmThrowing = () => ({ complete: async (): Promise<string> => { throw new Error('LLM must not be called'); } });
-const emptyPool = (): ConceptPool => ({ known: [], candidates: [], source: new Map() });
+const emptyPool = (): ConceptPool => ({ known: [], candidates: [] });
 
 // ─── SearchEvaluator：候选集来源 + source 归因 ─────────────────────────
 
 describe('AC-SEARCH 概念池驱动的搜索智能', () => {
   it('AC-SEARCH-01 概念池 candidate 被选中 → approved.source=new_concept', async () => {
     const bus = new EventBus();
-    const pool: ConceptPool = { known: [], candidates: ['向量数据库'], source: new Map() };
+    const pool: ConceptPool = { known: [], candidates: ['向量数据库'] };
     const role = new SearchEvaluator({
       eventBus: bus,
       soul: mockSoul,
@@ -94,7 +95,7 @@ describe('AC-SEARCH 概念池驱动的搜索智能', () => {
   it('AC-SEARCH-04 已搜词在 known 中 → 跨会话被候选集排除', async () => {
     const bus = new EventBus();
     // 候选只有一个，且它已在 known（上一会话 markSearched 的结果）→ 候选集为空 → 跳过
-    const pool: ConceptPool = { known: ['向量数据库'], candidates: ['向量数据库'], source: new Map() };
+    const pool: ConceptPool = { known: ['向量数据库'], candidates: ['向量数据库'] };
     const role = new SearchEvaluator({
       eventBus: bus,
       soul: { ...mockSoul, interests: { ...mockSoul.interests, seed_keywords: [] } },

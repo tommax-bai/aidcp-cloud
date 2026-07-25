@@ -17,9 +17,9 @@ import type {
   CommandResult,
   PublishApprovalCardData,
   PublishApprovalPayload,
-} from '../../comm/feishu-card-contract.js';
+} from '../../kernel/feishu-card-contract.js';
 import { clampTitle, firstSentence } from '../../kernel/title-clamp.js';
-import { publishProfileForPlatform } from '../platform-profile.js';
+import { publishProfileForPlatform } from '../../kernel/publish-platform-profile.js';
 import { checkWritingLanguage } from '../../kernel/writing-language.js';
 import type { DefaultChatProvider } from '../../kernel/default-chat-provider.js';
 

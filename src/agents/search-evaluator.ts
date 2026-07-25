@@ -11,9 +11,10 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { SessionContext } from './session-context.js';
-import type { ConceptPool, RoleName, SearchApprovedPayload, SearchNeededPayload } from '../event-bus/types.js';
+import type { RoleName, SearchApprovedPayload, SearchNeededPayload } from '../event-bus/types.js';
+import type { ConceptPool } from '../kernel/concept-pool.js';
 
-const EMPTY_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
+const EMPTY_POOL: ConceptPool = { known: [], candidates: [] };
 
 export interface SearchEvaluatorOptions extends RoleOptions {
   sessionContext: SessionContext;

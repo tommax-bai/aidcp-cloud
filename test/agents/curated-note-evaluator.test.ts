@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { EventBus } from '../../src/event-bus/index.js';
 import { CuratedNoteEvaluator } from '../../src/agents/curated-note-evaluator.js';
 import type { CuratedObservation } from '../../src/cache/curated-content-store.js';
-import type { NoteDetailData } from '../../src/event-bus/types.js';
+import type { NoteDetailData } from '../../src/kernel/note-detail.js';
 import type { Soul } from '../../src/kernel/soul-types.js';
 import type { TextCardTranscriber } from '../../src/publish-agent/text-card-transcriber.js';
 

@@ -21,7 +21,7 @@ import { CommentSearchTermGenerator, type RoleLlmLike } from '../agents/comment-
 import { CommentTargetPicker, type CommentCandidateCard } from '../agents/comment-target-picker.js';
 import { CommentComposer } from '../agents/comment-composer.js';
 import type { CommentApprovalPort } from '../agents/comment-approval-gate.js';
-import type { CommentCommandReceipt } from '../comm/feishu-card-contract.js';
+import type { CommentCommandReceipt } from '../kernel/feishu-card-contract.js';
 import {
   type CommentPostResult,
   type CommentTaskResult,

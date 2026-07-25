@@ -21,7 +21,7 @@ import pg from 'pg';
 // DEFAULT_PG_CONFIG 的真实归属是 kernel（pg-config.ts），pg-anchor-cache 只是再导出；content
 // 直连 kernel（content→kernel 恒允许），取值逐字不变，消去 content→automation 这一跨边界豁免。
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
-import type { ConceptPool } from '../event-bus/types.js';
+import type { ConceptPool } from '../kernel/concept-pool.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
@@ -117,11 +117,10 @@ export class ConceptStore {
    */
   async loadPool(): Promise<ConceptPool> {
     const records = await this.list();
-    const pool: ConceptPool = { known: [], candidates: [], source: new Map() };
+    const pool: ConceptPool = { known: [], candidates: [] };
     for (const r of records) {
       if (r.status === 'candidate') {
         pool.candidates.push(r.keyword);
-        if (r.sourceNote) pool.source.set(r.keyword, r.sourceNote);
       } else {
         pool.known.push(r.keyword);
       }

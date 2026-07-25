@@ -76,7 +76,7 @@ import {
   type RiskWindow,
 } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
-import type { NoteDetailData } from './event-bus/index.js';
+import type { NoteDetailData } from './kernel/note-detail.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import type {
   RoleFactoryRegistry,

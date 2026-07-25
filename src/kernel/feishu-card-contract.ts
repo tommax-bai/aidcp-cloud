@@ -1,17 +1,21 @@
 /**
- * 飞书卡 / 命令回执的 automation 侧结构化合同（change feishu-contract-seam / 定稿 §4.6.2）。
+ * 飞书卡 / 命令回执的结构化合同（change feishu-contract-seam / 定稿 §4.6.2；
+ * change cloud-coupling-phase5 从 `src/comm/feishu-card-contract.ts` 抬入 kernel）。
  *
- * 拆仓边界：`src/feishu/**` 归 aidcp-api，automation MUST NOT 直接 import 飞书模块。
- * 「automation 侧要发什么（审批卡入参、命令结果、命令回执）」是 automation 域的概念；
+ * 拆仓边界：`src/feishu/**` 归 aidcp-api，其它域 MUST NOT 直接 import 飞书模块。
+ * 「发方要发什么（审批卡入参、命令结果、命令回执）」是发方域的概念；
  * 「api 侧如何把它渲染成飞书交互卡」由 `src/feishu/cards.ts` 的 `buildXxxCard` 承担。
- * 故把 automation 需要的这几组结构化类型放在这里（comm 域，automation 层），由发布出口角色、
- * 边云消息处理器、评论调度器消费；组合根（`src/server.ts`）把这些结构交给 api 侧 builder + messenger，
- * 完成「automation 发结构化事件 → api 构卡」的接缝。
+ * 由发布出口角色（content）、边云消息处理器与评论调度器（automation）消费；
+ * 组合根（`src/server.ts`）把这些结构交给 api 侧 builder + messenger，
+ * 完成「发方交出结构化事件 → api 构卡」的接缝。
+ *
+ * **抬入 kernel 的理由**：生产方横跨 content 与 automation 两域、渲染方在 api，三层共导。
+ * 原落点 `src/comm/` 归 automation，会让 content 侧的发布出口角色为一组纯载荷类型跨服务边界。
+ * 零 import、纯接口，满足 §4.7 kernel 准入。
  *
  * `src/feishu/types.ts` / `src/feishu/commands.ts` / `src/feishu/ws-receiver.ts` 保留自己的同名副本
  * （api 渲染侧的入参 / 回执形状）。两侧在组合根相遇：把本合同的结构交给 `buildPublishApprovalCard`
  * / `buildCommandResultCard` 时，结构不兼容会当场被 typecheck 挡下（漂移守卫落在组合缝、非静默）。
- * 纯类型、无任何 import，满足 kernel-free 的同层引用。
  *
  * 注：`CommandResult` 在此**不含** api 专属的 `card?: FeishuCard` / `silent?` 字段（automation 侧的
  * 生产者从不设它们）；本合同类型是 api 侧同名类型的可赋值子集，故组合根直传 builder 成立。

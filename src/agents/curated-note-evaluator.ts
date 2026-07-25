@@ -21,7 +21,7 @@
 
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
-import type { NoteDetailData, RoleName } from '../event-bus/types.js';
+import type { NoteDetailData } from '../kernel/note-detail.js';
 import { topicKeysFromTitle } from '../kernel/valuable-comment-types.js';
 import { passesResonance, resolveCuratedGateConfig } from '../publish-agent/curated-gate.js';
 import type {
@@ -73,7 +73,7 @@ interface NoteEvalResult {
 }
 
 export class CuratedNoteEvaluator extends BaseRole {
-  readonly roleName: RoleName = 'curated_note_evaluator';
+  readonly roleName = 'curated_note_evaluator' as const;
   private readonly curatedStore: CuratedNoteSink;
   private readonly getAccountId: () => string;
   private readonly llmEvalEnabled: boolean;

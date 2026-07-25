@@ -1,52 +1,18 @@
-import { normalizePlatformId, type PlatformId } from '../platform/index.js';
+/**
+ * 发布下发段：把发布输入翻译成边云协议命令序列。
+ *
+ * 平台档案本体（`PublishPlatformProfile` / 两个常量 / `publishProfileForPlatform`）已析出到
+ * `src/kernel/publish-platform-profile.ts`（change cloud-coupling-phase5）——它零协议依赖、三域可读；
+ * 本文件只留真正引边云协议的那一段。跨属主消费方 MUST 直指 kernel，MUST NOT 从这里再导出。
+ */
+import type { PlatformId } from '../kernel/platform-types.js';
 import type { PublishCommandKind, PublishCommandParams, PublishCommandPayload } from '../comm/protocol.js';
 import { computeFillTimeoutMs, DEFAULT_FILL_BUDGET, type FillBudgetConfig } from './fill-budget.js';
 import type { PublishMetadata } from '../kernel/publish-pipeline-types.js';
-
-export type PublishImageSource = 'generated' | 'account_pool';
-export type PublishTargetKind = 'xhs_note' | 'facebook_personal_timeline';
+import { publishProfileForPlatform } from '../kernel/publish-platform-profile.js';
 
 /** Edge uses this as the total home-trigger + composer-open deadline. */
 const FACEBOOK_COMPOSER_OPEN_TIMEOUT_MS = 40_000;
-
-export interface PublishPlatformProfile {
-  platform: Exclude<PlatformId, 'wechat_channels'>;
-  displayName: string;
-  imageSource: PublishImageSource;
-  imageRequired: boolean;
-  target: PublishTargetKind;
-  supportsTitle: boolean;
-  supportsTopics: boolean;
-  supportsMetadata: boolean;
-}
-
-export const XHS_PUBLISH_PROFILE: PublishPlatformProfile = {
-  platform: 'xiaohongshu',
-  displayName: '小红书',
-  imageSource: 'generated',
-  imageRequired: true,
-  target: 'xhs_note',
-  supportsTitle: true,
-  supportsTopics: true,
-  supportsMetadata: true,
-};
-
-export const FACEBOOK_PUBLISH_PROFILE: PublishPlatformProfile = {
-  platform: 'facebook',
-  displayName: 'Facebook',
-  imageSource: 'account_pool',
-  imageRequired: true,
-  target: 'facebook_personal_timeline',
-  supportsTitle: false,
-  supportsTopics: false,
-  supportsMetadata: false,
-};
-
-export function publishProfileForPlatform(platform: string | null | undefined): PublishPlatformProfile {
-  const normalized = normalizePlatformId(platform);
-  if (normalized === 'wechat_channels') throw new Error('wechat_channels_publish_uses_interaction_reply_protocol');
-  return normalized === 'facebook' ? FACEBOOK_PUBLISH_PROFILE : XHS_PUBLISH_PROFILE;
-}
 
 export interface BuildPublishCommandPlanInput {
   taskId: string;

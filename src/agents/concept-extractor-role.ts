@@ -13,7 +13,7 @@
 
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
-import type { NoteDetailData, RoleName } from '../event-bus/types.js';
+import type { NoteDetailData } from '../kernel/note-detail.js';
 import type { CommentPlatformProfile } from '../kernel/platform-types.js';
 
 /** 概念写入下游（ConceptStore 的最小契约，便于注入桩单测）。 */
@@ -30,7 +30,7 @@ export interface ConceptExtractorRoleOptions extends RoleOptions {
 }
 
 export class ConceptExtractorRole extends BaseRole {
-  readonly roleName: RoleName = 'concept_extractor';
+  readonly roleName = 'concept_extractor' as const;
   private readonly conceptStore: ConceptSink;
   private readonly maxKeywords: number;
   private readonly platformProfile: CommentPlatformProfile;

@@ -14,7 +14,8 @@
  * 纯确定性、不调 LLM（不进 role-catalog）。回调 fire-and-forget、不阻塞浏览。账号未开自动联系评论 → 仅记日志、不发（零回归）。
  */
 import { BaseRole, type RoleOptions } from '../agents/base-role.js';
-import type { RoleName, NoteDetailData, QualityPassPayload } from '../event-bus/types.js';
+import type { RoleName, QualityPassPayload } from '../event-bus/types.js';
+import type { NoteDetailData } from '../kernel/note-detail.js';
 import { evaluateHotLead } from './heat-velocity.js';
 import { DEFAULT_HOT_LEAD_GATE_CONFIG, type HotLeadGateConfig } from '../kernel/hot-lead-gate-config.js';
 

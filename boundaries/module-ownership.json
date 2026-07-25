@@ -425,11 +425,6 @@
     "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
   {
-    "path": "src/comm/feishu-card-contract.ts",
-    "layer": "automation",
-    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
-  },
-  {
     "path": "src/comm/handler.ts",
     "layer": "automation",
     "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
@@ -1070,6 +1065,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/comment-approval-gate.ts 析出 CommentApprovalNoticeInput 纯输入数据模型（requestId/noteId/text/title/authorName/accountId/accountName + approvalSource union，全为原语）。零 import、零 SQL、无进程内活状态。CommentApprovalGate 角色留 comment-approval-gate.ts（automation）并从 kernel 导入等值再导出。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/concept-pool.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P5-B 新写：概念池纯数据模型 ConceptPool（原 src/event-bus/types.ts，automation）。抬入理由同 note-detail：属主是 content 的 concept-store.ts，留 automation 会让 content 仓编译不过。**同时删掉原 source: Map<string,string> 字段**——全仓只有写入点、零读取点，而拆仓后概念池由 content 装载、automation 的 role-dispatcher / search-evaluator 消费，跨进程要过 JSON，Map 序列化恒为 {}，读方永远拿到空表且无一处报错（红线：静默假成功）。关键词来源归属未丢，落在 concept_pool.source_note 列、经 ConceptRecord.sourceNote 读出，那条路径有真实消费者。零 import、四条准入正则实跑零命中。消除 import 豁免 1 条。请求回写 §4.7 见 docpatch RK-P5-B"
+  },
+  {
     "path": "src/kernel/config-mirror-bump-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 抬入：跨域配置镜像失效通道的契约段（ConfigMirrorKey 闭集合纯类型 + MirrorQueryable/MirrorVersionBumper 接口 + writeWithMirrorBump「同一笔提交」包装 + ConfigMirrorBumpSink 消费端口）。原分散在 src/config-mirror-freshness.ts（ConfigMirrorKey）与 src/config/mirror-version-store.ts（api）；automation 属主的四个限频配置 store 与 api 属主的十余个配置 store 都要引用它们，留在任一属主域都必然造出跨域 import（原状即 4 条 automation->api 豁免）。只 import type pg 与同层 pg-owner-connection-resolver，无 SQL 字面量（BEGIN/COMMIT/ROLLBACK 是事务控制、不是 DML/DDL）、无 HTTP 路由、无 LLM、无进程内活状态、不反向依赖业务层。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
@@ -1155,6 +1155,11 @@
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/cache/interaction-feed-store.ts 析出：FeedAction 纯类型联合，零 import、零 SQL、零活状态。存储实现留 interaction-feed-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
   },
   {
+    "path": "src/kernel/feishu-card-contract.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决·整文件移动】P5-3 从 src/comm/feishu-card-contract.ts（automation）git mv 抬入。该合同的生产方横跨 content（发布出口角色）与 automation（边云消息处理器 / 评论调度器）、渲染方在 api（feishu/cards.ts 的 buildXxxCard），三层共导；原落点归 automation 会让改判为 content 的发布出口角色为一组纯载荷类型跨服务边界。文件自述「纯类型、无任何 import」，四条准入正则实跑零命中。三个消费方已逐一 repoint，原路径不留再导出（原位再导出只是换马甲，不算消边）。消除 import 豁免 1 条。请求回写 §4.7 见 docpatch RK-P5-3"
+  },
+  {
     "path": "src/kernel/group-route-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P2-2 从 src/cache/group-route-store.ts 析出团队→飞书群路由的**纯载荷类型**（GroupRoute / SetGroupRouteResult）。存储本体（建表 SQL / 连接池 / 单写读回）留 automation，原文件 import 回来并等值再导出，automation 桶 cache/index.ts 的 export * 与既有消费方一个字节不改。面板（api）此前经 automation 桶间接拿这两个形状，repoint 到本文件后消 1 条 api->automation 入边。零 import，AC-BOUND-03 四条正则逐条实跑通过。请求回写 §4.7 见 docpatch RK-P2-2"
@@ -1217,7 +1222,7 @@
   {
     "path": "src/kernel/note-detail.ts",
     "layer": "kernel",
-    "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/content-curator-role.ts 析出 NoteData 纯数据模型接口（noteId/title/content/author/likeCount/collectCount/authorFollowed/comments，全为原语与数组）。零 import、零 SQL、零 HTTP、零 LLM、无进程内活状态。ContentCuratorRole 类 + 事件订阅留 content-curator-role.ts（automation）并等值再导出。供 content 侧精选评估角色跨边界共导，消 2 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+    "note": "【待定稿裁决·扩员】P5-B 抬入 NoteDetailData + NoteDetailImage（原 src/event-bus/types.ts，automation）。抬入理由不是共导多，而是**拆仓后 content 仓的 src 里没有 event-bus/types.ts**：concept-extractor-role / curated-note-evaluator 两个 content 角色以 NoteDetailData 为事件载荷类型（后者还用 NonNullable<NoteDetailData['images']>），留 automation 会让 content 仓模块解析失败、直接编译不过——豁免管得住门禁，管不住模块解析。NoteDetailImage 与协议 NoteImagePayload 逐字同形但**刻意不 import 它**（协议归 automation，kernel MUST NOT 反向依赖业务层），漂移由 automation 侧的赋值点 typecheck 兜住。原 NoteData 段不变。零 import、四条准入正则实跑零命中。消除 import 豁免 2 条。请求回写 §4.7 见 docpatch RK-P5-B"
   },
   {
     "path": "src/kernel/offboard-cleanup-grant-types.ts",
@@ -1293,6 +1298,11 @@
     "path": "src/kernel/publish-pipeline-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/publish-agent/types.ts 整体 git mv：发布管线纯类型契约（TriggerInput / PublishRecord / PublishMetadata / PipelineFields / ImagePlan / CoverCardPlan 等 + IMAGE_CATEGORIES as-const 枚举 + METADATA_DEFAULT_VALUES 保守默认 + hasUserRejectionEvidence 纯守卫），仅 import kernel（soul-types / curated-content-types / content-schedule-mode / platform-types / text-card-style / visual-reference-types / pipeline-log-contract / deployment-target）。零 SQL / HTTP / LLM / 模块级 Set/Map。原路径 publish-agent/types.ts 保留为 re-export 桩，content 层内部消费方无感。消 8 条跨边界入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
+  },
+  {
+    "path": "src/kernel/publish-platform-profile.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决·部分析出】P5-3 从 src/publish-agent/platform-profile.ts（automation）析出档案本体：PublishImageSource / PublishTargetKind / PublishPlatformProfile / XHS_PUBLISH_PROFILE / FACEBOOK_PUBLISH_PROFILE / publishProfileForPlatform。**不是整文件移动**：原文件的 buildPublishCommandPlan 产出边云协议命令载荷（引 comm/protocol.ts），是货真价实的下发段代码、留 automation。直接诱因是改判为 content 的发布出口角色只为取一个 displayName 就引了整个下发段文件。唯一 import 是 kernel 自己的 platform-types（normalizePlatformId / PlatformId 本就定义在那里，platform/registry.ts 只是再导出）。两个常量是对象字面量、非 Map/Set，四条准入正则实跑零命中。请求回写 §4.6.3 见 docpatch RK-P5-3"
   },
   {
     "path": "src/kernel/publish-status-types.ts",
@@ -1821,8 +1831,8 @@
   },
   {
     "path": "src/publish-agent/roles/publish-executor.ts",
-    "layer": "automation",
-    "note": "§4.6.3：下发执行段 6 文件之一"
+    "layer": "content",
+    "note": "【改判 2026-07-26 · change cloud-coupling-phase5】原判「§4.6.3 下发执行段 6 文件之一」，实测对 §4.6.3 自己写的三条机械判据**全不命中下发段**：引 ../comm/ 只命中 feishu-card-contract（审批卡结构化合同、非边缘协议与租约，且已随本 change 抬入 kernel）；引 ../llm/ 与图片供应商零命中；publish_log / INSERT / UPDATE / query( 零命中（落库经注入的 PublishLogStore 端口）。运行事实同向：组合根 server.ts 把它 registerRole 进 publishOrchestrator（content 的生成编排器）而非 PublishDispatcher；它是 roles/ 目录 31 个角色里唯一被判 automation 的一个。误判根源与 approval-gatekeeper（2026-07-25 修正）同型：change decouple-publish-generation-from-dispatch 把生成与下发切开后，真正的下发挪进 PublishDispatcher，本文件退化成「生成候审段的出口」（其文件头自述：不再驱动边缘指令序列、不再解析边缘节点），而归属表记的仍是切分前的形态。反证同样是硬的：坚持留 automation 就得把 BasePublishRole + PipelineContext 抬进 kernel，两者都是带管线行为的类、撞「kernel 里不放行为类」。改判后本文件全部 import 皆为 content 或 kernel，消除 import 豁免 2 条。请求回写 §4.6.3 见 docpatch RK-P5-3"
   },
   {
     "path": "src/publish-agent/roles/publish-mode-decider.ts",

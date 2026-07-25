@@ -16,7 +16,8 @@ import type { PersonaBinding } from '../kernel/persona-binding.js';
 import { CONFIG_MIRROR_STALE_REASON, PERSONA_UNAVAILABLE_REASON } from '../kernel/config-stop-work-reasons.js';
 import type { ConfigMirrorGatePort } from '../kernel/config-mirror-bump-types.js';
 import { EventBus } from '../event-bus/index.js';
-import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, NoteDetailData, PageCardsData, RoleName } from '../event-bus/types.js';
+import type { CommentApprovalTrace, CommentAppraisingPayload, MandatoryInteractionContext, PageCardsData, RoleName } from '../event-bus/types.js';
+import type { NoteDetailData } from '../kernel/note-detail.js';
 import {
   isNoteActionSupported,
   noteActionRefusalReason,
@@ -102,7 +103,7 @@ import {
 } from '../risk/resume-limits.js';
 import type { ResumeGateVerdict } from '../comm/browser-standby.js';
 import type { RiskStatus, RiskQuotaLevel } from '../risk/types.js';
-import type { ConceptPool } from '../event-bus/types.js';
+import type { ConceptPool } from '../kernel/concept-pool.js';
 import type { NotificationItem } from '../comm/protocol.js';
 import {
   FACEBOOK_REELS_FOLLOW_PROBABILITY,
@@ -199,7 +200,7 @@ export interface ContentRoleFactoryOptionMap {
 /** 经注册表构造的 content 角色名（`ContentRoleFactoryOptionMap` 的键，均属 `RoleName`）。 */
 export type ContentRoleName = keyof ContentRoleFactoryOptionMap;
 
-const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [], source: new Map() };
+const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [] };
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
 const VIEW_QUOTA_WAKE_GRACE_MS = 250;
 const FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS = 2;
