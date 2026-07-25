@@ -2320,6 +2320,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   };
   // 启动期告警（写者锁抢不到 → 立即退出）：此刻 alertStore 尚未构造，且我们马上就要 exit，
   // 故临时开一条连接把这条 P1 写进去再走。写不进去也照退——诚实失败优于静默双写。
+  //
+  // Block③ L3：`alerts` 属 automation ⇒ 连接配置改由 owner resolver 给（原为裸 PGHOST/… HOST-param，
+  // 那套**无视 `DATABASE_URL`**、也不会跟着 owner URL 走）。
+  // ⚠️ 这一处**故意仍自建一个专用小池**、不注入共享 `automationPool`：下面 `finally` 里调 `store.close()`
+  //    （= `pool.end()`），注入共享池会把整个 automation 池 end 掉、连带打死其余十几个 store
+  //    —— 与 `7f5232a` 修掉的那个 bug 同形。专用池由本函数独占、随 close 释放，才是对的。
   const raiseStandaloneAlert = async (input: {
     severity: 'P0' | 'P1' | 'P2' | 'P3';
     type: string;
@@ -2327,11 +2333,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     detail: string;
   }): Promise<void> => {
     const store = new PgAlertStore({
-      host: readEnvString('PGHOST'),
-      port: readEnvPort('PGPORT'),
-      database: readEnvString('PGDATABASE'),
-      user: readEnvString('PGUSER'),
-      password: readEnvString('PGPASSWORD'),
+      pool: new pg.Pool({ ...resolveOwnerPgConfig('automation'), max: 1 }),
     });
     try {
       await store.init();
@@ -2941,13 +2943,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 告警日志存储（alerts 表，V1 task 9.5）。init 失败留 undefined（告警不落库、不阻塞启动；飞书告警仍发）。
   let alertStore: PgAlertStore | undefined;
   try {
-    const as = new PgAlertStore({
-      host: readEnvString('PGHOST'),
-      port: readEnvPort('PGPORT'),
-      database: readEnvString('PGDATABASE'),
-      user: readEnvString('PGUSER'),
-      password: readEnvString('PGPASSWORD'),
-    });
+    // Block③ L3：`alerts` 属 automation ⇒ 绑 automationPool（原为裸 HOST-param 自建池，翻转时会
+    // 继续写旧共享库，而读端 `PgPanelAutomationRead.listAlerts` 已在 automation 池上 ⇒ 后台告警列表
+    // 会永久为空且零报错，正是「静默假成功」形态）。本实例的 `close()` **全仓无调用方**，故注入共享池安全。
+    const as = new PgAlertStore({ pool: automationPool });
     await as.init();
     alertStore = as;
     // 风控告警后绑定（change risk-state-cross-process-integrity）：写者锁 / 归属 / 记账 / 对账
