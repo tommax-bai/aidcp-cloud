@@ -527,62 +527,62 @@
   {
     "path": "src/config/account-persona-service.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/approval-policy-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/category-config-facade.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/category-config-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/content-schedule-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/credential-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/facebook-comment-config-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/facebook-group-join-automation-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/facebook-group-join-automation-view.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/hot-lead-config-facade.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/hot-lead-config-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/index.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/mirror-bump-outbox.ts",
@@ -617,7 +617,7 @@
   {
     "path": "src/config/model-config-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/pacing-config-facade.ts",
@@ -632,27 +632,27 @@
   {
     "path": "src/config/persona-auto-fill-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/persona-facade.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/persona-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/platform-credentials.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/quota-config-facade.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/quota-config-store.ts",
@@ -662,7 +662,7 @@
   {
     "path": "src/config/resume-config-facade.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/resume-config-store.ts",
@@ -672,27 +672,27 @@
   {
     "path": "src/config/role-catalog.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/role-config-facade.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/role-config-store.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/role-prompt-preview.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/session-config-facade.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/config/session-config-store.ts",
@@ -702,7 +702,7 @@
   {
     "path": "src/config/static-role-prompt-previews.ts",
     "layer": "api",
-    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外"
+    "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
     "path": "src/db/environment-row-lock.ts",
@@ -1442,17 +1442,17 @@
   {
     "path": "src/publish-agent/content-visual-brief.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/cover-form-sensor.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/curated-gate.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/draft-image-remove.ts",
@@ -1462,17 +1462,17 @@
   {
     "path": "src/publish-agent/draft-refinement-worker.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/draft-refinement.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/facebook-publish-media-store.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/fill-budget.ts",
@@ -1482,22 +1482,22 @@
   {
     "path": "src/publish-agent/image-provider.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/image-providers.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/index.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/json-repair.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/pending-dispatch-watchdog.ts",
@@ -1507,7 +1507,7 @@
   {
     "path": "src/publish-agent/pipeline-context.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/platform-profile.ts",
@@ -1517,22 +1517,22 @@
   {
     "path": "src/publish-agent/post-image-form-profile.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/post-processor.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/prompts-preview.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/prompts.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/publish-approval-api.ts",
@@ -1562,7 +1562,7 @@
   {
     "path": "src/publish-agent/publish-orchestrator.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/publish-pipeline-log-store.ts",
@@ -1577,127 +1577,127 @@
   {
     "path": "src/publish-agent/reference-image-guidance.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/retry-strategy.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/ai-flavor-scorer.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/approval-gatekeeper.ts",
-    "layer": "api",
-    "note": "§4.6.3：台账与审批段 7 文件之一"
+    "layer": "content",
+    "note": "§4.6.3：生成候选段（2026-07-25 修正——按本节自述机械判据「引 ../llm/ 即生成段」，且不写 publish_log/授权记录）"
   },
   {
     "path": "src/publish-agent/roles/base-role.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/category-classifier.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/collection-strategist.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/compliance-decider.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/content-assembler.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/content-cleaner.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/content-creator.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/content-scout.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/content-type-selector.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/cover-card-writer.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/cover-selector.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/facebook-media-selector.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/faithful-reference-rewrite.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/image-generator.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/image-prompt-composer.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/image-set-planner.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/index.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/location-strategist.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/mention-strategist.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/metadata-aggregator.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/permission-decider.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/publish-executor.ts",
@@ -1707,37 +1707,37 @@
   {
     "path": "src/publish-agent/roles/publish-mode-decider.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/quality-scorer.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/title-creator.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/topic-evaluator.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/topic-generator.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/visibility-decider.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/roles/visual-reference-analyzer.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/schedule-policy.ts",
@@ -1752,37 +1752,37 @@
   {
     "path": "src/publish-agent/seedream-client.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/text-card-source-style.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/text-card-transcriber.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/types.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/visual-fidelity-auditor.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/visual-reference-analyzer.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/publish-agent/wanxiang-client.ts",
     "layer": "content",
-    "note": "§4.6.3：生成候选段（54 文件），api 7 与 automation 6 逐文件点名"
+    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
   },
   {
     "path": "src/render/index.ts",

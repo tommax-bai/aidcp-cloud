@@ -1,7 +1,7 @@
 {
   "seedTotal": 173,
   "seedUnplanned": 173,
-  "frozenTotal": 86,
+  "frozenTotal": 81,
   "recordedAt": "2026-07-25",
   "raises": [],
   "entries": [
@@ -479,36 +479,6 @@
       "reason": "seed（api -> automation）：由 change cloud-schema-migration-executor 新增的共享 schema 能力探测入口 src/schema/schema-capability.ts 被 src/publish-agent/publish-log-store.ts 的 init() 导入（ensureCapabilitySchema）；本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null,
       "note": "本条与另 19 条同指向 src/schema/schema-capability.ts 的豁免共享**同一条消除路径**：src/schema/ 的归属由 §4.7 一次裁决即可把 20 条全部消除，方式二选一——(a) 把纯判定段（classifySchemaCapability / 错误形状 / 自建旋钮）析出为独立**无 SQL** 的新文件后判 kernel，探测执行段（pg_catalog / pg_indexes 查询）留 automation；(b) 确认 automation 归属 + 按拆仓设计以版本化包供 api / content 固定版本消费。**MUST NOT 把这 20 条当成 20 处各自独立、需要各自消除的架构违规**：它们是同一个共享基础设施的同一次归属待裁，条目数多只反映消费方多。eliminatedBy 暂为 null——消除方式已定、但控制仓尚未立项承接该裁决（seed 期允许）。请求回写 §4.7 见 docpatch R4。"
-    },
-    {
-      "from": "src/publish-agent/roles/approval-gatekeeper.ts",
-      "to": "src/llm/qwen.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/roles/approval-gatekeeper.ts",
-      "to": "src/publish-agent/pipeline-context.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/roles/approval-gatekeeper.ts",
-      "to": "src/publish-agent/prompts.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/roles/approval-gatekeeper.ts",
-      "to": "src/publish-agent/retry-strategy.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/publish-agent/roles/approval-gatekeeper.ts",
-      "to": "src/publish-agent/roles/base-role.ts",
-      "reason": "seed（api -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
     },
     {
       "from": "src/publish-agent/roles/publish-executor.ts",
