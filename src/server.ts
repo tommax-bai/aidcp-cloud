@@ -735,7 +735,6 @@ interface CompositionContext {
   personaStore: PersonaStore;
   planner: SimplePlanner;
   port: number;
-  postProcessor?: PostProcessor;
   preflightApprovePublish?: (requestId: string) => Promise<PublishApprovalPreflightResult>;
   probeModel?: (provider: string, model: string) => Promise<void>;
   providerRuntime: Record<string, { baseUrl: string; apiKey: string; }>;
@@ -2301,7 +2300,6 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     pipelineLogSink: publishPipelineLogStore,
   });
 
-  ctx.postProcessor = postProcessor;
   ctx.imageProvider = imageProvider;
   ctx.publishOrchestrator = publishOrchestrator;
 
