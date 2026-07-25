@@ -107,6 +107,23 @@ export class PgClientEnvAutomationRead implements ClientEnvAutomationReader {
     return rows.map((row) => row.env_key);
   }
 
+  /**
+   * 某环境在给定平台上的互动授权绑定账号（原 client-user-store 事务内那几条
+   * `SELECT account_id … WHERE env_key=$1 AND platform=$2` 的读侧，**去掉了跨库行锁**——
+   * 锁不能跨库，互斥改由 api 侧本域准入表的条件写承担，见 kernel 端口说明）。
+   * 表上 (platform, env_key) 唯一 ⇒ 至多一条。
+   *
+   * 缺表 / 连接故障**如实抛**：读方把 null 当作「确无绑定」的业务事实，降级会变成静默假成功。
+   */
+  async boundAccountForEnv(envKey: string, platform: string): Promise<string | null> {
+    const { rows } = await this.pool.query<{ account_id: string }>(
+      `SELECT account_id FROM interaction_auth_state
+        WHERE platform=$2 AND env_key=$1`,
+      [envKey, platform],
+    );
+    return rows[0]?.account_id ?? null;
+  }
+
   /** 批量风控态投影（原 listAllEnvironments 的 `LEFT JOIN risk_state` 侧）；只返回有风控行的账号。 */
   async riskStateProjection(accountIds: string[]): Promise<EnvRiskStateProjection[]> {
     if (!accountIds.length) return [];

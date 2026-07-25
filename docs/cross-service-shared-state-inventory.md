@@ -41,7 +41,7 @@
 | `src/client-auth/client-user-store.ts` `beginEnvironmentOffboard` | `interaction-env:` | api | **是** | `client_environments` 行锁（`lockEnvironmentRow`） | **静默**：拆库 / 读写分离 / 指向副本后两侧各自加锁均成功，互斥消失、零报错 |
 | `src/client-auth/client-user-store.ts` 客户禁用批量解绑 | `interaction-env:` | api | **是** | 同上（按 `env_key` 升序逐个取行锁，取锁顺序不变） | 同上（**静默**） |
 | `src/client-auth/client-user-store.ts` 环境归属批量改派 | `interaction-env:` | api | **是** | 同上 | 同上（**静默**） |
-| `src/client-auth/client-user-store.ts` `reconcileRevocationHolds` | `interaction-env:` | api | **是** | 同上 | 同上（**静默**） |
+| ~~`src/client-auth/client-user-store.ts` `reconcileRevocationHolds`~~（已消除） | `interaction-env:` | api | 否 | change block3-l3-offboard-eventual-consistency 起改名 `reconcileCleanupAdmissions`，**不再取环境级锁**：串行点是 api 属主准入表的 `UNIQUE(env_key)`，物化本身由属主侧按 `offboard_id` 幂等，重复投递（含 dev/ol 共库双跑）落到同一条台账行 | — |
 | `src/interactions/interaction-store.ts` `upsertAuthStatus` | `interaction-env:` | automation | **是** | 同上 | 同上（**静默**）；首次授权与客户解绑可交叉执行 |
 | `src/interactions/interaction-store.ts` 收件箱批次幂等 | `<platform>\|<accountId>\|<batchId>` | automation | 否 | 保留 advisory lock，静态检查白名单显式登记 | — |
 | `src/interactions/interaction-store.ts` 发送串行 | `interaction-send\|` | automation | 否 | 保留 advisory lock，静态检查白名单显式登记 | — |

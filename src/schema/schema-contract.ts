@@ -59,8 +59,15 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 对 api 属主账号主数据的守卫投影两张表。它**是**若干守卫的前置（投影探不到 ⇒ 那批守卫一律拒绝），
  * 但这正是设计要的 fail-closed 形态：能力级 fail-closed 比进程级硬启动失败更精准——迁移没跑时只有
  * 加群 / 委托任务认领停摆并响亮报错，其余功能照常。故仍只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
+ * 注：`0078_client_env_cleanup_admission`（change block3-l3-offboard-eventual-consistency）给 api 属主的
+ * `client_env_revocation_holds` 加三列 + 放宽两处约束，把「环境正在清理」这条**准入事实**收进 api 自己的库。
+ * 本构建的 client-user-store **确实依赖这三列**（准入的条件写、`materialized_at` 决定改派闸的原因码、
+ * `getOffboard` 的「已受理、尚未物化」中间态都读它们），但它与 client_identity 能力探测同门：
+ * 迁移没跑 ⇒ 启动期该能力带 version id fail-closed 报错，比抬 REQUIRED 把整进程拒起更精准。
+ * 故只抬 KNOWN_MAX、不抬 REQUIRED，与 0073 / 0074 同口径。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0077_automation_account_projection';
+export const KNOWN_MAX_SCHEMA_VERSION = '0078_client_env_cleanup_admission';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

@@ -13,6 +13,33 @@
  *  - **N2 结构性无泄漏**：客户可达的环境读只有吃 userId 的 scoped 方法（listEnvScope / ownsEnv），不存在取全量。
  *  - 读缺表（42P01，首启竞态）**fail-closed**：登录→凭据错、可见环境→空、启用态→false；绝不把读失败冒充放行。
  *  - key 明文绝不落库、绝不回读；只 create/rotate 时由上层一次性回显。
+ *
+ * ## 环境清理的准入 / 执行分家（Block③ L3 最终一致改造）
+ *
+ * 环境注销这条链历史上是**一笔跨属主事务**：本文件在自己的 `BEGIN/COMMIT` 里既撤销归属（api 表），
+ * 又把 api 池的事务句柄递给 automation 的离场写适配器去写离场四表。三库一拆，这笔事务不成立；
+ * 更糟的是它顺带做的那几处跨库行锁**失效时没有任何错误信号**——两侧连不同库时两边各自加锁都会成功、
+ * 互斥直接消失（同一教训写在 `src/db/environment-row-lock.ts` 文件头）。
+ *
+ * 现在拆成两件事：
+ *
+ * 1. **准入事实住在本域**：`client_env_revocation_holds` 由「只记缺绑定的撤权」升格为**环境清理准入表**
+ *    —— 每一个未了结的清理在 api 库里有且只有一行（`UNIQUE(env_key)`），无论 automation 那边有没有
+ *    台账行。于是「有清理在飞的环境不可改派」退化成**本域一张表上的条件写**（`setScope` 的那道闸），
+ *    不再需要去锁 automation 的离场表。既有的 `client_env_scope_cleanup_hold_guard` 触发器随之
+ *    自动覆盖整个清理窗口。`materialized_at IS NULL` = 已受理、尚未物化。
+ * 2. **执行台账住在属主**：`interaction_offboards` 等四表退化为「边缘清理进行到哪一步」的执行台账，
+ *    由 kernel 端口 `OffboardMaterializationOperations` 在 **automation 自己的事务**里落，
+ *    幂等键是 `offboard_id`。
+ *
+ * 投递形态 = **事务型 outbox，且 outbox 行就是准入行本身**：准入行与归属撤销在同一笔 api 提交里落定
+ * （原子），提交后由中继（`materializeAdmission` 立即推一次 + `reconcileCleanupAdmissions` 兜底轮询）
+ * 交给属主，属主按 `offboard_id` 幂等落账。**刻意不另开一张通用 outbox 表**：`src/transport/event-outbox.ts`
+ * 那张 `event_outbox` 属 automation 单写，api 拆出去后照样写不了它；而准入行本来就必须存在、
+ * 且逐字携带属主需要的全部载荷，再复制一份等于凭空造出「两行必须一致」的新问题。
+ *
+ * **不一致窗口的上界** = 一次兜底轮询周期（组合根 60s）+ 一次属主事务；窗口内的表现是
+ * 「api 侧已拒绝改派、automation 侧尚无台账」——**只多拒不误放**，方向安全。
  */
 
 import crypto from 'node:crypto';
@@ -26,9 +53,9 @@ import { resolveAccountDisplayName } from '../account-display-name.js';
 import { isMirrorStale, type ConfigMirrorKey } from '../config-mirror-freshness.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-version-store.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
-import type { OffboardWritePort, OffboardRow } from './offboard-write-port.js';
-import type { ClientEnvAutomationReader } from '../kernel/client-env-automation-types.js';
+import type { ClientEnvAutomationReader, OffboardProjection } from '../kernel/client-env-automation-types.js';
 import type { OffboardCleanupGrantOperations } from '../kernel/offboard-cleanup-grant-types.js';
+import type { OffboardMaterializationOperations } from '../kernel/offboard-materialization-types.js';
 
 const { Pool } = pg;
 
@@ -222,16 +249,27 @@ CREATE TABLE IF NOT EXISTS client_env_scope_audit (
 );
 CREATE INDEX IF NOT EXISTS client_env_scope_audit_scope_idx
   ON client_env_scope_audit (user_id, env_key, revoked_at DESC);
--- 管理员撤权必须先收回客户访问；若 interaction account binding 缺失，不能伪造 accountId
--- 或假称已清理。该 hold 只记录最小定位/审计字段，并在 binding 后到时转成既有 offboard。
+-- 环境清理**准入表**（api 属主的权威事实：这个环境是不是正在清理 / 已被撤权）。
+-- 历史名字 client_env_revocation_holds 保留（改名要动生产表，代价远大于收益），但含义已升格：
+-- 每一个未了结的清理在本库里有且只有一行（UNIQUE(env_key)），无论 automation 那边有没有执行台账行。
+-- 于是「有清理在飞的环境不可改派」是本域一张表上的条件写，不再需要跨库锁 automation 的离场表；
+-- 下方那个触发器也因此自动覆盖整个清理窗口。改造前 reason 只有两值、user_id 不可空，见 0075。
+-- 新列一律**内联在建表语句里**（不另起 ALTER）：运行时 DDL 是只减不增的棘轮，
+-- 加列的权威动作在 migrations/0075；这里只是「本存储需要什么形状」的声明，供启动期探测。
 CREATE TABLE IF NOT EXISTS client_env_revocation_holds (
-  revocation_id UUID        PRIMARY KEY,
-  env_key       TEXT        NOT NULL UNIQUE,
-  user_id       TEXT        NOT NULL,
-  reason        TEXT        NOT NULL CHECK (reason IN ('customer_terminated','admin_revoked')),
-  revoked_by    TEXT,
-  requested_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  revocation_id       UUID        PRIMARY KEY,
+  env_key             TEXT        NOT NULL UNIQUE,
+  user_id             TEXT,
+  reason              TEXT        NOT NULL CHECK (reason IN ('environment_unbind','customer_terminated','admin_revoked')),
+  revoked_by          TEXT,
+  -- 属主台账里那条离场记录的 id（api 侧预生成，同时是投递幂等键）。
+  offboard_id         TEXT,
+  -- NULL = 已受理、尚未物化（属主尚未落台账）。对外状态 'accepted' 就读这一列。
+  materialized_at     TIMESTAMPTZ,
+  -- 无互动绑定时是否允许属主直接落终态 tombstone（只有客户自助建号那条路允许）。
+  unbound_terminal_ok BOOLEAN     NOT NULL DEFAULT false,
+  requested_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS client_env_revocation_holds_requested_idx
   ON client_env_revocation_holds (requested_at, env_key);
@@ -377,28 +415,64 @@ export type CompleteProvisioningIntentResult =
   | { ok: false; reason: 'disabled' | 'invalid_intent' | 'intent_expired' | 'intent_target_mismatch' |
       'invalid_environment' | 'environment_already_registered' | 'env_already_assigned' };
 
+/**
+ * 一条离场的对外视图。
+ *
+ * `state: 'accepted'` = **已受理、尚未物化**：api 侧已经原子地落下准入并撤销归属，属主侧台账还没写成。
+ * 这个词是本 change 新增的，补的正是「对一笔已经被接受的离场答 404」这个静默假成功的镜像——
+ * 让调用方以为什么都没发生。它出现在两种情形：投递刚提交尚未落账（毫秒级），或属主暂时不可达。
+ *
+ * accepted 态下 `accountId` / `purgeDueAt` 为 **null**：这两个字段是属主在自己的事务里解析出来的，
+ * api 侧此刻不知道，**MUST NOT 编造**（拿一个可能过期的快照值填进去，比 null 更糟）。
+ */
 export interface ClientOffboardView {
   offboardId: string;
   envKey: string;
-  accountId: string;
-  state: 'pending_edge' | 'dispatched' | 'tombstoned' | 'purged';
+  /** null = 尚未物化，属主还没解析出绑定账号。绝不编造。 */
+  accountId: string | null;
+  state: 'accepted' | 'pending_edge' | 'dispatched' | 'tombstoned' | 'purged';
   reason: 'environment_unbind' | 'customer_terminated' | 'admin_revoked';
   requestedAt: number;
-  purgeDueAt: number;
+  /** null = 尚未物化（清除期限由属主写台账时定）。 */
+  purgeDueAt: number | null;
 }
 
+/**
+ * 清理准入已落、但还没有执行台账行的回执。
+ *
+ * `state` 两值：`binding_missing` = 属主已确认该环境**确实没有互动授权绑定**（今天唯一的取值）；
+ * `accepted` = 本次没能问到属主（端口报错），**未知不当作已知**，等对账循环重试。
+ * `kind` 保持 `binding_missing` 不变以免打断既有面板消费方。
+ */
 export interface ClientCleanupHoldView {
   kind: 'binding_missing';
   revocationId: string;
   envKey: string;
-  state: 'binding_missing';
-  reason: 'customer_terminated' | 'admin_revoked';
+  state: 'binding_missing' | 'accepted';
+  reason: 'environment_unbind' | 'customer_terminated' | 'admin_revoked';
   requestedAt: number;
 }
 
 export type ClientCleanupReceipt =
   | ClientCleanupHoldView
   | ({ kind: 'offboard_pending' } & ClientOffboardView);
+
+/**
+ * 环境清理准入行（api 属主 `client_env_revocation_holds` 的裸行）。
+ * 它同时是**投递载荷**：属主物化台账所需的每个字段都在这里，故不另开 outbox 表（见文件头）。
+ * `user_id` 可空——从执行台账反向认领来的准入行不知道发起客户，而 MUST NOT 编造一个。
+ */
+interface AdmissionRow {
+  revocation_id: string;
+  env_key: string;
+  user_id: string | null;
+  reason: ClientOffboardView['reason'];
+  revoked_by: string | null;
+  offboard_id: string;
+  unbound_terminal_ok: boolean;
+  materialized_at: Date | null;
+  requested_at: Date;
+}
 
 export type BeginOffboardResult =
   | { ok: true; offboard: ClientOffboardView }
@@ -443,11 +517,14 @@ export interface ClientUserStoreOptions {
    */
   mirrorVersionBumper?: MirrorVersionBumper;
   /**
-   * 离场表（automation 属主）的窄写入口（change offboard-saga）。生产由组合根 server.ts 注入
-   * automation 的 offboard-write-adapter；缺省 = 不注入，只有真正走到离场写入路径时才当场抛错
-   * （fail-loud，绝非静默假成功）。不触发离场路径的调用方无需注入。
+   * 离场**执行台账**的属主侧操作端口（Block③ L3 最终一致改造）。生产由组合根 server.ts 注入
+   * automation 的实现（持 automation 池、自开事务）；缺省 = 不注入，只有真正走到物化路径时才当场
+   * 抛错（fail-loud，绝非静默假成功）。不触发离场路径的调用方无需注入。
+   *
+   * 与改造前 `offboardWrites` 的关键差别：那个端口的方法**接调用方的事务句柄**（于是 api 的连接
+   * 去跑 automation 的 SQL，拆库即崩或写进错的库）；本端口不接句柄、自成一笔事务。
    */
-  offboardWrites?: OffboardWritePort;
+  offboardMaterialization?: OffboardMaterializationOperations;
   /**
    * automation 属主表（离场记录 / 微信互动授权绑定 / 风控态）的**只读投影端口**
    * （Block③ 物理拆库 L3）。生产由组合根 server.ts 按运行模式注入；本文件只从 kernel 取类型，
@@ -492,7 +569,7 @@ export interface ClientApprovalGroupCoverage {
 export class ClientUserStore {
   private readonly pool: pg.Pool;
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
-  private readonly offboardWrites?: OffboardWritePort;
+  private readonly offboardMaterialization?: OffboardMaterializationOperations;
   private readonly automationReads?: ClientEnvAutomationReader;
   private readonly cleanupGrantOperations?: OffboardCleanupGrantOperations;
   /** 同步 WS 出口闸镜像：删除生命周期中的 AdsPower env 不再接收普通自动化命令。 */
@@ -507,7 +584,7 @@ export class ClientUserStore {
     this.schemaEnsurer = options.schemaEnsurer;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
-    this.offboardWrites = options.offboardWrites;
+    this.offboardMaterialization = options.offboardMaterialization;
     this.automationReads = options.automationReads;
     this.cleanupGrantOperations = options.cleanupGrantOps;
   }
@@ -527,101 +604,114 @@ export class ClientUserStore {
     return this.cleanupGrantOperations;
   }
 
-  private offboardReceipt(offboard: ClientOffboardView): ClientCleanupReceipt {
-    return { kind: 'offboard_pending', ...offboard };
+  /** 离场执行台账的属主侧操作端口：未注入即当场抛错，绝不静默跳过离场副作用。 */
+  private offboardOps(): OffboardMaterializationOperations {
+    if (!this.offboardMaterialization) throw new Error('offboard_materialization_port_not_configured');
+    return this.offboardMaterialization;
   }
 
-  /** 离场表写入口（automation 属主）：未注入即当场抛错，绝不静默跳过离场副作用。 */
-  private offboardPort(): OffboardWritePort {
-    if (!this.offboardWrites) throw new Error('offboard_write_port_not_configured');
-    return this.offboardWrites;
-  }
-
-  private mapOffboardRow(row: OffboardRow): ClientOffboardView {
+  private mapProjection(row: OffboardProjection): ClientOffboardView {
     return {
-      offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
-      state: row.state, reason: row.reason,
-      requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime(),
+      offboardId: row.offboardId, envKey: row.envKey, accountId: row.accountId,
+      state: row.state, reason: row.reason, requestedAt: row.requestedAt, purgeDueAt: row.purgeDueAt,
+    };
+  }
+
+  /** 已受理、尚未物化的对外视图：属主还没解析出账号与清除期限，这两项 MUST 为 null。 */
+  private acceptedView(row: AdmissionRow): ClientOffboardView {
+    return {
+      offboardId: row.offboard_id, envKey: row.env_key, accountId: null,
+      state: 'accepted', reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: null,
+    };
+  }
+
+  private holdView(row: AdmissionRow, state: ClientCleanupHoldView['state']): ClientCleanupHoldView {
+    return {
+      kind: 'binding_missing', revocationId: row.revocation_id, envKey: row.env_key,
+      state, reason: row.reason, requestedAt: row.requested_at.getTime(),
     };
   }
 
   /**
-   * 收权（interaction_runtime_controls / interaction_auth_state，automation 属主）经窄接口下发。
-   * 真实 SQL 落在 automation 的 offboard-write-adapter；此处只转调，事务句柄照传，行为等价。
+   * 在调用方的 **api 事务**里写下一条环境清理准入（本域权威事实 + 投递载荷，同一笔提交 ⇒ 原子）。
+   *
+   * `ON CONFLICT (env_key) DO UPDATE SET updated_at=（原值）` 是**幂等命中**：该环境已有未了结的清理时
+   * 原样交回既有那条（含它的 offboard_id 与 reason），既不覆盖也不新建——与改造前 hold 的写法逐字同。
+   * 本方法只碰 api 属主表，不做任何跨域调用；物化在**提交之后**才发生。
    */
-  private async revokeInteractionAccess(
+  private async enqueueAdmission(
     client: pg.PoolClient,
-    input: { accountId: string; actor: string | null; requireAuthState: boolean },
-  ): Promise<void> {
-    await this.offboardPort().revokeInteractionAccess(client, input);
-  }
-
-  private async enqueueCleanupHold(
-    client: pg.PoolClient,
-    input: { userId: string; envKey: string; reason: ClientCleanupHoldView['reason']; actor: string | null },
-  ): Promise<ClientCleanupHoldView> {
-    const revocationId = crypto.randomUUID();
-    const { rows } = await client.query<{
-      revocation_id: string; env_key: string; reason: ClientCleanupHoldView['reason']; requested_at: Date;
-    }>(
+    input: { userId: string; envKey: string; reason: ClientOffboardView['reason']; actor: string | null;
+      unboundTerminalOk: boolean },
+  ): Promise<AdmissionRow> {
+    const { rows } = await client.query<AdmissionRow>(
       `INSERT INTO client_env_revocation_holds
-         (revocation_id,env_key,user_id,reason,revoked_by,requested_at,updated_at)
-       VALUES ($1,$2,$3,$4,$5,now(),now())
+         (revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,requested_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())
        ON CONFLICT (env_key) DO UPDATE
          SET updated_at=client_env_revocation_holds.updated_at
-       RETURNING revocation_id,env_key,reason,requested_at`,
-      [revocationId, input.envKey, input.userId, input.reason, input.actor],
+       RETURNING revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,
+                 materialized_at,requested_at`,
+      [crypto.randomUUID(), input.envKey, input.userId, input.reason, input.actor,
+        crypto.randomUUID(), input.unboundTerminalOk],
     );
     const row = rows[0];
     if (!row) throw new Error('revocation_hold_insert_failed');
-    const identities = await client.query<{ account_id: string }>(
-      `SELECT account_id FROM interaction_runtime_controls
-        WHERE platform='wechat_channels' AND env_key=$1
-        ORDER BY account_id LIMIT 2 FOR UPDATE`,
-      [input.envKey],
-    );
-    if (identities.rows.length === 1) {
-      await this.revokeInteractionAccess(client, {
-        accountId: identities.rows[0].account_id,
-        actor: input.actor,
-        requireAuthState: false,
-      });
-    }
-    return {
-      kind: 'binding_missing', revocationId: row.revocation_id, envKey: row.env_key,
-      state: 'binding_missing', reason: row.reason, requestedAt: row.requested_at.getTime(),
-    };
-  }
-
-  /** 建离场记录 + 收权 + 审计（automation 属主）经窄接口下发；返回视图由裸行映射，行为等价。 */
-  private async enqueueOffboard(
-    client: pg.PoolClient,
-    input: { userId: string; envKey: string; accountId: string; reason: ClientOffboardView['reason']; actor: string | null },
-  ): Promise<ClientOffboardView> {
-    return this.mapOffboardRow(await this.offboardPort().enqueueOffboard(client, input));
+    return row;
   }
 
   /**
-   * A provisioned environment that never acquired an interaction binding has no
-   * Cloud/Edge interaction credential scope to drain. Persist an explicit terminal
-   * offboard before revoking ownership so Electron can still require authoritative
-   * Cloud truth before deleting the physical profile.
+   * 中继：把一条已提交的准入交给属主物化，并把回执记回 api 侧准入行。
    *
-   * accountId uses the environment's reserved account namespace. This does not
-   * create an account or auth binding, and tombstoned rows are never dispatched.
+   * 三种结局都**如实**回报，绝无第四种「看起来成功」：
+   *   - 属主落了台账 → 记回 offboard_id + materialized_at，回 `offboard` 视图；
+   *   - 属主确认该环境尚无互动绑定 → 保留准入行不动，回 `binding_missing` 回执（等对账重试）；
+   *   - 端口不可达 / 抛错 → **未知不当作已知**，回 `accepted` 回执，准入行留着让对账循环重放。
+   *
+   * 幂等：属主侧按 `(platform, env_key)` 与 `offboard_id` 幂等；本侧回执写入是单条 UPDATE。
+   * 「属主已提交、回执没记上」的窗口由对账循环收敛（它会重放同一条准入，属主原样交回同一行）。
    */
-  private async enqueueProvisionedUnboundOffboard(
-    client: pg.PoolClient,
-    input: { userId: string; envKey: string },
-  ): Promise<ClientOffboardView> {
-    return this.mapOffboardRow(await this.offboardPort().enqueueProvisionedUnboundOffboard(client, input));
+  private async materializeAdmission(
+    row: AdmissionRow,
+  ): Promise<{ offboard?: ClientOffboardView; receipt: ClientCleanupReceipt }> {
+    let outcome: Awaited<ReturnType<OffboardMaterializationOperations['materializeEnvironmentOffboard']>>;
+    try {
+      outcome = await this.offboardOps().materializeEnvironmentOffboard({
+        offboardId: row.offboard_id,
+        envKey: row.env_key,
+        userId: row.user_id ?? '',
+        reason: row.reason,
+        actor: row.revoked_by,
+        unboundTerminalAllowed: row.unbound_terminal_ok,
+      });
+    } catch (error) {
+      console.warn(
+        `[client-env] 离场台账物化未完成（准入已落，稍后由对账循环重放）env=${row.env_key}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { receipt: this.holdView(row, 'accepted') };
+    }
+    if (!outcome.materialized) return { receipt: this.holdView(row, 'binding_missing') };
+    await this.pool.query(
+      `UPDATE client_env_revocation_holds
+          SET offboard_id=$2,materialized_at=now(),updated_at=now()
+        WHERE revocation_id=$1`,
+      [row.revocation_id, outcome.offboard.offboardId],
+    );
+    const offboard = this.mapProjection(outcome.offboard);
+    return { offboard, receipt: { kind: 'offboard_pending', ...offboard } };
   }
 
   /** Customer-authorized relinquish: revoke scope and stop Cloud sync/write in the same transaction as durable offboard creation. */
   async beginEnvironmentOffboard(userId: string, envKey: string): Promise<BeginOffboardResult> {
     const key = (envKey ?? '').trim();
     if (!userId || !key) return { ok: false, reason: 'not_authorized' };
+    // 「无绑定且非自助建号 ⇒ 拒绝解绑」这一判定要读 automation 的绑定。改造前它是事务内的跨库行锁，
+    // 拆库后那把锁会无声失效；现在改成**事务外、无锁**的端口读，互斥由下方本域准入行的条件写承担。
+    // 端口读失败 MUST 抛（不 catch）：把它降级成「没绑定」会让一次连接抖动看起来像一条业务事实。
+    const boundAccountId = await this.automationRead().boundAccountForEnv(key, 'wechat_channels');
     const client = await this.pool.connect();
+    let admission: AdmissionRow;
     try {
       await client.query('BEGIN');
       const user = await client.query<{ status: string }>(
@@ -631,12 +721,8 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: user.rows[0] ? 'disabled' : 'not_authorized' };
       }
-      // 环境级串行（change publish-approval-signal-to-database §5）：与首次授权写入互斥——
-      // 没有这道锁，「无绑定」检查之后仍可能有一条 auth 行插进来。
-      //
-      // 用**被保护数据所在表的行锁**，不再用库级 advisory lock：advisory lock 一旦两侧连到不同库 /
-      // 不同实例，两边各自加锁都会成功、互斥消失且**不报任何错**。行锁绑定 `client_environments` 这张
-      // 表本身，跨库时是响亮的失败而不是静默失效。
+      // 环境级串行（change publish-approval-signal-to-database §5）：用**被保护数据所在表的行锁**，
+      // 不用库级 advisory lock（后者两侧连不同库时两边都能加上、互斥无声消失）。
       // 注：本路径下方 JOIN 了 client_environments，故该行必然存在；无注册环境 = 无可串行的对手。
       await lockEnvironmentRow(client, key);
       const scope = await client.query<{ label: string | null; platform: string | null;
@@ -653,15 +739,7 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: owned.rows[0] ? 'offboard_binding_missing' : 'not_authorized' };
       }
-      const binding = await client.query<{ account_id: string }>(
-        `SELECT account_id FROM interaction_auth_state
-          WHERE env_key=$1 AND platform='wechat_channels' FOR UPDATE`, [key],
-      );
-      let offboard: ClientOffboardView;
-      if (binding.rows[0]) {
-        offboard = await this.enqueueOffboard(client, { userId, envKey: key, accountId: binding.rows[0].account_id,
-          reason: 'environment_unbind', actor: `client:${userId}` });
-      } else {
+      if (!boundAccountId) {
         // Only the original continuous client-provision grant may use the no-binding terminal path.
         // A legacy/admin grant with a missing binding remains fail-closed so corruption is not hidden.
         const provisioned = await client.query(
@@ -675,8 +753,12 @@ export class ClientUserStore {
           await client.query('ROLLBACK');
           return { ok: false, reason: 'offboard_binding_missing' };
         }
-        offboard = await this.enqueueProvisionedUnboundOffboard(client, { userId, envKey: key });
       }
+      admission = await this.enqueueAdmission(client, {
+        userId, envKey: key, reason: 'environment_unbind', actor: `client:${userId}`,
+        // 终态 tombstone 只在「确无绑定」这一支放行；有绑定时属主必须走真离场。
+        unboundTerminalOk: !boundAccountId,
+      });
       await client.query(
         `INSERT INTO client_env_scope_audit
            (user_id,env_key,label,platform,source,assigned_by,assigned_at,revoked_at,revoked_by,reason)
@@ -686,21 +768,36 @@ export class ClientUserStore {
       );
       await client.query(`DELETE FROM client_env_scope WHERE user_id=$1 AND env_key=$2 AND source='admin'`, [userId, key]);
       await client.query('COMMIT');
-      return { ok: true, offboard };
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
     } finally { client.release(); }
+    // 提交之后立刻推一次（进程内中继）：常态下响应里仍是物化完成的真视图，与改造前逐字同形。
+    const materialized = await this.materializeAdmission(admission);
+    return { ok: true, offboard: materialized.offboard ?? this.acceptedView(admission) };
   }
 
   /**
-   * 单条离场记录（Block③ L3：离场表属 automation，改经只读端口取投影，本层不直连别域的库）。
-   * 归属过滤（offboardId + userId 双条件）下推到属主侧，与改动前同一条件、同「不命中返 null」语义。
+   * 单条离场的对外状态。
+   *
+   * 先问属主台账（物化后的真态）；台账没有再看 **api 侧准入行** —— 那条准入若还在且尚未物化，
+   * 答案是 `accepted`（已受理、尚未物化），**MUST NOT 答 not_found**。对一笔已经被接受的离场答
+   * 「查无此项」是静默假成功的镜像：让调用方以为什么都没发生，而归属其实已经撤销了。
+   *
+   * 顺序不可颠倒：台账优先保证物化后拿到的是真状态；准入行在物化后仍在（它要一直挡住改派直到清除），
+   * 先读它会把已物化的离场也报成 accepted。
    */
   async getOffboard(userId: string, offboardId: string): Promise<ClientOffboardView | null> {
     const row = await this.automationRead().offboardForUser(offboardId, userId);
-    return row ? { offboardId: row.offboardId, envKey: row.envKey, accountId: row.accountId,
-      state: row.state, reason: row.reason, requestedAt: row.requestedAt, purgeDueAt: row.purgeDueAt } : null;
+    if (row) return this.mapProjection(row);
+    const { rows } = await this.pool.query<AdmissionRow>(
+      `SELECT revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,
+              materialized_at,requested_at
+         FROM client_env_revocation_holds
+        WHERE offboard_id=$1 AND user_id=$2 AND materialized_at IS NULL`,
+      [offboardId, userId],
+    );
+    return rows[0] ? this.acceptedView(rows[0]) : null;
   }
 
   /**
@@ -1337,21 +1434,36 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: 'disabled' };
       }
-      const binding = await client.query<{ account_id: string }>(
-        `SELECT a.account_id
+      // 改造前这里是一条四表 JOIN + `FOR SHARE OF s,e,a,acc` —— 全仓唯一一处一次钉住跨两个属主
+      // 四张表的语句。拆库后 a（automation 的授权绑定）那一段既连不到、锁也不可能成立，
+      // 故拆成两步：**本域三张表照旧在事务里钉住**，绑定改经端口问属主要。
+      const scope = await client.query<{ platform: string | null }>(
+        `SELECT e.platform
          FROM client_env_scope s
          JOIN client_environments e ON e.env_key = s.env_key
-         JOIN interaction_auth_state a
-           ON a.env_key = s.env_key AND a.platform = e.platform
-         JOIN accounts acc
-           ON acc.account_id = a.account_id AND acc.platform = a.platform
          WHERE s.user_id = $1 AND s.env_key = $2
            AND s.source = 'admin' AND e.lifecycle_state = 'active'
-         FOR SHARE OF s, e, a, acc`,
+         FOR SHARE OF s, e`,
         [userId, key],
       );
-      const accountId = binding.rows[0]?.account_id;
+      const platform = scope.rows[0]?.platform;
+      if (!platform) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_authorized' };
+      }
+      // 端口读失败 MUST 抛（下方 catch 只吞 42P01 缺表，不吞端口错）：这一步的返回值是**授权判定**，
+      // 把它降级成「没绑定」只是从放行变成拒绝，看着安全，实则把故障伪装成业务事实、藏住真原因。
+      const accountId = await this.automationRead().boundAccountForEnv(key, platform);
       if (!accountId) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'not_authorized' };
+      }
+      // 账号主数据属 api：存在性与平台一致性照旧在**本事务内**钉住（原查询的 acc 这一段）。
+      const account = await client.query(
+        `SELECT 1 FROM accounts WHERE account_id = $1 AND platform = $2 FOR SHARE`,
+        [accountId, platform],
+      );
+      if (!account.rows[0]) {
         await client.query('ROLLBACK');
         return { ok: false, reason: 'not_authorized' };
       }
@@ -1449,6 +1561,7 @@ export class ClientUserStore {
   ): Promise<MutateUserResult> {
     const offboards: ClientOffboardView[] = [];
     const cleanup: ClientCleanupReceipt[] = [];
+    const admissions: AdmissionRow[] = [];
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -1490,21 +1603,15 @@ export class ClientUserStore {
         for (const envKey of scopes.rows.map((scope) => scope.env_key).sort()) {
           await lockEnvironmentRow(client, envKey);
         }
+        // 改造前这里每个环境都要在 api 事务里**跨库**取一次绑定并加行锁，据此分「建离场」还是「挂 hold」。
+        // 现在一律只写本域准入行（两种情形本来就共用同一张表），由谁来分叉交给属主在自己的事务里判——
+        // 它是唯一能对绑定加锁的一方。物化在提交之后。
         for (const scope of scopes.rows) {
           if (scope.platform !== 'wechat_channels' && scope.registry_platform !== 'wechat_channels') continue;
-          const binding = await client.query<{ account_id: string }>(
-            `SELECT account_id FROM interaction_auth_state
-              WHERE env_key=$1 AND platform='wechat_channels' FOR UPDATE`, [scope.env_key],
-          );
-          if (!binding.rows[0]) {
-            cleanup.push(await this.enqueueCleanupHold(client, { userId, envKey: scope.env_key,
-              reason: 'customer_terminated', actor: updatedBy }));
-            continue;
-          }
-          const offboard = await this.enqueueOffboard(client, { userId, envKey: scope.env_key,
-            accountId: binding.rows[0].account_id, reason: 'customer_terminated', actor: updatedBy });
-          offboards.push(offboard);
-          cleanup.push(this.offboardReceipt(offboard));
+          admissions.push(await this.enqueueAdmission(client, {
+            userId, envKey: scope.env_key, reason: 'customer_terminated', actor: updatedBy,
+            unboundTerminalOk: false,
+          }));
         }
         await client.query(
           `INSERT INTO client_env_scope_audit
@@ -1523,6 +1630,12 @@ export class ClientUserStore {
       if ((error as { code?: string })?.code === '23505') return { ok: false, reason: 'name_taken' };
       throw error;
     } finally { client.release(); }
+    // 提交之后逐条推给属主（进程内中继）；推不动的留在准入表里由对账循环重放，回执如实降级。
+    for (const admission of admissions) {
+      const materialized = await this.materializeAdmission(admission);
+      if (materialized.offboard) offboards.push(materialized.offboard);
+      cleanup.push(materialized.receipt);
+    }
     const user = await this.viewOf(userId);
     return { ok: true, user: user!, offboards, cleanup };
   }
@@ -1950,7 +2063,8 @@ export class ClientUserStore {
            FROM client_environment_installations i0 WHERE i0.env_key=k.env_key
            ORDER BY last_seen_at DESC LIMIT 1
          ) i ON true
-         LEFT JOIN client_env_revocation_holds h ON h.env_key = k.env_key
+         LEFT JOIN client_env_revocation_holds h
+           ON h.env_key = k.env_key AND h.materialized_at IS NULL
          GROUP BY k.env_key,h.revocation_id,h.reason,h.requested_at,
                   d.request_id,d.requested_by,d.requested_at,d.result_kind,d.result_error,d.result_at,
                   i.installation_id,i.last_seen_at
@@ -2065,6 +2179,7 @@ export class ClientUserStore {
   ): Promise<SetScopeResult> {
     const offboards: ClientOffboardView[] = [];
     const cleanup: ClientCleanupReceipt[] = [];
+    const admissions: AdmissionRow[] = [];
     const seen = new Set<string>();
     const clean = items
       .map((i) => (i.envKey ?? '').trim())
@@ -2102,22 +2217,21 @@ export class ClientUserStore {
         return { ok: false, reason: 'unknown_environment', envKey: unknown };
       }
       if (clean.length) {
-        const held = await client.query<{ env_key: string }>(
-          `SELECT env_key FROM client_env_revocation_holds
+        // 「有清理在飞的环境不可改派」这道闸，改造前分居两库：hold（api）+ 离场台账非 purged（automation），
+        // 靠同一笔事务才原子。拆库后两闸各在一库、跨库锁无声失效 ⇒ 正在清理的环境会被改派给新客户。
+        // 现在两闸合成**本域一张准入表上的一次条件读**：一行即拒，`materialized_at` 只决定回哪个原因码
+        // （尚未物化 = cleanup_in_progress，已物化 = offboard_in_progress，与改造前逐字同）。
+        const admitted = await client.query<{ env_key: string; materialized_at: Date | null }>(
+          `SELECT env_key,materialized_at FROM client_env_revocation_holds
             WHERE env_key=ANY($1::text[]) ORDER BY env_key LIMIT 1 FOR UPDATE`, [clean],
         );
-        if (held.rows[0]) {
+        if (admitted.rows[0]) {
           await client.query('ROLLBACK');
-          return { ok: false, reason: 'cleanup_in_progress', envKey: held.rows[0].env_key };
-        }
-        const purging = await client.query<{ env_key: string }>(
-          `SELECT env_key FROM interaction_offboards
-            WHERE env_key=ANY($1::text[]) AND platform='wechat_channels' AND state <> 'purged'
-            ORDER BY env_key LIMIT 1 FOR UPDATE`, [clean],
-        );
-        if (purging.rows[0]) {
-          await client.query('ROLLBACK');
-          return { ok: false, reason: 'offboard_in_progress', envKey: purging.rows[0].env_key };
+          return {
+            ok: false,
+            reason: admitted.rows[0].materialized_at ? 'offboard_in_progress' : 'cleanup_in_progress',
+            envKey: admitted.rows[0].env_key,
+          };
         }
         const conflict = await client.query<{ env_key: string }>(
           `SELECT env_key FROM client_env_scope
@@ -2137,19 +2251,10 @@ export class ClientUserStore {
           `SELECT env_key,platform FROM client_environments WHERE env_key=$1 FOR UPDATE`, [row.env_key],
         )).rows[0];
         if (registry?.platform !== 'wechat_channels' && row.platform !== 'wechat_channels') continue;
-        const binding = await client.query<{ account_id: string }>(
-          `SELECT account_id FROM interaction_auth_state
-            WHERE platform='wechat_channels' AND env_key=$1 FOR UPDATE`, [row.env_key],
-        );
-        if (!binding.rows[0]) {
-          cleanup.push(await this.enqueueCleanupHold(client, { userId, envKey: row.env_key,
-            reason: 'admin_revoked', actor: assignedBy }));
-          continue;
-        }
-        const offboard = await this.enqueueOffboard(client, { userId, envKey: row.env_key,
-          accountId: binding.rows[0].account_id, reason: 'admin_revoked', actor: assignedBy });
-        offboards.push(offboard);
-        cleanup.push(this.offboardReceipt(offboard));
+        // 同 updateUser：只写本域准入行，「建离场 还是 挂 hold」交给唯一能对绑定加锁的一方（属主）判。
+        admissions.push(await this.enqueueAdmission(client, {
+          userId, envKey: row.env_key, reason: 'admin_revoked', actor: assignedBy, unboundTerminalOk: false,
+        }));
       }
       await client.query(
         `INSERT INTO client_env_scope_audit
@@ -2192,75 +2297,91 @@ export class ClientUserStore {
     } finally {
       client.release();
     }
+    // 提交之后逐条推给属主（进程内中继）；推不动的留在准入表里由对账循环重放。
+    for (const admission of admissions) {
+      const materialized = await this.materializeAdmission(admission);
+      if (materialized.offboard) offboards.push(materialized.offboard);
+      cleanup.push(materialized.receipt);
+    }
     return { ok: true, scope: await this.listEnvScope(userId), offboards, cleanup };
   }
 
   /**
-   * A late auth status supplies the exact accountId that an access-first admin revocation lacked.
-   * Materialize those holds into the existing offboard lifecycle; callers dispatch returned rows
-   * through InteractionOffboardingService, keeping this store the only DB writer.
+   * 环境清理准入的**对账循环**（承重兜底通道；替代原 `reconcileRevocationHolds`）。组合根每 60s 跑一次。
+   *
+   * 三件事，顺序即语义：
+   *   1. **认领**（adopt）—— 属主台账里有未清除的离场、api 侧却没有准入行时补一行。这是拆库切换当天
+   *      与任何回执丢失后的收敛路径：没有它，那些环境在 api 侧看起来「无人清理」、会被改派出去。
+   *      认领来的行 `user_id` 为 NULL（台账不一定有发起客户，而 MUST NOT 编造一个）。
+   *   2. **释放**（release）—— 已物化、但属主台账里已经清除（purged / 行不在）的准入行删掉，
+   *      环境重新可改派。**只在拿到属主投影时才释放**：读不到就什么都不做（fail-closed，宁可多拒）。
+   *   3. **物化**（materialize）—— 「已受理、尚未物化」的准入逐条推给属主（at-least-once 重放）。
+   *      返回被物化出来的离场行供调用方派发给边缘。
+   *
+   * 端口读失败 MUST 抛：`activeWechatOffboards` 拿不到就整轮放弃，绝不把空集当成「一条都没有」，
+   * 那会把 1 的认领变成空操作、把 2 变成**误删全部准入行** = 正在清理的环境全部重新可改派。
    */
-  async reconcileRevocationHolds(limit = 50): Promise<ClientOffboardView[]> {
+  async reconcileCleanupAdmissions(limit = 50): Promise<ClientOffboardView[]> {
     const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 50));
-    // Block③ L3：候选扫描原为 `holds`(api) JOIN `interaction_auth_state`(automation) 的跨库同查询，
-    // 现拆为「本地按序取 hold + 端口问哪些环境已有微信绑定 + 本地按原序取前 N」。
-    // 等价性：属主表 (platform, env_key) 唯一 ⇒ 原 JOIN 1:1、不放大基数，故「先排序后截断」与
-    // 「JOIN 后 ORDER BY … LIMIT」选出的是同一批同序候选。
-    // 基数：本地这次不带 LIMIT，但 hold 表本身有界——每环境至多一行（UNIQUE(env_key)），
-    // 且行在下方物化成离场记录时即删除，存量只等于「已撤权但仍无微信绑定」的环境数。
-    // 注意：本方法下方**事务内**那条 hold+auth_state 联查仍是跨库读（带 FOR UPDATE 行锁），
-    // 属「须监督」批、不在本刀范围内；候选扫描解耦不改变它。
-    const { rows: holds } = await this.pool.query<{ env_key: string }>(
-      `SELECT h.env_key
-         FROM client_env_revocation_holds h
-        ORDER BY h.requested_at,h.env_key`,
+    // 拿不到属主投影就整轮抛出去（调用方 warn 后下一轮重来），绝不假空集。
+    const active = await this.automationRead().activeWechatOffboards();
+    const activeByEnvKey = new Map(active.map((row) => [row.envKey, row]));
+
+    // 1. 认领：台账有、准入没有 ⇒ 补一行已物化的准入（env_key 冲突时不覆盖既有那条）。
+    //    revocation_id 由 (env_key, offboard_id) 派生而非随机：重复认领得到同一个 id，且不依赖
+    //    gen_random_uuid()（那是 PG13+ 才内置的函数，本仓迁移一处都没用过，不在这里引入新前提）。
+    if (active.length) {
+      await this.pool.query(
+        `INSERT INTO client_env_revocation_holds
+           (revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,
+            materialized_at,requested_at,updated_at)
+         SELECT md5('cleanup-admission:' || k.env_key || ':' || k.offboard_id)::uuid,
+                k.env_key,NULL,k.reason,NULL,k.offboard_id,false,now(),k.requested_at,now()
+           FROM unnest($1::text[],$2::text[],$3::text[],$4::timestamptz[])
+                AS k(env_key,offboard_id,reason,requested_at)
+         ON CONFLICT (env_key) DO NOTHING`,
+        [
+          active.map((row) => row.envKey),
+          active.map((row) => row.offboardId),
+          active.map((row) => row.reason),
+          active.map((row) => new Date(row.requestedAt).toISOString()),
+        ],
+      );
+    }
+
+    // 2. 释放：已物化、且台账里已无未清除记录 ⇒ 清理结束，环境重新可改派。
+    await this.pool.query(
+      `DELETE FROM client_env_revocation_holds
+        WHERE materialized_at IS NOT NULL AND NOT (env_key = ANY($1::text[]))`,
+      [[...activeByEnvKey.keys()]],
     );
-    const bound = new Set(await this.automationRead().wechatBoundEnvKeys(holds.map((h) => h.env_key)));
-    const candidates = holds.filter((h) => bound.has(h.env_key)).slice(0, boundedLimit);
+
+    // 3. 物化：已受理、尚未物化的准入逐条重放（顺序与改造前候选序一致：requested_at, env_key）。
+    const { rows: pending } = await this.pool.query<AdmissionRow>(
+      `SELECT revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,
+              materialized_at,requested_at
+         FROM client_env_revocation_holds
+        WHERE materialized_at IS NULL
+        ORDER BY requested_at,env_key
+        LIMIT $1`,
+      [boundedLimit],
+    );
     const offboards: ClientOffboardView[] = [];
-    for (const candidate of candidates) {
-      const client = await this.pool.connect();
-      try {
-        await client.query('BEGIN');
-        await lockEnvironmentRow(client, candidate.env_key);
-        const { rows } = await client.query<{
-          revocation_id: string; env_key: string; user_id: string;
-          reason: ClientCleanupHoldView['reason']; revoked_by: string | null; account_id: string;
-        }>(
-          `SELECT h.revocation_id,h.env_key,h.user_id,h.reason,h.revoked_by,a.account_id
-             FROM client_env_revocation_holds h
-             JOIN interaction_auth_state a ON a.env_key=h.env_key AND a.platform='wechat_channels'
-            WHERE h.env_key=$1 FOR UPDATE OF h,a`, [candidate.env_key],
-        );
-        const row = rows[0];
-        if (!row) {
-          await client.query('COMMIT');
-          continue;
-        }
-        const offboard = await this.enqueueOffboard(client, {
-          userId: row.user_id, envKey: row.env_key, accountId: row.account_id,
-          reason: row.reason, actor: row.revoked_by,
-        });
-        await client.query(`DELETE FROM client_env_revocation_holds WHERE revocation_id=$1`, [row.revocation_id]);
-        await client.query('COMMIT');
-        offboards.push(offboard);
-      } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-      } finally {
-        client.release();
-      }
+    for (const row of pending) {
+      const materialized = await this.materializeAdmission(row);
+      if (materialized.offboard) offboards.push(materialized.offboard);
     }
     return offboards;
   }
 
   /**
-   * 该账号是否还挂着未了结的撤权 hold（Block③ L3：原 `interaction_auth_state`(automation)
-   * JOIN `client_env_revocation_holds`(api) 的跨库同查询已拆两步）。
+   * 该账号是否还挂着**尚未物化**的清理准入（原名 hold；语义逐字保持不变）。
    *
-   * 等价性：属主表 (platform, env_key) 唯一、(platform, account_id) 为主键 ⇒ 原 JOIN 是 1:1，
-   * 「先取该账号的环境键、再本地查 hold 是否存在」与原 EXISTS 逐字同真值。
-   * 账号无绑定 ⇒ 原 JOIN 空集 ⇒ false；这里提前短路，同结果、少一次本地查询。
+   * `materialized_at IS NULL` 这个谓词是刻意的：准入行现在会一直留到清理结束（它兼任改派闸），
+   * 而本方法的历史含义是「已撤权、但还没转成离场记录」。不加这个谓词，语义会悄悄扩大成
+   * 「已撤权且尚未清除」——那是另一件事。
+   *
+   * 等价性：属主表 (platform, account_id) 为主键 ⇒ 原 JOIN 1:1；账号无绑定 ⇒ 原 JOIN 空集 ⇒ false。
    *
    * **失败方向必须是抛，MUST NOT 吞成 false**：本方法的消费方把 `!hasPendingRevocationHold`
    * 当作放行条件（互动读 / 回复 / 私信的闸），false 是「没有 hold、可以放行」。把跨域读失败降级成
@@ -2274,7 +2395,7 @@ export class ClientUserStore {
       `SELECT EXISTS (
          SELECT 1
            FROM client_env_revocation_holds h
-          WHERE h.env_key = ANY($1::text[])
+          WHERE h.env_key = ANY($1::text[]) AND h.materialized_at IS NULL
        ) AS present`,
       [envKeys],
     );

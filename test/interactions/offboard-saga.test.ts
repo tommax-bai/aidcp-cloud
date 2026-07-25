@@ -1,15 +1,16 @@
 /**
- * change offboard-saga 的聚焦回归：
- *   1) 离场分表 saga 中断（Step B 失败）后重入清完剩余、翻到 purged、不遗漏也不重复；
- *   2) 离场写窄接口（automation 属主 offboard-write-adapter）把写落在正确的离场表上。
- * 均为纯逻辑级（mock client / pool，无数据库连接）。
+ * change offboard-saga 的聚焦回归：离场分表 saga 中断（Step B 失败）后重入清完剩余、
+ * 翻到 purged、不遗漏也不重复。纯逻辑级（mock client / pool，无数据库连接）。
+ *
+ * 注：原本这里还有一条「离场写窄接口把写落在正确的离场表上」的用例，验的是那个**接调用方事务句柄**的
+ * 旧形态。Block③ L3 最终一致改造把它整体换成了属主自开事务的物化操作，覆盖迁到
+ * `offboard-materialization.test.ts`（含幂等、无绑定不编造、终态分支）。
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
-import { OffboardWriteAdapter } from '../../src/interactions/offboard-write-adapter.js';
 
 /** Step A 清的 automation 表（绑定行 interaction_auth_state 已挪到 Step C，与翻 purged 同事务）。 */
 const AUTOMATION_TABLES = [
@@ -80,29 +81,4 @@ test('purge saga: Step B failure leaves automation data purged but offboard un-p
   const before = deleted.length;
   assert.equal(await store.purgeDueOffboards(1_784_044_900_000), 0);
   assert.equal(deleted.length, before);
-});
-
-test('OffboardWriteAdapter.enqueueOffboard writes offboard + revoke + audit on the passed client (automation 属主表)', async () => {
-  const sqls: string[] = [];
-  const client = {
-    query: async (sql: string) => {
-      sqls.push(sql);
-      if (sql.includes('INSERT INTO interaction_offboards')) {
-        return { rows: [{ offboard_id: 'off-1', env_key: 'env-1', account_id: 'acct-1',
-          state: 'pending_edge', reason: 'environment_unbind',
-          requested_at: new Date(1), purge_due_at: new Date(2) }], rowCount: 1 };
-      }
-      return { rows: [{ account_id: 'acct-1' }], rowCount: 1 };
-    },
-  };
-  const adapter = new OffboardWriteAdapter();
-  const row = await adapter.enqueueOffboard(
-    client as unknown as Parameters<OffboardWriteAdapter['enqueueOffboard']>[0],
-    { userId: 'user-1', envKey: 'env-1', accountId: 'acct-1', reason: 'environment_unbind', actor: 'client:user-1' },
-  );
-  assert.equal(row.offboard_id, 'off-1');
-  assert.ok(sqls.some((s) => s.includes('INSERT INTO interaction_offboards')), '写离场记录');
-  assert.ok(sqls.some((s) => s.includes('UPDATE interaction_runtime_controls')), '收权运行控制');
-  assert.ok(sqls.some((s) => s.includes('UPDATE interaction_auth_state')), '收权鉴权态');
-  assert.ok(sqls.some((s) => s.includes('INSERT INTO interaction_offboard_audit')), '写离场审计');
 });

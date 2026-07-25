@@ -8,9 +8,11 @@
  * 拆库后那条 api 连接跑不了 automation 的 SQL（表不在那个库），故整个操作 MUST 收回属主域：
  * **由 automation 侧自己开事务、自己在 automation 池上执行**，api 侧只经本端口转调。
  *
- * 与同域的离场**写**入口（`client-auth/offboard-write-port.ts` 的 `OffboardWritePort`）的关键区别：
- * 那个端口的每个方法都**接调用方的事务句柄**（因为那些写确实与 api 侧的归属收权共提交，是真跨域事务、
- * 须最终一致重设计）；**本端口的方法不接句柄、自成一笔事务** —— 这正是「这一刀干净」的判据。
+ * 历史对照：同域的离场写曾经走一个**接调用方事务句柄**的端口（`client-auth/offboard-write-port.ts`），
+ * 因为那些写确实与 api 侧的归属收权共提交，是真跨域事务。change block3-l3-offboard-eventual-consistency
+ * 把它整体改成了最终一致（准入落 api 自己的库 + 属主自开事务物化台账），那个端口随之删除，
+ * 替代者是 kernel 的 `offboard-materialization-types.ts`。**三个端口现在一致：不接句柄、各自成一笔事务**
+ * —— 这正是「拆库后仍成立」的判据。
  *
  * ## 搬迁时 MUST 逐字保留的不变量（每一条都有能踩的红线）
  *

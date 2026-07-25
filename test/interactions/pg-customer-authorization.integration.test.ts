@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import pg from 'pg';
 import { ClientUserStore } from '../../src/client-auth/client-user-store.js';
-import { OffboardWriteAdapter } from '../../src/interactions/offboard-write-adapter.js';
+import { PgOffboardMaterializationOps } from '../../src/interactions/offboard-write-adapter.js';
 import { PgClientEnvAutomationRead } from '../../src/interactions/client-env-automation-read.js';
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
@@ -29,7 +29,7 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
-      offboardWrites: new OffboardWriteAdapter(),
+      offboardMaterialization: new PgOffboardMaterializationOps({ pool }),
       // Block③ L3：automation 属主表的顶层只读经端口取；真库单库下与直读逐字节等价。
       automationReads: new PgClientEnvAutomationRead({ pool }) });
     try {
@@ -167,7 +167,7 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
-      offboardWrites: new OffboardWriteAdapter(),
+      offboardMaterialization: new PgOffboardMaterializationOps({ pool }),
       // Block③ L3：automation 属主表的顶层只读经端口取；真库单库下与直读逐字节等价。
       automationReads: new PgClientEnvAutomationRead({ pool }) });
     const interactions = new InteractionStore({ pool, clock: () => 1_784_044_830_000, apiPurge: new InteractionApiWrites(),
@@ -351,7 +351,7 @@ test('PostgreSQL: provisioned video environment without an auth binding gets ter
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
-      offboardWrites: new OffboardWriteAdapter(),
+      offboardMaterialization: new PgOffboardMaterializationOps({ pool }),
       // Block③ L3：automation 属主表的顶层只读经端口取；真库单库下与直读逐字节等价。
       automationReads: new PgClientEnvAutomationRead({ pool }) });
     const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites(),
@@ -442,7 +442,7 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
-      offboardWrites: new OffboardWriteAdapter(),
+      offboardMaterialization: new PgOffboardMaterializationOps({ pool }),
       // Block③ L3：automation 属主表的顶层只读经端口取；真库单库下与直读逐字节等价。
       automationReads: new PgClientEnvAutomationRead({ pool }) });
     const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites(),
@@ -538,11 +538,13 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
       await assert.rejects(interactions.ingestBatch({
         ...parsed, envKey: 'env-revoke-missing', accountId: 'acct-revoke-late', batchId: 'batch-revocation-hold',
       }), (error: unknown) => (error as { code?: string }).code === 'INTERACTION_FEATURE_DISABLED');
-      const materialized = await users.reconcileRevocationHolds();
-      assert.deepEqual(materialized.map((item) => [item.envKey, item.accountId, item.reason]),
+      const materialized = await users.reconcileCleanupAdmissions();
+      assert.deepEqual(materialized.map((item: { envKey: string; accountId: string | null; reason: string }) =>
+        [item.envKey, item.accountId, item.reason]),
         [['env-revoke-missing', 'acct-revoke-late', 'admin_revoked']]);
+      // 准入行不再随物化删除——它一路挡住改派直到属主台账清除（purged）。物化只是给它盖上 materialized_at。
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_revocation_holds
-        WHERE env_key='env-revoke-missing'`)).rows[0].n, 0);
+        WHERE env_key='env-revoke-missing' AND materialized_at IS NOT NULL`)).rows[0].n, 1);
       assert.equal(await users.hasPendingRevocationHold('acct-revoke-late'), false);
       assert.equal((await pool.query<{ comments_read_enabled: boolean }>(`SELECT comments_read_enabled
         FROM interaction_runtime_controls WHERE account_id='acct-revoke-late'`)).rows[0].comments_read_enabled, false,

@@ -13,7 +13,7 @@
  *
  * 三条 SQL 从 `offboard-write-adapter.ts` 的 `markCleanupGrantIssued` / `markCleanupGrantConsumed` /
  * `insertOffboardAudit` **逐字迁来**（那三个方法在全仓只被本次搬走的两个方法调用过，故随本刀内化、
- * 从 `OffboardWritePort` 移除）。判定顺序、提交/回滚时机、审计写入条件亦逐字保留 ——
+ * 从当时那个接调用方句柄的写端口移除）。判定顺序、提交/回滚时机、审计写入条件亦逐字保留 ——
  * 逐条依据见 kernel 端口文件头「MUST 逐字保留的不变量」。
  */
 

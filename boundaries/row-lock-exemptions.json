@@ -6,51 +6,14 @@
   "scannerPolicy": "扫描器**宁可误报、绝不漏报**（漏报＝门禁形同虚设）：一条 FOR UPDATE 默认按 Postgres 语义覆盖语句里 FROM/JOIN 到的全部表；带 OF <别名> 时收窄，别名认不出来即退回全表；不判断是否真在事务内。因此清单里允许有「扫描器口径误报」条目，它们 MUST 在 reason 里写明为什么是误报，MUST NOT 靠放宽扫描器来消掉。",
   "seedTotal": 7,
   "seedUnplanned": 7,
-  "frozenTotal": 4,
+  "frozenTotal": 0,
   "recordedAt": "2026-07-25",
-  "seedBasis": "change dbsplit-test-gates 任务 A5 首次 seed：全量扫描 src/**/*.ts 得 55 处行锁点，其中跨属主 10 处、去重后 7 个 {file,table,kind} 键。7 条全部 eliminatedBy=null（无承接 change）：6 条是真实的跨属主行锁、去向是拆进程阶段（把跨边界读改成端口调用或接受最终一致），1 条是扫描器口径的已知误报。",
+  "seedBasis": "change dbsplit-test-gates 任务 A5 首次 seed：全量扫描 src/**/*.ts 得 55 处行锁点，其中跨属主 10 处、去重后 7 个 {file,table,kind} 键。7 条全部 eliminatedBy=null（无承接 change）：6 条是真实的跨属主行锁、去向是拆进程阶段（把跨边界读改成端口调用或接受最终一致），1 条是扫描器口径的已知误报。 | 2026-07-25 change block3-l3-offboard-eventual-consistency 下调 7→3：client-user-store 那 4 条（interaction_runtime_controls update / interaction_auth_state update / interaction_auth_state share / interaction_offboards update）随环境注销链的最终一致改造整批消除——准入事实收进 api 自己的库（client_env_revocation_holds 升格为清理准入表，改派闸退化成本域一张表上的条件写），执行台账交给属主自开事务落（kernel 端口 OffboardMaterializationOperations）。 借调式清单同批 2→1：offboard-write-adapter 不再接调用方句柄，改持 automation 池自开事务。 余下 3 条与 1 条借调点均属别的刀（delegated-task 误报 / interaction-store 的 assertAccountScope / environment-row-lock 的双向取锁出口）。",
   "raises": [],
-  "entries": [
-    {
-      "file": "src/client-auth/client-user-store.ts",
-      "table": "interaction_runtime_controls",
-      "kind": "update",
-      "direction": "api->automation",
-      "reason": "客户环境撤销（enqueueCleanupHold 路径）在 api 事务里按 env_key 取互动运行控制行并加锁，用来判定该环境下是否恰好一个账号身份。表属 automation 单写（§5.1 离场四表），api 侧只应经 OffboardWritePort 注入的窄接口触碰。",
-      "eliminatedBy": null,
-      "note": "去向：拆进程阶段随 offboard-saga 的窄接口一并收口——这条 SELECT ... FOR UPDATE 与随后的 revokeInteractionAccess 共事务，收口时 MUST 连同「谁持锁」一起搬，MUST NOT 只把写搬走留下读锁。"
-    },
-    {
-      "file": "src/client-auth/client-user-store.ts",
-      "table": "interaction_auth_state",
-      "kind": "update",
-      "direction": "api->automation",
-      "reason": "解绑 / 停用清理 / 管理员改派三条 api 事务路径都要按 env_key 取「该环境绑了哪个账号」并加锁，防止取到绑定后被并发改走。表属 automation 单写。",
-      "eliminatedBy": null,
-      "note": "同一键覆盖多处调用点（2026-07-25 实测 4 处：unbindEnvironment / 停用清理 / 改派移除 / 撤销 hold 的 JOIN 取绑定）。去向同上：拆进程阶段收口到 automation 侧端口。"
-    },
-    {
-      "file": "src/client-auth/client-user-store.ts",
-      "table": "interaction_auth_state",
-      "kind": "share",
-      "direction": "api->automation",
-      "reason": "客户自助离场入口用 client_env_scope / client_environments / interaction_auth_state / accounts 四表 JOIN 取绑定账号，并 FOR SHARE OF s,e,a,acc 把四行一起钉住。四个别名里 a 指向 automation 属主表。",
-      "eliminatedBy": null,
-      "note": "这是全仓唯一一处一次锁住四张跨两个属主的表的语句。拆库后 a 这一段直接连不到，是响亮的失败而非无声失效——但那时整条 JOIN 也不成立，MUST 在拆之前改成「先经端口问 automation 要绑定，再在 api 事务里锁自家三张表」。"
-    },
-    {
-      "file": "src/client-auth/client-user-store.ts",
-      "table": "interaction_offboards",
-      "kind": "update",
-      "direction": "api->automation",
-      "reason": "管理员改派环境前检查目标环境是否有离场在途（state <> 'purged'），取行加锁以免与离场推进竞态。表属 automation 单写（§5.1 离场四表）。",
-      "eliminatedBy": null,
-      "note": "去向：拆进程阶段改为向 automation 侧问「该环境是否离场在途」的端口调用；届时它退化为跨服务读，锁的互斥语义 MUST 由 automation 侧自己的事务承担。"
-    }
-  ],
+  "entries": [],
   "borrowedConnectionHelpers": {
     "why": "这些文件自己**从不建池、也从不 connect()**：它们的行锁跑在调用方传进来的事务句柄上。因此「加锁方属于哪一层」静态判不出来——它跟着调用方走，而调用方常常是组合根按结构类型注入的（连一条 import 边都没有，import 图也看不见）。AC-LOCK-04 因此只做一件事：**要求这个集合被逐个登记**，新出现一个未登记的借调式加锁点即失败，由人写清它跑在谁的事务里。",
-    "frozenTotal": 2,
+    "frozenTotal": 1,
     "files": [
       {
         "file": "src/db/environment-row-lock.ts",
@@ -60,15 +23,6 @@
         "reason": "环境级串行的唯一取锁出口，**现已只被 api 侧调用**：client-user-store（解绑 / 停用 / 改派）与 interactions/interaction-auth-gate.ts（登录态首写闸，持 api 池、自开事务）都直接 import 它，两者都跑在 api 的事务与连接上、锁的是 api 属主的 client_environments / client_env_scope —— 同层同库，不跨界。",
         "eliminatedBy": "block3-l3-auth-write-owner-collapse",
         "note": "2026-07-25 之前这里还有第二类调用方：automation 的 interaction-store.upsertAuthStatus 经组合根注入的 envLock 端口调用（无 import 边、AC-LOCK-03 看不见），那是**反方向**（automation->api）的跨属主行锁。本 change 把授权首写点收敛进 api 窄端点 PgInteractionAuthGate 后那条借用关系消失：automation 只经 kernel 端口拿一张带有效期的条件写回执，不再持有任何 api 表的锁。条目**仍留在册**——文件自身依旧不建池、锁仍跑在调用方句柄上，AC-LOCK-04 要的正是这类点位被人写清跑在谁的事务里。"
-      },
-      {
-        "file": "src/interactions/offboard-write-adapter.ts",
-        "fileLayer": "automation",
-        "tables": ["interaction_runtime_controls"],
-        "knownCallerLayers": ["api"],
-        "reason": "离场四表的 automation 侧单写者，方法签名接调用方的 Queryable 句柄，由组合根注入给 api 的 client-user-store。因此这处对 automation 属主表的 FOR UPDATE 实际跑在 **api 的事务与连接**上——文件自身归属 automation，光看文件层判不出跨界，AC-LOCK-03 对它天然失明。",
-        "eliminatedBy": null,
-        "note": "拆进程后本适配器与调用方不再同事务，这处「取行确认写没漏」的 FOR UPDATE MUST 改成 automation 侧自开事务的属主操作（同目录 offboard-cleanup-grant-ops.ts 已经是那个形态，可照抄）。"
       }
     ]
   }

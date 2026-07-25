@@ -58,7 +58,8 @@
       "src/kernel/client-env-automation-types.ts",
       "src/kernel/interaction-audit-outbox.ts",
       "src/kernel/interaction-auth-gate-types.ts",
-      "src/kernel/offboard-cleanup-grant-types.ts"
+      "src/kernel/offboard-cleanup-grant-types.ts",
+      "src/kernel/offboard-materialization-types.ts"
     ]
   },
   "rejected": [

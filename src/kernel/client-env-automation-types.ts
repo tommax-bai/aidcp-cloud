@@ -68,6 +68,14 @@ export interface ClientEnvAutomationReader {
   wechatBoundEnvKeys(envKeys: string[]): Promise<string[]>;
   /** 某账号当前绑定的微信互动环境键（属主侧 (platform, account_id) 为主键 ⇒ 0 或 1 条）。 */
   wechatEnvKeysForAccount(accountId: string): Promise<string[]>;
+  /**
+   * 某环境在给定平台上的互动授权绑定账号；**确无绑定**返回 null（属主侧 (platform, env_key) 唯一 ⇒ 0 或 1 条）。
+   *
+   * **失败方向 MUST 是抛，MUST NOT 降级成 null**：读方把 null 当作「这个环境确实没绑账号」，
+   * 据此改走「无绑定」分支（拒绝解绑 / 只挂准入不写台账 / 判定互动请求未授权）。把跨域读失败降级成
+   * null，等于让一次连接抖动看起来像一条业务事实 —— 那正是本仓禁止的静默假成功。
+   */
+  boundAccountForEnv(envKey: string, platform: string): Promise<string | null>;
   /** 批量风控态投影；只返回**有风控行**的账号（读方据缺失映射 null）。空入参返回空。 */
   riskStateProjection(accountIds: string[]): Promise<EnvRiskStateProjection[]>;
 }

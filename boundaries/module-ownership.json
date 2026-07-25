@@ -370,11 +370,6 @@
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
-    "path": "src/client-auth/offboard-write-port.ts",
-    "layer": "api",
-    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
-  },
-  {
     "path": "src/client-auth/rate-limiter.ts",
     "layer": "api",
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
@@ -1148,6 +1143,11 @@
     "path": "src/kernel/offboard-cleanup-grant-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change block3-l3-grant-collapse 新写：离场清理授权（cleanup grant）签发/烧票的**跨域操作**端口契约（OffboardCleanupGrantOperations 接口 + OffboardGrantRecord / Issue-Consume 输入输出纯类型 + 状态/原因/失败档字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 client-env-automation-types（只读投影端口）互补：本端口是**写操作**端口，且方法**不接调用方事务句柄、自成一笔事务**——因为这两笔事务碰的表全是 automation 属主、与任何 api 写都不共提交，故可整体收回属主域；属主实现在 src/interactions/offboard-cleanup-grant-ops.ts（automation）跑在 automation 池上。文件头载明搬迁 MUST 逐字保留的五条不变量（判定顺序 / 失败也提交 / 取行加锁与烧票同事务 / now 可注入 / epoch ms）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
+  },
+  {
+    "path": "src/kernel/offboard-materialization-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change block3-l3-offboard-eventual-consistency 新写：离场**执行台账物化**的跨域操作端口契约（OffboardMaterializationOperations 接口 + MaterializeEnvironmentOffboardInput / Outcome 纯类型 + 原因字面量联合）。唯一 import 是同层 client-env-automation-types 的 OffboardProjection 行类型；零 SQL / HTTP / LLM / 模块级 Set-Map。与同族两端口互补：client-env-automation-types 是只读投影、offboard-cleanup-grant-types 是清理授权的签发/烧票，本端口是台账物化。三者都**不接调用方事务句柄、各自成一笔事务**——这正是拆库后仍成立的判据。属主实现在 src/interactions/offboard-write-adapter.ts（automation）跑在 automation 池上。本端口取代了原 api 侧的 client-auth/offboard-write-port.ts（那个端口的方法接 api 事务句柄，于是 api 的连接去跑 automation 的 SQL，拆库即 42P01 或写进错的库；该文件随本 change 删除）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
   },
   {
     "path": "src/kernel/panel-automation-types.ts",

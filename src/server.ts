@@ -474,8 +474,9 @@ import type { InteractionAuthGate } from './kernel/interaction-auth-gate-types.j
 // 组合根直接构造 content 的回复生成实现，并作为 ReplyAiPort 注入 ReplyWorkflow（automation 编排层只持接口）。
 import { ReplyAiService } from './interactions/reply-ai.js';
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
-// change offboard-saga：把跨 owner 离场写收口到各属主的窄写入口，由组合根注入（拆进程时换成内部 HTTP）。
-import { OffboardWriteAdapter } from './interactions/offboard-write-adapter.js';
+// change offboard-saga → Block③ L3：离场**执行台账**的属主侧操作，由组合根注入（拆进程时换成内部 HTTP）。
+import { PgOffboardMaterializationOps } from './interactions/offboard-write-adapter.js';
+import type { OffboardMaterializationOperations } from './kernel/offboard-materialization-types.js';
 // Block③ L3：离场写适配器的**读侧配对**——api 的客户环境生命周期经 kernel 端口向 automation 取只读投影。
 import { PgClientEnvAutomationRead } from './interactions/client-env-automation-read.js';
 import { PgOffboardCleanupGrantOps } from './interactions/offboard-cleanup-grant-ops.js';
@@ -1138,9 +1139,9 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   //   - api：segC 未跑 ⇒ 本进程不该持有 automation 属主表的连接；HTTP 客户端待 Block② 补，暂 fail-closed
   //     （各方法 reject 具名错误），镜像 segD 的 panelAutomationRead / publishStatusLocal 先例；
   //     api 模式当前未部署，此路不改现网行为。
-  // ⚠️ 尚未解耦（不在本刀范围）：本 store 另有 8 处 automation 读夹在事务内 / 带跨库行锁（环境注销
-  //    关键路径），以及 OffboardWriteAdapter 那条「接调用方事务句柄」的跨域联合提交——都要靠最终一致
-  //    重设计，见 aidcp/docs/cloud-block3-l3-cutover-plan.md。
+  // Block③ L3 最终一致改造已收尾：环境注销关键路径上那 7 处「事务内跨库读 / 跨库行锁」与 5 处跨库
+  // 联合提交全部消除——准入事实收进 api 自己的库（client_env_revocation_holds 升格为清理准入表），
+  // 执行台账交给属主自开事务落（下面的 offboardMaterialization 端口）。详见 client-user-store 文件头。
   const clientEnvAutomationRead: ClientEnvAutomationReader =
     serviceModeFromEnv() === 'api'
       ? {
@@ -1148,12 +1149,13 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
           activeWechatOffboards: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
           wechatBoundEnvKeys: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
           wechatEnvKeysForAccount: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
+          boundAccountForEnv: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
           riskStateProjection: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
         }
       : new PgClientEnvAutomationRead({ pool: automationPool });
   // 离场清理授权的属主侧操作（Block③ L3）：签发 / 烧票两笔事务碰的表全是 automation 属主、
   // 与任何 api 写都不共事务 ⇒ 整体收回属主域，由它**自己开事务、跑 automation 池**，
-  // 而不是像 OffboardWriteAdapter 那样接 api 侧递来的事务句柄。
+  // 而不是接 api 侧递来的事务句柄。
   // api 模式同样 fail-closed（HTTP 客户端待 Block② 补），与上面的读端口同一范式。
   const offboardCleanupGrantOps: OffboardCleanupGrantOperations =
     serviceModeFromEnv() === 'api'
@@ -1162,7 +1164,16 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
           consumeCleanupGrant: () => Promise.reject(new Error('offboard_cleanup_grant_ops_unavailable_in_api_mode')),
         }
       : new PgOffboardCleanupGrantOps({ pool: automationPool });
-  const clientUserStore = new ClientUserStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter(), automationReads: clientEnvAutomationRead, cleanupGrantOps: offboardCleanupGrantOps });
+  // 离场**执行台账**的属主侧操作（Block③ L3 最终一致改造）：与上面两个端口同一范式——
+  // 自开事务、跑 automation 池，绝不接 api 侧递来的事务句柄（那正是拆库后会崩 / 会写错库的形态）。
+  const offboardMaterialization: OffboardMaterializationOperations =
+    serviceModeFromEnv() === 'api'
+      ? {
+          materializeEnvironmentOffboard: () =>
+            Promise.reject(new Error('offboard_materialization_unavailable_in_api_mode')),
+        }
+      : new PgOffboardMaterializationOps({ pool: automationPool });
+  const clientUserStore = new ClientUserStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardMaterialization, automationReads: clientEnvAutomationRead, cleanupGrantOps: offboardCleanupGrantOps });
   try {
     await mirrorVersionStore.init();
     await modelConfigStore.init();
@@ -4047,14 +4058,16 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       offboardRetryRunning = true;
       void (async () => {
         try {
-          const materialized = await clientUserStore.reconcileRevocationHolds();
+          // 承重兜底通道：认领属主台账里 api 侧还没记上的清理 + 释放已清除的准入 + 重放尚未物化的准入。
+          const materialized = await clientUserStore.reconcileCleanupAdmissions();
           for (const offboard of materialized) {
+            if (!offboard.accountId) continue;
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
           }
         } catch (error) {
           console.warn(
-            `[interaction] revocation hold reconcile 失败: ${error instanceof Error ? error.message : String(error)}`,
+            `[interaction] 环境清理准入 reconcile 失败: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
         await interactionOffboarding?.retryPending();
@@ -6305,6 +6318,8 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           // 亦供客户鉴权服务做 auth/scope 读（单实例共享池）。绝不回传 key/hash。
           clientUsers: clientUserStore,
           onClientOffboardCreated: async (offboard) => {
+            // 同上：尚未物化的离场没有可派发的账号，等对账循环补。
+            if (!offboard.accountId) return;
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
           },
@@ -6567,6 +6582,9 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
           },
           onOffboardCreated: async (offboard) => {
+            // accountId 为 null = 已受理、尚未物化（属主还没解析出账号）：此刻没有可派发的目标，
+            // MUST NOT 猜一个。对账循环物化成功后会带着真 accountId 再走一次派发。
+            if (!offboard.accountId) return;
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
           },

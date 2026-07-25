@@ -1847,11 +1847,19 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       let cleanupGrant: { token: string; expiresAt: number; edgeId: string } | null = null;
-      if (edgeId && result.offboard.state !== 'tombstoned' && result.offboard.state !== 'purged') {
+      // 清理授权把 accountId 绑进票据、并由属主按台账逐项核对。`state==='accepted'`（已受理、
+      // 尚未物化）时台账行还不存在、accountId 也还没解析出来 —— 此刻签票必然核不过，
+      // 更不能拿一个猜的账号去签。故这一支不发票：客户端仍拿 202 + accepted 态，
+      // 轮询 `GET /offboarding/:id` 直到物化，与旧客户端「不带 edgeId」那条路等价。
+      const grantable = result.offboard.accountId !== null
+        && result.offboard.state !== 'accepted'
+        && result.offboard.state !== 'tombstoned'
+        && result.offboard.state !== 'purged';
+      if (edgeId && grantable) {
         const issued = issueOffboardCleanupGrant({
           offboardId: result.offboard.offboardId,
           envKey: result.offboard.envKey,
-          accountId: result.offboard.accountId,
+          accountId: result.offboard.accountId!,
           edgeId,
           userId,
         }, config.jwtSecret);
@@ -1943,6 +1951,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     }
     const offboardStatus = /^\/offboarding\/([^/]+)$/.exec(url);
     if (method === 'GET' && offboardStatus) {
+      // 200 + `state:'accepted'` 是「已受理、尚未物化」的诚实答案；只有**这个客户名下确实没有这笔离场**
+      // 才 404。对一笔已经被接受、归属也已经撤销的离场答 404，是静默假成功的镜像。
       const offboard = await deps.store.getOffboard(userId, decodeURIComponent(offboardStatus[1]));
       if (!offboard) {
         sendJson(res, 404, { error: 'not_found' });

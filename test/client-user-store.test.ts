@@ -32,6 +32,7 @@ function fakeAutomationReads(overrides: Partial<ClientEnvAutomationReader> = {})
     activeWechatOffboards: async () => [],
     wechatBoundEnvKeys: async () => [],
     wechatEnvKeysForAccount: async () => [],
+    boundAccountForEnv: async () => null,
     riskStateProjection: async () => [],
     ...overrides,
   };
@@ -201,7 +202,9 @@ test('listAllEnvironments: 端口侧缺表(42P01)与本地缺表同口径 fail-c
 test('getOffboard: 经端口取投影并映射为视图；端口无行 → null（本地池不参与）', async () => {
   const requestedAt = new Date('2026-07-21T03:00:00Z');
   const purgeDueAt = new Date('2026-07-28T03:00:00Z');
-  const pool = fakePool(() => { throw new Error('本地池不该被 getOffboard 触达'); });
+  // 台账命中时本地池不参与；台账没有时才回落去查本域准入表（那是「已受理、尚未物化」的唯一来源）。
+  const localReads: string[] = [];
+  const pool = fakePool((sql) => { localReads.push(sql); return { rows: [] }; });
   const seen: { offboardId: string; userId: string }[] = [];
   const store = new ClientUserStore({
     schemaEnsurer: ensureCapabilitySchema,
@@ -220,7 +223,10 @@ test('getOffboard: 经端口取投影并映射为视图；端口无行 → null�
     offboardId: 'ob-1', envKey: 'env-1', accountId: 'acct-1', state: 'pending_edge',
     reason: 'environment_unbind', requestedAt: requestedAt.getTime(), purgeDueAt: purgeDueAt.getTime(),
   });
+  assert.deepEqual(localReads, [], '台账命中时绝不触本地池');
   assert.equal(await store.getOffboard('user-a', 'ob-missing'), null);
+  assert.equal(localReads.length, 1, '台账没有时回落查一次本域准入表');
+  assert.match(localReads[0], /FROM client_env_revocation_holds/);
   // 归属过滤下推到属主侧：两个参数都原样带过去，绝不在本地放宽。
   assert.deepEqual(seen, [
     { offboardId: 'ob-1', userId: 'user-a' },
@@ -251,43 +257,6 @@ test('hasPendingRevocationHold: 无微信绑定直接 false（不查本地池）
   assert.deepEqual(seenParams, [['env-held']]);
 });
 
-test('reconcileRevocationHolds: 候选按原序筛掉无绑定的 hold 并截断到 limit', async () => {
-  const holds = ['h-a', 'h-b', 'h-c', 'h-d'].map((env_key) => ({ env_key }));
-  const locked: string[] = [];
-  const client = {
-    query: async (sql: string, params?: unknown[]) => {
-      if (/FROM client_environments WHERE env_key = \$1 FOR UPDATE/.test(sql)) {
-        locked.push(String((params ?? [])[0]));
-        return { rows: [{ '?column?': 1 }], rowCount: 1 };
-      }
-      return { rows: [] }; // hold 重取空 → 本候选跳过，不产出离场记录
-    },
-    release() {},
-  };
-  let askedFor: string[] | undefined;
-  const pool = {
-    connect: async () => client,
-    query: async (sql: string) => {
-      assert.match(sql, /FROM client_env_revocation_holds h\n\s+ORDER BY h.requested_at,h.env_key/);
-      assert.doesNotMatch(sql, /interaction_auth_state/);
-      return { rows: holds };
-    },
-  } as unknown as pg.Pool;
-  const store = new ClientUserStore({
-    schemaEnsurer: ensureCapabilitySchema,
-    pool,
-    automationReads: fakeAutomationReads({
-      wechatBoundEnvKeys: async (envKeys) => {
-        askedFor = envKeys;
-        return ['h-d', 'h-b', 'h-c']; // 端口返回顺序无关：原序由本地 hold 查询决定
-      },
-    }),
-  });
-  assert.deepEqual(await store.reconcileRevocationHolds(2), []);
-  assert.deepEqual(askedFor, ['h-a', 'h-b', 'h-c', 'h-d']);
-  assert.deepEqual(locked, ['h-b', 'h-c']); // 无绑定的 h-a 被剔除；limit=2 截断掉 h-d
-});
-
 test('automation 读端口未注入：跨域读当场抛具名错，绝不静默回落空集', async () => {
   const store = new ClientUserStore({
     schemaEnsurer: ensureCapabilitySchema,
@@ -296,6 +265,211 @@ test('automation 读端口未注入：跨域读当场抛具名错，绝不静默
   await assert.rejects(() => store.getOffboard('u', 'ob'), /client_env_automation_read_port_not_configured/);
   await assert.rejects(() => store.hasPendingRevocationHold('acct'), /client_env_automation_read_port_not_configured/);
   await assert.rejects(() => store.listAllEnvironments(), /client_env_automation_read_port_not_configured/);
+});
+
+/* ───────────── Block③ L3 最终一致改造：环境清理**准入**（api 属主）侧 ───────────── */
+
+/** 准入行的裸形状（client_env_revocation_holds 升格后的列）。 */
+function admissionRow(over: Record<string, unknown> = {}) {
+  return {
+    revocation_id: 'rev-1', env_key: 'env-1', user_id: 'user-1', reason: 'admin_revoked',
+    revoked_by: 'admin', offboard_id: 'ob-1', unbound_terminal_ok: false,
+    materialized_at: null, requested_at: new Date(1_000), ...over,
+  };
+}
+
+test('setScope 的清理闸只读本域准入表：一行即拒，materialized_at 决定原因码（尚未物化）', async () => {
+  const seen: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      seen.push(sql);
+      if (/FROM client_users WHERE user_id/.test(sql)) return { rows: [{ '?column?': 1 }], rowCount: 1 };
+      if (/FROM client_env_revocation_holds/.test(sql)) {
+        return { rows: [{ env_key: 'env-1', materialized_at: null }], rowCount: 1 };
+      }
+      if (/FROM client_environments\s+WHERE env_key = ANY/.test(sql)) {
+        return { rows: [{ env_key: 'env-1', label: null, platform: 'wechat_channels' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const pool = { connect: async () => client, query: async () => ({ rows: [] }) } as unknown as pg.Pool;
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
+    automationReads: fakeAutomationReads() });
+  assert.deepEqual(await store.setScope('user-1', [{ envKey: 'env-1' }], 'admin'),
+    { ok: false, reason: 'cleanup_in_progress', envKey: 'env-1' });
+  // 这道闸改造前要去锁 automation 的 interaction_offboards（跨库行锁，拆库后无声失效）。
+  assert.ok(!seen.some((sql) => sql.includes('interaction_offboards')), '闸不得再碰属主的离场台账');
+  assert.equal(seen[seen.length - 1], 'ROLLBACK');
+});
+
+test('setScope 的清理闸：已物化的准入回 offboard_in_progress（原因码不退化）', async () => {
+  const client = {
+    query: async (sql: string) => {
+      if (/FROM client_users WHERE user_id/.test(sql)) return { rows: [{ '?column?': 1 }], rowCount: 1 };
+      if (/FROM client_env_revocation_holds/.test(sql)) {
+        return { rows: [{ env_key: 'env-1', materialized_at: new Date(2_000) }], rowCount: 1 };
+      }
+      if (/FROM client_environments\s+WHERE env_key = ANY/.test(sql)) {
+        return { rows: [{ env_key: 'env-1', label: null, platform: 'wechat_channels' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const pool = { connect: async () => client, query: async () => ({ rows: [] }) } as unknown as pg.Pool;
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
+    automationReads: fakeAutomationReads() });
+  assert.deepEqual(await store.setScope('user-1', [{ envKey: 'env-1' }], 'admin'),
+    { ok: false, reason: 'offboard_in_progress', envKey: 'env-1' });
+});
+
+test('getOffboard：台账还没写成时答「已受理、尚未物化」，绝不 404；accountId / purgeDueAt 为 null 而非编造', async () => {
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool((sql) => {
+      assert.match(sql, /FROM client_env_revocation_holds/);
+      assert.match(sql, /materialized_at IS NULL/);
+      return { rows: [admissionRow()] };
+    }),
+    automationReads: fakeAutomationReads({ offboardForUser: async () => null }),
+  });
+  assert.deepEqual(await store.getOffboard('user-1', 'ob-1'), {
+    offboardId: 'ob-1', envKey: 'env-1', accountId: null, state: 'accepted',
+    reason: 'admin_revoked', requestedAt: 1_000, purgeDueAt: null,
+  });
+});
+
+test('getOffboard：既无台账也无准入才回 null（真正的 not_found 仍是 not_found）', async () => {
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool(() => ({ rows: [] })),
+    automationReads: fakeAutomationReads({ offboardForUser: async () => null }),
+  });
+  assert.equal(await store.getOffboard('user-1', 'ob-x'), null);
+});
+
+test('物化失败方向：属主不可达时回执降级为 accepted、不写 materialized_at，绝不假装已清理', async () => {
+  const writes: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      if (/FROM client_users WHERE user_id/.test(sql)) return { rows: [{ status: 'enabled' }], rowCount: 1 };
+      if (/FROM client_environments WHERE env_key = \$1 FOR UPDATE/.test(sql)) return { rows: [{ '?column?': 1 }], rowCount: 1 };
+      if (/FROM client_env_scope s/.test(sql)) {
+        return { rows: [{ label: null, platform: 'wechat_channels', source: 'admin',
+          assigned_by: 'admin', assigned_at: new Date(0) }], rowCount: 1 };
+      }
+      if (/INSERT INTO client_env_revocation_holds/.test(sql)) return { rows: [admissionRow({ reason: 'environment_unbind' })], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const pool = {
+    connect: async () => client,
+    query: async (sql: string) => { writes.push(sql); return { rows: [] }; },
+  } as unknown as pg.Pool;
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema, pool,
+    automationReads: fakeAutomationReads({ boundAccountForEnv: async () => 'acct-1' }),
+    offboardMaterialization: {
+      materializeEnvironmentOffboard: async () => { throw new Error('automation_unreachable'); },
+    },
+  });
+  const result = await store.beginEnvironmentOffboard('user-1', 'env-1');
+  assert.ok(result.ok);
+  assert.equal(result.offboard.state, 'accepted');
+  assert.equal(result.offboard.accountId, null);
+  assert.ok(!writes.some((sql) => sql.includes('materialized_at=now()')), '没物化就绝不盖回执');
+});
+
+test('beginEnvironmentOffboard：确无绑定且非自助建号时仍然拒绝（归属不撤、准入不写）', async () => {
+  const seen: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      seen.push(sql);
+      if (/FROM client_users WHERE user_id/.test(sql)) return { rows: [{ status: 'enabled' }], rowCount: 1 };
+      if (/FROM client_environments WHERE env_key = \$1 FOR UPDATE/.test(sql)) return { rows: [{ '?column?': 1 }], rowCount: 1 };
+      if (/FROM client_env_scope s/.test(sql)) {
+        return { rows: [{ label: null, platform: 'wechat_channels', source: 'admin',
+          assigned_by: 'admin', assigned_at: new Date(0) }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 }; // provisioning intent 不命中
+    },
+    release() {},
+  };
+  const pool = { connect: async () => client, query: async () => ({ rows: [] }) } as unknown as pg.Pool;
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
+    automationReads: fakeAutomationReads({ boundAccountForEnv: async () => null }) });
+  assert.deepEqual(await store.beginEnvironmentOffboard('user-1', 'env-1'),
+    { ok: false, reason: 'offboard_binding_missing' });
+  assert.ok(!seen.some((sql) => sql.includes('INSERT INTO client_env_revocation_holds')), '拒绝路径不写准入');
+  assert.ok(!seen.some((sql) => sql.includes('DELETE FROM client_env_scope')), '拒绝路径不撤归属');
+  assert.equal(seen[seen.length - 1], 'ROLLBACK');
+});
+
+test('beginEnvironmentOffboard：绑定读失败 MUST 抛，绝不降级成「没绑定」再往下走', async () => {
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool(() => ({ rows: [] })),
+    automationReads: fakeAutomationReads({
+      boundAccountForEnv: async () => { throw new Error('automation_read_down'); },
+    }),
+  });
+  await assert.rejects(() => store.beginEnvironmentOffboard('user-1', 'env-1'), /automation_read_down/);
+});
+
+test('对账循环：属主投影读不到时整轮抛出，绝不把空集当「一条都没有」去删准入行', async () => {
+  const statements: string[] = [];
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool((sql) => { statements.push(sql); return { rows: [] }; }),
+    automationReads: fakeAutomationReads({
+      activeWechatOffboards: async () => { throw new Error('automation_read_down'); },
+    }),
+  });
+  await assert.rejects(() => store.reconcileCleanupAdmissions(), /automation_read_down/);
+  assert.deepEqual(statements, [], '读不到属主投影就一条本域写都不许发');
+});
+
+test('对账循环：认领属主台账里没被记上的清理，释放已清除的准入，重放尚未物化的准入', async () => {
+  const statements: { sql: string; params?: unknown[] }[] = [];
+  const materialized: string[] = [];
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool((sql, params) => {
+      statements.push({ sql, params });
+      if (/FROM client_env_revocation_holds\s+WHERE materialized_at IS NULL/.test(sql)) {
+        return { rows: [admissionRow({ env_key: 'env-pending', offboard_id: 'ob-pending' })] };
+      }
+      return { rows: [] };
+    }),
+    automationReads: fakeAutomationReads({
+      activeWechatOffboards: async () => [{
+        offboardId: 'ob-live', envKey: 'env-live', accountId: 'acct-live',
+        state: 'pending_edge', reason: 'admin_revoked', requestedAt: 1_000, purgeDueAt: 2_000,
+      }],
+    }),
+    offboardMaterialization: {
+      materializeEnvironmentOffboard: async (input) => {
+        materialized.push(input.offboardId);
+        return { materialized: true, offboard: {
+          offboardId: input.offboardId, envKey: input.envKey, accountId: 'acct-pending',
+          state: 'pending_edge', reason: input.reason, requestedAt: 1_000, purgeDueAt: 2_000,
+        } };
+      },
+    },
+  });
+  const out = await store.reconcileCleanupAdmissions();
+  const adopt = statements.find((s) => s.sql.includes('INSERT INTO client_env_revocation_holds'));
+  assert.ok(adopt && adopt.sql.includes('ON CONFLICT (env_key) DO NOTHING'), '认领不覆盖既有准入');
+  assert.deepEqual((adopt!.params ?? [])[0], ['env-live']);
+  const release = statements.find((s) => s.sql.includes('DELETE FROM client_env_revocation_holds'));
+  assert.ok(release && release.sql.includes('materialized_at IS NOT NULL'), '只释放已物化的准入');
+  assert.deepEqual((release!.params ?? [])[0], ['env-live'], '仍在台账里的环境不许被释放');
+  assert.deepEqual(materialized, ['ob-pending']);
+  assert.deepEqual(out.map((o) => [o.envKey, o.accountId]), [['env-pending', 'acct-pending']]);
+  assert.ok(statements.some((s) => s.sql.includes('materialized_at=now()')), '物化成功要盖回执');
 });
 
 /**
@@ -484,16 +658,21 @@ test('withAuthorizedInteractionScope holds complete authorization locks through 
     query: async (sql: string) => {
       calls.push(sql);
       if (/SELECT status FROM client_users/.test(sql)) return { rows: [{ status: 'enabled' }] };
-      if (/FROM client_env_scope s/.test(sql)) return { rows: [{ account_id: 'acct-a' }] };
+      if (/FROM client_env_scope s/.test(sql)) return { rows: [{ platform: 'wechat_channels' }] };
+      if (/FROM accounts WHERE account_id/.test(sql)) return { rows: [{ '?column?': 1 }] };
       return { rows: [] };
     },
     release: () => { released = true; },
   };
   const pool = { connect: async () => client } as unknown as pg.Pool;
-  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  // Block③ L3：绑定改经端口取（automation 属主），本域三张表照旧在事务里 FOR SHARE 钉住。
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
+    automationReads: fakeAutomationReads({ boundAccountForEnv: async () => 'acct-a' }) });
   const result = await store.withAuthorizedInteractionScope('user-a', 'env-a', async ({ accountId }) => {
     assert.equal(accountId, 'acct-a');
-    assert.equal(calls.at(-1)?.includes('FOR SHARE OF s, e, a, acc'), true);
+    assert.equal(calls.at(-1)?.includes('FROM accounts WHERE account_id'), true);
+    assert.ok(calls.some((sql) => sql.includes('FOR SHARE OF s, e')), '本域归属 / 注册行仍要钉住');
+    assert.ok(!calls.some((sql) => sql.includes('interaction_auth_state')), '不再跨库锁属主的授权行');
     assert.equal(calls.some((sql) => sql === 'COMMIT'), false, 'operation runs before transaction commit');
     return 'done';
   });
@@ -516,7 +695,8 @@ test('withAuthorizedInteractionScope fails closed on env/account binding mismatc
     release() {},
   };
   const pool = { connect: async () => client } as unknown as pg.Pool;
-  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
+    automationReads: fakeAutomationReads() });
   const result = await store.withAuthorizedInteractionScope('user-a', 'env-b', async () => {
     operationCalls += 1;
   });
