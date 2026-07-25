@@ -650,26 +650,26 @@ interface CompositionContext {
   // single-assignment cross-segment handles
   accountDisplayName: (accountId: string) => string | undefined;
   accountDisplayNameCandidates: (accountId: string) => string[];
-  accountPersonaService: AccountPersonaService;
+  accountPersonaService?: AccountPersonaService;
   accountState: AccountStateManager;
   accountStore: AccountStore | undefined;
-  alertStore: PgAlertStore | undefined;
+  alertStore?: PgAlertStore | undefined;
   anyImageKeyPresent: boolean;
   approvalPolicyStore: ApprovalPolicyStore | undefined;
-  approvePublishForClient: ReturnType<typeof createClientPublishApprovalHandler>;
+  approvePublishForClient?: ReturnType<typeof createClientPublishApprovalHandler>;
   billingPriceRefresh: { refresh(): Promise<import("./metrics/billing-price-refresh.js").BillingPriceRefreshResult>; };
   botChatEventHandler: FeishuBotChatEventHandler;
-  botChatsProvider: ReturnType<typeof createBotChatsProvider>;
+  botChatsProvider?: ReturnType<typeof createBotChatsProvider>;
   botChatStore: BotChatStore;
-  buildModelConfigView: () => Promise<ModelConfigView>;
-  buildTodayUsageForAccount: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload>;
+  buildModelConfigView?: () => Promise<ModelConfigView>;
+  buildTodayUsageForAccount?: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload>;
   cache: PgAnchorCache;
-  captchaAssist: CaptchaAssistService;
-  categoryConfigPanel: ReturnType<typeof createCategoryConfigPanel>;
+  captchaAssist?: CaptchaAssistService;
+  categoryConfigPanel?: ReturnType<typeof createCategoryConfigPanel>;
   categoryConfigStore: CategoryConfigStore;
   clientUserStore: ClientUserStore;
-  commandFace: ReturnType<typeof createCommandFace>;
-  commentScheduler: CommentScheduler | undefined;
+  commandFace?: ReturnType<typeof createCommandFace>;
+  commentScheduler?: CommentScheduler | undefined;
   conceptStore: ConceptStore | undefined;
   configMirrorPool: pg.Pool;
   // Block③ L3 step0：event_outbox / event_outbox_cursor / 风控命令 outbox 均属 automation。
@@ -679,7 +679,7 @@ interface CompositionContext {
   // api 属主池（accounts / persona_config / publish_log 等）。configMirrorPool 亦指向它（同对象），
   // 但语义为「config_mirror_version 专用」；面板等 api 属主读写按属主取用本字段，避免与 mirror 语义混淆。
   apiPool: pg.Pool;
-  configMirrorRefresher: ConfigMirrorRefresher;
+  configMirrorRefresher?: ConfigMirrorRefresher;
   /** api 侧失效信号落地端（segA 构造；api 模式的内部 HTTP 监听把它暴露成 route）。 */
   configMirrorBumpSink: ConfigMirrorBumpSink;
   contentScheduleStore: ContentScheduleStore;
@@ -702,73 +702,73 @@ interface CompositionContext {
   firstPostOnboardingStore: FirstPostOnboardingStore | undefined;
   getSoul: (accountId?: string) => Soul;
   groupRouteStore: GroupRouteStore | undefined;
-  handlePublishDraftImageRemove: ReturnType<typeof createPublishDraftImageRemoveHandler>;
-  hotLeadConfigPanel: ReturnType<typeof createHotLeadConfigPanel>;
+  handlePublishDraftImageRemove?: ReturnType<typeof createPublishDraftImageRemoveHandler>;
+  hotLeadConfigPanel?: ReturnType<typeof createHotLeadConfigPanel>;
   hotLeadConfigStore: HotLeadConfigStore;
-  imageProvider: RoutingImageProvider;
-  interactionCustomerApi: InteractionCustomerApi | undefined;
+  imageProvider?: RoutingImageProvider;
+  interactionCustomerApi?: InteractionCustomerApi | undefined;
   interactionFeedStore: InteractionFeedStore | undefined;
   // Block② 数据网关：收件箱读侧窄面本地实例（segC 构造），additive 挂 ctx 供 segD 组建 DataGateway 聚合；不改其构造/时机。
-  interactionStore: InteractionStore | undefined;
-  interactionInternalApi: { handle: (req: import("http").IncomingMessage, res: import("http").ServerResponse<import("http").IncomingMessage>, actor: string) => Promise<boolean>; } | undefined;
-  interactionOffboarding: InteractionOffboardingService | undefined;
-  interactionPermissionOverview: ReturnType<typeof buildInteractionPermissionOverview>;
+  interactionStore?: InteractionStore | undefined;
+  interactionInternalApi?: { handle: (req: import("http").IncomingMessage, res: import("http").ServerResponse<import("http").IncomingMessage>, actor: string) => Promise<boolean>; } | undefined;
+  interactionOffboarding?: InteractionOffboardingService | undefined;
+  interactionPermissionOverview?: ReturnType<typeof buildInteractionPermissionOverview>;
   lastObservedNoteByAccount: Map<string, { noteId: string; title: string; body: string; mediaType: "image_text" | "video"; author?: string; sourceUrl?: string; topics: string[]; likeCount: number; collectCount: number; referenceImages: CuratedReferenceImageInput[]; publishedAtText?: string; publishedObservedAt?: number; }>;
   likedNoteStore: LikedNoteStore | undefined;
-  listAccountAutomationCatalog: () => Promise<ContentScheduleCatalogRow[]>;
+  listAccountAutomationCatalog?: () => Promise<ContentScheduleCatalogRow[]>;
   llm: QwenClient;
   manualCommentAccounts: Set<string>;
   messenger: FeishuMessenger;
   mirrorVersionStore: MirrorVersionStore;
   modelConfigStore: ModelConfigStore;
   notificationContactStore: NotificationContactStore | undefined;
-  notifyPublishRejected: (requestId: string) => void;
+  notifyPublishRejected?: (requestId: string) => void;
   onCommentTakeoverEnd: (accountId: string) => void;
   onCommentTakeoverStart: (accountId: string) => void;
   ossUploader: ObjectStore | undefined;
-  pacingConfigPanel: ReturnType<typeof createPacingConfigPanel>;
+  pacingConfigPanel?: ReturnType<typeof createPacingConfigPanel>;
   pacingConfigStore: PacingConfigStore;
-  panelUsers: ReturnType<typeof parsePanelUsers>;
-  personaAutoFill: PersonaAutoFillService | undefined;
+  panelUsers?: ReturnType<typeof parsePanelUsers>;
+  personaAutoFill?: PersonaAutoFillService | undefined;
   personaAutoFillStore: PersonaAutoFillStore | undefined;
   personaPanel: ReturnType<typeof createPersonaPanel>;
   personaStore: PersonaStore;
   planner: SimplePlanner;
   port: number;
-  postProcessor: PostProcessor;
-  preflightApprovePublish: (requestId: string) => Promise<PublishApprovalPreflightResult>;
-  probeModel: (provider: string, model: string) => Promise<void>;
+  postProcessor?: PostProcessor;
+  preflightApprovePublish?: (requestId: string) => Promise<PublishApprovalPreflightResult>;
+  probeModel?: (provider: string, model: string) => Promise<void>;
   providerRuntime: Record<string, { baseUrl: string; apiKey: string; }>;
   publishApprovalClient: ReturnType<typeof createPublishApprovalClient> | undefined;
   publishApprovalStore: PublishApprovalStore | undefined;
-  publishDispatcher: PublishDispatcher;
+  publishDispatcher?: PublishDispatcher;
   publishLogStore: PublishLogStore;
-  publishOrchestrator: PublishOrchestrator;
+  publishOrchestrator?: PublishOrchestrator;
   publishPipelineLogStore: PublishPipelineLogStore;
-  quotaConfigPanel: ReturnType<typeof createQuotaConfigPanel>;
+  quotaConfigPanel?: ReturnType<typeof createQuotaConfigPanel>;
   quotaConfigStore: QuotaConfigStore;
   readApprovalDispatchProjection: (rows: Array<{ id: number; }>) => Promise<Map<number, ApprovalDispatchProjection>>;
-  readLiveContentVersion: (recordId: number) => Promise<number | null>;
-  readPublishApproval: (requestId: string) => Promise<{ approved: boolean; contentVersion: number; } | null>;
-  refreshPublishPreview: (recordId: number) => void;
+  readLiveContentVersion?: (recordId: number) => Promise<number | null>;
+  readPublishApproval?: (requestId: string) => Promise<{ approved: boolean; contentVersion: number; } | null>;
+  refreshPublishPreview?: (recordId: number) => void;
   resolveAccountChatId: (accountId: string | undefined) => Promise<string>;
   resolveCardChatId: (originChatId: string | undefined | null, accountId: string | undefined) => Promise<string>;
-  resolveController: (accountId: string) => Promise<RiskController>;
+  resolveController?: (accountId: string) => Promise<RiskController>;
   resolveEffectiveCommentApprovalMode: (accountId: string, sourceMode: "review" | "auto_approve") => Promise<"review" | "auto_approve">;
   resolvePersona: ReturnType<typeof createPersonaResolver>;
   resolveReviewCardDelivery: (accountId: string) => Promise<{ send: boolean; reason: string; }>;
-  resumeConfigPanel: ReturnType<typeof createResumeConfigPanel>;
+  resumeConfigPanel?: ReturnType<typeof createResumeConfigPanel>;
   resumeConfigStore: ResumeConfigStore;
-  riskRegistry: RiskControllerRegistry;
-  roleConfigPanel: ReturnType<typeof createRoleConfigPanel>;
+  riskRegistry?: RiskControllerRegistry;
+  roleConfigPanel?: ReturnType<typeof createRoleConfigPanel>;
   roleConfigStore: RoleConfigStore;
   roleLlm: (roleId: string) => ChatLlmClient;
-  rolePromptProvider: ReturnType<typeof createRolePromptProvider>;
-  server: EdgeCloudServer;
+  rolePromptProvider?: ReturnType<typeof createRolePromptProvider>;
+  server?: EdgeCloudServer;
   sessionConfigStore: SessionConfigStore;
-  sessionLimitPanel: ReturnType<typeof createSessionLimitPanel>;
+  sessionLimitPanel?: ReturnType<typeof createSessionLimitPanel>;
   tokenUsageStore: TokenUsageStore;
-  triggerPublishDispatchOnApprove: (requestId: string) => void;
+  triggerPublishDispatchOnApprove?: (requestId: string) => void;
   valuableCommentStore: ValuableCommentStore | undefined;
   writeApprovalDecision: (requestId: string, approved: boolean, payload: PublishApprovalPayload, context: ApprovalDecisionContext) => Promise<{ written: boolean; alreadyDecided?: boolean; }>;
 }
@@ -5297,7 +5297,15 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           new PublishGenerationHttpClient(
             new InternalHttpClient(generationBaseUrl, { timeoutMs: INTERNAL_HTTP_TIMEOUT_CEILING_MS }),
           )
-        : ctx.publishOrchestrator;
+        : // 批次 0e：local 分支取内容段构造的编排器。automation 模式没跑内容段 ⇒ 它是 undefined，
+          // 此前直接落穿成端口本体：每次发帖在调用点炸 TypeError、被上层 catch 归一成「失败」，
+          // 而启动日志照打「已就绪」—— 排期发帖 100% 失败且**小时格幂等票在触发前就已认领**，
+          // 失败一次就烧掉那一小时。改为响亮抛错并点名该配 http 传输，绝不静默回落。
+          requireSegment(
+            ctx.publishOrchestrator,
+            'publishOrchestrator（跑自动化段但没跑内容段时，须设 AIDCP_GENERATION_TRANSPORT=http + AIDCP_GATEWAY_BASE_URL 指向 content 服务）',
+            'content',
+          );
     ctx.publishScheduler = new PublishScheduler({
       conceptStore,
       likedStore: likedNoteStore,
@@ -5893,6 +5901,39 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   ctx.triggerPublishDispatchOnApprove = triggerPublishDispatchOnApprove;
 }
 
+/**
+ * 跨段依赖的**取用闸**（Block④ 三仓提取 · 批次 0e）。
+ *
+ * `CompositionContext` 的字段现已按「在哪一段被赋值」如实声明：基础段 74 个保持非可选，
+ * 只在内容段（3）/自动化段（38）赋值的一律可选 —— **本进程没跑那一段，字段就是 `undefined`**。
+ *
+ * 此前它们全声明成非可选、而上下文由 `{} as CompositionContext` 造出，等于**类型系统在替谎言背书**：
+ * `npm run typecheck` 对「api 模式下 47 个字段根本没被赋值」完全失明（全仓也没有任何一条测试
+ * 跑过 api 模式启动），落到运行时就是裸 TypeError —— 被上层 catch 归一成「失败」，而启动日志照打「已就绪」。
+ * 改成可选后编译器一次性列出 33 处未守卫使用点，本闸就是逐处收口用的。
+ *
+ * 两个形态，按「什么时候才需要它」选：
+ *   - {@link requireSegment}：**构造期**就要。缺了带字段名与来源段响亮抛错 —— 宁可这个模式起不来，
+ *     也不让 `undefined` 落穿到运行时。错误里点名缺什么，下一批补跨进程端口时照着做。
+ *   - {@link unavailableInMode}：**请求期**才调用（惰性闭包里）。缺了返回一个 reject 具名错误的函数，
+ *     让那条路由诚实失败、其余路由照常 —— 命名照本段既有的 `*_unavailable_in_api_mode` 范式。
+ *
+ * MUST NOT 用空对象、`?? null` 或吞掉错误的默认值收口：那正是本仓头号红线「静默假成功」。
+ */
+function requireSegment<T>(value: T | undefined, field: string, segment: string): T {
+  if (value === undefined) {
+    throw new Error(
+      `composition_dependency_unavailable: ${field}（由 ${segment} 段构造，本进程未运行该段）`,
+    );
+  }
+  return value;
+}
+
+/** 请求期才用的跨段依赖：缺了返回 reject 具名错误的函数，绝不返回 undefined 让调用点炸成 TypeError。 */
+function unavailableInMode(field: string): (...args: never[]) => Promise<never> {
+  return () => Promise.reject(new Error(`${field}_unavailable_in_this_service_mode`));
+}
+
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
   const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, billingPriceRefresh, botChatStore, botChatsProvider, buildModelConfigView, buildTodayUsageForAccount, captchaAssist, categoryConfigPanel, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigPanel, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigPanel, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, probeModel, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigPanel, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigPanel, riskRegistry, roleConfigPanel, rolePromptProvider, server, sessionLimitPanel, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
   // ── Block② 2e：运行模式（纯选择器，与 main() 同源）。segD 只在 monolith / api / core 跑。─────
@@ -5907,14 +5948,22 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   //     base URL 走 AIDCP_AUTOMATION_URL；缺省回落 127.0.0.1:<默认端口>（仅解析 URL、不发网络，构造不抛）。
   const automationBaseUrl =
     readEnvString('AIDCP_AUTOMATION_URL') ?? `http://127.0.0.1:${DEFAULT_AUTOMATION_READ_API_PORT}`;
+  // 批次 0e：本地分支依赖 riskRegistry（自动化段构造）。monolith / core 跑了那一段 ⇒ 必有，逐字节等价；
+  // 若某个未来模式既不是 api、又没跑自动化段，这里给 reject 具名错误的端口 —— 绝不让 undefined 落穿。
   const riskRead: RiskReadPort =
     mode === 'api'
       ? new RiskReadHttpClient(new InternalHttpClient(automationBaseUrl))
-      : {
-          getState: (accountId) => riskRegistry.getController(accountId).then((c) => c.getState()),
-          effectiveQuotas: (accountId) => riskRegistry.getController(accountId).then((c) => c.effectiveQuotas()),
-          slowStartView: (accountId) => riskRegistry.getController(accountId).then((c) => c.slowStartView()),
-        };
+      : riskRegistry
+        ? {
+            getState: (accountId) => riskRegistry.getController(accountId).then((c) => c.getState()),
+            effectiveQuotas: (accountId) => riskRegistry.getController(accountId).then((c) => c.effectiveQuotas()),
+            slowStartView: (accountId) => riskRegistry.getController(accountId).then((c) => c.slowStartView()),
+          }
+        : {
+            getState: unavailableInMode('risk_read'),
+            effectiveQuotas: unavailableInMode('risk_read'),
+            slowStartView: unavailableInMode('risk_read'),
+          };
   // 面板对 automation 域的只读投影端口（Block③ L3：面板不直连 automation 的库）。
   //   - monolith / core：跑在本进程 automation 池上的本地实现（PgPanelAutomationRead），逐字节等价、零 HTTP。
   //   - api：segC 未跑 ⇒ 本进程无 automation 属主表；HTTP 客户端待 Block② 补（automation 内部读 API 增面板端点）。
@@ -5975,16 +6024,22 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
       const panel = await startPanelApi(
         {
           interactionInternalApi,
-          interactionPermissions: { getView: () => interactionPermissionOverview },
+          // 批次 0e：三个跨段依赖（互动权限总览 / 风控注册表 / 边缘 WS 服务端）都由自动化段构造，
+          // 面板 deps 侧声明为非可选（src/panel/types.ts）。api 模式没跑那一段 ⇒ 这里响亮抛错、
+          // 由下面的 catch 记成「面板启动失败 + 缺哪个依赖」，而不是启动成功后逐条路由炸 TypeError。
+          // 把它们改成 deps 侧可选 + 逐路由 503 属批次 3（api main()）的范围，需同改 panel/types.ts。
+          interactionPermissions: {
+            getView: () => requireSegment(interactionPermissionOverview, 'interactionPermissionOverview', 'automation'),
+          },
           revocation: new TokenRevocationStore(),
-          riskRegistry,
+          riskRegistry: requireSegment(riskRegistry, 'riskRegistry', 'automation'),
           // change risk-target-follows-active-session：归属跟随当次连接，面板不再有「改归属」端点，
           // 也不按归属禁用风控写（写改回账号级）。currentDriverTarget 只读展示直接来自 panel-store。
           publishLogStore,
           conceptStore,
           botChatStore,
           eventBus,
-          edgeServer: server,
+          edgeServer: requireSegment(server, 'server', 'automation'),
           // Block③ L3：面板自己的读走 api 属主池（accounts/persona_config/publish_log）；
           // automation 属主表（风控/告警/互动）经注入的只读端口取，面板不直连别域的库。
           panelStore: new PgPanelStore({ pool: apiPool, automation: panelAutomationRead }),
@@ -5994,7 +6049,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           publishDispatcher,
           // Block② 数据网关收口：默认 local ⇒ dataGateway.delegatedTaskService === delegatedTaskService，零行为变更。
           delegatedTasks: dataGateway.delegatedTaskService,
-          preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
+          preflightApprovePublish: (requestId) => requireSegment(preflightApprovePublish, 'preflightApprovePublish', 'automation')(requestId),
           writeApprovalSignal: async (requestId, approved, payload, decidedBy) => {
             const result = await writeApprovalDecision(requestId, approved, payload, {
               decidedBy,
@@ -6004,8 +6059,8 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             // 但要通知陪伴界面 rejected（发布卡收起为「暂不发布」）。
             // already-decided 的重复「授权」也走人工批准入口（change parallel-rewrite-drafts）：
             // 熔断中即确认清除恢复 drain；非熔断时由 dispatch 幂等闸（inFlight/status/信号）自然吸收。
-            if (approved && (result.written || result.alreadyDecided === true)) triggerPublishDispatchOnApprove(requestId);
-            else if (!approved && result.written) notifyPublishRejected(requestId);
+            if (approved && (result.written || result.alreadyDecided === true)) requireSegment(triggerPublishDispatchOnApprove, 'triggerPublishDispatchOnApprove', 'automation')(requestId);
+            else if (!approved && result.written) requireSegment(notifyPublishRejected, 'notifyPublishRejected', 'automation')(requestId);
             return result;
           },
           // 授权下发进度投影（change publish-approval-signal-to-database，task 4.6）：
@@ -6034,10 +6089,10 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           publishDraft: {
             edit: (recordId, expectedVersion, patch, editor) =>
               publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
-            liveVersion: readLiveContentVersion,
-            hasDecision: async (recordId) => (await readPublishApproval(`publish-${recordId}`)) !== null,
+            liveVersion: (...a) => requireSegment(readLiveContentVersion, 'readLiveContentVersion', 'automation')(...a),
+            hasDecision: async (recordId) => (await requireSegment(readPublishApproval, 'readPublishApproval', 'automation')(`publish-${recordId}`)) !== null,
           },
-          notifyPublishPreviewChanged: (recordId) => refreshPublishPreview(recordId),
+          notifyPublishPreviewChanged: (recordId) => requireSegment(refreshPublishPreview, 'refreshPublishPreview', 'automation')(recordId),
           // change consolidate-command-face（§4.6.7）：面板账号命令与飞书命令共用同一命令面，账号级
           // pause/resume/恢复 edge 与调度启停不再在此内联第二份，收敛到上方 createCommandFace 一处。
           // commandFace 属 segC（automation·命令下发到边缘）；api 模式本进程无它 ⇒ 守卫成诚实报错桩，
@@ -6074,7 +6129,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                 updatedBy: g?.updatedBy ?? null,
               };
             },
-            listCatalog: () => listAccountAutomationCatalog(),
+            listCatalog: () => requireSegment(listAccountAutomationCatalog, 'listAccountAutomationCatalog', 'automation')(),
             setGlobal: (mask, updatedBy) => contentScheduleStore.setGlobal({ contentActiveMask: mask }, updatedBy),
             setAccount: (accountId, patch, updatedBy) => contentScheduleStore.setAccount(accountId, patch, updatedBy),
             setJoinGroupAutomation: async (accountId, patch, updatedBy) => {
@@ -6127,7 +6182,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           captchaAssist: captchaAssist?.isAvailable() ? captchaAssist : undefined,
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。
           modelConfig: {
-            getView: buildModelConfigView,
+            getView: (...a) => requireSegment(buildModelConfigView, 'buildModelConfigView', 'automation')(...a),
             setModel: async (patch, updatedBy) => {
               const cfg = modelConfigStore.getCached();
               const wantTextModel = typeof patch.textModel === 'string' && patch.textModel.trim() !== '';
@@ -6145,7 +6200,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               if (wantTextModel || wantTextProvider) {
                 const modelToProbe = wantTextModel ? (patch.textModel as string).trim() : cfg.textModel;
                 try {
-                  await probeModel(provider, modelToProbe);
+                  await requireSegment(probeModel, 'probeModel', 'automation')(provider, modelToProbe);
                 } catch (e) {
                   if (e instanceof ProviderKeyMissingError) return { ok: false, reason: 'provider_key_missing' as const };
                   return { ok: false, reason: 'model_invalid' as const };
@@ -6165,7 +6220,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               if (typeof patch.imageProvider === 'string' && patch.imageProvider.trim())
                 storePatch.imageProvider = normImageProvider(patch.imageProvider);
               await modelConfigStore.set(storePatch, updatedBy);
-              return { ok: true, view: await buildModelConfigView() };
+              return { ok: true, view: await requireSegment(buildModelConfigView, 'buildModelConfigView', 'automation')() };
             },
             setCredential: async (provider, field, value, updatedBy) => {
               if (!credentialStore.canEdit()) return { ok: false, reason: 'cred_key_missing' as const };
@@ -6180,7 +6235,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           // 安全限额配置（change safety-quota-config，stream D）。三档×动作×三窗口可改 + 热加载 + 非乐观回真态。
           quotaConfig: quotaConfigPanel,
           // 配置镜像健康只读投影（task 6.4）：每次请求现取，asOf 是数据时刻而非响应时刻。
-          configMirrorHealth: () => configMirrorRefresher.health(),
+          configMirrorHealth: () => requireSegment(configMirrorRefresher, 'configMirrorRefresher', 'automation').health(),
           // 操作兜底 floor 配置（change pacing-floor-config-min-interval）。四类操作最小间隔兜底区间可改 + 热加载 + 非乐观回真态。
           pacingConfig: pacingConfigPanel,
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
@@ -6321,7 +6376,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           onClientOffboardCreated: async (offboard) => {
             // 同上：尚未物化的离场没有可派发的账号，等对账循环补。
             if (!offboard.accountId) return;
-            const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
+            const edgeId = requireSegment(server, 'server', 'automation').resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
           },
         },
@@ -6397,7 +6452,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             viewForAccount: async (accountId) => {
               try {
                 const [dailyUsage, current, last] = await Promise.all([
-                  buildTodayUsageForAccount(accountId),
+                  requireSegment(buildTodayUsageForAccount, 'buildTodayUsageForAccount', 'automation')(accountId),
                   publishLogStore.currentPublishForAccount(accountId),
                   publishLogStore.lastPublishedForAccount(accountId),
                 ]);
@@ -6412,7 +6467,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                   if (current.status === 'submitted') state = 'submitted';
                   else if (current.status === 'scheduled') state = 'approved';
                   else {
-                    const decision = await readPublishApproval(`publish-${current.id}`).catch(() => null);
+                    const decision = await requireSegment(readPublishApproval, 'readPublishApproval', 'automation')(`publish-${current.id}`).catch(() => null);
                     state = decision == null ? 'pending' : decision.approved ? 'approved' : null;
                   }
                   if (state) {
@@ -6449,7 +6504,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               try {
                 const queue = await (dataGateway.publishStatusReader
                   ? dataGateway.publishStatusReader.getStatus()
-                  : publishOrchestrator.getStatus());
+                  : requireSegment(publishOrchestrator, 'publishOrchestrator', 'content').getStatus());
                 // 先按账号过滤 runs，并刻意丢弃全局 aggregate snapshot：终态 snapshot 没有稳定账号键，
                 // 不能让另一账号的最近一轮穿过客户边界；该账号 recent 只以 publish_log 为权威来源。
                 const accountRuns = (queue.runs ?? []).filter((run) => run.accountId === accountId);
@@ -6471,7 +6526,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                   },
                   pending,
                   recent,
-                  inFlightRecordIds: publishDispatcher.getInFlightRecordIds(),
+                  inFlightRecordIds: requireSegment(publishDispatcher, 'publishDispatcher', 'automation').getInFlightRecordIds(),
                   recentLimit: 5,
                   ...(publishApprovalStore
                     ? { approvalDispatch: await readApprovalDispatchProjection([...pending, ...recent]) }
@@ -6489,17 +6544,17 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           publishDraftActions: {
             edit: async (recordId, expectedVersion, patch, accountId, actor) => {
               const result = await publishLogStore.editDraft(recordId, expectedVersion, patch, actor, accountId);
-              if (result.ok) refreshPublishPreview(recordId);
+              if (result.ok) requireSegment(refreshPublishPreview, 'refreshPublishPreview', 'automation')(recordId);
               return result;
             },
-            approve: (payload, accountId, actor) => approvePublishForClient(payload, accountId, actor),
+            approve: (payload, accountId, actor) => requireSegment(approvePublishForClient, 'approvePublishForClient', 'automation')(payload, accountId, actor),
             removeImage: (payload, accountId, actor) =>
-              handlePublishDraftImageRemove(payload, { accountId, actor }),
+              requireSegment(handlePublishDraftImageRemove, 'handlePublishDraftImageRemove', 'automation')(payload, { accountId, actor }),
           },
           draftRefinements: draftRefinementStore,
           // D5 活体佐证（change curated-envkey-account-binding）：不可逆写要求绑定账号此刻活在该环境上。
           // 幸存者 resolveEdgeIdForAccount（account→edge）；反方向的 resolveAccountIdForEdge 已被慢启动 change 删除。
-          resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
+          resolveEdgeIdForAccount: (accountId) => requireSegment(server, 'server', 'automation').resolveEdgeIdForAccount(accountId),
           interactionApi: interactionCustomerApi,
           // 环境配置由 ClientUserStore 直接单写；仅当存在唯一当前账号时，回调读取同一个 controller 的生效投影。
           slowStart: {
@@ -6558,7 +6613,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                   };
                 }
                 // monolith / core：进程内单写，直调本进程 RiskController（与今日逐字节等价）。
-                const result = await (await riskRegistry.getController(accountId)).recoverRestricted(reason);
+                const result = await (await requireSegment(riskRegistry, 'riskRegistry', 'automation').getController(accountId)).recoverRestricted(reason);
                 return {
                   accepted: result.accepted,
                   ...(result.refusal ? { refusal: result.refusal } : {}),
@@ -6574,19 +6629,19 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                 return null;
               }
             },
-            resumeEdgesForAccount: (accountId) => server.resumeEdgesForAccount(accountId),
+            resumeEdgesForAccount: (accountId) => requireSegment(server, 'server', 'automation').resumeEdgesForAccount(accountId),
           },
           persona: {
-            get: (accountId) => accountPersonaService.get(accountId),
-            generate: (input) => accountPersonaService.generate(input),
-            persist: (accountId, soulYaml, updatedBy) => accountPersonaService.persist(accountId, soulYaml, updatedBy),
+            get: (accountId) => requireSegment(accountPersonaService, 'accountPersonaService', 'automation').get(accountId),
+            generate: (input) => requireSegment(accountPersonaService, 'accountPersonaService', 'automation').generate(input),
+            persist: (accountId, soulYaml, updatedBy) => requireSegment(accountPersonaService, 'accountPersonaService', 'automation').persist(accountId, soulYaml, updatedBy),
             platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
           },
           onOffboardCreated: async (offboard) => {
             // accountId 为 null = 已受理、尚未物化（属主还没解析出账号）：此刻没有可派发的目标，
             // MUST NOT 猜一个。对账循环物化成功后会带着真 accountId 再走一次派发。
             if (!offboard.accountId) return;
-            const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
+            const edgeId = requireSegment(server, 'server', 'automation').resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
           },
           personaAutoFill,
