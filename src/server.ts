@@ -657,8 +657,6 @@ interface CompositionContext {
   anyImageKeyPresent: boolean;
   approvalPolicyStore: ApprovalPolicyStore | undefined;
   approvePublishForClient?: ReturnType<typeof createClientPublishApprovalHandler>;
-  billingPriceRefresh: { refresh(): Promise<import("./metrics/billing-price-refresh.js").BillingPriceRefreshResult>; };
-  botChatEventHandler: FeishuBotChatEventHandler;
   botChatsProvider?: ReturnType<typeof createBotChatsProvider>;
   botChatStore: BotChatStore;
   buildTodayUsageForAccount?: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload>;
@@ -684,7 +682,6 @@ interface CompositionContext {
   credentialStore: CredentialStore;
   curatedContentStore: CuratedContentStore | undefined;
   dashscopeApiKey: string | undefined;
-  debugPort: number;
   delegatedTaskService: DelegatedTaskService | undefined;
   delegatedTaskStore: PgDelegatedTaskStore | undefined;
   deploymentTarget: "dev" | "ol" | null;
@@ -704,14 +701,11 @@ interface CompositionContext {
   hotLeadConfigStore: HotLeadConfigStore;
   imageProvider?: RoutingImageProvider;
   interactionCustomerApi?: InteractionCustomerApi | undefined;
-  interactionFeedStore: InteractionFeedStore | undefined;
   // Block② 数据网关：收件箱读侧窄面本地实例（segC 构造），additive 挂 ctx 供 segD 组建 DataGateway 聚合；不改其构造/时机。
   interactionStore?: InteractionStore | undefined;
   interactionInternalApi?: { handle: (req: import("http").IncomingMessage, res: import("http").ServerResponse<import("http").IncomingMessage>, actor: string) => Promise<boolean>; } | undefined;
   interactionOffboarding?: InteractionOffboardingService | undefined;
   interactionPermissionOverview?: ReturnType<typeof buildInteractionPermissionOverview>;
-  lastObservedNoteByAccount: Map<string, { noteId: string; title: string; body: string; mediaType: "image_text" | "video"; author?: string; sourceUrl?: string; topics: string[]; likeCount: number; collectCount: number; referenceImages: CuratedReferenceImageInput[]; publishedAtText?: string; publishedObservedAt?: number; }>;
-  likedNoteStore: LikedNoteStore | undefined;
   listAccountAutomationCatalog?: () => Promise<ContentScheduleCatalogRow[]>;
   llm: QwenClient;
   manualCommentAccounts: Set<string>;
@@ -720,8 +714,6 @@ interface CompositionContext {
   modelConfigStore: ModelConfigStore;
   notificationContactStore: NotificationContactStore | undefined;
   notifyPublishRejected?: (requestId: string) => void;
-  onCommentTakeoverEnd: (accountId: string) => void;
-  onCommentTakeoverStart: (accountId: string) => void;
   ossUploader: ObjectStore | undefined;
   pacingConfigStore: PacingConfigStore;
   panelUsers?: ReturnType<typeof parsePanelUsers>;
@@ -738,28 +730,22 @@ interface CompositionContext {
   publishDispatcher?: PublishDispatcher;
   publishLogStore: PublishLogStore;
   publishOrchestrator?: PublishOrchestrator;
-  publishPipelineLogStore: PublishPipelineLogStore;
   quotaConfigStore: QuotaConfigStore;
-  readApprovalDispatchProjection: (rows: Array<{ id: number; }>) => Promise<Map<number, ApprovalDispatchProjection>>;
   readLiveContentVersion?: (recordId: number) => Promise<number | null>;
   readPublishApproval?: (requestId: string) => Promise<{ approved: boolean; contentVersion: number; } | null>;
   refreshPublishPreview?: (recordId: number) => void;
   resolveAccountChatId: (accountId: string | undefined) => Promise<string>;
   resolveCardChatId: (originChatId: string | undefined | null, accountId: string | undefined) => Promise<string>;
   resolveController?: (accountId: string) => Promise<RiskController>;
-  resolveEffectiveCommentApprovalMode: (accountId: string, sourceMode: "review" | "auto_approve") => Promise<"review" | "auto_approve">;
   resolvePersona: ReturnType<typeof createPersonaResolver>;
-  resolveReviewCardDelivery: (accountId: string) => Promise<{ send: boolean; reason: string; }>;
   resumeConfigStore: ResumeConfigStore;
   riskRegistry?: RiskControllerRegistry;
   roleConfigStore: RoleConfigStore;
-  roleLlm: (roleId: string) => ChatLlmClient;
   rolePromptProvider?: ReturnType<typeof createRolePromptProvider>;
   server?: EdgeCloudServer;
   sessionConfigStore: SessionConfigStore;
   tokenUsageStore: TokenUsageStore;
   triggerPublishDispatchOnApprove?: (requestId: string) => void;
-  valuableCommentStore: ValuableCommentStore | undefined;
   writeApprovalDecision: (requestId: string, approved: boolean, payload: PublishApprovalPayload, context: ApprovalDecisionContext) => Promise<{ written: boolean; alreadyDecided?: boolean; }>;
 }
 
@@ -921,7 +907,6 @@ async function wireOutboxNotifyWakeups(
 
 async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
-  const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
   const deploymentTarget = parseDeploymentTarget(readEnvString('AIDCP_DEPLOY_ENV'));
 
   // schema 契约门（change cloud-schema-migration-executor 任务 6.3）：读迁移账本最高版本，与本构建
@@ -1314,12 +1299,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   } catch (err) {
     console.warn('[aidcp-cloud] token 用量记账初始化失败（用量将不落库，绝不影响 LLM 调用）:', (err as Error).message);
   }
-  // 退出前 flush 末窗（有界 3s，防 PG 不可达时 close 挂住退出）。
-  const billingPriceRefresh = createBillingPriceRefresh({
-    tokenUsage: tokenUsageStore,
-    credentials: credentialStore,
-    env: process.env,
-  });
 
   const flushTokenUsageOnExit = (sig: string): void => {
     console.log(`[aidcp-cloud] 收到 ${sig}，flush token 用量后退出`);
@@ -1363,14 +1342,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
       }
     },
   });
-  // 发布链 token 账号归属（change parallel-rewrite-drafts 显式归账）：每个发布角色的 LLM 调用从当轮黑板
-  // 显式带 accountId（BasePublishRole.accountIdFrom），并发生成各轮各归各账。原「当前发布账号」进程级
-  // 单槽已退役——红线：MUST NOT 重新引入共享可变槽推断当前账号（并发轮互踩记账）。
-  // 把共享文本客户端按角色绑定成 thin wrapper（发布侧用）：只补 role，账号由调用方显式携带。
-  const roleLlm = (roleId: string): ChatLlmClient => ({
-    complete: (prompt, opts) => llm.complete(prompt, { ...opts, role: opts?.role ?? roleId }),
-    chat: (messages, opts) => llm.chat(messages, { ...opts, role: opts?.role ?? roleId }),
-  });
   const planner = new SimplePlanner({ llm });
   const cache = new PgAnchorCache({
     pool: automationPool,
@@ -1383,7 +1354,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   });
 
   const botChatStore = new BotChatStore({ pool: apiPool });
-  const botChatEventHandler = new FeishuBotChatEventHandler(botChatStore);
 
   // 探测 schema（不再建表，change cloud-schema-migration-executor 第 5 节）；
   // PG 不可用时打印告警但不阻塞启动协议处理。缺对象与连不上库分别报出，MUST NOT 混成一句通用 warn。
@@ -1410,22 +1380,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
-  // 发布角色执行日志（publish_pipeline_logs 表，change publish-pipeline-observability）：复用同库连接配置。
-  // 表由 migration 0004 已建,无需 init;写入 best-effort、不阻塞发布。注入给 PublishOrchestrator 当 pipelineLogSink。
-  const publishPipelineLogStore = new PublishPipelineLogStore({
-    pool: apiPool,
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
-  });
-  try {
-    await publishLogStore.init();
-    console.log('[aidcp-cloud] PublishLogStore 已就绪');
-  } catch (err) {
-    console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
-  }
 
   // ── 人审授权的持久权威（change publish-approval-signal-to-database）────────────────────────
   // 授权这一位过去躺在本机文件 /tmp/aidcp-publish-approve-<requestId>.json 上：写方（飞书/后台/客户端/
@@ -1493,30 +1447,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
    * 一批稿件的授权下发进度（投影用，task 4.6）。未接线 / 读失败 → 空表，投影不带下发态字段、
    * 前端回落既有呈现。MUST NOT 因读不到就伪造一个「无阻塞」的下发态。
    */
-  const readApprovalDispatchProjection = async (
-    rows: Array<{ id: number }>,
-  ): Promise<Map<number, ApprovalDispatchProjection>> => {
-    const out = new Map<number, ApprovalDispatchProjection>();
-    if (!publishApprovalStore) return out;
-    const ids = [...new Set(rows.map((row) => row.id))];
-    if (ids.length === 0) return out;
-    try {
-      const active = await publishApprovalStore.readActiveMany(ids.map((id) => `publish-${id}`));
-      for (const [requestId, row] of active) {
-        const match = /^publish-(\d+)$/.exec(requestId);
-        if (!match) continue;
-        out.set(Number(match[1]), {
-          approved: row.approved,
-          dispatchState: row.dispatchState,
-          dispatchBlockedReason: row.dispatchBlockedReason,
-          decidedAt: row.decidedAt,
-        });
-      }
-    } catch (err) {
-      console.warn('[aidcp-cloud] 授权下发进度读取失败（投影回落既有呈现）:', (err as Error).message);
-    }
-    return out;
-  };
 
   /**
    * 授权写出口的对外形状（沿用 `ApprovalWriteResult`）。未接线（PG 不可用 / target 缺失）时**诚实抛错**，
@@ -1564,42 +1494,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   let firstPostCoordinator: FirstPostOnboardingCoordinator | undefined;
 
 
-  // 点赞笔记存储（liked_notes 表，发帖来源血缘）。init 失败留 undefined（血缘退化、不阻塞启动）。
-  let likedNoteStore: LikedNoteStore | undefined;
-  try {
-    const ls = new LikedNoteStore({
-      pool: automationPool,
-      host: readEnvString('PGHOST'),
-      port: readEnvPort('PGPORT'),
-      database: readEnvString('PGDATABASE'),
-      user: readEnvString('PGUSER'),
-      password: readEnvString('PGPASSWORD'),
-    });
-    await ls.init();
-    likedNoteStore = ls;
-    console.log('[aidcp-cloud] LikedNoteStore 已就绪（liked_notes 表）');
-  } catch (err) {
-    console.warn('[aidcp-cloud] LikedNoteStore 初始化失败，来源血缘退化:', (err as Error).message);
-  }
 
-  // 优质评论语料库（valuable_comments 表，comment-like-on-detail B）。
-  // init 失败留 undefined（语料库退化：不归档、撰写不注入参考，不崩闭环）。
-  let valuableCommentStore: ValuableCommentStore | undefined;
-  try {
-    const vs = new ValuableCommentStore({
-      pool: automationPool,
-      host: readEnvString('PGHOST'),
-      port: readEnvPort('PGPORT'),
-      database: readEnvString('PGDATABASE'),
-      user: readEnvString('PGUSER'),
-      password: readEnvString('PGPASSWORD'),
-    });
-    await vs.init();
-    valuableCommentStore = vs;
-    console.log('[aidcp-cloud] ValuableCommentStore 已就绪（valuable_comments 表）');
-  } catch (err) {
-    console.warn('[aidcp-cloud] ValuableCommentStore 初始化失败，评论语料库退化:', (err as Error).message);
-  }
 
   // 通知联系人名册（notification-contact-registry，迁移 0016）：记录给本账号发过通知的人（评论/@/点赞/收藏/关注）。
   // 无条件接线（核心特性）；init 失败留 undefined（记录与面板退化，绝不崩闭环）。
@@ -1632,23 +1527,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     console.warn('[aidcp-cloud] GroupRouteStore 初始化失败，团队路由退化（一律落默认群）:', (err as Error).message);
   }
 
-  // 面板互动流展示账本（change interaction-feed-enrichment）。init 失败留 undefined（面板互动表退化为空、绝不崩闭环）。
-  let interactionFeedStore: InteractionFeedStore | undefined;
-  try {
-    const ifs = new InteractionFeedStore({
-      pool: automationPool,
-      host: readEnvString('PGHOST'),
-      port: readEnvPort('PGPORT'),
-      database: readEnvString('PGDATABASE'),
-      user: readEnvString('PGUSER'),
-      password: readEnvString('PGPASSWORD'),
-    });
-    await ifs.init();
-    interactionFeedStore = ifs;
-    console.log('[aidcp-cloud] InteractionFeedStore 已就绪（interaction_feed / interaction_target_meta 表）');
-  } catch (err) {
-    console.warn('[aidcp-cloud] InteractionFeedStore 初始化失败，面板互动流退化:', (err as Error).message);
-  }
 
   // 精选灵感语料（curated_content 表，change curated-inspiration-corpus）。过门槛的高价值笔记落详细行，
   // 作发帖创作正向素材来源。init 失败留 undefined（不捕获、创作回落旧路径，绝不崩闭环）。
@@ -1676,25 +1554,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   }
 
 
-  // 「本账号最近观测到的笔记内容」缓存（change curated-inspiration-corpus）：collect 通常在 note.detail 之后、
-  // 同访问内发生，自有收藏自动纳入精选时据此补建正文。仅留最近一条/账号，内存态、丢失无害（取不到则不补建空正文壳行）。
-  const lastObservedNoteByAccount = new Map<
-    string,
-    {
-      noteId: string;
-      title: string;
-      body: string;
-      mediaType: 'image_text' | 'video';
-      author?: string;
-      sourceUrl?: string;
-      topics: string[];
-      likeCount: number;
-      collectCount: number;
-      referenceImages: CuratedReferenceImageInput[];
-      publishedAtText?: string;
-      publishedObservedAt?: number;
-    }
-  >();
 
   // 概念池存储（concepts 表，跨会话搜索记忆）。init 失败则留 undefined：
   // RoleDispatcher 不注册概念抽取角色、搜索退化为仅 seed_keywords（不崩闭环）。
@@ -1732,12 +1591,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 生命周期；自动排期 priority=automatic 不进入集合。
   // 注：只覆盖 XHS 手动评论（withManualCommitMarker 那条路）；FB 手动 /comment 从不进本集合。
   const manualCommentAccounts = new Set<string>();
-  const onCommentTakeoverStart = (accountId: string): void => {
-    manualCommentAccounts.add(accountId);
-  };
-  const onCommentTakeoverEnd = (accountId: string): void => {
-    manualCommentAccounts.delete(accountId);
-  };
 
   // 事件总线
   const eventBus = new EventBus();
@@ -1837,45 +1690,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   }
   // 启动加载持久化暂停态进内存缓存：被暂停账号重启后仍为 paused，不静默复活。
   const accountState = new AccountStateManager(accountStore);
-  const resolveEffectiveCommentApprovalMode = async (
-    accountId: string,
-    sourceMode: 'review' | 'auto_approve',
-  ): Promise<'review' | 'auto_approve'> => {
-    if (!approvalPolicyStore) return sourceMode;
-    try {
-      const accountMode: AccountCommentApprovalMode = await approvalPolicyStore.getAccountCommentMode(accountId);
-      return accountMode === 'auto_approve_all' ? 'auto_approve' : sourceMode;
-    } catch (error) {
-      console.warn(
-        `[approval-policy] 评论策略读取失败，回落来源模式 account=${accountId} sourceMode=${sourceMode}: ${(error as Error).message}`,
-      );
-      return sourceMode;
-    }
-  };
 
-  const resolveReviewCardDelivery = async (accountId: string): Promise<{ send: boolean; reason: string }> => {
-    if (!approvalPolicyStore) return { send: true, reason: 'policy_store_unavailable' };
-    let policy: Awaited<ReturnType<ApprovalPolicyStore['getGroupPublishPolicyForAccount']>>;
-    try {
-      policy = await approvalPolicyStore.getGroupPublishPolicyForAccount(accountId);
-    } catch (error) {
-      console.warn(`[approval-policy] 分组稿件策略读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
-      return { send: true, reason: 'policy_read_failed' };
-    }
-    if (policy.delivery !== 'client_only') return { send: true, reason: 'client_and_feishu' };
-    if (!policy.groupLabel) return { send: true, reason: 'account_group_missing' };
-    try {
-      const reachability = await clientUserStore.hasEnabledClientApprovalReachability(accountId);
-      if (reachability.reachable) return { send: false, reason: 'suppressed_by_client_only_policy' };
-      console.warn(
-        `[approval-policy] client_only 账号客户审批归属不可证，保留飞书卡 account=${accountId} group=${policy.groupLabel} reason=${reachability.reason}`,
-      );
-      return { send: true, reason: `client_reachability_${reachability.reason}` };
-    } catch (error) {
-      console.warn(`[approval-policy] 客户审批归属读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
-      return { send: true, reason: 'client_reachability_read_failed' };
-    }
-  };
   await accountState.init();
   const accountDisplayName = (accountId: string): string | undefined => {
     const display = accountStore?.getDisplayName?.(accountId);
@@ -2135,8 +1950,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // Block② 2e：飞书出站信使上提至恒跑的 segA（automation 模式也需要它）；FeishuMessenger 构造纯（只赋默认值、无网络/定时器）。
   const messenger = new FeishuMessenger();
 
-  ctx.billingPriceRefresh = billingPriceRefresh;
-  ctx.botChatEventHandler = botChatEventHandler;
   ctx.botChatStore = botChatStore;
   ctx.cache = cache;
   ctx.categoryConfigStore = categoryConfigStore;
@@ -2147,7 +1960,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.contentScheduleStore = contentScheduleStore;
   ctx.credentialStore = credentialStore;
   ctx.dashscopeApiKey = dashscopeApiKey;
-  ctx.debugPort = debugPort;
   ctx.deploymentTarget = deploymentTarget;
   ctx.draftRefinementStore = draftRefinementStore;
   ctx.facebookCommentAuditStore = facebookCommentAuditStore;
@@ -2169,12 +1981,9 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.publishApprovalClient = publishApprovalClient;
   ctx.publishApprovalStore = publishApprovalStore;
   ctx.publishLogStore = publishLogStore;
-  ctx.publishPipelineLogStore = publishPipelineLogStore;
   ctx.quotaConfigStore = quotaConfigStore;
-  ctx.readApprovalDispatchProjection = readApprovalDispatchProjection;
   ctx.resumeConfigStore = resumeConfigStore;
   ctx.roleConfigStore = roleConfigStore;
-  ctx.roleLlm = roleLlm;
   ctx.sessionConfigStore = sessionConfigStore;
   ctx.tokenUsageStore = tokenUsageStore;
   ctx.writeApprovalDecision = writeApprovalDecision;
@@ -2193,23 +2002,15 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.firstPostOnboardingStore = firstPostOnboardingStore;
   ctx.getSoul = getSoul;
   ctx.groupRouteStore = groupRouteStore;
-  ctx.interactionFeedStore = interactionFeedStore;
-  ctx.lastObservedNoteByAccount = lastObservedNoteByAccount;
-  ctx.likedNoteStore = likedNoteStore;
   ctx.manualCommentAccounts = manualCommentAccounts;
   ctx.messenger = messenger;
   ctx.notificationContactStore = notificationContactStore;
-  ctx.onCommentTakeoverEnd = onCommentTakeoverEnd;
-  ctx.onCommentTakeoverStart = onCommentTakeoverStart;
   ctx.personaAutoFillStore = personaAutoFillStore;
   ctx.personaPanel = personaPanel;
   ctx.personaStore = personaStore;
   ctx.resolveAccountChatId = resolveAccountChatId;
   ctx.resolveCardChatId = resolveCardChatId;
-  ctx.resolveEffectiveCommentApprovalMode = resolveEffectiveCommentApprovalMode;
   ctx.resolvePersona = resolvePersona;
-  ctx.resolveReviewCardDelivery = resolveReviewCardDelivery;
-  ctx.valuableCommentStore = valuableCommentStore;
 }
 
 async function segBContent(ctx: CompositionContext): Promise<void> {
@@ -2229,13 +2030,63 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     ossUploader,
     providerRuntime,
     publishLogStore,
-    publishPipelineLogStore,
     resolveCardChatId,
-    resolveReviewCardDelivery,
-    roleLlm,
     tokenUsageStore,
     writeApprovalDecision,
+    approvalPolicyStore,
+    clientUserStore,
+    apiPool,
   } = ctx;
+  // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
+  // 判据三条全中才搬：① segA 赋值 ② 只有本段读 ③ **segA 自己不再引用它**。
+  // segA 仍引用的一律留在 segA（含声明前就被惰性回调捕获的**前向引用**，那类最阴）。
+  // 发布链 token 账号归属（change parallel-rewrite-drafts 显式归账）：每个发布角色的 LLM 调用从当轮黑板
+  // 显式带 accountId（BasePublishRole.accountIdFrom），并发生成各轮各归各账。原「当前发布账号」进程级
+  // 单槽已退役——红线：MUST NOT 重新引入共享可变槽推断当前账号（并发轮互踩记账）。
+  // 把共享文本客户端按角色绑定成 thin wrapper（发布侧用）：只补 role，账号由调用方显式携带。
+  const roleLlm = (roleId: string): ChatLlmClient => ({
+    complete: (prompt, opts) => llm.complete(prompt, { ...opts, role: opts?.role ?? roleId }),
+    chat: (messages, opts) => llm.chat(messages, { ...opts, role: opts?.role ?? roleId }),
+  });
+  // 发布角色执行日志（publish_pipeline_logs 表，change publish-pipeline-observability）：复用同库连接配置。
+  // 表由 migration 0004 已建,无需 init;写入 best-effort、不阻塞发布。注入给 PublishOrchestrator 当 pipelineLogSink。
+  const publishPipelineLogStore = new PublishPipelineLogStore({
+    pool: apiPool,
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
+  try {
+    await publishLogStore.init();
+    console.log('[aidcp-cloud] PublishLogStore 已就绪');
+  } catch (err) {
+    console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
+  }
+  const resolveReviewCardDelivery = async (accountId: string): Promise<{ send: boolean; reason: string }> => {
+    if (!approvalPolicyStore) return { send: true, reason: 'policy_store_unavailable' };
+    let policy: Awaited<ReturnType<ApprovalPolicyStore['getGroupPublishPolicyForAccount']>>;
+    try {
+      policy = await approvalPolicyStore.getGroupPublishPolicyForAccount(accountId);
+    } catch (error) {
+      console.warn(`[approval-policy] 分组稿件策略读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
+      return { send: true, reason: 'policy_read_failed' };
+    }
+    if (policy.delivery !== 'client_only') return { send: true, reason: 'client_and_feishu' };
+    if (!policy.groupLabel) return { send: true, reason: 'account_group_missing' };
+    try {
+      const reachability = await clientUserStore.hasEnabledClientApprovalReachability(accountId);
+      if (reachability.reachable) return { send: false, reason: 'suppressed_by_client_only_policy' };
+      console.warn(
+        `[approval-policy] client_only 账号客户审批归属不可证，保留飞书卡 account=${accountId} group=${policy.groupLabel} reason=${reachability.reason}`,
+      );
+      return { send: true, reason: `client_reachability_${reachability.reason}` };
+    } catch (error) {
+      console.warn(`[approval-policy] 客户审批归属读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
+      return { send: true, reason: 'client_reachability_read_failed' };
+    }
+  };
 
   // 去 AI 味后处理器
   const postProcessor = new PostProcessor({
@@ -2548,7 +2399,103 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, apiPool, botChatEventHandler, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, automationPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, interactionFeedStore, lastObservedNoteByAccount, likedNoteStore, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, onCommentTakeoverEnd, onCommentTakeoverStart, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolveEffectiveCommentApprovalMode, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, valuableCommentStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, apiPool, approvalPolicyStore, automationPool, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
+  // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
+  // 判据三条全中才搬：① segA 赋值 ② 只有本段读 ③ **segA 自己不再引用它**。
+  // segA 仍引用的一律留在 segA（含声明前就被惰性回调捕获的**前向引用**，那类最阴）。
+  const botChatEventHandler = new FeishuBotChatEventHandler(botChatStore);
+  // 点赞笔记存储（liked_notes 表，发帖来源血缘）。init 失败留 undefined（血缘退化、不阻塞启动）。
+  let likedNoteStore: LikedNoteStore | undefined;
+  try {
+    const ls = new LikedNoteStore({
+      pool: automationPool,
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await ls.init();
+    likedNoteStore = ls;
+    console.log('[aidcp-cloud] LikedNoteStore 已就绪（liked_notes 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] LikedNoteStore 初始化失败，来源血缘退化:', (err as Error).message);
+  }
+  // 优质评论语料库（valuable_comments 表，comment-like-on-detail B）。
+  // init 失败留 undefined（语料库退化：不归档、撰写不注入参考，不崩闭环）。
+  let valuableCommentStore: ValuableCommentStore | undefined;
+  try {
+    const vs = new ValuableCommentStore({
+      pool: automationPool,
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await vs.init();
+    valuableCommentStore = vs;
+    console.log('[aidcp-cloud] ValuableCommentStore 已就绪（valuable_comments 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] ValuableCommentStore 初始化失败，评论语料库退化:', (err as Error).message);
+  }
+  // 面板互动流展示账本（change interaction-feed-enrichment）。init 失败留 undefined（面板互动表退化为空、绝不崩闭环）。
+  let interactionFeedStore: InteractionFeedStore | undefined;
+  try {
+    const ifs = new InteractionFeedStore({
+      pool: automationPool,
+      host: readEnvString('PGHOST'),
+      port: readEnvPort('PGPORT'),
+      database: readEnvString('PGDATABASE'),
+      user: readEnvString('PGUSER'),
+      password: readEnvString('PGPASSWORD'),
+    });
+    await ifs.init();
+    interactionFeedStore = ifs;
+    console.log('[aidcp-cloud] InteractionFeedStore 已就绪（interaction_feed / interaction_target_meta 表）');
+  } catch (err) {
+    console.warn('[aidcp-cloud] InteractionFeedStore 初始化失败，面板互动流退化:', (err as Error).message);
+  }
+  // 「本账号最近观测到的笔记内容」缓存（change curated-inspiration-corpus）：collect 通常在 note.detail 之后、
+  // 同访问内发生，自有收藏自动纳入精选时据此补建正文。仅留最近一条/账号，内存态、丢失无害（取不到则不补建空正文壳行）。
+  const lastObservedNoteByAccount = new Map<
+    string,
+    {
+      noteId: string;
+      title: string;
+      body: string;
+      mediaType: 'image_text' | 'video';
+      author?: string;
+      sourceUrl?: string;
+      topics: string[];
+      likeCount: number;
+      collectCount: number;
+      referenceImages: CuratedReferenceImageInput[];
+      publishedAtText?: string;
+      publishedObservedAt?: number;
+    }
+  >();
+  const onCommentTakeoverStart = (accountId: string): void => {
+    manualCommentAccounts.add(accountId);
+  };
+  const onCommentTakeoverEnd = (accountId: string): void => {
+    manualCommentAccounts.delete(accountId);
+  };
+  const resolveEffectiveCommentApprovalMode = async (
+    accountId: string,
+    sourceMode: 'review' | 'auto_approve',
+  ): Promise<'review' | 'auto_approve'> => {
+    if (!approvalPolicyStore) return sourceMode;
+    try {
+      const accountMode: AccountCommentApprovalMode = await approvalPolicyStore.getAccountCommentMode(accountId);
+      return accountMode === 'auto_approve_all' ? 'auto_approve' : sourceMode;
+    } catch (error) {
+      console.warn(
+        `[approval-policy] 评论策略读取失败，回落来源模式 account=${accountId} sourceMode=${sourceMode}: ${(error as Error).message}`,
+      );
+      return sourceMode;
+    }
+  };
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
   // 现役路径用其 default controller（单一来源，避免双 controller 写同一 risk_state）；PG 不可用则现役回退内存态。
   // PgRiskStore 单例：既喂 registry（按账号风控单写），又作 InteractionStore 接线孤儿
@@ -5867,7 +5814,7 @@ function unavailableInMode(field: string): (...args: never[]) => Promise<never> 
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, billingPriceRefresh, botChatStore, botChatsProvider, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, debugPort, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readApprovalDispatchProjection, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, botChatStore, botChatsProvider, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commandFace, commentScheduler, conceptStore, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
   // ── Block④ 三仓提取 · 批次 0c：面板配置外观从 segC 上提到本段 ────────────────────────
   // 判据＝**构造只依赖 segA**（llm / modelConfigStore / 六个配置 store 全在 segA）。它们只被本段消费，
   // 原先建在 segC 再经 ctx 绕一圈回来 —— 那让 api 模式白白依赖 automation 段。就地建，零跨段依赖。
@@ -5959,6 +5906,40 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   // ── Block② 2e：运行模式（纯选择器，与 main() 同源）。segD 只在 monolith / api / core 跑。─────
   const mode = serviceModeFromEnv();
   const { deploymentTarget } = ctx; // 'dev'|'ol'|null（segA 设）；outbox emit / 消费的 executionTarget。
+  // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
+  // 判据三条全中才搬：① segA 赋值 ② 只有本段读 ③ **segA 自己不再引用它**。
+  // segA 仍引用的一律留在 segA（含声明前就被惰性回调捕获的**前向引用**，那类最阴）。
+  const debugPort = Number(process.env.AIDCP_DEBUG_PORT ?? 8788);
+  // 退出前 flush 末窗（有界 3s，防 PG 不可达时 close 挂住退出）。
+  const billingPriceRefresh = createBillingPriceRefresh({
+    tokenUsage: tokenUsageStore,
+    credentials: credentialStore,
+    env: process.env,
+  });
+  const readApprovalDispatchProjection = async (
+    rows: Array<{ id: number }>,
+  ): Promise<Map<number, ApprovalDispatchProjection>> => {
+    const out = new Map<number, ApprovalDispatchProjection>();
+    if (!publishApprovalStore) return out;
+    const ids = [...new Set(rows.map((row) => row.id))];
+    if (ids.length === 0) return out;
+    try {
+      const active = await publishApprovalStore.readActiveMany(ids.map((id) => `publish-${id}`));
+      for (const [requestId, row] of active) {
+        const match = /^publish-(\d+)$/.exec(requestId);
+        if (!match) continue;
+        out.set(Number(match[1]), {
+          approved: row.approved,
+          dispatchState: row.dispatchState,
+          dispatchBlockedReason: row.dispatchBlockedReason,
+          decidedAt: row.decidedAt,
+        });
+      }
+    } catch (err) {
+      console.warn('[aidcp-cloud] 授权下发进度读取失败（投影回落既有呈现）:', (err as Error).message);
+    }
+    return out;
+  };
   // 面板用户名单在 segB/segC 才解析（parsePanelUsers）；api 模式跳过那两段 ⇒ ctx.panelUsers 恒 undefined。
   // 就地按同一 env 重解析（守卫：缺则面板启动读 config.users.length 会 NPE）；monolith/core 下 ctx.panelUsers 已有 ⇒ 短路、逐字节等价。
   const panelUsers = ctx.panelUsers ?? parsePanelUsers(readEnvString('AIDCP_PANEL_USERS'));
