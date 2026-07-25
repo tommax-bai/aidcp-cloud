@@ -365,6 +365,9 @@ import {
   RISK_COMMAND_RETENTION_MS,
   RISK_COMMAND_TOPIC,
 } from './transport/risk-command-outbox.js';
+import { PgRiskCommandService } from './risk/risk-command-service.js';
+import { RiskCommandHttpClient, registerRiskCommandRoutes } from './transport/risk-command-http.js';
+import type { RiskCommandPort } from './kernel/risk-command-types.js';
 import {
   bridgeEventBusToOutbox,
   PanelEventReplay,
@@ -758,6 +761,8 @@ interface CompositionContext {
   resolvePersona: ReturnType<typeof createPersonaResolver>;
   resumeConfigStore: ResumeConfigStore;
   riskRegistry?: RiskControllerRegistry;
+  /** 风控写命令服务（P5-1）：segC 构造（提交 + 结果账本），segD 注入面板。 */
+  riskCommandService?: PgRiskCommandService;
   roleConfigStore: RoleConfigStore;
   rolePromptProvider?: ReturnType<typeof createRolePromptProvider>;
   server?: EdgeCloudServer;
@@ -815,11 +820,15 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
 }
 
 /**
- * automation 进程独占的内部只读 API：把本进程 RiskControllerRegistry 的账号维只读投影
+ * automation 进程独占的内部 API：把本进程 RiskControllerRegistry 的账号维只读投影
  * （getState / effectiveQuotas / slowStartView）暴露为内部 HTTP route，供 api 进程经 RiskReadHttpClient 远程取。
  * 仅 automation 模式调用（monolith/core 的 segD 走本地适配、不需 HTTP；content/api 无 registry）。
- * **只读、零写方法**——传输层无从引入任何风控写路径（红线：风控单写仍只在本进程 RiskController）。
  * registry 缺失（segC 未构造）时不静默假成功：如实告警、不注册路由。
+ *
+ * **这里注册的写端点只有「提交命令 + 回读结局」两类**（change cloud-coupling-phase5 P5-1）：
+ * 提交只落 outbox 行、回读只查结果账本，二者都不碰 `RiskController`。真正改状态的三个方法
+ * 仍只在本进程 outbox 消费者的那一处回调里被调用——风控单写不变量在进程边界上物理成立。
+ * 风控命令服务缺失（target 非法）时同样不注册：宁可 api 侧调用报 404，也绝不受理一条没人应用的命令。
  */
 async function startAutomationReadApi(ctx: CompositionContext): Promise<void> {
   const registry = ctx.riskRegistry;
@@ -835,8 +844,13 @@ async function startAutomationReadApi(ctx: CompositionContext): Promise<void> {
   const port = readEnvPort('AIDCP_AUTOMATION_PORT') ?? DEFAULT_AUTOMATION_READ_API_PORT;
   const httpServer = new InternalHttpServer();
   registerRiskReadRoutes(httpServer, local);
+  const commandService = ctx.riskCommandService;
+  if (commandService) registerRiskCommandRoutes(httpServer, commandService);
+  else console.warn('[aidcp-cloud] risk-command 端点未注册：AIDCP_DEPLOY_ENV 缺失/非法，命令无人应用故不受理');
   const actual = await httpServer.listen(port);
-  console.log(`[aidcp-cloud] automation 内部只读 API 已监听 127.0.0.1:${actual}（risk-read 端点）`);
+  console.log(
+    `[aidcp-cloud] automation 内部 API 已监听 127.0.0.1:${actual}（risk-read${commandService ? ' + risk-command' : ''} 端点）`,
+  );
 }
 
 /**
@@ -2790,34 +2804,53 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   };
   console.log('[aidcp-cloud] RiskControllerRegistry 已就绪（按真实账号懒解析，PgRiskStore 持久化）');
 
-  // ── Block② 2e：拆段传输接线（非 monolith 才启用；monolith 逐字节等价、不起任何新东西）──────
-  // automation/core（segC 运行 + 有合法 target）下：
-  //   ① 风控命令消费者——把 api 侧 emit 的风控写命令，交本进程唯一的 RiskController 应用（单写落地点）。
+  // ── Block② 2e：拆段传输接线 ────────────────────────────────────────────────
+  //   ① 风控命令消费者——把提交侧 emit 的风控写命令，交本进程唯一的 RiskController 应用（单写落地点）。
   //   ② EventBus → outbox 桥——把本进程编排事件 tee 到 panel.event 主题，供 api 进程回放给 panel-ws。
   //      **仅当面板确实在另一个进程时才接**（判定收口在 panelEventTransportForMode）：core 下 panel-ws
   //      与产生端同进程、EventBus 直连，此处再 tee 就是往共库的生产 PG 满速率写无人消费的废行。
-  // monolith 下两者都 MUST NOT 起（EventBus 仍进程内直连 panel-ws；无独立 api 进程 emit 命令）。
+  //
+  // **① 不再按 seamMode 分叉（change cloud-coupling-phase5 P5-1）**：面板的风控写从今天起一律走这条
+  // 异步通道，monolith 也不例外。原先「monolith 不起消费者」的前提是「monolith 下没人 emit」——
+  // 那个前提已经不成立。若这里仍按 seamMode 跳过，面板提交完命令**没有任何人会应用它**：
+  // 操作员看到 202、状态永远不变、日志里一个字都不会提（红线：静默假成功）。
+  // 一条路径、从今天起就在生产上跑，拆进程那天这里不需要任何改动。
   const seamMode = serviceModeFromEnv();
   const panelEventTransport = panelEventTransportForMode(seamMode);
-  if (seamMode !== 'monolith' && deploymentTarget) {
+  const riskCommandService = deploymentTarget
+    ? new PgRiskCommandService({ pool: automationPool, executionTarget: deploymentTarget, logger: console })
+    : undefined;
+  ctx.riskCommandService = riskCommandService;
+  if (deploymentTarget && riskCommandService) {
     const riskCommandConsumer = startRiskCommandConsumer({
       pool: automationPool,
       executionTarget: deploymentTarget,
       // 单写不变量收口在这一处回调：风控三写方法只在本进程 RiskController 上发生。at-least-once ⇒ 三方法均幂等。
-      apply: async (cmd) => {
+      apply: async (cmd, commandId) => {
         const controller = await riskRegistry.getController(cmd.accountId);
-        if (cmd.kind === 'applySignal') await controller.applySignal(cmd.signal);
-        else if (cmd.kind === 'setQuotaLevel') await controller.setQuotaLevel(cmd.level);
-        else await controller.recoverRestricted(cmd.reason);
+        try {
+          if (cmd.kind === 'applySignal') await controller.applySignal(cmd.signal);
+          else if (cmd.kind === 'setQuotaLevel') await controller.setQuotaLevel(cmd.level);
+          else await controller.recoverRestricted(cmd.reason);
+        } catch (err) {
+          // 失败必须对提交方可见：先落具名 failed，再原样抛出让 outbox 卡住重放（loud）。
+          // 吞掉它等于「本该改的账号状态没改、且无人知道」。
+          const reason = err instanceof Error ? err.message : String(err);
+          await riskCommandService.recordFailed(commandId, reason).catch(() => undefined);
+          throw err;
+        }
+        // 真态由**写完之后回读** controller 得到，绝不用入参推断（拒绝 / 收敛都会让二者不同）。
+        const state = controller.getState();
+        await riskCommandService.recordApplied(commandId, state.status, state.quotaLevel);
       },
       logger: console,
     });
-    if (panelEventTransport.tee) {
+    if (seamMode !== 'monolith' && panelEventTransport.tee) {
       bridgeEventBusToOutbox({ eventBus, pool: automationPool, executionTarget: deploymentTarget, logger: console });
     }
     console.log(
       `[aidcp-cloud] 拆段传输已接线（${seamMode}）：风控命令消费者${
-        panelEventTransport.tee
+        seamMode !== 'monolith' && panelEventTransport.tee
           ? ' + 事件→outbox 桥'
           : '；面板事件 tee 未启用（面板与产生端同进程，EventBus 直连，无进程外消费者）'
       }`,
@@ -2831,6 +2864,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         backlogByTopic: () => riskCommandConsumer.backlogByTopic(),
       },
     ]);
+  } else {
+    console.warn(
+      '[aidcp-cloud] AIDCP_DEPLOY_ENV 缺失/非法 ⇒ 风控命令消费者未启动：面板的风控写会以具名错误拒绝（fail-closed），绝不静默受理。',
+    );
   }
 
   // ── event_outbox 保留期（本 change）：outbox 是队列不是账本，没有剪裁就只进不出。─────────────
@@ -6104,6 +6141,19 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             effectiveQuotas: unavailableInMode('risk_read'),
             slowStartView: unavailableInMode('risk_read'),
           };
+  // 风控**写命令**端口（P5-1，用户 2026-07-25 拍板走异步）。与只读端口同形的三分支：
+  //   - api：HTTP 客户端 → automation 的内部 API（那边注册了 registerRiskCommandRoutes）。
+  //   - monolith / core：本进程直接落 outbox + 读结果账本（PgRiskCommandService）。
+  //   - 既非 api 又没跑自动化段：reject 具名错误。**绝不给一个「假装受理」的空实现**——
+  //     那会让操作员提交完看到 202、命令却从未存在（红线：静默假成功）。
+  const riskCommands: RiskCommandPort =
+    mode === 'api'
+      ? new RiskCommandHttpClient(new InternalHttpClient(automationBaseUrl))
+      : (ctx.riskCommandService ?? {
+          submitSignal: unavailableInMode('risk_command'),
+          submitQuotaLevel: unavailableInMode('risk_command'),
+          outcomeOf: unavailableInMode('risk_command'),
+        });
   // 面板对 automation 域的只读投影端口（Block③ L3：面板不直连 automation 的库）。
   //   - monolith / core：跑在本进程 automation 池上的本地实现（PgPanelAutomationRead），逐字节等价、零 HTTP。
   //   - api：segC 未跑 ⇒ 本进程无 automation 属主表；HTTP 客户端待 Block② 补（automation 内部读 API 增面板端点）。
@@ -6172,7 +6222,10 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             getView: () => requireSegment(interactionPermissionOverview, 'interactionPermissionOverview', 'automation'),
           },
           revocation: new TokenRevocationStore(),
-          riskRegistry: requireSegment(riskRegistry, 'riskRegistry', 'automation'),
+          // change cloud-coupling-phase5 P5-1：面板的风控写改成异步命令端口（提交 + 回读），
+          // 不再注入 RiskController registry。写只发生在 automation 的单写者回调里。
+          riskCommands,
+          riskRead,
           // change risk-target-follows-active-session：归属跟随当次连接，面板不再有「改归属」端点，
           // 也不按归属禁用风控写（写改回账号级）。currentDriverTarget 只读展示直接来自 panel-store。
           publishLogStore,

@@ -6,7 +6,11 @@
  * task 1（骨架）仅用到 edgeServer；其余依赖留待 task 5 只读接口与 task 4 写接口。
  */
 
-import type { RiskController } from '../risk/index.js';
+// 风控写已改异步（change cloud-coupling-phase5 P5-1，用户 2026-07-25 拍板）：面板不再持有
+// RiskController（automation 的单写运行时），只拿 kernel 的提交/回读端口。别再把它加回来——
+// 风控最终状态只由 automation 的 RiskController 单写，面板同步直调在拆进程后物理上不成立。
+import type { RiskCommandPort } from '../kernel/risk-command-types.js';
+import type { RiskReadPort } from '../kernel/risk-read-types.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 // GroupRoute / SetGroupRouteResult 已抬入 kernel（纯载荷，any→kernel 恒允许），不再经 automation 桶 cache/index；
 // BotChatStore 系 api 同层直连（无需豁免）；精选类型已提进 kernel（无需豁免）。
@@ -238,8 +242,17 @@ export interface PanelDeps {
     /** 调度引擎当前是否活跃（dashboard summary 读）。 */
     dispatchActive?(): boolean;
   };
-  /** 风控注册表（V1 写路由 risk/status、risk/quota 按账号取 controller；单写 PER ACCOUNT）。 */
-  riskRegistry: { getController(accountId: string): Promise<RiskController> };
+  /**
+   * 风控写出口（异步命令；change cloud-coupling-phase5 P5-1）。
+   * `/risk/status` 与 `/risk/quota` 只提交命令拿 commandId，结果由 `/api/risk-commands/:id` 回读。
+   * **MUST NOT 在提交响应里补任何写后状态字段**——那一刻结果尚不存在，补出来的一定是编的。
+   */
+  riskCommands: RiskCommandPort;
+  /**
+   * 风控只读投影（仪表盘按账号补当日生效上限用）。与写路径严格分开：本端口无任何写方法，
+   * 组合根在 api 模式下把它接到 automation 的内部只读 API。
+   */
+  riskRead: RiskReadPort;
   /**
    * 账号属性写入（change editable-account-group-label）。未注入则 `/api/accounts/:id/group-label` 返回 503。
    * setGroupLabel 经账号存储单写（accounts 表拥有者）：UPDATE-only、空归 NULL（清空）、退役账号 / 无行以

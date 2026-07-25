@@ -170,8 +170,11 @@ export async function emitRiskCommand(
  * 由 automation 组合根提供，内部按 `cmd.kind` 转调
  * `riskRegistry.getController(cmd.accountId).applySignal/setQuotaLevel/recoverRestricted`。
  * **MUST 幂等**（at-least-once 可能重投同一条）。
+ *
+ * 第二参 `commandId` = 该命令的 outbox 行 id（change cloud-coupling-phase5 P5-1）。提交方按它回读
+ * 结局，故落地回调 MUST 拿得到它——否则「应用完了」这件事对提交方永远不可见，界面只能永远转圈。
  */
-export type RiskCommandApply = (cmd: RiskCommand) => Promise<void>;
+export type RiskCommandApply = (cmd: RiskCommand, commandId: number) => Promise<void>;
 
 export interface RiskCommandConsumerOptions {
   /** 归属目标；只消费本 target 的命令。MUST 为 'dev' | 'ol'。 */
@@ -205,7 +208,7 @@ export class RiskCommandConsumer {
     const apply = options.apply;
     const handler: OutboxHandler = async (event: OutboxEvent) => {
       const cmd = decodeRiskCommand(event.payload);
-      await apply(cmd);
+      await apply(cmd, event.id);
     };
     this.inner = new OutboxConsumer({
       consumer: options.consumer ?? RISK_COMMAND_CONSUMER,

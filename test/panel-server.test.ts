@@ -10,6 +10,19 @@ import { TokenRevocationStore } from '../src/panel/revocation.js';
 import { FacebookPublishMediaError } from '../src/publish-agent/facebook-publish-media-store.js';
 import { isFacebookPublishMediaError } from '../src/kernel/facebook-publish-media-types.js';
 import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
+
+/**
+ * 把一个真 `RiskController` 包成 kernel 的只读投影端口（change cloud-coupling-phase5 P5-1）。
+ * 面板改注入端口之后，配额相关断言的成色只有接真 controller 才保得住——
+ * 换成写死的假配额，「restricted 账号互动上限为 0」这类断言就退化成在验证桩自己。
+ */
+function riskReadFromControllers(get: (accountId: string) => RiskController) {
+  return {
+    getState: async (accountId: string) => get(accountId).getState(),
+    effectiveQuotas: async (accountId: string) => get(accountId).effectiveQuotas(),
+    slowStartView: async (accountId: string) => get(accountId).slowStartView(),
+  };
+}
 import { DelegatedTaskService } from '../src/delegated-task/service.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
@@ -95,7 +108,14 @@ const deps = {
     },
     dispatchActive: () => dispatchActiveState,
   },
-  riskRegistry: { getController: async (id: string) => new RiskController({ accountId: id }) },
+  // change cloud-coupling-phase5 P5-1：面板不再持有 RiskController。
+  // 写 = 异步命令端口（提交只回 commandId）；读 = 只读投影端口（这里仍接真 controller，保住配额断言的成色）。
+  riskCommands: {
+    submitSignal: async () => ({ commandId: '1' }),
+    submitQuotaLevel: async () => ({ commandId: '2' }),
+    outcomeOf: async (commandId: string) => ({ commandId, state: 'processing' as const }),
+  },
+  riskRead: riskReadFromControllers((id) => new RiskController({ accountId: id })),
 } as unknown as PanelDeps;
 
 function makeConfig(over: Partial<PanelConfig> = {}): PanelConfig {
@@ -649,8 +669,24 @@ test('HTTP 待审草稿编辑：未注入 publishDraft → 503', async () => {
   }
 });
 
-test('HTTP risk 写路由：枚举 kind / override 需 reason / quota / 真态写回（V1 8.4）', async () => {
-  const h = await startPanelApi(deps, makeConfig());
+test('HTTP risk 写路由：枚举校验 + 受理回执只带 commandId（P5-1 异步化）', async () => {
+  // 记录真实提交，证明校验通过的请求确实到达了写出口（而不是被静默吞掉）。
+  const submits: Array<{ kind: string; accountId: string; reason?: string; level?: string }> = [];
+  const asyncDeps = {
+    ...(deps as object),
+    riskCommands: {
+      submitSignal: async (input: { accountId: string; kind: string; reason?: string }) => {
+        submits.push({ accountId: input.accountId, kind: input.kind, ...(input.reason ? { reason: input.reason } : {}) });
+        return { commandId: String(submits.length) };
+      },
+      submitQuotaLevel: async (input: { accountId: string; level: string }) => {
+        submits.push({ accountId: input.accountId, kind: 'setQuotaLevel', level: input.level });
+        return { commandId: String(submits.length) };
+      },
+      outcomeOf: async (commandId: string) => ({ commandId, state: 'processing' as const }),
+    },
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(asyncDeps, makeConfig());
   const base = `http://127.0.0.1:${h.port}`;
   try {
     const login = await fetch(`${base}/api/auth/login`, {
@@ -663,36 +699,70 @@ test('HTTP risk 写路由：枚举 kind / override 需 reason / quota / 真态�
     const post = (path: string, body: unknown) =>
       fetch(`${base}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
 
-    // manual_restrict: normal → restricted, changed
-    const r1 = (await (await post('/api/accounts/default/risk/status', { kind: 'manual_restrict' })).json()) as {
-      state: { status: string };
-      changed: boolean;
-    };
-    assert.equal(r1.state.status, 'restricted');
-    assert.equal(r1.changed, true);
+    // 合法信号 → 202 受理。**回执里 MUST NOT 出现任何写后状态字段**：受理那一刻结果还不存在，
+    // 补一个 state / changed 出来就是编的（红线：静默假成功）。
+    const res1 = await post('/api/accounts/default/risk/status', { kind: 'manual_restrict' });
+    assert.equal(res1.status, 202);
+    const body1 = (await res1.json()) as Record<string, unknown>;
+    assert.equal(body1.accepted, true);
+    assert.equal(typeof body1.commandId, 'string');
+    for (const forbidden of ['state', 'statusBefore', 'changed', 'status', 'quotaLevel']) {
+      assert.equal(forbidden in body1, false, `受理回执 MUST NOT 带写后状态字段 ${forbidden}`);
+    }
 
-    // manual_freeze → frozen
-    const r2 = (await (await post('/api/accounts/default/risk/status', { kind: 'manual_freeze' })).json()) as {
-      state: { status: string };
-    };
-    assert.equal(r2.state.status, 'frozen');
-
-    // override 缺 reason → 400；带 reason → 200
+    // override 缺 reason → 400（且 MUST NOT 提交）；带 reason → 202 并带上审计理由
     assert.equal((await post('/api/accounts/default/risk/status', { kind: 'operator_override_recover' })).status, 400);
     assert.equal(
       (await post('/api/accounts/default/risk/status', { kind: 'operator_override_recover', reason: 'manual review' })).status,
-      200,
+      202,
     );
-
     // 枚举外 kind → 400
     assert.equal((await post('/api/accounts/default/risk/status', { kind: 'light' })).status, 400);
-
-    // quota: aggressive；枚举外 → 400
-    const q = (await (await post('/api/accounts/default/risk/quota', { level: 'aggressive' })).json()) as {
-      state: { quotaLevel: string };
-    };
-    assert.equal(q.state.quotaLevel, 'aggressive');
+    // quota: 合法 202 / 枚举外 400
+    assert.equal((await post('/api/accounts/default/risk/quota', { level: 'aggressive' })).status, 202);
     assert.equal((await post('/api/accounts/default/risk/quota', { level: 'mega' })).status, 400);
+
+    // 被 400 挡下的三条 MUST NOT 到达写出口——校验必须先于提交，绝不入队一条注定被拒的命令。
+    assert.deepEqual(submits, [
+      { accountId: 'default', kind: 'manual_restrict' },
+      { accountId: 'default', kind: 'operator_override_recover', reason: 'manual review' },
+      { accountId: 'default', kind: 'setQuotaLevel', level: 'aggressive' },
+    ]);
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP risk 结果回读：四态如实透传，unknown 与 processing 严格分开', async () => {
+  const outcomes: Record<string, unknown> = {
+    '1': { commandId: '1', state: 'processing' },
+    '2': { commandId: '2', state: 'applied', decidedAt: 1, status: 'restricted', quotaLevel: 'normal' },
+    '3': { commandId: '3', state: 'failed', decidedAt: 2, reason: 'recovery_window_not_elapsed' },
+  };
+  const readDeps = {
+    ...(deps as object),
+    riskCommands: {
+      submitSignal: async () => ({ commandId: '1' }),
+      submitQuotaLevel: async () => ({ commandId: '1' }),
+      // 查无此命令 MUST 回 unknown，MUST NOT 回落 processing：那会让界面永远转圈且永不报错。
+      outcomeOf: async (commandId: string) => outcomes[commandId] ?? { commandId, state: 'unknown' },
+    },
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(readDeps, makeConfig());
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const get = async (id: string) =>
+      (await (await fetch(`${base}/api/risk-commands/${id}`, { headers: auth })).json()) as Record<string, unknown>;
+
+    assert.equal((await get('1')).state, 'processing');
+    const applied = await get('2');
+    assert.equal(applied.state, 'applied');
+    assert.equal(applied.status, 'restricted', '真态由单写者回读，原样透传');
+    const failed = await get('3');
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.reason, 'recovery_window_not_elapsed', '失败原因 MUST 可见');
+    assert.equal((await get('999')).state, 'unknown', '查无此命令 MUST NOT 伪装成处理中');
   } finally {
     await h.close();
   }
@@ -1255,7 +1325,7 @@ test('summary 上限随风控态收敛：restricted 账号互动上限为 0，�
   const restricted = new RiskController({ accountId: 'r' });
   await restricted.applySignal({ kind: 'confirmed' }); // normal → restricted（平台硬信号）
   assert.equal(restricted.getState().status, 'restricted');
-  const depsR = { ...(deps as object), riskRegistry: { getController: async () => restricted } } as unknown as PanelDeps;
+  const depsR = { ...(deps as object), riskRead: riskReadFromControllers(() => restricted) } as unknown as PanelDeps;
   const h = await startPanelApi(depsR, makeConfig());
   const base = `http://127.0.0.1:${h.port}`;
   try {

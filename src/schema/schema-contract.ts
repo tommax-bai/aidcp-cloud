@@ -66,8 +66,13 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * `getOffboard` 的「已受理、尚未物化」中间态都读它们），但它与 client_identity 能力探测同门：
  * 迁移没跑 ⇒ 启动期该能力带 version id fail-closed 报错，比抬 REQUIRED 把整进程拒起更精准。
  * 故只抬 KNOWN_MAX、不抬 REQUIRED，与 0073 / 0074 同口径。
+ *
+ * 注：`0079_risk_command_outcome`（change cloud-coupling-phase5 P5-1）建 automation 属主的风控写命令
+ * 结果账本。迁移没跑 ⇒ 提交时的占位行 INSERT 抛错（已 catch 成 warn，命令仍入队）、`outcomeOf` 直接
+ * 报 `relation ... does not exist`——响亮，绝不退化成「查不到 = 处理中」。命令本身走 event_outbox、
+ * 单写者照常应用，故不是承重前置。与上面几条同口径：只抬 KNOWN_MAX、不抬 REQUIRED。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0078_client_env_cleanup_admission';
+export const KNOWN_MAX_SCHEMA_VERSION = '0079_risk_command_outcome';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

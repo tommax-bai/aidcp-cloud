@@ -721,9 +721,10 @@ function createRequestHandler(
         totalsByAccount.map(async (entry) => {
           try {
             // change risk-target-follows-active-session：不再按归属跳过——归属跟随当次连接，
-            // 物化 controller 只为**读**当日生效上限做展示；若该账号其实由另一目标驱动，其风控写会被
-            // 条件写作废（并驱逐这份缓存），不会盖回对方状态。拿不到上限就不带上限（诚实缺省）。
-            const dayQuotas = (await deps.riskRegistry.getController(entry.accountId)).effectiveQuotas().day;
+            // 这里只为**读**当日生效上限做展示；若该账号其实由另一目标驱动，其风控写会被条件写
+            // 作废，不会盖回对方状态。拿不到上限就不带上限（诚实缺省）。
+            // change cloud-coupling-phase5 P5-1：改经 kernel 只读端口，面板不再物化 controller。
+            const dayQuotas = (await deps.riskRead.effectiveQuotas(entry.accountId)).day;
             const saturated = RISK_ACTIONS.filter((a) => entry.totals[a] >= dayQuotas[a]);
             return { ...entry, quotas: dayQuotas, saturated };
           } catch {
@@ -1666,15 +1667,16 @@ function createRequestHandler(
       }
       // 存在性校验先行（#28）：不存在账号 → 404，绝不经 saveState 的 ON CONFLICT 造幽灵 risk_state 行。
       if (!(await assertAccountExists(accountId, res))) return;
-      // change risk-target-follows-active-session：风控写改回账号级，不再前置「非属主 409」。
-      const controller = await deps.riskRegistry.getController(accountId);
-      const before = controller.getState().status;
-      const after = await controller.applySignal({
-        kind: kind as RiskSignalKind,
+      // change cloud-coupling-phase5 P5-1（用户 2026-07-25 拍板走异步）：面板只提交命令。
+      // 202 + commandId，**不含任何写后状态字段**——受理这一刻结果尚不存在，补出来的一定是编的
+      // （红线：静默假成功）。结果由 GET /api/risk-commands/:id 回读。
+      const accepted = await deps.riskCommands.submitSignal({
+        accountId,
+        kind,
         ...(typeof reason === 'string' ? { reason } : {}),
+        requestedBy: `panel:${verified.payload.sub}`,
       });
-      // 诚实：返回写后真态 + 是否真变化（refused 由前端按 changed=false 渲染，区别于成功）
-      sendJson(res, 200, { state: after, statusBefore: before, changed: before !== after.status });
+      sendJson(res, 202, { accepted: true, commandId: accepted.commandId });
       return;
     }
     if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/risk/quota')) {
@@ -1694,9 +1696,24 @@ function createRequestHandler(
       }
       // 存在性校验先行（#28）：同上，杜绝对不存在账号造幽灵风控行 + 假成功。
       if (!(await assertAccountExists(accountId, res))) return;
-      // change risk-target-follows-active-session：配额档写改回账号级，不再前置「非属主 409」。
-      const controller = await deps.riskRegistry.getController(accountId);
-      sendJson(res, 200, { state: await controller.setQuotaLevel(level as RiskQuotaLevel) });
+      // change cloud-coupling-phase5 P5-1：同 /risk/status，只提交、不回状态。
+      const acceptedQuota = await deps.riskCommands.submitQuotaLevel({
+        accountId,
+        level,
+        requestedBy: `panel:${verified.payload.sub}`,
+      });
+      sendJson(res, 202, { accepted: true, commandId: acceptedQuota.commandId });
+      return;
+    }
+    // 风控命令结果回读（change cloud-coupling-phase5 P5-1）：四态如实透传。
+    // 'unknown' MUST 与 'processing' 分开渲染——把查无此命令当成处理中，界面会永远转圈且永不报错。
+    if (method === 'GET' && url.startsWith('/api/risk-commands/')) {
+      const commandId = decodeURIComponent(url.slice('/api/risk-commands/'.length));
+      if (!commandId) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'missing_command_id' });
+        return;
+      }
+      sendJson(res, 200, await deps.riskCommands.outcomeOf(commandId));
       return;
     }
     // 调度启停（V1 task 9.4）：复用共享 CommandActions；回报真实在线 edge 数，绝不乐观。

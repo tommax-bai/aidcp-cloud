@@ -82,7 +82,8 @@
       "src/kernel/publish-draft-contract.ts",
       "src/kernel/concept-pool.ts",
       "src/kernel/feishu-card-contract.ts",
-      "src/kernel/publish-platform-profile.ts"
+      "src/kernel/publish-platform-profile.ts",
+      "src/kernel/risk-command-types.ts"
     ]
   },
   "rejected": [

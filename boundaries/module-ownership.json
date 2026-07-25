@@ -1315,6 +1315,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/reference-image-guidance.ts 整体 git mv：纯参考图引导（REFERENCE_IMAGE_MAX_COUNT 常量 + referenceImages* / referenceImageUrl / buildReferenceImageGuidance 纯字符串/过滤函数），仅 import kernel（publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/reference-image-guidance.ts 保留为 re-export 桩，同层消费方无感。消 1 条 api 侧 publish-scheduler 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/risk-command-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P5-1 新写（用户 2026-07-25 拍板：面板写风控走异步）：风控写命令的跨属主契约——受理回执 RiskCommandAccepted（**只有 commandId、无任何写后状态字段**）、四态结局 RiskCommandOutcome（processing / applied / failed / unknown）、两个提交入参型、以及只含「提交 + 回读」三方法的 RiskCommandPort。§4.6.4 明写 risk/status 与 risk/quota 两条端点 MUST 在拆分前迁走，否则 §14 红线 9「RiskController 单写」在拆分后即刻不成立；面板同步直调 RiskController 物理上跨不了进程。契约里刻意不含任何同步写方法：applySignal / setQuotaLevel / recoverRestricted 只活在 automation 的 RiskController 上。unknown 独立成态是硬要求——把「查无此命令」当成 processing，界面会永远转圈且永不报错（红线：静默假成功的另一形态）。零 import，四条准入正则实跑零命中。消除 import 豁免 1 条（src/panel/types.ts -> src/risk/index.ts，api -> automation，本 change 前该方向唯一一条边）。请求回写 §4.6.4 见 docpatch RK-P5-1"
+  },
+  {
     "path": "src/kernel/risk-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P2-6 把 src/risk/types.ts（112 行、零 import）整文件提升为风控词表共享契约：三组枚举 RISK_ACTIONS / RISK_STATUSES / RISK_QUOTA_LEVELS 及其联合类型、配额结构 ActionQuota / WindowQuotas、两个注入端口 QuotaProvider / AccountNurtureProvider、RiskState / RiskSignal / CounterEvent 与两个存储端口 RiskStore / InteractionStore，共 18 个导出。**整搬不析出**：AC-BOUND-03 四条正则逐条实跑不命中、零 import；与 session-limits.ts / resume-limits.ts 被拒的理由（承载会话预算的业务判定）不同类，本文件只是词表与端口形状、无任何判定。**RiskSignalKind 一并搬**：路线图原稿称它在 risk-state-machine.ts 属误记，实为本文件；搬走后 risk-state-machine.ts 与 risk-controller.ts 一个字节不改，风控最终状态单写域不受影响。原文件留纯再导出壳（automation），risk/ 内部 17 个消费者与 test/ 零改动；五个跨层消费方 panel/version.ts、panel/panel-server.ts、panel/panel-store.ts、client-auth/client-auth-server.ts、config/quota-config-facade.ts 全部 repoint 到本文件。请求回写 §4.7 见 docpatch RK-P2-6"
@@ -2005,6 +2010,11 @@
     "note": "§4.7：RiskController 单写（19/19 automation）"
   },
   {
+    "path": "src/risk/risk-command-service.ts",
+    "layer": "automation",
+    "note": "§4.7：RiskController 单写（19/19 automation）"
+  },
+  {
     "path": "src/risk/risk-controller-registry.ts",
     "layer": "automation",
     "note": "§4.7：RiskController 单写（19/19 automation）"
@@ -2236,6 +2246,11 @@
   },
   {
     "path": "src/transport/publish-status-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/risk-command-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },

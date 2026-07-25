@@ -11,7 +11,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startPanelApi } from '../src/panel/panel-server.js';
 import { parsePanelUsers } from '../src/panel/auth.js';
-import { RiskController } from '../src/risk/risk-controller.js';
 import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
@@ -39,8 +38,14 @@ function account(accountId: string, currentDriverTarget: 'dev' | 'ol' | null) {
   };
 }
 
+const ZERO_QUOTA = {
+  like: 0, collect: 0, comment: 0, follow: 0, publish: 0,
+  view: 0, search: 0, comment_like: 0, join_group: 0, dm_reply: 0,
+};
+
 function makeDeps(over: Partial<Record<string, unknown>> = {}) {
   const materialized: string[] = [];
+  const submitted: string[] = [];
   const deps = {
     edgeServer: { edgeCount: () => 0, onlineEdgeCount: () => 0 },
     eventBus: { onAny: () => () => {} },
@@ -60,15 +65,34 @@ function makeDeps(over: Partial<Record<string, unknown>> = {}) {
     },
     publishStatus: { getStatus: () => Promise.resolve({ status: 'idle', snapshot: null }) },
     commandActions: {},
-    riskRegistry: {
-      getController: async (id: string) => {
-        materialized.push(id);
-        return new RiskController({ accountId: id });
+    // change cloud-coupling-phase5 P5-1：面板不再物化 RiskController。
+    // 写走异步命令端口（提交即回 commandId），读走只读投影端口。
+    riskCommands: {
+      submitSignal: async (input: { accountId: string }) => {
+        submitted.push(input.accountId);
+        return { commandId: `cmd-${submitted.length}` };
       },
+      submitQuotaLevel: async (input: { accountId: string }) => {
+        submitted.push(input.accountId);
+        return { commandId: `cmd-${submitted.length}` };
+      },
+      outcomeOf: async (commandId: string) => ({ commandId, state: 'processing' as const }),
+    },
+    riskRead: {
+      getState: async () => ({ status: 'normal', quotaLevel: 'normal' }),
+      effectiveQuotas: async (id: string) => {
+        materialized.push(id);
+        return {
+          minute: ZERO_QUOTA,
+          hour: ZERO_QUOTA,
+          day: { ...ZERO_QUOTA, like: 30 },
+        };
+      },
+      slowStartView: async () => ({ state: 'off' as const, totalDays: 0, eligible: false }),
     },
     ...over,
   } as unknown as PanelDeps;
-  return { deps, materialized };
+  return { deps, materialized, submitted };
 }
 
 function makeConfig(): PanelConfig {
@@ -100,8 +124,8 @@ async function withPanel(deps: PanelDeps, fn: (base: string, auth: Record<string
 }
 
 // 注：change 文档里称这条口为 `/risk/signal`，代码里的真实路径是 `/risk/status`（写的是风控信号）。以代码为准。
-test('风控写改回账号级：任意账号（含由别的 target 驱动的）/risk/status 与 /risk/quota 都 200', async () => {
-  const { deps, materialized } = makeDeps();
+test('风控写改回账号级：任意账号（含由别的 target 驱动的）/risk/status 与 /risk/quota 都受理', async () => {
+  const { deps, submitted } = makeDeps();
   await withPanel(deps, async (base, auth) => {
     for (const accountId of ['mine', 'theirs', 'orphan']) {
       for (const [path, body] of [
@@ -109,10 +133,11 @@ test('风控写改回账号级：任意账号（含由别的 target 驱动的）
         [`/api/accounts/${accountId}/risk/quota`, { level: 'conservative' }],
       ] as const) {
         const res = await fetch(`${base}${path}`, { method: 'POST', headers: auth, body: JSON.stringify(body) });
-        assert.equal(res.status, 200, `${path} MUST 账号级放行、不按归属禁用`);
+        // change cloud-coupling-phase5 P5-1：改异步后是 202 受理，不再是 200 写后真态。
+        assert.equal(res.status, 202, `${path} MUST 账号级放行、不按归属禁用`);
       }
     }
-    assert.ok(materialized.includes('theirs'), '由别的 target 驱动的账号也照常物化+写（不再拦）');
+    assert.ok(submitted.includes('theirs'), '由别的 target 驱动的账号也照常提交（不再拦）');
   });
 });
 
