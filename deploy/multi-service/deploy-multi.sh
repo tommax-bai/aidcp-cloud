@@ -88,7 +88,7 @@ preflight() {
 # 探测的是**将要运行的**已同步代码（rsync 之后调用）。未满足即拒绝切换，保持单体不停机。
 capability_probe() {
   local topo="$1" f="$CLOUD_DIR/src/gateway/service-mode.ts"
-  SSH "test -f $f" || die "缺少 $f（代码未同步或结构变化）"
+  SSH "test -f $f" || die "缺少 ${f}（代码未同步或结构变化）"
   if [ "$topo" = "3" ]; then
     if ! SSH "grep -q \"'automation'\" $f && grep -q \"'api'\" $f"; then
       die "能力探测失败：service-mode.ts 尚未识别 'automation' / 'api'（当前仅 content/core/monolith）。
@@ -120,7 +120,7 @@ sync_code() {
   trap 'rm -rf "$staging"' RETURN
   log "从 HEAD 生成干净树快照 → $staging"
   git -C "$REPO_ROOT" archive HEAD | tar -x -C "$staging"
-  log "rsync 快照 → $HOST:$CLOUD_DIR（exclude .env / node_modules / .git）"
+  log "rsync 快照 → $HOST:${CLOUD_DIR}（exclude .env / node_modules / .git）"
   # 不用 --delete：只覆盖更新，避免误删云端仅有文件；.env / node_modules / .git 永远保留。
   RSYNC \
     --exclude '.env' --exclude 'node_modules' --exclude '.git' \
@@ -131,7 +131,7 @@ sync_code() {
 
 # ── 装单元 + daemon-reload（幂等；从已同步的仓内副本安装，单一真源）───────────
 install_units() {
-  log "安装 systemd 单元 → $UNIT_DIR（从 $CLOUD_DIR/deploy/multi-service/ 拷贝）"
+  log "安装 systemd 单元 → ${UNIT_DIR}（从 $CLOUD_DIR/deploy/multi-service/ 拷贝）"
   SSH "cp -f $CLOUD_DIR/deploy/multi-service/aidcp-cloud-content.service \
              $CLOUD_DIR/deploy/multi-service/aidcp-cloud-automation.service \
              $CLOUD_DIR/deploy/multi-service/aidcp-cloud-api.service \
@@ -181,7 +181,7 @@ check_api() {
 
 healthcheck_topology() {
   local topo="$1" ok=0
-  log "健康检查（topology=$topo）"
+  log "健康检查（topology=${topo}）"
   if [ "$topo" = "3" ]; then
     check_content        || ok=1
     check_automation_ws "$AUTOMATION_UNIT" || ok=1
@@ -196,7 +196,7 @@ healthcheck_topology() {
 
 # ── 停 / 起 ──────────────────────────────────────────────────────────────────
 stop_monolith() {
-  log "停用单体 $MONOLITH（释放 8787 / panel / client-auth）"
+  log "停用单体 ${MONOLITH}（释放 8787 / panel / client-auth）"
   # disable --now：停止并去掉开机自启，避免与多服务同时抢端口。单元文件保留、可一键回切。
   sctl "$MONOLITH" "disable" || warn "$MONOLITH disable 返回非零（可能本就未启用），继续。"
   SSH "systemctl stop $MONOLITH" || true
@@ -255,7 +255,7 @@ start_topology() {
     check_automation_ws "$CORE_UNIT" || { rollback_to_monolith; die "core WS 健康检查失败，已回滚。"; }
     check_api "$CORE_UNIT" || { rollback_to_monolith; die "core api 健康检查失败，已回滚。"; }
   fi
-  log "多服务（topology=$topo）已就绪。"
+  log "多服务（topology=${topo}）已就绪。"
 }
 
 # ── 主流程 ───────────────────────────────────────────────────────────────────
