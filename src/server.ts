@@ -320,7 +320,7 @@ import {
   DEFAULT_CONTENT_READ_API_PORT,
   type ServiceMode,
 } from './gateway/service-mode.js';
-import { InternalHttpClient, InternalHttpServer } from './transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer, INTERNAL_HTTP_TIMEOUT_CEILING_MS } from './transport/internal-http.js';
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
 import { PublishStatusHttpClient, registerPublishStatusRoutes } from './transport/publish-status-http.js';
 import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './transport/publish-generation-http.js';
@@ -4920,7 +4920,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     const generationBaseUrl = readEnvString('AIDCP_GATEWAY_BASE_URL');
     const publishGenerationPort: SchedulerOrchestrator =
       generationTransport === 'http' && generationBaseUrl
-        ? new PublishGenerationHttpClient(new InternalHttpClient(generationBaseUrl))
+        ? // 单次调用超时**必须 > 分段 long-poll 预算**（PUBLISH_GENERATION_POLL_SEGMENT_CEILING_MS=150s），
+          // 否则每一段 poll 都会在服务端回 `{done:false}` 之前先被客户端切断 ⇒ 每次跨服务生成都在默认 15s
+          // 确定性失败。取内部 HTTP 的 180s 硬顶（与 model-call 180s 天花板同源的既有常量，不新写魔数）。
+          new PublishGenerationHttpClient(
+            new InternalHttpClient(generationBaseUrl, { timeoutMs: INTERNAL_HTTP_TIMEOUT_CEILING_MS }),
+          )
         : ctx.publishOrchestrator;
     ctx.publishScheduler = new PublishScheduler({
       conceptStore,

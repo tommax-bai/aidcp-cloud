@@ -73,6 +73,24 @@ export interface SchedulerOrchestrator {
   trigger(input: TriggerInput): Promise<SchedulerTriggerResult>;
 }
 
+/**
+ * 把生成端口的**抛出物**归一为稳定可读的失败原因码。
+ *
+ * 进程内编排本体从不 reject——它把管线异常自收敛成 `status:'failed' + reason`。但拆进程后这个端口可能是
+ * 跨服务 HTTP 客户端，传输层会 reject（结构化错误带 string `code`：`timeout` / `transport_error` /
+ * `generation_timeout` / `unknown_correlation` …）。这里保码 + 保原文，`timeout` 归一成语义更明确的
+ * `generation_timeout`（「这一轮生成超时了」，而非某个含糊的网络码）。
+ */
+export function describeGenerationFailure(err: unknown): string {
+  const raw =
+    err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string'
+      ? (err as { code: string }).code
+      : 'generation_error';
+  const code = raw === 'timeout' ? 'generation_timeout' : raw;
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return message ? `${code}:${message}` : code;
+}
+
 /** claim 拒绝原因（change parallel-rewrite-drafts）：同键在途 / 自主单飞 / 账号在途帽满 / 全局并发帽满。 */
 export type ClaimRejectReason = 'duplicate_source' | 'already_running' | 'publish_capacity' | 'publish_busy';
 
@@ -637,7 +655,22 @@ export class PublishScheduler {
       input.scheduleExecution = { ...scheduleExecution };
     }
     this.logger.log(`[PublishScheduler] 触发发帖编排 reason=${reason} forced=${forced} account=${input.accountId} newConcepts=${input.metrics.newConceptCount} liked=${input.metrics.likedSinceLastPublish}`);
-    const res = await this.d.orchestrator.trigger(input);
+    let res: SchedulerTriggerResult;
+    try {
+      res = await this.d.orchestrator.trigger(input);
+    } catch (err) {
+      // 生成端口的**传输层失败**（拆进程后端口可能是跨服务 HTTP 客户端：单次调用超时 / 连接断 /
+      // 未知 correlation）。本进程内的编排从不走到这里（它自收敛成 status:'failed'）。
+      // 归一到同一条诚实终态，红线两头都不许踩：
+      //   · 绝不静默假成功——不回 pending_approval / published，也不压成 skipped 让上层当「本槽没事发生」；
+      //   · 也绝不让 reject 穿透调用链——洗稿 fire-and-forget 链等路径上没有兜底 catch，
+      //     未捕获拒绝会打崩整个云端进程。
+      const detail = describeGenerationFailure(err);
+      this.logger.error(
+        `[PublishScheduler] 生成端口调用失败 account=${input.accountId} reason=${reason} detail=${detail}`,
+      );
+      return { status: 'failed', recordId: null, failureReason: detail };
+    }
     return { status: res.status, recordId: res.recordId, failureReason: res.reason, approvalCard: res.approvalCard };
     } finally {
       // 释放 claim：finally 覆盖 buildTriggerInput + 编排全程——任何 DB 瞬错/管线异常都不得让键永久卡死。

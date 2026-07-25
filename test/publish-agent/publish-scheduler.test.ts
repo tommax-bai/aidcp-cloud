@@ -408,3 +408,50 @@ describe('claim 键控单飞与容量帽', () => {
     if (b.started) await assert.rejects(b.outcome);
   });
 });
+
+/**
+ * 跨进程生成端口的失败路径（拆内容域后 orchestrator 可能是 HTTP 客户端）。
+ * 进程内编排从不 reject——它把管线异常自收敛成 status:'failed'；HTTP 客户端会 reject（超时 / 传输错）。
+ * 红线：超时 MUST 变成一次**诚实的失败**——既不静默假成功（也不压成 skipped 让上层当「没事发生」），
+ * 也不让 reject 穿透成未捕获异常打崩进程。
+ */
+describe('生成端口传输失败 → 诚实失败终态', () => {
+  function buildThrowing(err: unknown) {
+    const deps: PublishSchedulerDeps = {
+      conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [] },
+      likedStore: { countSince: async () => 0, recentSince: async () => [] },
+      publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
+      resolveRisk: async () => ({
+        canDo: () => true,
+        explain: () => ({ allowed: true }),
+        getState: () => ({ status: 'normal', quotaLevel: 'normal' }),
+      }),
+      resolveSingleAccountId: async () => 'acc-test',
+      orchestrator: { trigger: async () => { throw err; } },
+      soul: {} as PublishSchedulerDeps['soul'],
+      clock: () => T,
+      logger: silent,
+    };
+    return new PublishScheduler(deps);
+  }
+
+  it('单次调用超时 → status=failed 且原因带 generation_timeout（不上抛、不染绿）', async () => {
+    const timeout = Object.assign(new Error('call timed out after 180000ms: publish-generation/poll'), {
+      code: 'timeout',
+    });
+    const o = await buildThrowing(timeout).triggerManual('acc-test');
+    assert.equal(o.result, 'triggered');
+    assert.equal(o.result === 'triggered' && o.status, 'failed', '绝不静默假成功、也不压成 skipped');
+    assert.match(o.result === 'triggered' ? o.failureReason ?? '' : '', /generation_timeout/);
+    assert.match(o.result === 'triggered' ? o.failureReason ?? '' : '', /180000ms/, '原文保真，人能看懂超时在哪一层');
+  });
+
+  it('传输错误 → 同样收敛成 failed；claim 键随后释放，可立即重触发', async () => {
+    const scheduler = buildThrowing(Object.assign(new Error('socket hang up'), { code: 'transport_error' }));
+    const first = await scheduler.triggerManual('acc-test');
+    assert.equal(first.result === 'triggered' && first.status, 'failed');
+    assert.match(first.result === 'triggered' ? first.failureReason ?? '' : '', /transport_error/);
+    const second = await scheduler.triggerManual('acc-test');
+    assert.equal(second.result === 'triggered' && second.status, 'failed', '键未卡死：第二次仍进得了编排段');
+  });
+});
