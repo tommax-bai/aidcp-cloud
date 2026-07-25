@@ -126,8 +126,15 @@ for owner in "${OWNERS[@]}"; do
     args+=(--table="public.$t")
   done < <(grep -v '^#' "$list" | grep -v '^[[:space:]]*$')
 
-  # --no-owner/--no-acl：目标库的属主与权限由建库时的 OWNER 决定，不从源库照搬。
-  pg_dump --no-owner --no-acl "${args[@]}" -d "$SOURCE_DB" \
+  # 属主与权限**照搬源库**（刻意不加 --no-owner / --no-acl）。
+  #
+  # 为什么：本脚本以超级用户身份恢复。若不照搬，新库里的表就全归恢复者（postgres）所有，而应用
+  # 是以**应用角色**连库的 ⇒ 翻转当天每一次写入都 permission denied，而且是在切换之后才暴露。
+  # 角色是**集群级**对象、三个属主库与源库同实例，所以 pg_dump 生成的 `ALTER ... OWNER TO <role>`
+  # 与 GRANT 在目标库里逐字可执行，拿到与源库**逐字一致**的属主与授权。
+  # 实测源库形态（2026-07-25 dev）：95 张表属应用角色、3 张（互动回复配置作用域三表）属 postgres、
+  # 21 个序列全部是表的从属序列（`-t` 会一并带走）——照搬即保真，不需要任何人工归位。
+  pg_dump "${args[@]}" -d "$SOURCE_DB" \
     | psql -v ON_ERROR_STOP=1 -q -d "$target"
   echo "  copied."
 done
