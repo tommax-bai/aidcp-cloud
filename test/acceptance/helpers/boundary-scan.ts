@@ -246,6 +246,291 @@ export function scanSqlWrites(files: string[]): SqlScanResult {
   return { writes, dynamic };
 }
 
+/* ------------------------------------------------------------------ 行锁扫描（AC-LOCK-03/04） */
+
+/**
+ * 行锁（`FOR UPDATE` / `FOR SHARE` 及其变体）的归属扫描。
+ *
+ * 为什么必须机械扫：**跨库行锁的失效是无声的**（同一教训写在 `src/db/environment-row-lock.ts` 文件头）。
+ * 两侧连到不同库时，两边各自加锁都会成功、互斥消失、且不产生任何错误。advisory lock 那族门禁
+ * （`AC-LOCK-01/02`）只看 `pg_advisory_*`，对行锁完全无感——这一族补上的正是那个盲区。
+ *
+ * 扫描口径（**宁可误报、绝不漏报**，红线：漏报＝门禁形同虚设）：
+ *   - 行锁作用于**语句里 FROM/JOIN 到的全部表**（Postgres 语义），故一条 `FOR UPDATE` 会上报该字符串
+ *     字面量里认出来的所有表；带 `OF <别名列表>` 时收窄到那几个别名对应的表，别名认不出来时**退回全表**；
+ *   - **不判断是否真在事务里**：静态判不了，且事务外的行锁本身就是可疑写法。宁可多报；
+ *   - 词法器看不懂的命中（落在任何字符串字面量之外）与一张表都认不出来的命中，MUST 作为**失败**
+ *     交出去（`unlexed` / `tableless`），MUST NOT 静默丢弃。
+ */
+export type RowLockKind = 'update' | 'no_key_update' | 'share' | 'key_share';
+
+export interface RowLockSite {
+  file: string;
+  line: number;
+  kind: RowLockKind;
+  /** 本次加锁覆盖到的表（去重、字典序）。 */
+  tables: string[];
+  /** 语句里出现、但不在属主表里的标识符（多为 CTE 名 / 子查询别名），单独交出去由调用方判定。 */
+  unknownNames: string[];
+  /** 行锁子句原文（压成单行），供清单可读与人工复核。 */
+  clause: string;
+  /**
+   * `true` = 本文件从头到尾没有自己的连接（既不建池、也不 `connect()`），加锁只能跑在**调用方传进来的句柄**上。
+   * 这类文件的「加锁方属于哪一层」静态判不出来——它跟着调用方的事务走，而调用方常常是组合根注入的、
+   * 连 import 边都没有。故它们 MUST 单独登记（AC-LOCK-04），MUST NOT 只按文件自身归属放过。
+   */
+  borrowedConnection: boolean;
+}
+
+export interface RowLockScanResult {
+  sites: RowLockSite[];
+  /** 命中行锁关键字却不在任何字符串字面量内 —— 词法器没看懂，MUST 判失败。 */
+  unlexed: { file: string; line: number; excerpt: string }[];
+  /** 行锁语句里一张表都认不出来 —— MUST 判失败，MUST NOT 当「没跨界」放过。 */
+  tableless: { file: string; line: number; excerpt: string }[];
+}
+
+/** 模板串插值段的等长占位符（保持偏移与行号不漂）。 */
+const INTERPOLATION_MARK = '';
+
+/**
+ * 把注释整体涂白（**逐字符换成空格、保留换行**），偏移与行号因此逐字不变。
+ * 与 `stripTsComments` 的差别只有「是否保长」——那个用于 import/写入扫描（不需要行号），这个用于行锁扫描（需要行号）。
+ */
+export function blankTsComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/[^\n]*/gm, (m, head: string) => head + ' '.repeat(m.length - head.length));
+}
+
+/** 同上，SQL 行注释版（`-- ` 到行尾），只在字面量正文里用。 */
+function blankSqlLineComments(text: string): string {
+  return text.replace(/(^|\s)--(\s[^\n]*|$)/gm, (m, head: string) => head + ' '.repeat(m.length - head.length));
+}
+
+function skipInterpolation(source: string, from: number): number {
+  let depth = 1;
+  let i = from;
+  while (i < source.length) {
+    const c = source[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`' || c === "'" || c === '"') { i = readStringLiteral(source, i).end; continue; }
+    if (c === '{') { depth += 1; i += 1; continue; }
+    if (c === '}') { depth -= 1; i += 1; if (depth === 0) return i; continue; }
+    i += 1;
+  }
+  return i;
+}
+
+/**
+ * 从 `source[start]` 的引号读一个字符串字面量。
+ * 返回的 `text` 与源文**等长对齐**（转义与插值段都用等长占位替换），故 `start + 1 + idx` 即源文偏移。
+ */
+function readStringLiteral(source: string, start: number): { text: string; end: number } {
+  const quote = source[start];
+  let i = start + 1;
+  let text = '';
+  while (i < source.length) {
+    const c = source[i];
+    if (c === '\\') { text += '  '; i += 2; continue; }
+    if (c === quote) { i += 1; break; }
+    // 单/双引号字面量不跨行：遇换行就地终止，防止把正则字面量里的引号当串首、吞掉整个文件。
+    if (quote !== '`' && c === '\n') break;
+    if (quote === '`' && c === '$' && source[i + 1] === '{') {
+      const close = skipInterpolation(source, i + 2);
+      text += INTERPOLATION_MARK.padEnd(close - i, ' ');
+      i = close;
+      continue;
+    }
+    text += c;
+    i += 1;
+  }
+  return { text, end: i };
+}
+
+/** 列出源文件里的全部字符串字面量（正文与源文偏移对齐）。 */
+export function extractStringLiterals(source: string): { start: number; text: string }[] {
+  const out: { start: number; text: string }[] = [];
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    if (c === '`' || c === "'" || c === '"') {
+      const { text, end } = readStringLiteral(source, i);
+      out.push({ start: i + 1, text });
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  return out;
+}
+
+/** 行锁子句。多词形态排在前面，避免 `FOR NO KEY UPDATE` 被 `FOR ... UPDATE` 截断。 */
+const ROW_LOCK_RE =
+  /\bFOR\s+(NO\s+KEY\s+UPDATE|KEY\s+SHARE|UPDATE|SHARE)\b(?:\s+OF\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*))?/gi;
+
+const ROW_LOCK_KINDS: Record<string, RowLockKind> = {
+  'update': 'update',
+  'no key update': 'no_key_update',
+  'share': 'share',
+  'key share': 'key_share',
+};
+
+/**
+ * 表引用（含可选别名）。别名位若命中 SQL 关键字则不当别名。
+ * 两处否定式后顾与写入扫描器同源：`FOR UPDATE` 与 `ON CONFLICT DO UPDATE` 后面跟的不是表名。
+ *
+ * **别名段 MUST 写成前瞻（不消费）**：写成消费式时 `FROM a JOIN b` 里的 `JOIN` 会被当成 a 的别名吃掉，
+ * 于是 `b` 整张表在下一轮扫描里消失 —— 这是**漏报**方向的失效，正是本族门禁最怕的形态。
+ * 回归防线：`row-lock-ownership.test.ts` 的 `AC-LOCK-05` 别名用例。
+ */
+const TABLE_REF_RE =
+  /(?<!\bDO\s{1,4})(?<!\bFOR\s{1,4})\b(?:FROM|JOIN|INTO|UPDATE)\s+(?:ONLY\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)(?=(?:\s+(?:AS\s+)?([a-zA-Z_][a-zA-Z0-9_]*))?)/gi;
+
+const SQL_NON_ALIAS = new Set([
+  'where', 'on', 'using', 'set', 'left', 'right', 'inner', 'outer', 'full', 'cross', 'join', 'group',
+  'order', 'limit', 'offset', 'for', 'as', 'union', 'except', 'intersect', 'having', 'returning',
+  'values', 'and', 'or', 'not', 'with', 'select', 'from', 'into', 'update', 'delete', 'insert',
+  'when', 'then', 'else', 'end', 'lateral', 'natural', 'window', 'fetch', 'only', 'distinct', 'case',
+  'asc', 'desc', 'do', 'nothing', 'conflict', 'is', 'null', 'in', 'exists', 'by', 'at', 'tablesample',
+]);
+
+function lineIndex(source: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < source.length; i += 1) if (source[i] === '\n') starts.push(i + 1);
+  return starts;
+}
+
+function lineOf(starts: number[], offset: number): number {
+  let lo = 0;
+  let hi = starts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (starts[mid] <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo + 1;
+}
+
+/** 「自持连接」痕迹：自己建池、自己取连接、或持有池字段。一处都没有＝加锁跑在调用方句柄上。 */
+const OWN_CONNECTION_RE = /\bnew\s+(?:pg\.)?Pool\b|\.connect\s*\(|this\.#?pool\b/;
+
+/**
+ * 扫一个源文件里的行锁点。`knownTables` 用于把「真表名」与 CTE / 子查询别名分开。
+ */
+export function scanRowLockSource(file: string, rawSource: string, knownTables: ReadonlySet<string>): RowLockScanResult {
+  const source = blankTsComments(rawSource);
+  const borrowedConnection = !OWN_CONNECTION_RE.test(source);
+  const starts = lineIndex(source);
+  const literals = extractStringLiterals(source);
+  const sites: RowLockSite[] = [];
+  const tableless: { file: string; line: number; excerpt: string }[] = [];
+  const covered = new Set<number>();
+
+  for (const literal of literals) {
+    const text = blankSqlLineComments(literal.text);
+    ROW_LOCK_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    const hits: { at: number; kind: RowLockKind; of: string | undefined; clause: string }[] = [];
+    while ((m = ROW_LOCK_RE.exec(text)) !== null) {
+      const kind = ROW_LOCK_KINDS[m[1].replace(/\s+/g, ' ').toLowerCase()];
+      /* c8 ignore next */
+      if (!kind) continue;
+      hits.push({ at: literal.start + m.index, kind, of: m[2], clause: m[0].replace(/\s+/g, ' ') });
+    }
+    if (hits.length === 0) continue;
+
+    // 该字面量里认出来的表与别名。行锁默认覆盖语句里全部 FROM/JOIN 表（Postgres 语义）。
+    const tables = new Set<string>();
+    const unknown = new Set<string>();
+    const aliasToTable = new Map<string, string>();
+    TABLE_REF_RE.lastIndex = 0;
+    let t: RegExpExecArray | null;
+    while ((t = TABLE_REF_RE.exec(text)) !== null) {
+      const name = t[1];
+      const alias = t[2] && !SQL_NON_ALIAS.has(t[2].toLowerCase()) ? t[2] : undefined;
+      if (knownTables.has(name)) {
+        tables.add(name);
+        aliasToTable.set(name, name);
+        if (alias) aliasToTable.set(alias, name);
+      } else {
+        unknown.add(name);
+        if (alias) unknown.add(alias);
+      }
+    }
+
+    for (const hit of hits) {
+      covered.add(hit.at);
+      let locked = [...tables];
+      if (hit.of) {
+        const names = hit.of.split(',').map((n) => n.trim());
+        const resolved = names.map((n) => aliasToTable.get(n)).filter((n): n is string => Boolean(n));
+        // 别名有认不出来的 → 退回「全表」，宁可误报（红线：MUST NOT 漏报）。
+        if (resolved.length === names.length) locked = [...new Set(resolved)];
+      }
+      if (locked.length === 0) {
+        tableless.push({
+          file,
+          line: lineOf(starts, hit.at),
+          excerpt: text.slice(Math.max(0, hit.at - literal.start - 160), hit.at - literal.start + 40).replace(/\s+/g, ' ').trim(),
+        });
+        continue;
+      }
+      sites.push({
+        file,
+        line: lineOf(starts, hit.at),
+        kind: hit.kind,
+        tables: locked.sort(),
+        unknownNames: [...unknown].sort(),
+        clause: hit.clause,
+        borrowedConnection,
+      });
+    }
+  }
+
+  // 保真自检：源文里每一处行锁关键字都 MUST 被上面的字面量扫描覆盖到，否则词法器没看懂 = 可能漏报。
+  const unlexed: { file: string; line: number; excerpt: string }[] = [];
+  ROW_LOCK_RE.lastIndex = 0;
+  let raw: RegExpExecArray | null;
+  while ((raw = ROW_LOCK_RE.exec(source)) !== null) {
+    if (covered.has(raw.index)) continue;
+    unlexed.push({
+      file,
+      line: lineOf(starts, raw.index),
+      excerpt: source.slice(Math.max(0, raw.index - 80), raw.index + 40).replace(/\s+/g, ' ').trim(),
+    });
+  }
+
+  sites.sort((a, b) => (a.line === b.line ? a.tables.join().localeCompare(b.tables.join()) : a.line - b.line));
+  return { sites, unlexed, tableless };
+}
+
+export function scanRowLocks(files: string[], knownTables: ReadonlySet<string>): RowLockScanResult {
+  const sites: RowLockSite[] = [];
+  const unlexed: { file: string; line: number; excerpt: string }[] = [];
+  const tableless: { file: string; line: number; excerpt: string }[] = [];
+  for (const file of files) {
+    const result = scanRowLockSource(file, readFileSync(repoPath(file), 'utf8'), knownTables);
+    sites.push(...result.sites);
+    unlexed.push(...result.unlexed);
+    tableless.push(...result.tableless);
+  }
+  sites.sort((a, b) => (a.file === b.file ? a.line - b.line : a.file.localeCompare(b.file)));
+  return { sites, unlexed, tableless };
+}
+
+/** 行锁跨属主豁免条目 —— 一条条目 = 一个 `{文件, 表, 锁强度}` 三元组。 */
+export interface RowLockExemption {
+  file: string;
+  table: string;
+  kind: RowLockKind;
+  /** `<加锁方层>-><表属主层>`，冗余写出方便人读，不参与键。 */
+  direction: string;
+  reason: string;
+  eliminatedBy: string | null;
+  note?: string;
+}
+
 /* ------------------------------------------------------------------ 动态 SQL 登记 */
 
 export interface DynamicSqlResolution {
@@ -635,6 +920,9 @@ export interface BoundarySnapshot {
   migrationTables: string[];
   tableOwners: Map<string, Layer>;
   exceptionTables: Set<string>;
+  /** 已知表全集：属主表 ∪ src 自建 ∪ migrations 建表 ∪ 例外表（口径取最宽，宁可多认、少漏判行锁）。 */
+  knownTables: Set<string>;
+  rowLocks: RowLockScanResult;
 }
 
 let cached: BoundarySnapshot | null = null;
@@ -656,6 +944,13 @@ export function boundarySnapshot(): BoundarySnapshot {
   }
   const owners = readJson<TableOwnershipFile>('boundaries/table-ownership.json');
   const exceptions = readJson<ExceptionTablesFile>('boundaries/exception-tables.json');
+  const migrationTables = listMigrationTables();
+  const knownTables = new Set<string>([
+    ...owners.tables.map((t) => t.table),
+    ...[...merged.values()].filter((w) => w.op === 'create_table').map((w) => w.table),
+    ...migrationTables,
+    ...exceptions.tables.map((t) => t.table),
+  ]);
   cached = {
     files,
     ownership,
@@ -670,9 +965,11 @@ export function boundarySnapshot(): BoundarySnapshot {
           : a.file.localeCompare(b.file)
         : a.table.localeCompare(b.table),
     ),
-    migrationTables: listMigrationTables(),
+    migrationTables,
     tableOwners: new Map(owners.tables.map((t) => [t.table, t.owner])),
     exceptionTables: new Set(exceptions.tables.map((t) => t.table)),
+    knownTables,
+    rowLocks: scanRowLocks(files, knownTables),
   };
   return cached;
 }

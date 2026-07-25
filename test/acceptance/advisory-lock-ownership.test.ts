@@ -8,6 +8,9 @@
  * 因此必须由自动化检查拦住，MUST NOT 只靠人工评审发现。
  *
  * 环境层级：离线 / 源码级（读本仓源码文本，不连库、不起服务）。
+ *
+ * **本文件只扫 `pg_advisory_*`，对行锁（`FOR UPDATE` / `FOR SHARE`）完全无感。**
+ * 行锁的跨库失效同样无声，由同族的 `AC-LOCK-03/04/05` 承接，在 `row-lock-ownership.test.ts`。
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';

@@ -1,21 +1,30 @@
 /**
  * event-outbox 传输原语 PG-gated 集成测试（change block2-outbox-transport）。
  *
- * 无 DATABASE_URL 时整组 skip（照仓内 *.integration.test.ts 范式）。真库往返验证桩测不到的东西：
+ * 不在真库测试通道（npm run test:pg）里时整组 skip。真库往返验证桩测不到的东西：
  *   - BIGSERIAL id 单调；emit 3 条 → consumer 有序收齐；游标真落库；
  *   - 第二个消费者名独立从头收齐（游标按 (consumer,target) 分行）；
  *   - dev / ol target 互不可见。
  *
  * 本 change 不要求执行本文件（只需 typecheck + 单元测试）；写好待整批末尾在有库环境统一跑。
- * 运行：DATABASE_URL=postgres://… tsx --test test/transport/event-outbox.integration.test.ts
+ * 运行：npm run test:pg（需 DATABASE_URL 指向 aidcp_test* 专用测试库，见 test/helpers/pg-test-database-guard.ts）
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 
 import { OutboxConsumer, emitOutboxEvent, type OutboxEvent } from '../../src/transport/event-outbox.js';
+import { OUTBOX_URL_ENV, resolveIntegrationDatabase } from '../helpers/pg-test-database-guard.js';
 
-const connectionString = process.env.DATABASE_URL;
+/**
+ * 连库前 MUST 过 `test/helpers/pg-test-database-guard.ts` 的三条守卫：拒绝已知生产 host、
+ * 强制 `aidcp_test*` 专用库名、只在显式测试通道（`npm run test:pg`）里生效。
+ * 理由：dev 与 ol 连的是同一台物理 PostgreSQL，那台就是生产库，而本组用例会 TRUNCATE / 建表。
+ * 不在通道里 → 整组 skip、绝不连库；在通道里而守卫不过 → 当场抛错，MUST NOT 降级为 skip。
+ */
+const target = resolveIntegrationDatabase(OUTBOX_URL_ENV);
+const connectionString = target.enabled ? target.connectionString : undefined;
+const skipReason = target.enabled ? (false as const) : target.skipReason;
 const silent = { log() {}, warn() {} };
 
 const SCHEMA_SQL = `
@@ -38,7 +47,7 @@ CREATE TABLE IF NOT EXISTS event_outbox_cursor (
 
 test(
   'PostgreSQL: emit 3 条 → consumer 有序收齐 + 游标落库；第二消费者独立收齐；dev/ol 隔离',
-  { skip: !connectionString },
+  { skip: skipReason },
   async () => {
     const pool = new pg.Pool({ connectionString });
     try {
@@ -109,7 +118,7 @@ test(
 
 test(
   'PostgreSQL: 提交乱序不吞事件——在途小 id 未提交时，压住已提交的大 id，落定后有序补投（at-least-once）',
-  { skip: !connectionString },
+  { skip: skipReason },
   async () => {
     const pool = new pg.Pool({ connectionString });
     // 独立连接，模拟两个并发业务事务

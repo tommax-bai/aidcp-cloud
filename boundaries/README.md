@@ -3,6 +3,7 @@
 这里的清单文件是两族门禁的输入。门禁本体在 `test/acceptance/module-boundary.test.ts`（`AC-BOUND-01..06`）
 与 `test/acceptance/table-ownership.test.ts`（`AC-OWN-01..05`），由既有的 `npm run test:acceptance`
 与控制仓 `scripts/land-change` 在每次集成前执行。零新依赖、不依赖 CI。
+锁归属另成一族（`AC-LOCK-*`），输入也放在本目录：见下表的 `row-lock-exemptions.json`。
 
 规范位置在控制仓 `docs/cloud-service-decomposition-proposal.md`：
 族名与族内编号见 §12「两族门禁」；文件归属判据见 §4.7；表属主判据见 §5.1；协议归属裁决见 §10.9。
@@ -21,6 +22,7 @@
 | `kernel-non-members.json` | kernel 花名册 + 「被多边共导但 MUST NOT 进 kernel」的文件与原因 | 人工，改前先改 §4.7 |
 | `import-exemptions.json` | 跨边界 import 的棘轮式豁免清单 | 只减不增（见下） |
 | `table-write-exemptions.json` | 跨层表写入的棘轮式豁免清单 | 只减不增（见下） |
+| `row-lock-exemptions.json` | **行锁**（`FOR UPDATE` / `FOR SHARE`）跨属主的棘轮式豁免清单 + 「借调调用方连接」的加锁点花名册 | 只减不增；**不由 `boundaries:refresh` 维护，纯人工** |
 
 ## 唯一的重跑入口
 
@@ -153,6 +155,15 @@ npm run boundaries:census
      `UPDATE` / `INSERT` 语句全在 `src/config/mirror-version-store.ts`（`api`）一侧，`AC-OWN-02` 恒绿。
      门禁看得见的只是同一批改动带来的 4 条 `automation -> api` **import** 边（已在 `import-exemptions.json` 逐条挂着消除方式）。
 2. 文件系统信号与 PostgreSQL advisory lock 通道（§14 红线 24）。
+   - **锁通道自 2026-07-25 起不再全盲**：advisory lock 的归属由 `test/acceptance/advisory-lock-ownership.test.ts`
+     的 `AC-LOCK-01/02` 扫，**行锁**（`FOR UPDATE` / `FOR SHARE`）由 `test/acceptance/row-lock-ownership.test.ts`
+     的 `AC-LOCK-03/04/05` 扫，清单在 `row-lock-exemptions.json`。补这一刀的理由与 advisory lock 同源：
+     两侧连到不同库时，两边各自加锁都会成功、互斥消失、且不产生任何错误——失效方向是**无声的**。
+   - **行锁族仍然看不见的**：一条行锁究竟跑在**谁的事务**里。文件自己不建池、不 `connect()` 时，
+     锁跑在调用方传进来的句柄上，而调用方常由组合根按结构类型注入（连 import 边都没有）。
+     `AC-LOCK-04` 的处置不是猜，而是**要求这类文件被逐个登记**：新出现一个未登记的借调式加锁点即失败，
+     由人写清它跑在谁的事务里。今天登记 2 个（`src/db/environment-row-lock.ts`、
+     `src/interactions/offboard-write-adapter.ts`），两个都确实跨边界，理由与去向写在清单条目里。
 
 > 定稿 §12「阶段 1 退出判据」点名的五处里，另三处（`interaction_runtime_controls` / `interaction_auth_state`
 > 双写、`first_post_onboarding` 双写）是**真跨/同层 SQL 双写**、扫描器看得见：前两张已在

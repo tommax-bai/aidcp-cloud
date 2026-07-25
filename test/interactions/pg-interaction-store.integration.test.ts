@@ -15,8 +15,17 @@ import { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
 import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
 import { InteractionSendOrchestrator, replyIdempotencyKey } from '../../src/interactions/send-orchestrator.js';
 import type { InteractionReplyResultPayload, InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
+import { INTERACTION_URL_ENV, resolveIntegrationDatabase } from '../helpers/pg-test-database-guard.js';
 
-const connectionString = process.env.AIDCP_INTERACTION_TEST_DATABASE_URL;
+/**
+ * 连库前 MUST 过 `test/helpers/pg-test-database-guard.ts` 的三条守卫：拒绝已知生产 host、
+ * 强制 `aidcp_test*` 专用库名、只在显式测试通道（`npm run test:pg`）里生效。
+ * 理由：dev 与 ol 连的是同一台物理 PostgreSQL，那台就是生产库，而本组用例会 TRUNCATE / 建表。
+ * 不在通道里 → 整组 skip、绝不连库；在通道里而守卫不过 → 当场抛错，MUST NOT 降级为 skip。
+ */
+const target = resolveIntegrationDatabase(INTERACTION_URL_ENV);
+const connectionString = target.enabled ? target.connectionString : undefined;
+const skipReason = target.enabled ? (false as const) : target.skipReason;
 const attemptGate = {
   rateLimits: { accountPerMinute: 100, accountPerHour: 100, accountPerDay: 100,
     threadCooldownSeconds: 0, newLoginCooldownSeconds: 0, consecutiveFailureLimit: 3 },
@@ -24,7 +33,7 @@ const attemptGate = {
 };
 
 test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recovery and confirmed result',
-  { skip: !connectionString }, async () => {
+  { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const store = new InteractionStore({ pool, clock: () => 1784044802100, apiPurge: new InteractionApiWrites(), envLock });
     try {
@@ -318,7 +327,7 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
   });
 
 test('PostgreSQL: circuit reset, replay-safe thread states and periodic classifying recovery',
-  { skip: !connectionString }, async () => {
+  { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const now = 1_784_044_900_000;
     const store = new InteractionStore({ pool, clock: () => now, envLock });
@@ -442,7 +451,7 @@ test('PostgreSQL: circuit reset, replay-safe thread states and periodic classify
   });
 
 test('PostgreSQL: immutable template/config versions, publish CAS and fail-closed invalid variables',
-  { skip: !connectionString }, async () => {
+  { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const configs = new ReplyConfigStore({ pool });
     try {
@@ -524,7 +533,7 @@ test('PostgreSQL: immutable template/config versions, publish CAS and fail-close
   });
 
 test('PostgreSQL mock Edge E2E: sync → list/detail → generate/approve/send → confirmed',
-  { skip: !connectionString }, async () => {
+  { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const store = new InteractionStore({ pool, clock: () => attemptGate.now, envLock });
     const configs = new ReplyConfigStore({ pool });

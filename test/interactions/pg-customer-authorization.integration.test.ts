@@ -11,13 +11,22 @@ import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { lockEnvironmentRow, lockEnvironmentScopeRows } from '../../src/db/environment-row-lock.js';
 import { shanghaiDayStartMs } from '../../src/time/shanghai-day.js';
+import { INTERACTION_URL_ENV, resolveIntegrationDatabase } from '../helpers/pg-test-database-guard.js';
 
 const envLock = { lockEnvironmentRow, lockEnvironmentScopeRows };
 
-const connectionString = process.env.AIDCP_INTERACTION_TEST_DATABASE_URL;
+/**
+ * 连库前 MUST 过 `test/helpers/pg-test-database-guard.ts` 的三条守卫：拒绝已知生产 host、
+ * 强制 `aidcp_test*` 专用库名、只在显式测试通道（`npm run test:pg`）里生效。
+ * 理由：dev 与 ol 连的是同一台物理 PostgreSQL，那台就是生产库，而本组用例会 TRUNCATE / 建表。
+ * 不在通道里 → 整组 skip、绝不连库；在通道里而守卫不过 → 当场抛错，MUST NOT 降级为 skip。
+ */
+const target = resolveIntegrationDatabase(INTERACTION_URL_ENV);
+const connectionString = target.enabled ? target.connectionString : undefined;
+const skipReason = target.enabled ? (false as const) : target.skipReason;
 
 test('PostgreSQL: authoritative env ownership is unique and cross-customer interaction access fails closed',
-  { skip: !connectionString }, async () => {
+  { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
       offboardWrites: new OffboardWriteAdapter(),
@@ -155,7 +164,7 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
   });
 
 test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombstone after exact Edge result and purge by deadline',
-  { skip: !connectionString }, async () => {
+  { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
       offboardWrites: new OffboardWriteAdapter(),
@@ -338,7 +347,7 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
   });
 
 test('PostgreSQL: provisioned video environment without an auth binding gets terminal offboard while legacy missing binding stays closed',
-  { skip: !connectionString }, async () => {
+  { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
       offboardWrites: new OffboardWriteAdapter(),
@@ -428,7 +437,7 @@ test('PostgreSQL: provisioned video environment without an auth binding gets ter
   });
 
 test('PostgreSQL: admin revocation removes ownership before cleanup and late binding materializes exact offboard',
-  { skip: !connectionString }, async () => {
+  { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const users = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool,
       offboardWrites: new OffboardWriteAdapter(),
