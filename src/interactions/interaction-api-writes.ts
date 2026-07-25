@@ -18,13 +18,26 @@ import type pg from 'pg';
 type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
 
 export class InteractionApiWrites {
-  /** 离场清理：删账号维度的回复配置（api 属主）。仅按 account_id，与改动前 purgeDueOffboards 逐字一致。 */
-  async purgeReplyConfigForAccount(client: Queryable, accountId: string): Promise<void> {
-    await client.query(`DELETE FROM reply_templates WHERE account_id=$1`, [accountId]);
-    await client.query(`DELETE FROM reply_rules WHERE account_id=$1`, [accountId]);
-    await client.query(`DELETE FROM account_reply_profiles WHERE account_id=$1`, [accountId]);
-    await client.query(`DELETE FROM interaction_reply_config_versions WHERE account_id=$1`, [accountId]);
-    await client.query(`DELETE FROM interaction_reply_configs WHERE account_id=$1`, [accountId]);
+  /**
+   * 离场清理：删账号维度的回复配置（api 属主）。仅按 account_id —— 这五张表没有 env_key 列，
+   * 天然只能按账号删，**故调用方（离场 saga）有责任先核验该账号确实仍绑在被清理的那个环境上**；
+   * 账号已改派 / 从未绑定时 MUST NOT 调本方法（见 interaction-store.purgeDueOffboards 的归属核验）。
+   *
+   * 返回真实删除的总行数：离场清理要能事后回答「删了几行」，MUST NOT 只回 void（0 行也当成功是本仓红线）。
+   */
+  async purgeReplyConfigForAccount(client: Queryable, accountId: string): Promise<number> {
+    let removed = 0;
+    for (const sql of [
+      `DELETE FROM reply_templates WHERE account_id=$1`,
+      `DELETE FROM reply_rules WHERE account_id=$1`,
+      `DELETE FROM account_reply_profiles WHERE account_id=$1`,
+      `DELETE FROM interaction_reply_config_versions WHERE account_id=$1`,
+      `DELETE FROM interaction_reply_configs WHERE account_id=$1`,
+    ]) {
+      const result = await client.query(sql, [accountId]);
+      removed += result.rowCount ?? 0;
+    }
+    return removed;
   }
 
   /** 过期清理：删 365 天前的配置面审计（api 属主）。与改动前 purgeExpiredContent 逐字一致。 */

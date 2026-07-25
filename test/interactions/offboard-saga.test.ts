@@ -11,9 +11,10 @@ import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import { OffboardWriteAdapter } from '../../src/interactions/offboard-write-adapter.js';
 
+/** Step A 清的 automation 表（绑定行 interaction_auth_state 已挪到 Step C，与翻 purged 同事务）。 */
 const AUTOMATION_TABLES = [
   'interaction_threads', 'interaction_sync_batches', 'interaction_sync_cursors',
-  'interaction_api_requests', 'interaction_auth_state', 'interaction_runtime_controls',
+  'interaction_api_requests', 'interaction_runtime_controls',
 ];
 const REPLY_TABLES = [
   'reply_templates', 'reply_rules', 'account_reply_profiles',
@@ -29,6 +30,10 @@ test('purge saga: Step B failure leaves automation data purged but offboard un-p
         if (offboardState === 'purged') return { rows: [], rowCount: 0 };
         return { rows: [{ offboard_id: 'off-1', account_id: 'acct-1', env_key: 'env-1',
           user_id: 'user-1', edge_result_status: null }], rowCount: 1 };
+      }
+      // 归属核验：账号仍绑在被离场的那个环境上 → 账号级清理放行。
+      if (sql.includes('SELECT env_key FROM interaction_auth_state')) {
+        return { rows: [{ env_key: 'env-1' }], rowCount: 1 };
       }
       const del = sql.match(/DELETE FROM (\w+)/);
       if (del) { deleted.push(del[1]); return { rows: [], rowCount: 1 }; }
@@ -61,12 +66,20 @@ test('purge saga: Step B failure leaves automation data purged but offboard un-p
   await assert.rejects(store.purgeDueOffboards(1_784_044_900_000), /simulated step B failure/);
   for (const t of AUTOMATION_TABLES) assert.ok(deleted.includes(t), `automation 表应已删: ${t}`);
   for (const t of REPLY_TABLES) assert.ok(!deleted.includes(t), `reply 表首跑不应删: ${t}`);
+  assert.equal(deleted.includes('interaction_auth_state'), false,
+    '绑定行只在 Step C 与翻 purged 同事务删：中断时它必须还在，重入才能重算出同一个归属结论');
   assert.equal(offboardState, 'pending_edge', '离场行未翻 purged，可被下一轮再取到');
 
-  // 重入：Step A 幂等重删 automation（无害）、Step B 补删 reply、Step C 翻 purged。
+  // 重入：Step A 幂等重删 automation（无害）、Step B 补删 reply、Step C 删绑定 + 翻 purged。
   assert.equal(await store.purgeDueOffboards(1_784_044_900_000), 1);
   for (const t of REPLY_TABLES) assert.ok(deleted.includes(t), `reply 表重入应删完: ${t}`);
+  assert.ok(deleted.includes('interaction_auth_state'), '重入跑完 Step C 才删绑定行');
   assert.equal(offboardState, 'purged');
+
+  // 再跑一次：已 purged 不再入选，不重复删、不重复计数。
+  const before = deleted.length;
+  assert.equal(await store.purgeDueOffboards(1_784_044_900_000), 0);
+  assert.equal(deleted.length, before);
 });
 
 test('OffboardWriteAdapter.enqueueOffboard writes offboard + revoke + audit on the passed client (automation 属主表)', async () => {

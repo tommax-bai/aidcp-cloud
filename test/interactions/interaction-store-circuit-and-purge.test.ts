@@ -180,13 +180,16 @@ test('deadline purges Cloud data without Edge receipt and a late receipt is reco
         return { rows: [{ offboard_id: 'offboard-due', account_id: 'acct-due', env_key: 'env-due',
           user_id: 'user-due', edge_result_status: null }] };
       }
+      if (sql.includes('SELECT env_key FROM interaction_auth_state')) {
+        return { rows: [{ env_key: 'env-due' }], rowCount: 1 };
+      }
       if (sql.startsWith('DELETE FROM')) {
         deletedSql.push(sql);
         return { rows: [], rowCount: 1 };
       }
       if (sql.includes("UPDATE interaction_offboards SET state='purged'")) return { rows: [], rowCount: 1 };
       if (sql.includes('INSERT INTO interaction_offboard_audit')) {
-        offboardAudits.push({ event: params[5] ? 'cloud_purged' : 'unknown', status: params[5] as string });
+        offboardAudits.push({ event: sql.match(/'(cloud_purge[a-z_]*)'/)?.[1] ?? 'unknown', status: params[5] as string });
         return { rows: [], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
@@ -201,7 +204,11 @@ test('deadline purges Cloud data without Edge receipt and a late receipt is reco
   assert.equal(deletedSql.some((sql) => sql.includes('interaction_reply_config_scopes') ||
     sql.includes('interaction_reply_scope_versions') || sql.includes('interaction_reply_scope_audit')), false,
   'offboarding an account must preserve group/default strategy aggregates and their immutable versions');
-  assert.deepEqual(offboardAudits, [{ event: 'cloud_purged', status: 'purged_edge_unconfirmed' }]);
+  assert.deepEqual(offboardAudits, [
+    { event: 'cloud_purged', status: 'purged_edge_unconfirmed' },
+    { event: 'cloud_purge_rows', status: 'scope=account+env;api_requests=1,auth_state=1,reply_config=5,'
+      + 'runtime_controls=1,sync_batches=1,sync_cursors=1,threads=1' },
+  ]);
 
   const lateAudits: Array<{ event: string; status: string }> = [];
   const lateClient = {

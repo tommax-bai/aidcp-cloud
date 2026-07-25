@@ -41,6 +41,18 @@ export type { InteractionTestResetResult, ListQuery, ListResult, ReplyPreviewCon
 const { Pool } = pg;
 const SYNC_THREAD_FUTURE_SKEW_MS = 5 * 60 * 1_000;
 
+/**
+ * 单次离场清理调用的记录数上限（见 `purgeDueOffboards`）。单条清理是三笔短事务、不长事务锁表，
+ * 但「一次到期一大批」时无界循环会长时间占住连接并与在线流量抢 IO；到顶即收工，其余留下一轮。
+ */
+const OFFBOARD_PURGE_BATCH_LIMIT = 200;
+
+/** 离场清理留痕：把每张表的实删行数压成稳定的 k=v 串（审计表无 JSONB 列）。 */
+function formatPurgeCounts(accountScoped: boolean, counts: Record<string, number>): string {
+  const body = Object.keys(counts).sort().map((key) => `${key}=${counts[key]}`).join(',');
+  return `${accountScoped ? 'scope=account+env' : 'scope=env_only'};${body}`;
+}
+
 type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
 
 /**
@@ -50,7 +62,8 @@ type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
  * 收口到本接口后不再是跨 owner 单事务/跨层直写。
  */
 export interface InteractionApiPurgePort {
-  purgeReplyConfigForAccount(q: Queryable, accountId: string): Promise<void>;
+  /** 返回真实删除的总行数（离场清理要把「删了几行」如实留痕，MUST NOT 只回 void 让调用方假设已删）。 */
+  purgeReplyConfigForAccount(q: Queryable, accountId: string): Promise<number>;
   purgeExpiredAuditEvents(q: Queryable, now: number): Promise<number>;
 }
 
@@ -1709,20 +1722,43 @@ export class InteractionStore implements InteractionStoreReaderPort {
   }
 
   /**
-   * 离场分表清理 saga（change offboard-saga）——把改动前「一个跨 owner 单事务清 12 张表」拆成
-   * 三个各自独立提交、可重入的步骤，不再依赖跨库单事务原子：
-   *   Step A（automation 属主 + 取行，一个事务）：取一条到期离场并清 automation 侧数据；
-   *   Step B（api 属主，一个事务）：经窄接口清 reply 配置面；
-   *   Step C（automation 属主，一个事务）：状态守卫翻 purged + 审计。
+   * 离场分表清理 saga（change offboard-saga；correctness 加固见下）——把改动前「一个跨 owner 单事务
+   * 清 12 张表」拆成三个各自独立提交、可重入的步骤，不再依赖跨库单事务原子：
+   *   Step A（automation 属主 + 取行，一个事务）：取一条到期离场、**核验归属**、清 automation 侧数据；
+   *   Step B（api 属主，一个事务）：经窄接口清 reply 配置面（**仅在归属核验通过时**）；
+   *   Step C（automation 属主，一个事务）：删绑定行 + 状态守卫翻 purged + 审计。
    * 幂等可重入：DELETE 天然幂等（重跑删 0 行、不重复副作用），离场行的生命周期状态本身即持久进度——
    *   翻到 purged 前一直可被再次取到，中断后下一轮从 Step A 重清剩余、不遗漏；翻到 purged 后再不入选。
    * 「进度落库」= 离场行的 state（pending_edge/dispatched/tombstoned→purged），无需另立进度台账。
-   * 清的表与改动前完全一致，只换原子性实现与 api 属主表的写入通道。
+   *
+   * ── 删除范围的两级口径（本方法最容易删错的地方）─────────────────────────────
+   * 被清的表分两类：
+   *   ① **环境级**（threads / sync_batches / sync_cursors / api_requests，以及经 FK 级联的 messages /
+   *      reply_jobs / send_attempts）：谓词是 (account_id, env_key)，天然只命中被离场的那一对绑定。
+   *   ② **账号级**（runtime_controls + reply 配置面五张表）：这些表**根本没有 env_key 维度**
+   *      （主键 = (platform, account_id)），只能按账号整删。若该账号此刻已改派 / 重新绑定到**另一个**
+   *      环境，按账号整删就会把**在用客户的活数据**删掉；若这条离场记录压根没有真实绑定
+   *      （`enqueueProvisionedUnboundOffboard` 用 `account_id := env_key` 占位），账号号更是**捏造的**，
+   *      按它去删等于拿一个不属于任何人的键去扫生产表。
+   * 因此 Step A 先读 `interaction_auth_state`（PK=(platform,account_id)，UNIQUE(platform,env_key)）核验：
+   *   - 绑定存在且 env_key == 本离场的 env_key → 账号级清理**放行**；
+   *   - 绑定指向别的 env_key（已改派 / 已重新绑定）或绑定不存在（占位账号号 / 绑定已被外部删除）
+   *     → 账号级清理**跳过**，只做环境级清理，并留审计。宁可少删（少删可再删，多删不可逆）。
+   * 该核验必须在**每一轮**都能重算出同一答案，所以绑定行的删除从 Step A 挪到 Step C，与翻 purged
+   * 同事务提交：只要离场行还没到 purged，绑定行就还在 —— 崩溃后重入读到的仍是同一个事实，
+   * 且 `upsertAuthStatus` / `assertAccountScope` 的换绑闸在整条 saga 期间一直有效（绑定行还在 ⇒
+   * 该账号换环境、该环境换账号都会被 SCOPE_MISMATCH 挡住），账号级清理的前提不会在半途被人改掉。
+   *
+   * ── 上限 ─────────────────────────────────────────────────────────────────
+   * 一次调用最多清 `limit` 条（默认 200），其余留给下一轮定时器：单条清理已是三笔短事务、不锁表，
+   * 但一次到期一大批时无界循环会长时间霸占连接并与在线流量抢 IO。到顶时如实告警，MUST NOT 装作清完。
    */
-  async purgeDueOffboards(now = this.clock()): Promise<number> {
+  async purgeDueOffboards(now = this.clock(), limit = OFFBOARD_PURGE_BATCH_LIMIT): Promise<number> {
+    const batchLimit = Math.max(1, Math.min(OFFBOARD_PURGE_BATCH_LIMIT, Math.trunc(limit) || OFFBOARD_PURGE_BATCH_LIMIT));
     let purged = 0;
-    while (true) {
-      // Step A：取一条到期离场，同一事务里清 automation 属主表并提交。
+    let rounds = 0;
+    for (; rounds < batchLimit; rounds++) {
+      // Step A：取一条到期离场，同一事务里核验归属并清 automation 属主表，然后提交。
       const picked = await this.withPurgeTx(async (client) => {
         const due = await client.query<{
           offboard_id: string; account_id: string; env_key: string; user_id: string | null;
@@ -1733,24 +1769,60 @@ export class InteractionStore implements InteractionStoreReaderPort {
               ORDER BY purge_due_at ASC,offboard_id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, [now]);
         const row = due.rows[0];
         if (!row) return null;
-        await client.query(`DELETE FROM interaction_threads WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
-        await client.query(`DELETE FROM interaction_sync_batches WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
-        await client.query(`DELETE FROM interaction_sync_cursors WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
-        await client.query(`DELETE FROM interaction_api_requests WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
-        await client.query(`DELETE FROM interaction_auth_state WHERE account_id=$1 AND env_key=$2`, [row.account_id, row.env_key]);
-        await client.query(`DELETE FROM interaction_runtime_controls WHERE account_id=$1`, [row.account_id]);
-        return row;
+        // 归属核验：该账号当前绑在哪个环境？行锁与本事务同寿，挡住同刻的授权首写。
+        const binding = await client.query<{ env_key: string }>(
+          `SELECT env_key FROM interaction_auth_state WHERE platform=$1 AND account_id=$2 FOR UPDATE`,
+          [INTERACTION_PLATFORM, row.account_id],
+        );
+        const boundEnvKey = binding.rows[0]?.env_key ?? null;
+        const accountScoped = boundEnvKey === row.env_key;
+        const counts: Record<string, number> = {};
+        const purgeRows = async (label: string, sql: string, params: unknown[]): Promise<void> => {
+          const result = await client.query(sql, params);
+          counts[label] = result.rowCount ?? 0;
+        };
+        const scope = [row.account_id, row.env_key];
+        await purgeRows('threads', `DELETE FROM interaction_threads WHERE account_id=$1 AND env_key=$2`, scope);
+        await purgeRows('sync_batches', `DELETE FROM interaction_sync_batches WHERE account_id=$1 AND env_key=$2`, scope);
+        await purgeRows('sync_cursors', `DELETE FROM interaction_sync_cursors WHERE account_id=$1 AND env_key=$2`, scope);
+        await purgeRows('api_requests', `DELETE FROM interaction_api_requests WHERE account_id=$1 AND env_key=$2`, scope);
+        // 运行控制按账号删（该表 env_key 可空、且历史上存在无 env 绑定的行；收权路径同样只按账号身份）。
+        // 安全性来自上面的归属核验，不来自 env 谓词——加 env 谓词只会把无绑定的旧行永远留下。
+        if (accountScoped) {
+          await purgeRows('runtime_controls',
+            `DELETE FROM interaction_runtime_controls WHERE platform=$2 AND account_id=$1`,
+            [row.account_id, INTERACTION_PLATFORM]);
+        }
+        return { ...row, accountScoped, boundEnvKey, counts };
       });
       if (!picked) break;
+      if (!picked.accountScoped) {
+        console.warn(
+          `[interaction] 离场 ${picked.offboard_id}（env=${picked.env_key}）只做环境级清理：`
+          + `账号 ${picked.account_id} 当前绑定=${picked.boundEnvKey ?? '无'}，`
+          + '账号级数据（运行控制 / 回复配置面）不属于本次离场，按「宁可少删」跳过。',
+        );
+      }
       // Step B：经窄接口清 api 属主的 reply 配置面（独立事务，DELETE 幂等，中断重入照删剩余）。
-      await this.withPurgeTx((client) => this.requireApiPurge().purgeReplyConfigForAccount(client, picked.account_id));
-      // Step C：状态守卫翻 purged + 审计（独立事务，已 purged 则空过、不重复计数）。
+      // 归属核验未通过时**整步跳过**：这五张表无 env 维度，按账号删会命中在用绑定的活数据。
+      if (picked.accountScoped) {
+        picked.counts.reply_config = await this.withPurgeTx(
+          (client) => this.requireApiPurge().purgeReplyConfigForAccount(client, picked.account_id));
+      }
+      // Step C：删绑定行 + 状态守卫翻 purged + 审计（独立事务，已 purged 则空过、不重复计数）。
       const flipped = await this.withPurgeTx(async (client) => {
         const updated = await client.query(
           `UPDATE interaction_offboards SET state='purged',purged_at=now(),updated_at=now()
             WHERE offboard_id=$1 AND state IN ('pending_edge','dispatched','tombstoned')`, [picked.offboard_id],
         );
+        // 0 行 = 这条离场已被另一台（DEV/OL 共库、两台各跑一份小时定时器）清完并翻了 purged。
+        // 不计数、不写审计、不删绑定行（赢家已在它自己的 Step C 里删过）——绝不把「没做成」记成做成。
         if (!updated.rowCount) return false;
+        const authState = await client.query(
+          `DELETE FROM interaction_auth_state WHERE platform=$1 AND account_id=$2 AND env_key=$3`,
+          [INTERACTION_PLATFORM, picked.account_id, picked.env_key],
+        );
+        picked.counts.auth_state = authState.rowCount ?? 0;
         await client.query(
           `INSERT INTO interaction_offboard_audit
              (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
@@ -1759,9 +1831,32 @@ export class InteractionStore implements InteractionStoreReaderPort {
             picked.edge_result_status === 'cleared' || picked.edge_result_status === 'already_cleared'
               ? 'purged_edge_confirmed' : 'purged_edge_unconfirmed'],
         );
+        // 删了什么、删了几行 —— 事后可查的唯一留痕（审计表无 JSONB 列，故压成稳定的 k=v 串）。
+        // event_id 是主键：同一笔事务里的两条审计必须来自不同前缀，否则退化的 idGen 会撞主键。
+        await client.query(
+          `INSERT INTO interaction_offboard_audit
+             (event_id,offboard_id,platform,account_id,env_key,user_id,event,status)
+           VALUES ($1,$2,'wechat_channels',$3,$4,$5,'cloud_purge_rows',$6)`,
+          [this.idGen('purge_rows'), picked.offboard_id, picked.account_id, picked.env_key, picked.user_id,
+            formatPurgeCounts(picked.accountScoped, picked.counts)],
+        );
         return true;
       });
-      if (flipped) purged++;
+      if (flipped) {
+        purged++;
+        if (picked.accountScoped && picked.counts.auth_state === 0) {
+          console.warn(
+            `[interaction] 离场 ${picked.offboard_id}：Step A 观察到的绑定行在 Step C 已不存在（删 0 行）；`
+            + '账号级清理已按当时的绑定事实执行，此处如实记 0，不当作失败也不当作已删。',
+          );
+        }
+      }
+    }
+    if (rounds >= batchLimit) {
+      console.warn(
+        `[interaction] 离场清理本轮到达单次上限 ${batchLimit} 条（本轮清了 ${purged} 条）；`
+        + '是否仍有到期记录本轮未再探查，留待下一轮定时器——MUST NOT 据此认为已清完。',
+      );
     }
     return purged;
   }

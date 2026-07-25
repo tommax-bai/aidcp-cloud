@@ -33,6 +33,20 @@ test('offboarding dispatch is scope-bound, body-free and remains pending while E
   assert.doesNotMatch(JSON.stringify(pushed[0]), /content|cookie|credential|template/i);
 });
 
+test('purge counter accumulates purged offboards, not timer ticks, and stays silent on a zero-row run', async () => {
+  const metrics = new InteractionMetrics();
+  let purged = 0;
+  const service = new InteractionOffboardingService({
+    store: { purgeDueOffboards: async () => purged } as unknown as InteractionStore,
+    metrics, pusher: { pushToEdges: () => 0 } as unknown as EdgePusher, clock: () => 13,
+  });
+  assert.equal(await service.purgeDue(), 0);
+  assert.deepEqual(metrics.snapshot().counters, {}, '清了 0 条不得打点（否则读起来像「清过了」）');
+  purged = 3;
+  assert.equal(await service.purgeDue(), 3);
+  assert.deepEqual(metrics.snapshot().counters, { 'interaction_offboard_purge_total|status=purged': 3 });
+});
+
 test('offboarding retry resolves only the account-bound Edge and replays the same durable command identity', async () => {
   const pushed: Array<{ edgeId?: string; envelope: Envelope }> = [];
   const store = {

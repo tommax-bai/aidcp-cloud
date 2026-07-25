@@ -46,9 +46,14 @@ export class InteractionOffboardingService {
     return dispatched;
   }
 
+  /**
+   * 计数口径：counter 按**实际清掉的离场记录数**累加。改动前把 count 当 label（`count:'3'`）而按 1 递增，
+   * 读出来的是「跑过几轮定时器」而不是「清了几条」，且每个数字自成一条时间序列——那是把 0 行与 N 行
+   * 记成同一件事的静默假成功。0 条时不打点（不制造「清过了」的假象）。
+   */
   async purgeDue(): Promise<number> {
     const purged = await this.deps.store.purgeDueOffboards((this.deps.clock ?? Date.now)());
-    if (purged) this.deps.metrics.increment('interaction_offboard_purge_total', { status: 'purged', count: String(purged) });
+    if (purged) this.deps.metrics.increment('interaction_offboard_purge_total', { status: 'purged' }, purged);
     return purged;
   }
 }
