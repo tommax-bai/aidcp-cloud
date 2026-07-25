@@ -47,9 +47,17 @@ CREATE TABLE IF NOT EXISTS publish_draft_refinement_jobs (
   id                 UUID PRIMARY KEY,
   execution_target   TEXT NOT NULL CHECK (execution_target IN ('dev','ol')),
   account_id         TEXT NOT NULL,
-  -- 跨 owner 外键（引 publish_log，另一服务所有）。additive 拆库前置：共库期保留此约束，
-  -- 拆库后的替代已就位在 claimNext 的读侧 fail-closed（EXISTS publish_log），删约束押到拆库那刻、此处不删。
-  record_id          INT NOT NULL REFERENCES publish_log(id) ON DELETE CASCADE,
+  -- 跨 owner 外键已降级（Block③ 物理拆库前置）：publish_log 属 api，本表属 content，拆库后两者不同物理库，
+  -- PostgreSQL 外键不能跨库 —— 带着它建表会在空的 content 库里当场失败（publish_log 不存在）。本表由
+  -- init() 无条件 CREATE TABLE 自建（本文件 :160），故这条是 owner-URL 一翻转就必炸的硬阻断。
+  -- 原约束的两个作用各有去处，**不是静默拿掉**：
+  --   ① 插入期引用完整性：等价守卫在唯一创建入口的上游 —— create() 只被
+  --      src/client-auth/client-auth-server.ts:981 调用，而它先在 :938 经
+  --      pendingPublishPreviewForAccountRecord 读一次 publish_log（同账号 + pending_approval），
+  --      读不到当场 404 返回、走不到 create()。故「record_id 指向不存在的 publish_log」构造不出来。
+  --   ② ON DELETE CASCADE：publish_log 全仓零 DELETE（grep 零命中）→ 今天从不触发。
+  --      若日后引入删稿，须在 api 池补一条存在性预检 + 本表孤儿清理，MUST NOT 指望本约束。
+  record_id          INT NOT NULL,
   expected_version   INT NOT NULL CHECK (expected_version >= 0),
   scope              TEXT NOT NULL CHECK (scope IN ('whole','body','images','selected_image','selected_text')),
   instruction        TEXT NOT NULL,

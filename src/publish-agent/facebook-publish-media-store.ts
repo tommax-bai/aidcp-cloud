@@ -107,20 +107,29 @@ export type FacebookPublishSetPatch =
 export const FACEBOOK_PUBLISH_MEDIA_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS account_facebook_publish_image_set (
   id                     BIGSERIAL PRIMARY KEY,
-  -- 跨 owner 外键（引 accounts，另一服务所有）。additive 拆库前置：共库期保留此约束，
-  -- 拆库后的替代已就位——每个公开入口（list/upload/reorder/updateSet/deleteSet/reserveNext/availableCount）
-  -- 先走 assertFacebookAccount（现读 accounts、缺行即 account_not_found fail-closed）。删约束押到拆库那刻、此处不删。
-  account_id             TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+  -- 跨 owner 外键已降级（Block③ 物理拆库前置）：accounts 属 api，本表属 content，拆库后两者不同物理库，
+  -- PostgreSQL 外键不能跨库 —— 带着它建表会在空的 content 库里当场失败（accounts 不存在），是硬阻断。
+  -- 原约束的两个作用各有去处，**不是静默拿掉**：
+  --   ① 插入期引用完整性：等价守卫在 assertFacebookAccount（本文件 :504，经 AccountPlatformReader 端口向 api
+  --      域问平台，缺账号即 account_not_found fail-closed），且它挂在**每一个**公开入口上
+  --      （list/upload/reorder/updateSet/deleteSet/reserveNext/availableCount）；唯一写 account_id 的语句
+  --      在 uploadOne，只能由 uploadFiles 进入，而 uploadFiles 第一行就是该断言 → 违规插入构造不出来。
+  --   ② ON DELETE CASCADE：全仓零 DELETE FROM accounts、account-store 不暴露任何删除入口 → 今天从不触发。
+  --      账号删除若日后落地，级联由 src/transport/account-delete-cascade.ts 的 outbox 接管（见
+  --      scripts/db-split/0076_downgrade_cross_owner_account_fk.sql 的「危险窗口」）。
+  account_id             TEXT NOT NULL,
   status                 TEXT NOT NULL DEFAULT 'available'
                          CHECK (status IN ('available','reserved','used','disabled','deleted','quarantine')),
   caption_hint           TEXT,
   sort_order             INTEGER NOT NULL DEFAULT 0,
   reserved_by            TEXT,
   reserved_at            TIMESTAMPTZ,
-  -- 跨 owner 外键（引 publish_log，另一服务所有），可空、审计用途（记「这组图被哪条发布记录用掉」）。
-  -- additive 拆库前置：共库期保留此约束；此指针不参与任何鉴权/取数判定，读侧只原样透出 id，
-  -- 拆库后即便悬空也无害（不需读侧 fail-closed），故不加校验（YAGNI）。删约束押到拆库那刻、此处不删。
-  used_by_publish_log_id INTEGER REFERENCES publish_log(id) ON DELETE SET NULL,
+  -- 跨 owner 外键已降级（同上理由：publish_log 属 api）。本列可空、纯审计（记「这组图被哪条发布记录用掉」）。
+  -- 它今天挡不住任何东西：唯一写点是 markUsed(setId, publishLogId)，publishLogId 来自
+  -- src/publish-agent/publish-dispatcher.ts:505 那条刚落库的 publish_log 记录 id（必然存在）；
+  -- ON DELETE SET NULL 同样从不触发（publish_log 全仓零 DELETE）。此指针不参与任何鉴权/取数判定，
+  -- 读侧只原样透出 id，拆库后即便悬空也无害，故不补读侧校验（YAGNI）。
+  used_by_publish_log_id INTEGER,
   last_error             TEXT,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -142,8 +151,8 @@ ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS caption_
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS reserved_by TEXT;
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ;
--- 旧库补列路径，与上面同一条审计用途的跨 owner 外键（引 publish_log）；拆库后同样无需读侧 fail-closed。
-ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS used_by_publish_log_id INTEGER REFERENCES publish_log(id) ON DELETE SET NULL;
+-- 旧库补列路径，与上面同一条审计列；跨 owner 外键同样已降级（理由与上同，此处只补列、不补约束）。
+ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS used_by_publish_log_id INTEGER;
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS last_error TEXT;
 ALTER TABLE account_facebook_publish_image_set ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE account_facebook_publish_image ADD COLUMN IF NOT EXISTS duplicate_of_image_id BIGINT REFERENCES account_facebook_publish_image(id) ON DELETE SET NULL;

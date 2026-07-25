@@ -1,7 +1,11 @@
 -- aidcp:kind=expand
 -- aidcp:objects=
 --
--- change: Block③ 物理拆库前置脚手架 —— 跨属主 accounts 外键降级（UNWIRED / 未执行）。
+-- change: Block③ 物理拆库前置脚手架 —— **全部跨属主外键**降级（UNWIRED / 未执行）。
+--
+-- 文件名里的 `account_fk` 是历史遗留：本脚本最初只处理 `REFERENCES accounts(account_id)` 那一族。
+-- 现口径是**全部跨 owner 外键**（含指向 publish_log 与 interaction_reply_config_scopes 的 3 条）。
+-- 名字保持不变，因为 scripts/db-split/0077_copy_owner_data.sh 的拒绝提示逐字点了这个路径。
 --
 -- 状态：本迁移是 **前置脚手架**，author 但不执行。它尚未进任何真库账本；adoption 前请读完
 -- 本头「adoption 须知」。共库期本迁移不改任何现网读写行为（DROP CONSTRAINT 是放宽，见 kind 说明）。
@@ -31,9 +35,14 @@
 -- 的 task_id）**不动**：它们随表同库迁移、保留库内 CASCADE。本迁移只拆「跨 owner」的那一层。
 --
 -- ============================================================================
--- 拆哪些约束（12 条跨 owner FK，全部引用 accounts(account_id)；owner 口径见 boundaries/table-ownership.json）
+-- 拆哪些约束（15 条跨 owner FK；owner 口径见 boundaries/table-ownership.json）
 -- ============================================================================
--- 约束名是 PG 对列级内联外键自动生成的 <表名>_account_id_fkey。accounts 自身属 api，故「跨 owner」=
+-- 数字来源：2026-07-25 在 dev 生产库上只读实测 pg_constraint（共 40 条外键，跨属主 15 条），
+-- 而不是从源码 DDL 反推 —— 源码只是「新库会建成什么样」，现网真库才是「现在实际有什么」。
+-- 12 条 automation→api + 3 条 content→api。段 A/B 是 accounts 族（12 条，脚本初版即覆盖），
+-- 段 C 是**非 accounts** 的 3 条（后补，见下）。
+--
+-- 约束名是 PG 对列级内联外键自动生成的 <表名>_<列名>_fkey。accounts 自身属 api，故「跨 owner」=
 -- 子表属 content / automation。api 属主的 account 关联表（persona_config / first_post_onboarding /
 -- account_comment_approval_policy / interaction_reply_config* / reply_templates / reply_rules /
 -- account_reply_profiles / interaction_audit_events 等）与 accounts 同库，外键 **不拆**、随本地 CASCADE 清。
@@ -56,6 +65,25 @@
 --    automation 属主（1）：
 --      delegated_tasks                (migrations/0038)  —— 由应用层「删账号前查 api 账号存在性 +
 --                                        应用层清理」接管（存在性校验从跨库 FK 改为应用层查 api）。
+-- C) 3 条**不指向 accounts** 的跨 owner 外键（2026-07-25 dev 实测补入；旧版脚本漏了它们，
+--    而 0077 的前置自检查的是「属主表指向本属主之外的表」，漏一条就整批拒绝执行）：
+--    content 属主（2）——两条都指向 api 的 publish_log：
+--      account_facebook_publish_image_set.used_by_publish_log_id (migrations/0067)
+--          可空、纯审计指针（记「这组图被哪条发布记录用掉」），ON DELETE SET NULL。
+--          它今天挡不住任何东西：唯一写点 markUsed() 的 publishLogId 来自刚落库的那条 publish_log；
+--          publish_log 全仓零 DELETE，SET NULL 从不触发。读侧只原样透出 id，悬空亦无害。
+--      publish_draft_refinement_jobs.record_id                   (migrations/0057)
+--          ON DELETE CASCADE。插入期完整性的等价守卫在应用层上游：唯一创建入口
+--          src/client-auth/client-auth-server.ts:981 之前先读一次 publish_log（:938），读不到即 404。
+--          CASCADE 同样从不触发（publish_log 零 DELETE）。
+--    automation 属主（1）——指向 api 的 interaction_reply_config_scopes：
+--      interaction_reply_jobs.config_scope_id                    (migrations/0048)
+--          无 ON DELETE 子句（默认 NO ACTION）。两点须知：
+--          (a) 这条只活在 migrations/0048，**src/ 的自建 DDL 里没有它**（src/interactions/ 的存储不建这条
+--              外键）——所以源码侧门禁 AC-SPLIT-02 看不见它，只能靠本脚本 + 真库实测兜住。
+--          (b) 它是 b46708b 把 interaction_reply_config_scopes 的属主从 automation 改判 api **之后**
+--              才变成跨 owner 的。属主一改判就可能凭空多出要降的外键，这正是本脚本必须按真库
+--              pg_constraint 实测复核、而不是只跟着源码 DDL 走的理由。
 --
 -- ============================================================================
 -- 危险窗口（adoption 铁律）：本迁移 MUST 与应用层 outbox 级联接线 **成对** 上线
@@ -66,6 +94,11 @@
 --     单库多消费者形态验收），确认级联幂等清理跑通，**再** 应用本迁移拆 FK。
 --   * dev-first：先在 dev 走完拆 FK + 级联验收，OL 押最后（OL 每张表迁移前先 pg_dump 快照留档）。
 --   * 绝不碰同机 isales。
+--
+-- 段 C 的 3 条**不在这个危险窗口里**，理由是它们的父表从不被删：publish_log 与
+-- interaction_reply_config_scopes 全仓零 DELETE（grep 零命中），故其 ON DELETE 子句今天从不触发，
+-- 拆掉不产生任何需要 outbox 接管的级联。它们剩下的唯一真实作用是**插入期引用完整性**，
+-- 两条 content 侧的等价应用层守卫见段 C 逐条说明（自 aidcp-cloud 本 change 起，源码 DDL 也已同步降级）。
 --
 -- ============================================================================
 -- 可逆性
@@ -110,6 +143,16 @@ ALTER TABLE account_facebook_publish_image_set
 -- automation 属主
 ALTER TABLE delegated_tasks              DROP CONSTRAINT IF EXISTS delegated_tasks_account_id_fkey;
 
+-- ── C) 不指向 accounts 的跨 owner 外键（3 条；2026-07-25 dev 实测补入）──────────
+-- content 属主 → api 的 publish_log
+ALTER TABLE account_facebook_publish_image_set
+  DROP CONSTRAINT IF EXISTS account_facebook_publish_image_set_used_by_publish_log_id_fkey;
+ALTER TABLE publish_draft_refinement_jobs
+  DROP CONSTRAINT IF EXISTS publish_draft_refinement_jobs_record_id_fkey;
+-- automation 属主 → api 的 interaction_reply_config_scopes
+ALTER TABLE interaction_reply_jobs
+  DROP CONSTRAINT IF EXISTS interaction_reply_jobs_config_scope_id_fkey;
+
 -- ── 回滚（共库期可逆；物理拆库后不可重建，此处仅留档，MUST NOT 与上面同批执行）─────────────
 -- ALTER TABLE interaction_threads          ADD CONSTRAINT interaction_threads_account_id_fkey          FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE;
 -- ALTER TABLE interaction_messages         ADD CONSTRAINT interaction_messages_account_id_fkey         FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE;
@@ -123,3 +166,6 @@ ALTER TABLE delegated_tasks              DROP CONSTRAINT IF EXISTS delegated_tas
 -- ALTER TABLE facebook_group_membership    ADD CONSTRAINT facebook_group_membership_account_id_fkey    FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE;
 -- ALTER TABLE account_facebook_publish_image_set ADD CONSTRAINT account_facebook_publish_image_set_account_id_fkey FOREIGN KEY (account_id) REFERENCES accounts(account_id) ON DELETE CASCADE;
 -- ALTER TABLE delegated_tasks              ADD CONSTRAINT delegated_tasks_account_id_fkey              FOREIGN KEY (account_id) REFERENCES accounts(account_id);
+-- ALTER TABLE account_facebook_publish_image_set ADD CONSTRAINT account_facebook_publish_image_set_used_by_publish_log_id_fkey FOREIGN KEY (used_by_publish_log_id) REFERENCES publish_log(id) ON DELETE SET NULL;
+-- ALTER TABLE publish_draft_refinement_jobs ADD CONSTRAINT publish_draft_refinement_jobs_record_id_fkey FOREIGN KEY (record_id) REFERENCES publish_log(id) ON DELETE CASCADE;
+-- ALTER TABLE interaction_reply_jobs        ADD CONSTRAINT interaction_reply_jobs_config_scope_id_fkey  FOREIGN KEY (config_scope_id) REFERENCES interaction_reply_config_scopes(scope_id);

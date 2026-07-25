@@ -45,14 +45,9 @@
     "src/onboarding/first-post-onboarding-store.ts": {
       "accounts(account_id)": 1
     },
-    "src/publish-agent/draft-refinement.ts": {
-      "publish_log(id)": 1
-    },
     "src/publish-agent/facebook-publish-media-store.ts": {
       "account_facebook_publish_image(id)": 2,
-      "account_facebook_publish_image_set(id)": 1,
-      "accounts(account_id)": 1,
-      "publish_log(id)": 2
+      "account_facebook_publish_image_set(id)": 1
     }
   },
   "schemaLiterals": {
