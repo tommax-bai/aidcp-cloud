@@ -23,6 +23,7 @@ import {
   type AccountDisplayNameInput,
 } from './account-display-name.js';
 import type { SchemaEnsurer } from './kernel/schema-capability-contract.js';
+import type { AccountIdentityProjectionRow } from './kernel/account-projection-types.js';
 
 const { Pool } = pg;
 
@@ -126,6 +127,15 @@ export interface AccountStore {
   init?(): Promise<void>;
   /** 列出全部账号的暂停态（启动加载用）。 */
   listAll(): Promise<AccountRecord[]>;
+  /**
+   * 账号身份花名册（change automation-accounts-projection）：`account_id` / `platform` / `group_label`
+   * 三列的**原样值**，供 automation 域刷新它自己的守卫投影（accounts 属 api 单写，automation
+   * MUST NOT 直连本域的库）。
+   *
+   * ⚠️ 实现 MUST NOT 归一 / trim / 小写化 platform 与 group_label：消费方的守卫谓词是从原来内联
+   * accounts 的 SQL 里逐字搬过去的，只有原样值才能保证语义等价。
+   */
+  listAccountIdentities?(): Promise<readonly AccountIdentityProjectionRow[]>;
   /** upsert 一个账号的暂停态（pause 未注册账号时自动建行）。 */
   setPaused(accountId: string, paused: boolean, at: number | null): Promise<void>;
   /**
@@ -306,6 +316,25 @@ export class PgAccountStore implements AccountStore {
       accountId: r.account_id,
       status: r.status === 'paused' ? 'paused' : 'active',
       pausedAt: r.paused_at ? r.paused_at.getTime() : null,
+    }));
+  }
+
+  /**
+   * 账号身份花名册（change automation-accounts-projection）：三列**原样**返回，不归一、不 trim。
+   * 唯一消费方是 automation 域的守卫投影刷新器，经 kernel 端口 `AccountRosterSourcePort` 取。
+   */
+  async listAccountIdentities(): Promise<readonly AccountIdentityProjectionRow[]> {
+    const { rows } = await this.pool.query<{
+      account_id: string;
+      platform: string | null;
+      group_label: string | null;
+    }>('SELECT account_id, platform, group_label FROM accounts');
+    return rows.map((r) => ({
+      accountId: r.account_id,
+      // 库内 platform 是 NOT NULL DEFAULT，理论上不会是 NULL；真遇上也不猜平台，落空串让
+      // 消费方的平台谓词自然判假（fail-closed），MUST NOT 在这里补一个默认平台。
+      platform: r.platform ?? '',
+      groupLabel: r.group_label ?? null,
     }));
   }
 

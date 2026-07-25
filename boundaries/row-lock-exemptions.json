@@ -6,7 +6,7 @@
   "scannerPolicy": "扫描器**宁可误报、绝不漏报**（漏报＝门禁形同虚设）：一条 FOR UPDATE 默认按 Postgres 语义覆盖语句里 FROM/JOIN 到的全部表；带 OF <别名> 时收窄，别名认不出来即退回全表；不判断是否真在事务内。因此清单里允许有「扫描器口径误报」条目，它们 MUST 在 reason 里写明为什么是误报，MUST NOT 靠放宽扫描器来消掉。",
   "seedTotal": 7,
   "seedUnplanned": 7,
-  "frozenTotal": 7,
+  "frozenTotal": 6,
   "recordedAt": "2026-07-25",
   "seedBasis": "change dbsplit-test-gates 任务 A5 首次 seed：全量扫描 src/**/*.ts 得 55 处行锁点，其中跨属主 10 处、去重后 7 个 {file,table,kind} 键。7 条全部 eliminatedBy=null（无承接 change）：6 条是真实的跨属主行锁、去向是拆进程阶段（把跨边界读改成端口调用或接受最终一致），1 条是扫描器口径的已知误报。",
   "raises": [],
@@ -46,15 +46,6 @@
       "reason": "管理员改派环境前检查目标环境是否有离场在途（state <> 'purged'），取行加锁以免与离场推进竞态。表属 automation 单写（§5.1 离场四表）。",
       "eliminatedBy": null,
       "note": "去向：拆进程阶段改为向 automation 侧问「该环境是否离场在途」的端口调用；届时它退化为跨服务读，锁的互斥语义 MUST 由 automation 侧自己的事务承担。"
-    },
-    {
-      "file": "src/delegated-task/store.ts",
-      "table": "accounts",
-      "kind": "update",
-      "direction": "automation->api",
-      "reason": "**扫描器口径的已知误报，不是真的跨属主行锁**：claimNext 的 CTE 只 SELECT ... FROM delegated_tasks ... FOR UPDATE SKIP LOCKED，accounts 出现在同一条语句的 EXISTS 子查询里（AND EXISTS (SELECT 1 FROM accounts a WHERE ...)），Postgres 的 FOR UPDATE 不覆盖子查询的表。扫描器按「一个字符串字面量里认出来的全部表」上报，故多报了 accounts。",
-      "eliminatedBy": null,
-      "note": "MUST NOT 靠放宽扫描器来消这条：要把子查询里的表排掉就得做真正的 SQL 语法树解析，而任何解析不确定都会变成漏报，漏报比误报危险得多（本 change 的红线）。留一条带解释的豁免是更便宜也更安全的处置。"
     },
     {
       "file": "src/interactions/interaction-store.ts",

@@ -57,6 +57,12 @@ export interface FacebookGroupStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  /**
+   * 强制刷一次账号守卫投影（change automation-accounts-projection）。只在 `assertFacebookAccountGroupLabels`
+   * 这一处「运营会被当场挡住」的写路径上用，用来把投影的常规滞后压到 0。
+   * 不注入即退化为「按当前投影判定」——仍是 fail-closed，只是运营可能要等一个刷新周期。
+   */
+  refreshAccountProjection?: () => Promise<unknown>;
 }
 
 type FacebookGroupStoreQueryable = Pick<pg.Pool, 'query'>;
@@ -288,9 +294,11 @@ CREATE INDEX IF NOT EXISTS idx_fb_group_target_direction
 export const FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS facebook_group_membership (
   id                  BIGSERIAL PRIMARY KEY,
-  -- 跨 owner 外键（引 accounts，另一服务所有）。additive 拆库前置：共库期保留此约束，
-  -- 拆库后替代分两处：写侧 claimNext 已 FROM accounts 锚定（悬空账号不派新成员）、
-  -- 读侧 coverageCandidates 已加 EXISTS accounts（悬空账号不作覆盖候选）。删约束押到拆库那刻、此处不删。
+  -- 跨 owner 外键（引 accounts，另一服务所有）。additive 拆库前置：共库期保留此约束。
+  -- 拆库后的替代已全部就位：本表全部账号守卫（claimNext / revalidateScopedAssignment /
+  -- coverageCandidates）已改读本域的账号投影表，不再内联 accounts；投影缺行或陈旧一律判否。
+  -- 降约束本身押到拆库那刻，语句已备在 scripts/db-split/0076_downgrade_cross_owner_account_fk.sql
+  -- （facebook_group_membership_account_id_fkey 那一行），此处不删。
   account_id          TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
   group_url           TEXT NOT NULL REFERENCES facebook_group_target(group_url) ON DELETE CASCADE,
   status              TEXT NOT NULL CHECK (status IN ('assigned','joining','joined','pending','gated','no_button','checkpoint','failed','left')),
@@ -351,9 +359,11 @@ CREATE INDEX IF NOT EXISTS idx_fb_group_join_audit_group
 
 export class FacebookGroupTargetStore {
   private readonly pool: pg.Pool;
+  private readonly refreshAccountProjection?: () => Promise<unknown>;
 
   constructor(options: FacebookGroupStoreOptions = {}) {
     this.pool = poolFrom(options);
+    this.refreshAccountProjection = options.refreshAccountProjection;
   }
 
   async init(): Promise<void> {
@@ -461,19 +471,39 @@ export class FacebookGroupTargetStore {
     }
   }
 
+  private async readProjectedFacebookGroupLabels(
+    queryable: FacebookGroupStoreQueryable,
+    labels: string[],
+  ): Promise<Set<string>> {
+    // 守卫读改读本域投影（原为内联 accounts）。新鲜期谓词挂在同一条语句里：投影缺行 → 谓词自然判假；
+    // 投影陈旧 / 从未刷过 → 新鲜期判假 → 整句返空 → 下面一律判否。两条路都落在拒绝一侧。
+    const { rows } = await queryable.query<{ group_label: string }>(
+      `SELECT DISTINCT p.group_label
+       FROM automation_account_projection p
+       WHERE lower(btrim(p.platform)) IN ('facebook','fb')
+         AND p.group_label = ANY($1::text[])
+         AND EXISTS (
+           SELECT 1 FROM automation_account_projection_state apj_state
+           WHERE apj_state.fresh_until > now()
+         )`,
+      [labels],
+    );
+    return new Set(rows.map((row) => row.group_label));
+  }
+
   private async assertFacebookAccountGroupLabels(
     queryable: FacebookGroupStoreQueryable,
     labels: string[],
   ): Promise<void> {
     if (labels.length === 0) return;
-    const { rows } = await queryable.query<{ group_label: string }>(
-      `SELECT DISTINCT group_label
-       FROM accounts
-       WHERE lower(btrim(platform)) IN ('facebook','fb')
-         AND group_label = ANY($1::text[])`,
-      [labels],
-    );
-    const actual = new Set(rows.map((row) => row.group_label));
+    let actual = await this.readProjectedFacebookGroupLabels(queryable, labels);
+    if (labels.some((label) => !actual.has(label)) && this.refreshAccountProjection) {
+      // 未命中时**先强制刷一次投影再问一遍**。这是整批守卫里唯一一处运营会被当场挡住的写路径
+      // （刚建号 / 刚改分组标签就来配 scope），投影的常规滞后会在这里变成一句莫名其妙的
+      // 「分组不存在」。刷新失败或刷完仍未命中，照旧判否——refresh 只压缩窗口，MUST NOT 放行。
+      await this.refreshAccountProjection().catch(() => undefined);
+      actual = await this.readProjectedFacebookGroupLabels(queryable, labels);
+    }
     if (labels.some((label) => !actual.has(label))) throw new FacebookGroupScopeError('invalid_account_group');
   }
 
@@ -711,9 +741,12 @@ export class FacebookGroupTargetStore {
          WHERE direction IS NOT NULL
          ORDER BY direction ASC`,
       ),
+      // 纯展示面（Console 的分组下拉），**不挂新鲜期谓词**：这里读到一个滞后 ≤ 一个刷新周期的
+      // 标签清单不构成任何放行——运营真拿它去配 scope 时，写路径上的 assertFacebookAccountGroupLabels
+      // 会再判一次（那一处才是守卫，且带新鲜期）。反过来，投影陈旧时把下拉清空只会让运营无从下手。
       this.pool.query<{ account_group_label: string }>(
         `SELECT DISTINCT group_label AS account_group_label
-         FROM accounts
+         FROM automation_account_projection
          WHERE lower(btrim(platform)) IN ('facebook','fb')
            AND group_label IS NOT NULL
            AND btrim(group_label) <> ''
@@ -747,6 +780,10 @@ export class FacebookGroupTargetStore {
     };
   }
 
+  /**
+   * 纯展示面（Console 的加群自动化目录：这个账号的分组标签 + 名下可加群数）。与 listFacets 同理
+   * **不挂新鲜期谓词**：它只喂一个数字给界面，不放行任何动作；真正下手的 claimNext 才是守卫。
+   */
   async scopedTargetCountsForAccounts(
     accountIds: readonly string[],
   ): Promise<Map<string, FacebookGroupScopedTargetCount>> {
@@ -760,7 +797,7 @@ export class FacebookGroupTargetStore {
                     SELECT 1 FROM facebook_group_membership m WHERE m.group_url = t.group_url
                   )
               )::text AS total
-       FROM accounts a
+       FROM automation_account_projection a
        LEFT JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
        LEFT JOIN facebook_group_target t ON t.group_url = s.group_url
        WHERE a.account_id = ANY($1::text[]) AND lower(btrim(a.platform)) IN ('facebook','fb')
@@ -780,13 +817,18 @@ export class FacebookGroupTargetStore {
     };
   }
 
+  /** 选群守卫：返回非 null 即意味着「可以对这个群下手」，故**挂新鲜期谓词**，陈旧时返 null。 */
   async nextJoinCandidate(accountId: string): Promise<FacebookGroupTargetRow | null> {
     const { rows } = await this.pool.query<TargetDbRow>(
       `SELECT t.group_url, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch, t.created_at, t.updated_at
-       FROM accounts a
+       FROM automation_account_projection a
        JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
        JOIN facebook_group_target t ON t.group_url = s.group_url
        WHERE a.account_id = $1
+         AND EXISTS (
+           SELECT 1 FROM automation_account_projection_state apj_state
+           WHERE apj_state.fresh_until > now()
+         )
          AND lower(btrim(a.platform)) IN ('facebook','fb')
          AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
          AND t.enabled = true
@@ -801,6 +843,11 @@ export class FacebookGroupTargetStore {
     return rows[0] ? toTargetRow(rows[0]) : null;
   }
 
+  /**
+   * 纯展示面（后台的逐账号加群进度）。同 listFacets **不挂新鲜期谓词**；注意这里的平台谓词是
+   * `platform = 'facebook'` 精确等值（不是别处那句 `lower(btrim(...)) IN (...)`），投影存原样值
+   * 才能让这句逐字照搬后仍然等价。
+   */
   async accountProgress(): Promise<FacebookGroupAccountProgress[]> {
     const { rows } = await this.pool.query<{
       account_id: string;
@@ -822,7 +869,7 @@ export class FacebookGroupTargetStore {
               count(*) FILTER (WHERE m.status IN ('failed','checkpoint','no_button','left'))::text AS failed,
               max(m.joined_at) AS last_joined_at,
               max(m.last_commented_at) AS last_commented_at
-       FROM accounts a
+       FROM automation_account_projection a
        LEFT JOIN facebook_group_membership m ON m.account_id = a.account_id
        WHERE a.platform = 'facebook'
        GROUP BY a.account_id
@@ -865,12 +912,19 @@ export class FacebookGroupMembershipStore {
 
   async claimNext(accountId: string): Promise<FacebookGroupMembershipRow | null> {
     const { rows } = await this.pool.query<MembershipDbRow>(
+      // 写路径守卫（认领一个群成员行）。原为内联 accounts，现读本域投影：整句仍是**一条语句**，
+      // 候选选取与 INSERT 的原子性一字未变，且 `FOR UPDATE OF t` 锁的本来就只有 facebook_group_target
+      // （automation 属主），从来没有跨属主行锁——去规范化之后更不可能有。
       `WITH candidate AS (
          SELECT t.group_url
-         FROM accounts a
+         FROM automation_account_projection a
          JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
          JOIN facebook_group_target t ON t.group_url = s.group_url
          WHERE a.account_id = $1
+           AND EXISTS (
+             SELECT 1 FROM automation_account_projection_state apj_state
+             WHERE apj_state.fresh_until > now()
+           )
            AND lower(btrim(a.platform)) IN ('facebook','fb')
            AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
            AND t.enabled = true
@@ -898,21 +952,43 @@ export class FacebookGroupMembershipStore {
   }
 
   /**
+   * 当前投影是否仍在新鲜期内。投影与本 store 的表同库同池（去规范化的全部意义就在这里），
+   * 所以这只是一次本地读。任何读失败（含表不存在）一律按「不新鲜」处理 —— fail-closed。
+   */
+  private async accountProjectionFresh(): Promise<boolean> {
+    try {
+      const { rows } = await this.pool.query<{ fresh: boolean }>(
+        `SELECT (fresh_until > now()) AS fresh FROM automation_account_projection_state`,
+      );
+      return rows[0]?.fresh === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * 自动/裸池 assignment 在导航前重验账号当前分组与 scope。只删除 assigned/joining；任何终态事实原样保留。
+   *
+   * ⚠️ **这一处的极性是反的**，是整批守卫里唯一需要特殊处理的点：这里「账号查不到 / 分组对不上」
+   * 意味着**删除**成员行。若照别处那样把新鲜期谓词直接挂进 SQL，投影陈旧时 NOT EXISTS 恒真 →
+   * 反而会把一批合法的 assigned 行删掉；若把新鲜期挂在 DELETE 的正向条件上，陈旧时又变成一条也不删、
+   * 落到下面的状态读上判 'eligible' —— 那是**放行**，正是红线禁止的方向。
+   * 故这里改为**先问新鲜期**：不新鲜就既不删、也不放行，返回具名的 'projection_stale'。
    */
   async revalidateScopedAssignment(
     accountId: string,
     groupUrlInput: string,
-  ): Promise<'eligible' | 'scope_mismatch' | 'terminal' | 'missing'> {
+  ): Promise<'eligible' | 'scope_mismatch' | 'terminal' | 'missing' | 'projection_stale'> {
     const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
     if (!groupUrl) return 'missing';
+    if (!(await this.accountProjectionFresh())) return 'projection_stale';
     const removed = await this.pool.query(
       `DELETE FROM facebook_group_membership m
        WHERE m.account_id = $1 AND m.group_url = $2
          AND m.status IN ('assigned','joining')
          AND NOT EXISTS (
            SELECT 1
-           FROM accounts a
+           FROM automation_account_projection a
            JOIN facebook_group_target_scope s
              ON s.group_url = m.group_url AND s.account_group_label = a.group_label
            WHERE a.account_id = m.account_id
@@ -1067,9 +1143,14 @@ export class FacebookGroupMembershipStore {
         `SELECT ${cols}
          FROM facebook_group_membership
          WHERE account_id = $1
-           -- 拆库前置：account_id 跨 owner 引 accounts。共库期外键（CASCADE）保证账号删则成员行随删、此断言恒真，
-           -- 与原行为等价；拆库后无级联，账号已删的悬空群成员读侧 fail-closed（不作为覆盖候选、不替死号去评论）。
-           AND EXISTS (SELECT 1 FROM accounts a WHERE a.account_id = $1)
+           -- 守卫读改读本域投影（change automation-accounts-projection）：账号在投影里查得到、且投影
+           -- 仍在新鲜期内，才认这个账号可以去覆盖评论。缺行 / 陈旧 / 投影从未刷过，三种情况都判否
+           -- （不作为覆盖候选、不替一个我们已经说不准还在不在的账号去评论）。
+           AND EXISTS (SELECT 1 FROM automation_account_projection a WHERE a.account_id = $1)
+           AND EXISTS (
+             SELECT 1 FROM automation_account_projection_state apj_state
+             WHERE apj_state.fresh_until > now()
+           )
            AND status = 'joined'
            AND joined_at IS NOT NULL
          ORDER BY last_commented_at ASC NULLS FIRST, joined_at ASC, group_url ASC
@@ -1084,8 +1165,12 @@ export class FacebookGroupMembershipStore {
       `SELECT ${cols}
        FROM facebook_group_membership
        WHERE account_id = $1
-         -- 拆库前置：见 relaxed 分支同一说明——account_id 跨 owner 引 accounts，拆库后悬空群成员读侧 fail-closed。
-         AND EXISTS (SELECT 1 FROM accounts a WHERE a.account_id = $1)
+         -- 见 relaxed 分支同一说明：守卫读改读本域投影，缺行 / 陈旧一律判否。
+         AND EXISTS (SELECT 1 FROM automation_account_projection a WHERE a.account_id = $1)
+         AND EXISTS (
+           SELECT 1 FROM automation_account_projection_state apj_state
+           WHERE apj_state.fresh_until > now()
+         )
          AND status = 'joined'
          AND joined_at IS NOT NULL
          AND joined_at <= now() - ($3::double precision * interval '1 second')

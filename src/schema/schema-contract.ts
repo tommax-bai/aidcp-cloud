@@ -54,8 +54,13 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 分段进程）才起——今天生产跑的 monolith 一条都不起，故仍只抬 KNOWN_MAX、不抬 REQUIRED。
  * 迁移没跑而又起了分段进程时不会静默：读游标的查询会直接报 `relation ... does not exist`，
  * 由消费轮询每轮 warn 出来（绝不退化成「查不到 = 没有事件」）。
+ *
+ * 注：`0077_automation_account_projection`（change automation-accounts-projection）建的是 automation 域
+ * 对 api 属主账号主数据的守卫投影两张表。它**是**若干守卫的前置（投影探不到 ⇒ 那批守卫一律拒绝），
+ * 但这正是设计要的 fail-closed 形态：能力级 fail-closed 比进程级硬启动失败更精准——迁移没跑时只有
+ * 加群 / 委托任务认领停摆并响亮报错，其余功能照常。故仍只抬 KNOWN_MAX、不抬 REQUIRED。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
+export const KNOWN_MAX_SCHEMA_VERSION = '0077_automation_account_projection';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

@@ -238,7 +238,14 @@ export class FacebookGroupJoinScheduler {
     if (revalidateScope) {
       const eligibility = await this.deps.memberships.revalidateScopedAssignment(accountId, assigned.groupUrl);
       if (eligibility !== 'eligible') {
-        const reason = eligibility === 'scope_mismatch' ? 'scope_mismatch' : 'assignment_not_executable';
+        // 'projection_stale' = 账号守卫投影陈旧，这次**说不准**这个 assignment 还该不该执行。
+        // 报成一条具名的拒绝，MUST NOT 混进 'assignment_not_executable'（那是「这行确实不可执行」的
+        // 结论，是另一件事），更 MUST NOT 当成可以继续。
+        const reason = eligibility === 'scope_mismatch'
+          ? 'scope_mismatch'
+          : eligibility === 'projection_stale'
+            ? 'account_projection_stale'
+            : 'assignment_not_executable';
         await this.audit({
           accountId,
           groupUrl: assigned.groupUrl,

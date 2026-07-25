@@ -37,6 +37,7 @@
       "src/kernel/reference-image-guidance.ts",
       "src/kernel/note-detail.ts",
       "src/kernel/account-identity.ts",
+      "src/kernel/account-projection-types.ts",
       "src/kernel/facebook-comment-config-types.ts",
       "src/kernel/image-provider-registry.ts",
       "src/kernel/comment-approval-notice.ts",

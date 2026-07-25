@@ -12,6 +12,8 @@
     { "table": "alerts", "owner": "automation", "basis": "§5.1「告警（alerts）」→ aidcp-automation；api MUST NOT UPDATE" },
     { "table": "anchor_staging", "owner": "automation", "basis": "§5.1 未具名；锚点主缓存，写入方 src/cache/pg-anchor-cache.ts 属 automation（§4.7 cache 逐文件表）" },
     { "table": "anchors", "owner": "automation", "basis": "§5.1 未具名；同上" },
+    { "table": "automation_account_projection", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change automation-accounts-projection 新增（migrations/0077）。§5.1 未具名；automation 域对 api 属主 accounts 的**去规范化守卫投影**（只收 account_id / platform / group_label 三列原样值），唯一 SQL 写入方 src/transport/account-projection-store.ts 属 automation。注：本表刻意不引 accounts 外键——加外键等于把刚拆掉的跨属主耦合原样加回来。MUST 回写 §5.1" },
+    { "table": "automation_account_projection_state", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change automation-accounts-projection 新增（migrations/0077）。§5.1 未具名；上表的单行新鲜期状态表，是守卫 fail-closed 的落点（fresh_until 过期即全部账号守卫拒绝），唯一 SQL 写入方 src/transport/account-projection-store.ts 属 automation。MUST 回写 §5.1" },
     { "table": "bot_chats", "owner": "api", "basis": "§5.1 未具名；飞书群花名册，写入方 src/cache/bot-chat-store.ts 属 api（§4.7 cache 逐文件表）" },
     { "table": "category_config", "owner": "api", "basis": "§5.1 未具名；配置面，写入方属 api（§4.6.8）" },
     { "table": "client_env_provisioning_intents", "owner": "api", "basis": "§5.1「客户、环境归属和账号绑定」→ aidcp-api" },

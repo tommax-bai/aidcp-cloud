@@ -114,7 +114,7 @@ test('FacebookGroupTargetStore.importTargets validates explicit scopes before ta
         rolledBack = true;
         return { rows: [] };
       }
-      if (sql.includes('SELECT DISTINCT group_label')) {
+      if (sql.includes('SELECT DISTINCT p.group_label')) {
         return { rows: [{ group_label: '招聘组' }, { group_label: '华东组' }] };
       }
       if (sql.includes('INSERT INTO facebook_group_target')) {
@@ -137,7 +137,7 @@ test('FacebookGroupTargetStore.importTargets validates explicit scopes before ta
   );
   assert.equal(rolledBack, false);
   assert.deepEqual(result.rows[0].accountGroupLabels, ['招聘组', '华东组']);
-  const validationIndex = calls.findIndex((call) => call.sql.includes('SELECT DISTINCT group_label'));
+  const validationIndex = calls.findIndex((call) => call.sql.includes('SELECT DISTINCT p.group_label'));
   const targetWriteIndex = calls.findIndex((call) => call.sql.includes('INSERT INTO facebook_group_target'));
   assert.ok(validationIndex >= 0 && validationIndex < targetWriteIndex, '范围必须在任何目标写之前验证');
   assert.ok(calls.some((call) => call.sql.includes('DELETE FROM facebook_group_target_scope')));
@@ -149,7 +149,7 @@ test('FacebookGroupTargetStore.importTargets validates explicit scopes before ta
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params: [...params] });
       if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] };
-      if (sql.includes('SELECT DISTINCT group_label')) return { rows: [] };
+      if (sql.includes('SELECT DISTINCT p.group_label')) return { rows: [] };
       throw new Error(`非法范围验证后不应继续执行: ${sql}`);
     },
   };
@@ -226,7 +226,7 @@ test('FacebookGroupTargetStore.replaceTargetScopes bulk-replaces and reads datab
   const client = {
     query: async (sql: string) => {
       calls.push(sql);
-      if (sql.includes('SELECT DISTINCT group_label')) return { rows: [{ group_label: '华东组' }, { group_label: '招聘组' }] };
+      if (sql.includes('SELECT DISTINCT p.group_label')) return { rows: [{ group_label: '华东组' }, { group_label: '招聘组' }] };
       if (sql.includes('SELECT group_url FROM facebook_group_target')) return { rows: urls.map((group_url) => ({ group_url })) };
       if (sql.includes('scope_updated_at, t.scope_updated_by')) {
         return { rows: urls.map((group_url) => ({
@@ -394,7 +394,15 @@ test('claimNext is scope-bound, fails closed for ungrouped/unmapped accounts, an
   const store = new FacebookGroupMembershipStore({ pool });
   assert.equal(await store.claimNext('acc-fb'), null);
   assert.deepEqual(capturedParams, ['acc-fb']);
-  assert.match(capturedSql, /FROM accounts a/);
+  // 守卫读已去规范化到本域投影（change automation-accounts-projection）：MUST NOT 再内联 api 属主的 accounts，
+  // 且必须带新鲜期谓词——投影陈旧时这条认领语句一行也选不出来（fail-closed）。
+  assert.match(capturedSql, /FROM automation_account_projection a/);
+  assert.doesNotMatch(capturedSql, /FROM accounts\b/, '写路径守卫 MUST NOT 再直读 api 属主的 accounts');
+  assert.match(
+    capturedSql,
+    /FROM automation_account_projection_state apj_state\s*\n\s*WHERE apj_state\.fresh_until > now\(\)/,
+    '投影陈旧必须让候选为空（fail-closed），绝不因为投影没跟上就放行',
+  );
   assert.match(capturedSql, /JOIN facebook_group_target_scope s ON s\.account_group_label = a\.group_label/);
   assert.match(capturedSql, /a\.group_label IS NOT NULL AND btrim\(a\.group_label\) <> ''/);
   assert.match(capturedSql, /NOT EXISTS \(\s*SELECT 1 FROM facebook_group_membership m WHERE m\.group_url = t\.group_url/);
@@ -410,22 +418,52 @@ test('revalidateScopedAssignment releases only unfinished mismatches and preserv
   const mismatchPool = {
     query: async (sql: string) => {
       calls.push(sql);
+      if (sql.includes('fresh_until > now()')) return { rows: [{ fresh: true }] };
       if (sql.startsWith('DELETE')) return { rows: [], rowCount: 1 };
       throw new Error('scope mismatch 删除后不应再查状态');
     },
   } as unknown as pg.Pool;
   const mismatchStore = new FacebookGroupMembershipStore({ pool: mismatchPool });
   assert.equal(await mismatchStore.revalidateScopedAssignment('acc-fb', 'https://facebook.com/groups/group-a'), 'scope_mismatch');
-  assert.match(calls[0], /m\.status IN \('assigned','joining'\)/);
-  assert.match(calls[0], /facebook_group_target_scope/);
+  const deleteSql = calls.find((sql) => sql.startsWith('DELETE'))!;
+  assert.match(deleteSql, /m\.status IN \('assigned','joining'\)/);
+  assert.match(deleteSql, /facebook_group_target_scope/);
+  assert.match(deleteSql, /FROM automation_account_projection a/);
+  assert.doesNotMatch(deleteSql, /FROM accounts\b/, '守卫 MUST NOT 再直读 api 属主的 accounts');
 
   const terminalPool = {
-    query: async (sql: string) => sql.startsWith('DELETE')
-      ? { rows: [], rowCount: 0 }
-      : { rows: [{ status: 'joined' }] },
+    query: async (sql: string) => {
+      if (sql.includes('fresh_until > now()')) return { rows: [{ fresh: true }] };
+      return sql.startsWith('DELETE') ? { rows: [], rowCount: 0 } : { rows: [{ status: 'joined' }] };
+    },
   } as unknown as pg.Pool;
   const terminalStore = new FacebookGroupMembershipStore({ pool: terminalPool });
   assert.equal(await terminalStore.revalidateScopedAssignment('acc-fb', 'https://facebook.com/groups/group-a'), 'terminal');
+});
+
+/**
+ * 反向极性那一处的 fail-closed：这里「查不到」意味着**删除**，所以新鲜期不能挂进 SQL，
+ * 必须先问、不新鲜就既不删也不放行。两个方向都断言：
+ * ① 陈旧时 MUST NOT 发出 DELETE（不能把一批合法 assigned 行误删）；
+ * ② 陈旧时 MUST NOT 返回 'eligible'（不能因为投影没跟上就放行去加群）。
+ */
+test('revalidateScopedAssignment refuses without deleting when the account projection is stale', async () => {
+  for (const staleRows of [[{ fresh: false }], []]) {
+    const calls: string[] = [];
+    const stalePool = {
+      query: async (sql: string) => {
+        calls.push(sql);
+        if (sql.includes('fresh_until > now()')) return { rows: staleRows };
+        throw new Error(`投影陈旧时不应发出任何后续语句: ${sql}`);
+      },
+    } as unknown as pg.Pool;
+    const store = new FacebookGroupMembershipStore({ pool: stalePool });
+    assert.equal(
+      await store.revalidateScopedAssignment('acc-fb', 'https://facebook.com/groups/group-a'),
+      'projection_stale',
+    );
+    assert.equal(calls.filter((sql) => sql.startsWith('DELETE')).length, 0, '陈旧时绝不删成员行');
+  }
 });
 
 test('join audit persists trigger source and latestScheduledResult ignores newer manual rows by SQL contract', async () => {

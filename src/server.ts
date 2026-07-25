@@ -332,6 +332,12 @@ import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './
 //   - 风控写：api 只 emit 命令落 outbox；automation 唯一消费者经真 RiskController 应用（单写不变量物理成立）。
 //   - 事件观测：automation 把 EventBus tee 到 outbox；api 回放进本进程 EventBus → panel-ws。
 import { RiskReadHttpClient, registerRiskReadRoutes } from './transport/risk-read-http.js';
+import {
+  DEFAULT_ACCOUNT_PROJECTION_MAX_STALE_MS,
+  DEFAULT_ACCOUNT_PROJECTION_REFRESH_MS,
+  PgAccountProjectionStore,
+} from './transport/account-projection-store.js';
+import type { AccountRosterSourcePort } from './kernel/account-projection-types.js';
 import type { RiskReadPort } from './kernel/risk-read-types.js';
 import type { PanelAutomationReader } from './kernel/panel-automation-types.js';
 import { PgPanelAutomationRead } from './risk/panel-automation-read.js';
@@ -1080,9 +1086,16 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // automation 域对 api 属主 accounts 的守卫投影（change automation-accounts-projection）。
+  // 真正构造押到下面 accountStore 就绪那一段（花名册来源要靠它），这里先声明——两个 Facebook 群存储
+  // 与委托任务存储在下面就要按引用取它。
+  let accountProjectionStore: PgAccountProjectionStore | undefined;
   // Facebook group join: operator target catalog, one-group-one-account assignment ledger,
   // and best-effort join audit. Join loop is default-off and shadow-first.
   const facebookGroupTargetStore = new FacebookGroupTargetStore({
+    // 唯一一处「运营会被当场挡住」的写路径（配 scope 前校验分组标签存在）在判否之前强制刷一次投影，
+    // 把常规滞后压到 0；刷不动照旧判否（fail-closed）。投影没起来则退化为按当前投影判定。
+    refreshAccountProjection: () => accountProjectionStore?.refresh() ?? Promise.resolve(),
     pool: automationPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
@@ -1724,6 +1737,61 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     await store.init();
     accountStore = store;
     console.log('[aidcp-cloud] AccountStore 已就绪（accounts 表，seed default）');
+    // ── automation 域的账号守卫投影（change automation-accounts-projection）──────────────────
+    // accounts 属 api 单写。automation 侧原本有 10 处内联 accounts 的守卫读（三处夹在写路径 / 写事务内），
+    // 现已全部改读本域投影表 ⇒ 守卫回到同库、留在单条语句内，跨库读与跨库事务在这批点位上消失。
+    // 花名册来源经 kernel 端口取，**绝不**把 api 的连接池递给 automation 侧消费方：
+    //   - monolith / core / automation / content：本进程内 api 账号存储直读，逐字节等价、零 HTTP；
+    //   - api：本进程不该驱动 automation 的守卫，投影也不属它 ⇒ fail-closed（reject 具名错误），
+    //     镜像 clientEnvAutomationRead / offboardCleanupGrantOps 的既有范式。
+    // 拆进程后 automation 侧要改走内部 HTTP 取花名册：端口形状（只读、无参、返全量）就是为那一步留的，
+    // 但 api 侧今天还没有内部只读 API（只有 automation 起了一个），故该客户端留到 Block② 补。
+    const accountRosterSource: AccountRosterSourcePort =
+      serviceModeFromEnv() === 'api'
+        ? {
+            listAccountIdentities: () =>
+              Promise.reject(new Error('account_roster_source_unavailable_in_api_mode')),
+          }
+        : {
+            listAccountIdentities: async () => {
+              // 诚实失败：账号存储没起来就是「这次没读到」，让刷新算失败、新鲜期不推进、守卫到期即拒绝。
+              // MUST NOT 返空数组冒充成功——那会把「读不到」洗成「一个账号都没有」。
+              if (!store.listAccountIdentities) throw new Error('account_roster_source_missing_method');
+              return store.listAccountIdentities();
+            },
+          };
+    try {
+      const projection = new PgAccountProjectionStore({
+        pool: automationPool,
+        source: accountRosterSource,
+        refreshIntervalMs: readEnvNumber(
+          'AIDCP_ACCOUNT_PROJECTION_REFRESH_MS',
+          DEFAULT_ACCOUNT_PROJECTION_REFRESH_MS,
+        ),
+        maxStalenessMs: readEnvNumber(
+          'AIDCP_ACCOUNT_PROJECTION_MAX_STALE_MS',
+          DEFAULT_ACCOUNT_PROJECTION_MAX_STALE_MS,
+        ),
+      });
+      await projection.init();
+      const first = await projection.refresh();
+      projection.start();
+      accountProjectionStore = projection;
+      console.log(
+        first.ok
+          ? `[aidcp-cloud] 账号守卫投影已就绪（首刷 ${first.rows} 个账号；加群 / 委托任务认领的账号守卫读本域投影）`
+          : `[aidcp-cloud] 账号守卫投影已启动但首刷未成功（${first.reason}）：新鲜期未推进，相关守卫暂时一律拒绝，下一轮重试`,
+      );
+    } catch (projectionError) {
+      // 投影不可用 = 加群 / 委托任务认领这批守卫全部 fail-closed（响亮停摆），其余功能不受影响。
+      // 这正是要的方向：宁可停手，也不要因为守卫读不到就放行。
+      console.error(
+        '[aidcp-cloud] 账号守卫投影初始化失败：Facebook 加群与委托任务认领的账号守卫将一律拒绝'
+        + '（fail-closed，绝不放行）。多半是迁移 0077_automation_account_projection 还没跑，'
+        + '处置是 npm run migrate up 后重启：',
+        (projectionError as Error).message,
+      );
+    }
     try {
       const policies = new ApprovalPolicyStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema });
       await policies.init();

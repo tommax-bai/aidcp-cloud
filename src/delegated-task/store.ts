@@ -28,8 +28,11 @@ export const DELEGATED_TASK_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS delegated_tasks (
   id                    UUID PRIMARY KEY,
   execution_target      TEXT NOT NULL CHECK (execution_target IN ('dev','ol')),
-  -- 跨 owner 外键（引 accounts，另一服务所有）。additive 拆库前置：共库期保留此约束，
-  -- 拆库后的替代已就位在 claimNext 的读侧 fail-closed（EXISTS accounts），删约束押到拆库那刻、此处不删。
+  -- 跨 owner 外键（引 accounts，另一服务所有）。additive 拆库前置：共库期保留此约束。
+  -- 拆库后的替代已就位在 claimNext 的读侧 fail-closed —— 那里已改读**本域的账号投影表**
+  -- （change automation-accounts-projection），不再内联 accounts。降约束本身押到拆库那刻，
+  -- 语句已备在 scripts/db-split/0076_downgrade_cross_owner_account_fk.sql（delegated_tasks_account_id_fkey
+  -- 那一行），此处不删。
   account_id            TEXT NOT NULL REFERENCES accounts(account_id),
   account_name          TEXT NOT NULL,
   platform              TEXT NOT NULL CHECK (platform IN ('xiaohongshu','facebook')),
@@ -530,9 +533,19 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
            AND pause_requested=false AND cancel_requested=false
            AND not_before <= $1 AND (next_eligible_at IS NULL OR next_eligible_at <= $1)
            AND deadline_at > $1 AND (claim_expires_at IS NULL OR claim_expires_at <= $1)
-           -- 拆库前置：account_id 跨 owner 引 accounts。共库期这条外键（RESTRICT）保证账号在，此断言恒真、
-           -- 与原行为等价；拆库后跨库外键不存在，悬空任务读侧 fail-closed（不被 claim、不静默替账号动作）。
-           AND EXISTS (SELECT 1 FROM accounts a WHERE a.account_id = delegated_tasks.account_id)
+           -- 账号存在性守卫（change automation-accounts-projection）：改读**本域**的账号投影表，
+           -- 不再内联 api 属主的 accounts。守卫因此回到同库、留在这条认领语句内，
+           -- 下面那句行锁（SKIP LOCKED）锁的本来也只有 delegated_tasks 自己（从无跨属主行锁）。
+           -- 缺行 / 投影陈旧 / 投影从未刷过 → 断言判否 → 任务不被 claim（fail-closed，
+           -- 绝不替一个我们已经说不准还在不在的账号动手）。
+           AND EXISTS (
+             SELECT 1 FROM automation_account_projection a
+             WHERE a.account_id = delegated_tasks.account_id
+           )
+           AND EXISTS (
+             SELECT 1 FROM automation_account_projection_state apj_state
+             WHERE apj_state.fresh_until > now()
+           )
          ORDER BY CASE priority WHEN 'high' THEN 0 ELSE 1 END, deadline_at ASC, created_at ASC
          FOR UPDATE SKIP LOCKED LIMIT 1
        )
