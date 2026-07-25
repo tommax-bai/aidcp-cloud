@@ -11,8 +11,11 @@
  * 红线（MUST NOT 静默假成功）：抽不到关键词时不写任何行、不编造占位词。
  */
 
-import { BaseRole } from './base-role.js';
-import type { RoleOptions } from './base-role.js';
+// change cloud-coupling-phase5 P5-2：脱离 automation 属主的公共基类。
+// ContentRole 与它是同一份 kernel 实现的两个薄壳，逻辑零重复；差别只有两处：
+// 事件总线只收「订阅」这一半（本角色从不 emit），角色名不标注 automation 的联合。
+import { ContentRole } from './content-role.js';
+import type { ContentRoleOptions } from './content-role.js';
 import type { NoteDetailData } from '../kernel/note-detail.js';
 import type { CommentPlatformProfile } from '../kernel/platform-types.js';
 
@@ -21,7 +24,7 @@ export interface ConceptSink {
   addCandidate(keyword: string, sourceNote?: string): Promise<boolean>;
 }
 
-export interface ConceptExtractorRoleOptions extends RoleOptions {
+export interface ConceptExtractorRoleOptions extends ContentRoleOptions {
   conceptStore: ConceptSink;
   /** 每篇笔记最多抽取的关键词数（默认 3）。 */
   maxKeywords?: number;
@@ -29,7 +32,7 @@ export interface ConceptExtractorRoleOptions extends RoleOptions {
   platformProfile: CommentPlatformProfile;
 }
 
-export class ConceptExtractorRole extends BaseRole {
+export class ConceptExtractorRole extends ContentRole {
   readonly roleName = 'concept_extractor' as const;
   private readonly conceptStore: ConceptSink;
   private readonly maxKeywords: number;

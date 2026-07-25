@@ -10,17 +10,20 @@
  * 副作用：archive() 落库（PII：存了别人评论原文 + 作者昵称，仅限已点赞的公开评论，带保留上限）。
  */
 
-import { BaseRole } from './base-role.js';
-import type { RoleOptions } from './base-role.js';
+// change cloud-coupling-phase5 P5-2：脱离 automation 属主的公共基类。
+// ContentRole 与它是同一份 kernel 实现的两个薄壳，逻辑零重复；差别只有两处：
+// 事件总线只收「订阅」这一半（本角色从不 emit），角色名不标注 automation 的联合。
+import { ContentRole } from './content-role.js';
+import type { ContentRoleOptions } from './content-role.js';
 import type { NoteData } from '../kernel/note-detail.js';
 import { topicKeysFromTitle, type ValuableCommentInput } from '../kernel/valuable-comment-types.js';
 
-export interface ValuableCommentArchivistOptions extends RoleOptions {
+export interface ValuableCommentArchivistOptions extends ContentRoleOptions {
   getNoteData: (noteId: string) => NoteData | null;
   archive: (input: ValuableCommentInput) => Promise<void>;
 }
 
-export class ValuableCommentArchivist extends BaseRole {
+export class ValuableCommentArchivist extends ContentRole {
   // change cloud-coupling-phase0：同上，`as const` 保住字面量类型，防线见 content-role-names 合同测试。
   readonly roleName = 'valuable_comment_archivist' as const;
   private readonly getNoteData: (noteId: string) => NoteData | null;

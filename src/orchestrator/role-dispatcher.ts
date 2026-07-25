@@ -77,7 +77,7 @@ import { NotificationReturnHome } from '../agents/notification-return-home.js';
 import { ExcursionResumer } from '../agents/excursion-resumer.js';
 import type { EdgeTaskLease, EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import { isPreemptionReason } from '../comm/preemption.js';
-import type { BaseRole, RoleOptions } from '../agents/base-role.js';
+import type { RoleOptions } from '../agents/base-role.js';
 import type { Soul } from '../kernel/soul-types.js';
 import { computeDwellMs, computeThinkMs, computeFeedFloorMs, effectiveTempo, type PacingFloorProvider } from '../risk/pacing.js';
 import { SearchFrequencyLimiter } from '../risk/search-frequency-limiter.js';
@@ -133,10 +133,24 @@ export interface ConceptStorePort {
 }
 
 /**
- * 角色工厂：给定该角色的构造参数（由 dispatcher 就地组装），产出一个 BaseRole 实例。
+ * 调度器对一个角色实例**唯一**要求的能力：能挂上、能摘下（change cloud-coupling-phase5 P5-2）。
+ *
+ * 原先这里写的是 `BaseRole`，等于要求所有角色都是 automation 那个基类的子类——
+ * content 侧角色脱离该基类后就会在这里撞墙。调度器实测只调 subscribe / unsubscribe 两个方法，
+ * 收窄到这两个即是真实需求，也让 automation 不再对 content 的类形状有任何静态依赖。
+ */
+export interface SubscribableRole {
+  /** 角色自报名（后台 prompt 预览借读；调度分发不依赖它）。裸 string——不要求角色标注 automation 的联合。 */
+  readonly roleName: string;
+  subscribe(): void;
+  unsubscribe(): void;
+}
+
+/**
+ * 角色工厂：给定该角色的构造参数（由 dispatcher 就地组装），产出一个可订阅角色实例。
  * 参数按角色异构，故放宽为可变参；组合根侧的具体工厂各自精确标注构造签名（见 server.ts）。
  */
-export type RoleFactory = (...args: any[]) => BaseRole;
+export type RoleFactory = (...args: any[]) => SubscribableRole;
 
 /**
  * 角色工厂注册表（RoleName → 工厂）。组合根 `src/server.ts` 注入 content 层角色类的构造，
@@ -668,10 +682,10 @@ export class RoleDispatcher {
   private conceptPool: ConceptPool = EMPTY_CONCEPT_POOL;
   /** 会话开始时刻，用于估算会话进度（疲劳乘子）。时长上限改为从全局单场上限提供者惰性解析（见 maxDurationMs()）。 */
   private sessionStartedAt: number;
-  private roles: BaseRole[] = [];
+  private roles: SubscribableRole[] = [];
 
   /** 只读暴露已注册角色实例（change role-prompt-visibility，仅供后台 prompt 预览借读；不改分发逻辑）。 */
-  getRoles(): readonly BaseRole[] {
+  getRoles(): readonly SubscribableRole[] {
     return this.roles;
   }
 
@@ -1442,7 +1456,7 @@ export class RoleDispatcher {
   private makeContentRole<K extends ContentRoleName>(
     name: K,
     options: ContentRoleFactoryOptionMap[K],
-  ): BaseRole {
+  ): SubscribableRole {
     const factory = this.roleFactories[name];
     if (!factory) {
       throw new Error(

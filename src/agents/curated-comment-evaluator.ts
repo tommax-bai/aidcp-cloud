@@ -17,8 +17,11 @@
  * 副作用：curatedStore.archiveComment（落精选语料 content_type='comment'，账号维度）。
  */
 
-import { BaseRole } from './base-role.js';
-import type { RoleOptions } from './base-role.js';
+// change cloud-coupling-phase5 P5-2：脱离 automation 属主的公共基类。
+// ContentRole 与它是同一份 kernel 实现的两个薄壳，逻辑零重复；差别只有两处：
+// 事件总线只收「订阅」这一半（本角色从不 emit），角色名不标注 automation 的联合。
+import { ContentRole } from './content-role.js';
+import type { ContentRoleOptions } from './content-role.js';
 import type { NoteData } from '../kernel/note-detail.js';
 import { topicKeysFromTitle } from '../kernel/valuable-comment-types.js';
 import { passesCommentResonance, resolveCuratedGateConfig } from '../publish-agent/curated-gate.js';
@@ -39,7 +42,7 @@ export interface CuratedCommentSink {
   ): Promise<void>;
 }
 
-export interface CuratedCommentEvaluatorOptions extends RoleOptions {
+export interface CuratedCommentEvaluatorOptions extends ContentRoleOptions {
   curatedStore: CuratedCommentSink;
   /** 取来源笔记（拿标题作上下文/归档来源）。 */
   getNoteData: (noteId: string) => NoteData | null;
@@ -69,7 +72,7 @@ interface CommentEvalResult {
   reason: string;
 }
 
-export class CuratedCommentEvaluator extends BaseRole {
+export class CuratedCommentEvaluator extends ContentRole {
   // change cloud-coupling-phase0：不再为一个自标注跨边界导入角色名联合。`as const` 保住字面量类型
   // 不塌成 string（下游按 `browse:${roleName}` 拼模型解析键，塌了会静默丢配置）。
   // 写错角色名的防线改由 test/agents/content-role-names.test.ts 与角色目录对拍承担。

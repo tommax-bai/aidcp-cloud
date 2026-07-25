@@ -19,8 +19,11 @@
  * 副作用：curatedStore.upsertObservation（落精选语料，账号维度）。
  */
 
-import { BaseRole } from './base-role.js';
-import type { RoleOptions } from './base-role.js';
+// change cloud-coupling-phase5 P5-2：脱离 automation 属主的公共基类。
+// ContentRole 与它是同一份 kernel 实现的两个薄壳，逻辑零重复；差别只有两处：
+// 事件总线只收「订阅」这一半（本角色从不 emit），角色名不标注 automation 的联合。
+import { ContentRole } from './content-role.js';
+import type { ContentRoleOptions } from './content-role.js';
 import type { NoteDetailData } from '../kernel/note-detail.js';
 import { topicKeysFromTitle } from '../kernel/valuable-comment-types.js';
 import { passesResonance, resolveCuratedGateConfig } from '../publish-agent/curated-gate.js';
@@ -51,7 +54,7 @@ export interface CuratedNoteSink {
   ): Promise<CuratedTextCardContext | null>;
 }
 
-export interface CuratedNoteEvaluatorOptions extends RoleOptions {
+export interface CuratedNoteEvaluatorOptions extends ContentRoleOptions {
   curatedStore: CuratedNoteSink;
   /** 取当前连接账号（落库账号归属）。 */
   getAccountId: () => string;
@@ -72,7 +75,7 @@ interface NoteEvalResult {
   reason: string;
 }
 
-export class CuratedNoteEvaluator extends BaseRole {
+export class CuratedNoteEvaluator extends ContentRole {
   readonly roleName = 'curated_note_evaluator' as const;
   private readonly curatedStore: CuratedNoteSink;
   private readonly getAccountId: () => string;

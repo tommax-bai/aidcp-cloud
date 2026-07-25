@@ -1,34 +1,9 @@
 {
   "seedTotal": 173,
   "seedUnplanned": 173,
-  "frozenTotal": 4,
+  "frozenTotal": 0,
   "recordedAt": "2026-07-25",
   "raises": [],
-  "entries": [
-    {
-      "from": "src/agents/concept-extractor-role.ts",
-      "to": "src/agents/base-role.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/agents/curated-comment-evaluator.ts",
-      "to": "src/agents/base-role.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/agents/curated-note-evaluator.ts",
-      "to": "src/agents/base-role.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/agents/valuable-comment-archivist.ts",
-      "to": "src/agents/base-role.ts",
-      "reason": "seed（content -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    }
-  ],
+  "entries": [],
   "seedBasis": "decouple store schema+pgconfig cluster: frozenTotal 209->173"
 }

@@ -95,6 +95,11 @@
     "note": "§4.7 src/agents/ 50 文件：43 automation 为 content 5 + api 2 的补集"
   },
   {
+    "path": "src/agents/content-role.ts",
+    "layer": "content",
+    "note": "【待定稿裁决】P5-2 新写：content 侧事件驱动角色的薄壳基类。§7.2 判据三首批迁移名单里的四个角色（concept_extractor / curated_note_evaluator / curated_comment_evaluator / valuable_comment_archivist）此前继承 automation 属主的 src/agents/base-role.ts——那是本 change 前最后 4 条跨边界豁免，且拆仓后 content 的 src 里没有事件总线实现与 RoleName 联合、四个角色直接编译不过。本类与 BaseRole 是同一份 kernel 实现（role-runtime.ts）的两个外壳，各自只做「存字段 + 转调」，零逻辑重复。与 BaseRole 的唯一实质差别是两处收窄：事件总线只收 kernel 的 RoleEventSource（只订阅、不发布），角色名是裸 string 不标注 automation 的 RoleName（那道闸原样搬到 test/agents/content-role-names.test.ts，写错一个字母仍编译红）。归 content 而非 automation：它只服务四个 content 角色，拆仓时随它们进 aidcp-content，届时全部 import 皆为 kernel。消除 import 豁免 4 条。请求回写 §4.7 src/agents/ 逐文件表见 docpatch RK-P5-2"
+  },
+  {
     "path": "src/agents/curated-comment-evaluator.ts",
     "layer": "content",
     "note": "§7.2 判据三首批迁移名单"
@@ -1328,6 +1333,11 @@
     "path": "src/kernel/risk-read-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change block2-api-split 新增：风控只读窄面端口契约（RiskReadPort，getState / effectiveQuotas / slowStartView 异步读），零 import。零 SQL / HTTP / LLM / 无进程内活状态。风控最终状态单写仍留 automation 的 apply-callback；api/panel 经本端口取只读投影（默认 local 直连本地 RiskController、http 经 RiskReadHttpClient）。为拆进程后 api 侧读风控态而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split"
+  },
+  {
+    "path": "src/kernel/role-runtime.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决·部分析出】P5-2 从 src/agents/base-role.ts（automation）析出其**无状态段**：resolveSoul / runRoleCompletion / roleLog / positiveTimeoutMs / oneLinePreview，外加 content 侧角色订阅的三条事件载荷 ContentRoleEventMap 与只含 on 的窄事件源 RoleEventSource。**不是整文件移动**：基类持事件总线句柄与人设快照，是带状态的行为类，撞「kernel 里不放行为类」。析出后 automation 的 BaseRole 与 content 的 ContentRole 都改成这些函数的薄壳，实现只有一份——复制第二份判定逻辑漂了没有任何机械手段会说话。RoleEventSource **刻意只给 on、不给 emit**：实测四个 content 角色全仓零 emit 命中；给出 emit 会让 content 在拆进程后能往一条它并不拥有的进程内总线上发事件，单体里跑得通、拆完静默失效。ContentRoleEventMap 重新声明而非 import（事件映射表归 automation，kernel MUST NOT 反向依赖业务层），漂移由 test/agents/content-role-events.test.ts 的编译期断言兜住。只 import kernel 的 soul-types / llm-contract / note-detail。四条准入正则实跑零命中。请求回写 §4.7 见 docpatch RK-P5-2"
   },
   {
     "path": "src/kernel/schedule-policy.ts",
