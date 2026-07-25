@@ -1,7 +1,7 @@
 {
   "seedTotal": 173,
   "seedUnplanned": 173,
-  "frozenTotal": 69,
+  "frozenTotal": 68,
   "recordedAt": "2026-07-25",
   "raises": [],
   "entries": [
@@ -9,12 +9,6 @@
       "from": "src/account-store.ts",
       "to": "src/platform/index.ts",
       "reason": "seed（api -> automation）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/agents/comment-de-ai-flavor.ts",
-      "to": "src/publish-agent/post-processor.ts",
-      "reason": "seed（automation -> content）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
       "eliminatedBy": null
     },
     {

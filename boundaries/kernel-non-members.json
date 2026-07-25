@@ -65,7 +65,8 @@
       "src/kernel/hot-lead-gate-config.ts",
       "src/kernel/account-ownership-port.ts",
       "src/kernel/config-stop-work-reasons.ts",
-      "src/kernel/text-card-transcription.ts"
+      "src/kernel/text-card-transcription.ts",
+      "src/kernel/ai-flavor-detection.ts"
     ]
   },
   "rejected": [

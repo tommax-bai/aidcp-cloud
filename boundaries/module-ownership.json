@@ -1025,6 +1025,11 @@
     "note": "【待定稿裁决】change automation-accounts-projection 新增：账号身份跨属主投影的端口契约（AccountIdentityProjectionRow 三列纯类型 + AccountRosterSourcePort 只读无参端口）。零 import、零 SQL / HTTP / LLM、无进程内活状态、不反向依赖业务层。accounts 属 api 单写，automation 域为把守卫读拉回同库而在本域冷备投影，投影来源经本端口取，避免 automation 直连 api 的库。api 侧 src/account-store.ts 实现、automation 侧 src/transport/account-projection-store.ts 消费。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-account-projection"
   },
   {
+    "path": "src/kernel/ai-flavor-detection.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】P3-7 从 src/publish-agent/prompts.ts + post-processor.ts 析出去 AI 味的**检测与一轮收敛**（BANNED_PHRASES 词表 / exclamationMaxForTone / detectBannedPhrases / aiScoreFromHits / runAiFlavorPass）。评论侧与发帖侧要的是同一套判据，此前评论侧为复用直连 content 实现文件。词表尤其不能各留一份——发帖 prompt 与后处理检测共用同一份是既有不变量。**有意不搬 PostProcessor 类**：本层现有 6 个导出类全是错误类型，且判例 src/kernel/image-provider-registry.ts 文件头明写「路由客户端类留 content」；改为把类里被共用的那段无状态纯编排提成函数 runAiFlavorPass，类留原处当薄壳，两侧共用同一份逻辑、无任何行为复制。重写器由调用方注入，本层不认识模型客户端。请求回写 §4.7 见 docpatch RK-P3-7"
+  },
+  {
     "path": "src/kernel/client-env-automation-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change block3-l3-client-user-read-port 新写：客户环境生命周期（api 属主 client-auth/client-user-store）对 automation 域的只读投影端口契约（ClientEnvAutomationReader 接口 + OffboardProjection / EnvRiskStateProjection 纯行类型 + OffboardProjectionState/Reason 字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 panel-automation-types（面板专用跨表聚合读端口）同类、形状各按消费方定：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/interactions/client-env-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 客户环境读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"

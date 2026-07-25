@@ -29,28 +29,10 @@ import { buildContentVisualExcerpt, buildCoverCardCopyPrompt } from '../kernel/c
 // change decouple-behavior-class-ports）；此处等值再导出，既有导入方无感、行为逐字不变。
 export { buildContentVisualExcerpt, buildCoverCardCopyPrompt };
 
-/**
- * 禁用词/句式列表（negative list）。
- * 后处理与 prompt 共用同一份，保证生成约束与检测口径一致。
- */
-export const BANNED_PHRASES: string[] = [
-  '首先',
-  '其次',
-  '最后',
-  '总结来说',
-  '值得一提的是',
-  // 「不得不说」已移出（change category-adaptive-images-and-judgment）：真人极常见口语开头，
-  // 计入后处理硬检测/扣分属校准偏差；保留真正的 AI 结构套话（首先/其次/综上所述/众所周知…）。
-  '众所周知',
-  '让我们一起来看看',
-  '让我们一起',
-  '接下来我将',
-  '接下来我会',
-  '总的来说',
-  '综上所述',
-  '各有优劣',
-  '各有千秋',
-];
+// 词表已迁入 kernel（change cloud-coupling-p3-7）：发帖 prompt 与后处理检测**共用同一份**是既有不变量，
+// 各留一份必然悄悄漂。此处等值再导出，本文件与另外几个按名取用的角色一行不改。
+import { BANNED_PHRASES } from '../kernel/ai-flavor-detection.js';
+export { BANNED_PHRASES };
 
 /** 鼓励的写作风格（写进 prompt，正向引导）。 */
 export const ENCOURAGED_STYLE: string[] = [

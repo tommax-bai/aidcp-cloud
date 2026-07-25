@@ -11,7 +11,7 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { RoleName, CommentComposedPayload } from '../event-bus/types.js';
-import { PostProcessor } from '../publish-agent/post-processor.js';
+import { runAiFlavorPass, type AiFlavorPassOptions } from '../kernel/ai-flavor-detection.js';
 import { checkWritingLanguage, writingLanguageInstruction } from '../kernel/writing-language.js';
 
 /**
@@ -49,18 +49,17 @@ export interface CommentDeAiFlavorOptions extends RoleOptions {
 
 export class CommentDeAiFlavor extends BaseRole {
   readonly roleName: RoleName = 'comment_de_ai_flavor';
-  private readonly post: PostProcessor;
+  /** 本角色这一轮去 AI 味的旋钮（判据与发帖侧同源，落在 kernel）。 */
+  private readonly pass: AiFlavorPassOptions;
   private readonly isCommentSublineExpired: (noteId: string) => boolean;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CommentDeAiFlavorOptions) {
     super(options);
     this.isCommentSublineExpired = options.isCommentSublineExpired ?? (() => false);
-    this.post = new PostProcessor(
-      this.llm
-        ? { rewrite: (content, flagged) => this.rewrite(content, flagged), rewriteThreshold: COMMENT_REWRITE_THRESHOLD, extraPhrases: COMMENT_AI_PHRASES }
-        : { rewriteThreshold: COMMENT_REWRITE_THRESHOLD, extraPhrases: COMMENT_AI_PHRASES },
-    );
+    this.pass = this.llm
+      ? { rewrite: (content, flagged) => this.rewrite(content, flagged), rewriteThreshold: COMMENT_REWRITE_THRESHOLD, extraPhrases: COMMENT_AI_PHRASES }
+      : { rewriteThreshold: COMMENT_REWRITE_THRESHOLD, extraPhrases: COMMENT_AI_PHRASES };
   }
 
   subscribe(): void {
@@ -78,7 +77,7 @@ export class CommentDeAiFlavor extends BaseRole {
     if (this.isCommentSublineExpired(payload.noteId)) return;
     let text = payload.draft;
     try {
-      const result = await this.post.process(payload.draft, COMMENT_EXCLAMATION_MAX);
+      const result = await runAiFlavorPass(payload.draft, COMMENT_EXCLAMATION_MAX, this.pass);
       text = result.content;
     } catch {
       // 去 AI 味失败不应阻断：退回原草稿（确定性、不抛）。
