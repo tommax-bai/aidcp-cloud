@@ -11,13 +11,16 @@ import {
   isReplyProfile,
   isReplyRule,
   isReplyTemplate,
+  normalizeReplyProfile,
+} from '../../src/interactions/reply-config.js';
+// 纯函数段已迁入 kernel（change cloud-coupling-p3-8）；断言体一行未改。
+import {
   forcedHumanRisk,
   matchReplyRule,
-  normalizeReplyProfile,
   renderReplyTemplate,
   validateFinalReplyText,
   validateReplyConfig,
-} from '../../src/interactions/reply-config.js';
+} from '../../src/kernel/interaction-reply-contract.js';
 import type { MinimalInbound, PolisherInput, ReplyConfigSnapshot, ReplyProfile, ReplyRule, ReplyTemplate, RiskReviewerInput, ScopedJobContext } from '../../src/kernel/interaction-types.js';
 
 const now = 1784044800000;

@@ -2,11 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   deterministicClaimTags,
   matchReplyRule,
+  readJobConfig,
+  readPublishedConfig,
   renderReplyTemplate,
   validateFinalReplyText,
   validateReplyConfig,
-} from './reply-config.js';
-import { readJobConfig, readPublishedConfig, type ReplyConfigReader } from '../kernel/interaction-reply-contract.js';
+  type ReplyConfigReader,
+} from '../kernel/interaction-reply-contract.js';
 import { automaticReplyContentEligible } from './reply-auto-send.js';
 import type { InteractionStore } from './interaction-store.js';
 import {

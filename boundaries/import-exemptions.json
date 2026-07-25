@@ -1,7 +1,7 @@
 {
   "seedTotal": 173,
   "seedUnplanned": 173,
-  "frozenTotal": 81,
+  "frozenTotal": 79,
   "recordedAt": "2026-07-25",
   "raises": [],
   "entries": [
@@ -286,18 +286,6 @@
       "reason": "由 change config-mirror-cross-process-invalidation 新增：automation 侧委托任务 worker 在认领前问统一停手判据。",
       "eliminatedBy": null,
       "note": "消除动作二选一，先等定稿裁决：① §4.6.8 若按「随消费方走」的同一判据把 src/config/mirror-stop-work.ts 改判 automation，本条与同簇另 2 条直接消失（净额 0，理由写在 ownership-rules.json 该文件的 basis）；② 否则 automation 侧改为经 api 窄内部接口取停手判据。裁决请求见 docpatch R1。本条与 src/comment-agent/comment-scheduler.ts、src/delegated-task/worker.ts、src/orchestrator/role-dispatcher.ts 三处同簇（共 3 条）。"
-    },
-    {
-      "from": "src/interactions/reply-auto-send.ts",
-      "to": "src/interactions/reply-config.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
-    },
-    {
-      "from": "src/interactions/reply-workflow.ts",
-      "to": "src/interactions/reply-config.ts",
-      "reason": "seed（automation -> api）：aidcp-cloud@313eba2 实测既存跨边界依赖，本 change 一次性冻结、只保证不新增。",
-      "eliminatedBy": null
     },
     {
       "from": "src/onboarding/first-post-onboarding-coordinator.ts",

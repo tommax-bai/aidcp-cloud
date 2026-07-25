@@ -1,4 +1,4 @@
-import { deterministicClaimTags, forcedHumanRisk, validateFinalReplyText } from './reply-config.js';
+import { deterministicClaimTags, forcedHumanRisk, validateFinalReplyText } from '../kernel/interaction-reply-contract.js';
 import type { ReplyProfile, ReplyRule, RiskTag } from '../kernel/interaction-types.js';
 
 const AUDIT_ONLY_TAGS = new Set<RiskTag>(['meaning_changed', 'introduced_claim']);
