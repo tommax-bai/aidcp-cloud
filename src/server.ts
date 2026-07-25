@@ -2636,12 +2636,24 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   let interactionOffboarding: InteractionOffboardingService | undefined;
   const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
   try {
+    // Block③ L3 翻转前置：这三个 store 是 interaction_* 那批 **automation 属主表的单写者**，
+    // 但它们此前构造时不传 pool ⇒ 各自 `new Pool(resolveEnvPgConfig())` 回落**共享库**配置。
+    // 一旦设 AIDCP_PG_AUTOMATION_URL，属主会继续读写旧共享库、而已解耦的读端口读新 automation 库
+    // ⇒ split brain（读端看空库/陈旧副本，写端的授权与离场改动读端永远看不见）。故在此显式绑属主池。
+    // **今天逐字节等价且不依赖任何 env 组合**：resolveOwnerPgConfig('automation') 在 owner URL 未设时
+    // 回落的 resolveSharedPgConfig 与 resolveEnvPgConfig() 是同一套 env 名 / 同一 DEFAULT 兜底 /
+    // 同样 DATABASE_URL 优先 —— 这三个 store 本就跑在那个 resolver 上，故不存在 L2 那批 HOST-param
+    // store「接池后开始认 DATABASE_URL」的口径漂移。连接数亦降（三个私有池 → 复用 automationPool）。
+    // ⚠️ 翻转后它们那几处直读 api 表的守卫（client_env_revocation_holds / accounts 的 FOR SHARE、
+    //    经 envLock 锁 client_environments）会**响亮失败**——这是设计意图（见 db/environment-row-lock.ts
+    //    头注释：宁可响亮失败，也不要无声失去互斥），属须监督批，见 cloud-block3-l3-cutover-plan.md §2.1。
     interactionStore = new InteractionStore({
+      pool: automationPool,
       apiPurge: new InteractionApiWrites(),
       envLock: { lockEnvironmentRow, lockEnvironmentScopeRows },
     });
-    replyConfigStore = new ReplyConfigStore();
-    replyConfigScopeStore = new ReplyConfigScopeStore();
+    replyConfigStore = new ReplyConfigStore({ pool: automationPool });
+    replyConfigScopeStore = new ReplyConfigScopeStore({ pool: automationPool });
     interactionSchemaMode = await interactionStore.init();
     await replyConfigStore.init();
     await replyConfigScopeStore.init();
