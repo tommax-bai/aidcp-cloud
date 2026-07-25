@@ -17,8 +17,10 @@ import {
   attributeMigrations,
   loadMigrationOwnerScopes,
   loadTableOwnership,
+  scopeDeclarationsToOwners,
   versionsForOwner,
 } from '../../src/schema/migration-owners.js';
+import { declaredObjects } from '../../src/schema/schema-inspect.js';
 import { versionOf, type MigrationFile } from '../../src/schema/migration-plan.js';
 
 function file(name: string, header: string): MigrationFile {
@@ -94,4 +96,43 @@ test('真实语料：三属主范围的并集 = 全部迁移，且账本迁移�
 
   // 这条是「属主 URL 未设时逐字节等价」的前提：三属主同组 ⇒ 组范围 = 并集 = 今天的全部迁移。
   assert.deepEqual([...union].sort(), files.map((f) => versionOf(f.name)).sort());
+});
+
+test('跨属主迁移的对象按属主收窄：本属主的表才核验，索引/约束无法归因时如实列出', () => {
+  const files: MigrationFile[] = [
+    // 只碰 content：索引可确定归属
+    { name: '0001_content_only.sql', content: '-- aidcp:objects=table:concepts,index:idx_concepts_a\n', checksum: 'a' },
+    // 同时碰 content 与 automation：table/column 各归各家，index 无法归因
+    {
+      name: '0002_mixed.sql',
+      content: '-- aidcp:objects=table:account_facebook_publish_image,table:facebook_group_target,index:idx_fb_x\n',
+      checksum: 'b',
+    },
+  ];
+  const owners = new Map<string, PgOwner>([
+    ['concepts', 'content'],
+    ['account_facebook_publish_image', 'content'],
+    ['facebook_group_target', 'automation'],
+  ]);
+  const index = attributeMigrations(files, owners);
+  const declared = declaredObjects(files);
+
+  const content = scopeDeclarationsToOwners(declared, index, owners, ['content']);
+  assert.deepEqual(
+    content.checked.map((o) => `${o.type}:${o.name}`).sort(),
+    ['index:idx_concepts_a', 'table:account_facebook_publish_image', 'table:concepts'],
+    'content 只该核验自己的表，外加那条只碰 content 的迁移里的索引',
+  );
+  assert.deepEqual(
+    content.unattributable.map((o) => `${o.type}:${o.name}`),
+    ['index:idx_fb_x'],
+    '跨属主迁移里的索引 MUST 进未核验清单，MUST NOT 被当成已核验、也 MUST NOT 被当成缺失',
+  );
+
+  const automation = scopeDeclarationsToOwners(declared, index, owners, ['automation']);
+  assert.deepEqual(
+    automation.checked.map((o) => `${o.type}:${o.name}`),
+    ['table:facebook_group_target'],
+    'automation 不该被要求 content 的表存在——这正是它挡住新库 baseline 的那个 bug',
+  );
 });

@@ -43,6 +43,7 @@ import {
 import {
   filesForOwners,
   loadMigrationOwnerScopes,
+  scopeDeclarationsToOwners,
   type MigrationOwnerIndex,
 } from '../src/schema/migration-owners.js';
 import {
@@ -258,14 +259,39 @@ async function commandUp(client: pg.Client, files: MigrationFile[], flags: Flags
   }
 }
 
-async function runVerify(client: pg.Client, files: MigrationFile[]) {
-  const schema = runtimeSchemaName();
-  const actual = await readActualSchema(client, schema);
-  return { schema, report: diffSchema(declaredObjects(files), actual) };
+/** 一组属主的归因上下文：把「本组范围的迁移」进一步收窄成「本组属主拥有的对象」。 */
+interface OwnerScope {
+  owners: PgOwner[];
+  index: MigrationOwnerIndex;
+  tableOwners: Map<string, PgOwner>;
 }
 
-async function commandVerify(client: pg.Client, files: MigrationFile[]): Promise<number> {
-  const { schema, report } = await runVerify(client, files);
+/**
+ * 跨属主迁移里的索引/约束声明无法按属主归因。**如实打印**，绝不静默略过 ——
+ * 一个说不清自己验了什么的验证装置，比没有验证更坏。
+ */
+function reportUnattributable(objects: readonly { type: string; name: string; version: string }[]): void {
+  if (objects.length === 0) return;
+  console.log(
+    `本次未核验 ${objects.length} 个索引/约束声明：它们来自跨属主迁移，声明里不带表名、无法按属主归因。`,
+  );
+  for (const o of objects) console.log(`  ? ${o.type}:${o.name}  ← ${o.version}`);
+}
+
+async function runVerify(client: pg.Client, files: MigrationFile[], scope?: OwnerScope) {
+  const schema = runtimeSchemaName();
+  const actual = await readActualSchema(client, schema);
+  const declared = declaredObjects(files);
+  if (!scope) return { schema, report: diffSchema(declared, actual), unattributable: [] as typeof declared };
+  // 收窄到本组属主真正拥有的对象。跨属主迁移的索引/约束无法按属主归因 ——
+  // 它们进 unattributable，由调用方**如实打印「本次未核验」**，MUST NOT 静默丢弃。
+  const { checked, unattributable } = scopeDeclarationsToOwners(declared, scope.index, scope.tableOwners, scope.owners);
+  return { schema, report: diffSchema(checked, actual), unattributable };
+}
+
+async function commandVerify(client: pg.Client, files: MigrationFile[], scope?: OwnerScope): Promise<number> {
+  const { schema, report, unattributable } = await runVerify(client, files, scope);
+  reportUnattributable(unattributable);
   console.log(`实测对账（schema=${schema}）：声明 ${report.declaredObjectCount} 个对象、覆盖 ${report.declaredTableCount} 张表`);
   console.log(`缺失对象：${report.missing.length}`);
   for (const m of report.missing) console.log(`  - ${m.type}:${m.name}  ← ${m.version}`);
@@ -287,9 +313,10 @@ async function commandVerify(client: pg.Client, files: MigrationFile[]): Promise
  *   3) `AIDCP_PG_CONTENT_URL=<新库> npm run migrate status --owner=content` 复核。
  * 第 2 步可以随便重跑：幂等。
  */
-async function commandBaseline(client: pg.Client, files: MigrationFile[], flags: Flags): Promise<number> {
+async function commandBaseline(client: pg.Client, files: MigrationFile[], flags: Flags, scope?: OwnerScope): Promise<number> {
   await ensureLedger(client, files);
-  const { schema, report } = await runVerify(client, files);
+  const { schema, report, unattributable } = await runVerify(client, files, scope);
+  reportUnattributable(unattributable);
   if (report.missing.length > 0) {
     console.error(`拒绝写入基线：实测对账在 schema=${schema} 上发现 ${report.missing.length} 个缺失对象。`);
     for (const m of report.missing) console.error(`  - ${m.type}:${m.name}  ← ${m.version}`);
@@ -344,7 +371,7 @@ async function main(): Promise<void> {
   }
 
   // 属主判据不可用即退出：退化成「不分属主、全库一把梭」会把一个属主的迁移灌进另一个属主的库。
-  const { index, files } = await loadMigrationOwnerScopes(() => loadMigrationFiles());
+  const { index, files, tableOwners } = await loadMigrationOwnerScopes(() => loadMigrationFiles());
   if (index.residue.length > 0) {
     console.log(`残留迁移（头声明为空、计入全部属主）${index.residue.length} 条：${index.residue.join(', ')}`);
   }
@@ -358,10 +385,11 @@ async function main(): Promise<void> {
     await client.connect();
     try {
       let code = 1;
+      const scope: OwnerScope = { owners: group.owners, index, tableOwners };
       if (command === 'status') code = await commandStatus(client, group.files);
       else if (command === 'up') code = await commandUp(client, group.files, flags);
-      else if (command === 'verify') code = await commandVerify(client, group.files);
-      else if (command === 'baseline') code = await commandBaseline(client, group.files, flags);
+      else if (command === 'verify') code = await commandVerify(client, group.files, scope);
+      else if (command === 'baseline') code = await commandBaseline(client, group.files, flags, scope);
       worst = Math.max(worst, code);
     } finally {
       await client.end();

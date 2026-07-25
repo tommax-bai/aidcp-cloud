@@ -217,6 +217,8 @@ export function filesForOwners(
 export interface MigrationOwnerScopes {
   index: MigrationOwnerIndex;
   files: MigrationFile[];
+  /** 表 → 属主（调用方要用它把对象声明收窄到本属主，见 scopeDeclarationsToOwners） */
+  tableOwners: Map<string, PgOwner>;
 }
 
 /**
@@ -243,5 +245,54 @@ export async function loadMigrationOwnerScopes(
       throw new Error(`属主 ${owner} 的迁移范围为空，属主判据已失效（迁移目录或边界清单不完整）`);
     }
   }
-  return { index, files };
+  return { index, files, tableOwners };
+}
+
+/**
+ * 把「本组范围内全部迁移声明的对象」收窄到「这些属主真正拥有的对象」。
+ *
+ * 为什么必须收窄：一条迁移可以同时碰多个属主的表（实测 8 条），它会因此进入每个相关属主的范围。
+ * 但它声明的对象里，只有**本属主拥有的那部分**该在本属主的库里存在。不收窄就会出现
+ * 「在 content 库里要求 automation 的表」这种必然失败，而这条失败会挡住新建库的 baseline ——
+ * 于是新库永远没有账本，契约门永远报「账本表不存在」。
+ *
+ * 收窄规则：
+ *   - `table:t` / `column:t.c` → 按 `boundaries/table-ownership.json` 判 `t` 的属主，属本组才核验；
+ *   - `index:i` / `constraint:c` → 声明里**不带表名**，无法反推归属表。若它来自一条只碰本组属主的
+ *     迁移，则确定属本组、照常核验；若来自**跨属主**迁移，则无法归因 —— 归进 `unattributable`，
+ *     由调用方**如实打印「本次未核验」**。MUST NOT 静默丢弃：一个说不清自己验了什么的验证装置，
+ *     比没有验证更坏。
+ */
+export interface OwnerScopedDeclarations<T extends { type: string; name: string; version: string }> {
+  /** 确定属于本组、本次真的核验了的对象 */
+  checked: T[];
+  /** 来自跨属主迁移的索引/约束声明：无法按属主归因，本次**未核验**（调用方 MUST 打出来） */
+  unattributable: T[];
+}
+
+export function scopeDeclarationsToOwners<T extends { type: string; name: string; version: string }>(
+  declared: readonly T[],
+  index: MigrationOwnerIndex,
+  tableOwners: Map<string, PgOwner>,
+  owners: readonly PgOwner[],
+): OwnerScopedDeclarations<T> {
+  const inGroup = new Set<PgOwner>(owners);
+  const checked: T[] = [];
+  const unattributable: T[] = [];
+
+  for (const obj of declared) {
+    if (obj.type === 'table' || obj.type === 'column') {
+      const table = obj.type === 'table' ? obj.name : obj.name.slice(0, obj.name.indexOf('.'));
+      const owner = tableOwners.get(table);
+      if (owner && inGroup.has(owner)) checked.push(obj);
+      continue;
+    }
+    // index / constraint：只有当声明它的那条迁移**只碰本组属主**时才能确定归属。
+    const attribution = index.byVersion.get(obj.version);
+    const migrationOwners = attribution?.owners ?? [];
+    if (migrationOwners.length > 0 && migrationOwners.every((o) => inGroup.has(o))) checked.push(obj);
+    else unattributable.push(obj);
+  }
+
+  return { checked, unattributable };
 }
