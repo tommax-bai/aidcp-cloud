@@ -97,6 +97,28 @@ for owner in "${OWNERS[@]}"; do
     fi
   done <<< "$seqlist"
 
+  # 7. 触发器：属主表上的每个触发器都必须在目标库里存在
+  #
+  # `pg_dump --table` 带表也带表上的触发器，但**不带触发器调用的函数** —— 函数缺失时恢复会在
+  # post-data 阶段炸，而那时表和数据都已灌完，看起来「拷过了」。这条检查把那种半完成状态钉死。
+  while read -r trg; do
+    [ -z "$trg" ] && continue
+    tbl="${trg%%|*}"; nm="${trg##*|}"
+    got="$(psql -qtA -d "$target" -c "
+      select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+       where not t.tgisinternal and c.relname = '$tbl' and t.tgname = '$nm'" || true)"
+    if [ "$got" != "1" ]; then
+      note "trigger $nm on $tbl: missing from '$target' (a trigger function that --table does not carry?)"
+    else
+      printf '  ok %-42s trigger on %s\n' "$nm" "$tbl"
+    fi
+  done < <(psql -qtA -d "$SOURCE_DB" -F'|' -c "
+    select c.relname || '|' || t.tgname
+      from pg_trigger t join pg_class c on c.oid = t.tgrelid
+     where not t.tgisinternal
+       and c.relname in ($(echo "$expected" | sed "s/^/'/;s/\$/'/" | paste -sd, -))
+     order by 1")
+
   # 4. 目标库里不该有跨 owner 外键
   cross="$(psql -qtA -d "$target" -c "
     select c.conrelid::regclass || ' -> ' || c.confrelid::regclass

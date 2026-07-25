@@ -120,6 +120,27 @@ for owner in "${OWNERS[@]}"; do
     fi
   fi
 
+  # 先补函数：`pg_dump --table` **只带表**，不带 schema 里的函数。而源库的触发器是**指名调用**
+  # public 下的函数的（今天有一个：`client_env_scope` 上的清理准入守卫），函数不在目标库里，
+  # 恢复到 post-data 建触发器那一步就当场炸，而且是在表和数据都已经灌完之后才炸。
+  # 处置：把 public 下的全部函数先复制过去。多带几个用不上的函数是惰性的（与多带一张表不同），
+  # 少带一个则是响亮但很晚的失败，方向上宁可多带。
+  nfunc="$(psql -qtA -d "$SOURCE_DB" -c "
+    select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'")"
+  if [ "$nfunc" != "0" ]; then
+    psql -qtA -d "$SOURCE_DB" -c "
+      select pg_get_functiondef(p.oid) || ';' ||
+             ' ALTER FUNCTION public.' || p.proname || '(' ||
+             pg_get_function_identity_arguments(p.oid) || ') OWNER TO ' ||
+             quote_ident(pg_get_userbyid(p.proowner)) || ';'
+        from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public'
+       order by p.proname" \
+      | psql -v ON_ERROR_STOP=1 -q -d "$target"
+    echo "  prerequisites: $nfunc public function(s) copied"
+  fi
+
   args=()
   while read -r t; do
     [ -z "$t" ] && continue
