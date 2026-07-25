@@ -4,7 +4,7 @@
  */
 
 import type { CuratedSourceAdmission } from '../cache/curated-content-store.js';
-import type { BeginRewriteResult, ReferenceNote } from '../publish-agent/publish-scheduler.js';
+import type { BeginRewriteResult, ReferenceNote } from '../kernel/publish-generation-types.js';
 import type { FirstPostOnboardingStore } from './first-post-onboarding-store.js';
 
 export interface FirstPostOnboardingCoordinatorDeps {

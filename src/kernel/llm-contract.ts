@@ -20,6 +20,19 @@
 export type LlmThinkingModeOpt = 'off' | 'on' | 'default';
 
 /**
+ * **已解析**的思考模式：只有真正要下发的那两个取值，没有「不干预」那一档。
+ *
+ * 与 api 属主 `src/config/role-catalog.ts` 的 `ThinkingMode` 结构逐字一致，由 {@link LlmThinkingModeOpt}
+ * 排除 `'default'` 派生而来 —— 让「解析之后只剩两态」这件事由类型系统承担，而不是靠调用方自觉。
+ *
+ * ⚠️ **下发路径上的类型绝不能换成三值的 {@link LlmThinkingModeOpt}**：请求体构造处的守卫是
+ * `if (!mode) return { params: {} }`（没解析出模式 ⇒ 一个 thinking 字段都不发），而 `'default'` 是**真值**，
+ * 会穿过守卫落进厂商分支、把「不干预」发成一个显式的「关闭思考」参数。那正好违反该处自己写死的
+ * 「零回归、请求体逐字一致」，且现有思考模式测试抓不到。
+ */
+export type LlmThinkingMode = Exclude<LlmThinkingModeOpt, 'default'>;
+
+/**
  * Per-call 覆盖选项（change console-role-model-config）。
  * 调用方按需传：`role` 触发按角色解析模型/温度；`model`/`temperature`/`timeoutMs` 为显式覆盖（探活与测试用）。
  * **不传 opts 时行为与改造前逐字一致**（零回归不变量）。
@@ -50,4 +63,19 @@ export interface LlmCallOpts {
    * 优先于按角色解析；不传则走注入的 `getThinking`，再缺则 default（零回归）。
    */
   thinkingMode?: LlmThinkingModeOpt;
+}
+
+/**
+ * 纯文本补全端口：**调用方只需要「给一段提示词、拿一段文本」的那一面**。
+ *
+ * 此前仓里有**三份逐字相同的私有声明**（边云消息处理器与规划器用的客户端接口、搜索词角色的 `RoleLlmLike`、
+ * 角色基类里的私有 `RoleLlm`），分属三个属主。于是每个「只想要 complete」的消费方都被迫直连 content 属主的
+ * 厂商客户端文件 —— 三条跨边界依赖由此而来，而它们要的其实是同一个一行接口。
+ *
+ * **命名红线**：本接口名里不得出现 `LlmClient` / `ChatLlmClient` 两个 token —— kernel 准入门把它们本身
+ * 当作「厂商调用」特征直接拒绝（正则精确锚这两个词；`LlmCallOpts` / `RoleLlmLike` 这类不命中）。
+ * 厂商 HTTP 客户端类、错误类、多轮 chat 接口一律留在 content 属主的实现文件，本端口只承载最窄的那一面。
+ */
+export interface TextCompletionPort {
+  complete(prompt: string, opts?: LlmCallOpts): Promise<string>;
 }

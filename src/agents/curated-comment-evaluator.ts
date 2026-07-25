@@ -20,7 +20,6 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from '../kernel/note-detail.js';
-import type { RoleName } from '../event-bus/types.js';
 import { topicKeysFromTitle } from '../kernel/valuable-comment-types.js';
 import { passesCommentResonance, resolveCuratedGateConfig } from '../publish-agent/curated-gate.js';
 
@@ -71,7 +70,10 @@ interface CommentEvalResult {
 }
 
 export class CuratedCommentEvaluator extends BaseRole {
-  readonly roleName: RoleName = 'curated_comment_evaluator';
+  // change cloud-coupling-phase0：不再为一个自标注跨边界导入角色名联合。`as const` 保住字面量类型
+  // 不塌成 string（下游按 `browse:${roleName}` 拼模型解析键，塌了会静默丢配置）。
+  // 写错角色名的防线改由 test/agents/content-role-names.test.ts 与角色目录对拍承担。
+  readonly roleName = 'curated_comment_evaluator' as const;
   private readonly curatedStore: CuratedCommentSink;
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly getAccountId: () => string;

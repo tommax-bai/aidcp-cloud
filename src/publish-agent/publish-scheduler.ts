@@ -22,8 +22,10 @@ import type { PlatformId } from '../kernel/platform-types.js';
 import { referenceImagesForGeneration, REFERENCE_IMAGE_MAX_COUNT } from '../kernel/reference-image-guidance.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 
-/** 洗稿参照笔记（change curated-note-actions）：管理后台精选页人工指定，注入创作输入独立参照块。 */
-export type ReferenceNote = NonNullable<TriggerInput['generateInput']['referenceNote']>;
+// 发布触发的四段结果契约已收口到 kernel（change cloud-coupling-phase0）：ReferenceNote /
+// ClaimRejectReason / TriggerOutcome / BeginRewriteResult。此处等值再导出，本文件与三个测试逐字不改。
+import type { ReferenceNote, ClaimRejectReason, TriggerOutcome, BeginRewriteResult } from '../kernel/publish-generation-types.js';
+export type { ReferenceNote, ClaimRejectReason, TriggerOutcome, BeginRewriteResult };
 
 /** 参照正文注入上限（字符）：保真改写需要足够上下文，同时防超长全文撑爆 prompt。 */
 export const REFERENCE_BODY_MAX_LEN = 6000;
@@ -92,12 +94,6 @@ export function describeGenerationFailure(err: unknown): string {
 }
 
 /** claim 拒绝原因（change parallel-rewrite-drafts）：同键在途 / 自主单飞 / 账号在途帽满 / 全局并发帽满。 */
-export type ClaimRejectReason = 'duplicate_source' | 'already_running' | 'publish_capacity' | 'publish_busy';
-
-/** console 洗稿同步触发结果：started=false 时 reason 供 HTTP 回执直译；started=true 时 outcome 在本轮收敛时 settle。 */
-export type BeginRewriteResult =
-  | { started: true; outcome: Promise<TriggerOutcome> }
-  | { started: false; reason: ClaimRejectReason };
 
 export interface PublishSchedulerDeps {
   conceptStore: SchedulerConceptStore;
@@ -147,13 +143,6 @@ export interface PublishSchedulerDeps {
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
-export type TriggerOutcome =
-  // reason = 触发原因（manual_feishu / concept_threshold(...) / risk_window(...)）；
-  // status = 编排终态（pending_approval/published/draft 正常，failed/timeout/skipped 非正常）；
-  // failureReason = 编排非正常收敛时的可读原因（来自编排器，供飞书回执 surface「为什么」）。
-  | { result: 'triggered'; reason: string; status: string; recordId?: number | null; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }
-  | { result: 'skipped'; reason: string }
-  | { result: 'blocked'; reason: string };
 
 export interface ManualTriggerOptions {
   referenceNote?: ReferenceNote;

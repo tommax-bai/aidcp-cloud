@@ -16,17 +16,21 @@
  * 调用方按需传：`role` 触发按角色解析模型/温度；`model`/`temperature`/`timeoutMs` 为显式覆盖（探活与测试用）。
  * **不传 opts 时行为与改造前逐字一致**（零回归不变量）。
  */
-import { type ThinkingMode } from '../config/role-catalog.js';
+// change cloud-coupling-phase0：思考模式的**已解析两态**改从 kernel 取（LlmThinkingMode = Exclude<…,'default'>），
+// 与 role-catalog 的 ThinkingMode 结构逐字一致。以 as 别名导入 ⇒ 本文件四处使用点一字不改，请求体构造逐字不变。
+import type { LlmThinkingMode as ThinkingMode } from '../kernel/llm-contract.js';
 // LlmCallOpts（不含 LlmClient / ChatLlmClient 等含供应商语义的标识符）析出到 kernel
 // （change decouple-llm-lang-interaction-contracts），供 automation 侧多个角色 type-only 共导、消跨边界边。
 // 本文件对既有导入方保持等值再导出。LlmClient / ChatLlmClient 因门禁 §4.7 禁止 kernel 内出现该标识符而留本文件（content）。
-import type { LlmCallOpts } from '../kernel/llm-contract.js';
+import type { LlmCallOpts, TextCompletionPort } from '../kernel/llm-contract.js';
 export type { LlmCallOpts } from '../kernel/llm-contract.js';
 
-/** 通用文本 LLM 客户端接口（与 edge 侧 selector.LlmClient 同形，便于迁移）。只需补全。 */
-export interface LlmClient {
-  complete(prompt: string, opts?: LlmCallOpts): Promise<string>;
-}
+/**
+ * 通用文本 LLM 客户端接口（与 edge 侧 selector.LlmClient 同形，便于迁移）。只需补全。
+ * 形状由 kernel 的 TextCompletionPort 定义 —— 此前 automation 侧两个消费方为了这一行接口直连本文件，
+ * 现在它们改指 kernel，本名保留给 content 内部既有用法（含 ChatLlmClient 继承链）。
+ */
+export interface LlmClient extends TextCompletionPort {}
 
 /** 含多轮 chat 的文本客户端（发布角色 + 按角色绑定 wrapper 用）。 */
 export interface ChatLlmClient extends LlmClient {

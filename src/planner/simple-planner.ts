@@ -4,13 +4,13 @@
  * 两种工作模式：
  * 1) 规则优先：命中内置关键词模板（点赞/关注/评论/搜索…）直接产出步骤，
  *    零模型调用、确定性强，适合高频固定动作；
- * 2) LLM 兜底：未命中模板且注入了 LlmClient 时，让 Qwen 把目标拆成 JSON 步骤，
+ * 2) LLM 兜底：未命中模板且注入了 TextCompletionPort 时，让 Qwen 把目标拆成 JSON 步骤，
  *    并对输出做严格校验（防幻觉：op 合法、字段齐全）。
  *
  * 这是"任务规划接口 + 简单实现"，后续可替换为更强的 LLM/计划图实现而不动调用方。
  */
 
-import type { LlmClient } from '../llm/qwen.js';
+import type { TextCompletionPort } from '../kernel/llm-contract.js';
 import type { Plan, PlanRequest, PlanStep, TaskPlanner } from './types.js';
 
 const VALID_OPS = new Set(['click', 'input', 'scroll']);
@@ -49,7 +49,7 @@ const RULES: Rule[] = [
 
 export interface SimplePlannerOptions {
   /** 可选 LLM 兜底（未命中规则时用） */
-  llm?: LlmClient;
+  llm?: TextCompletionPort;
 }
 
 export class SimplePlanner implements TaskPlanner {

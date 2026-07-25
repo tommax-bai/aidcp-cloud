@@ -4,7 +4,7 @@ import type { PersonaBinding } from '../kernel/persona-binding.js';
 import { normalizePlatformId } from '../platform/index.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import { resolveLikeAffinity } from '../kernel/like-affinity.js';
-import { isWritingLanguage } from '../soul/writing-language.js';
+import { isWritingLanguage } from '../kernel/writing-language.js';
 import type { WritingLanguage } from '../kernel/soul-types.js';
 
 export const MAX_PERSONA_BYTES = 32 * 1024;

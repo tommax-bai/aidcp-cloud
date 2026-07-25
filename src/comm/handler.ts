@@ -2,7 +2,7 @@
  * 默认边-云消息处理器：把协议消息接到云端三大能力。
  *
  * - plan.request   → TaskPlanner（规划层）
- * - select.request → LlmClient（文本模型做选择题）
+ * - select.request → TextCompletionPort（文本模型做选择题）
  * - anchor.get     → PgAnchorCache.get（主缓存）
  * - anchor.report  → 反污染晋升（命中统计 / 暂存→确认→晋升）
  * - hello          → 分配会话，回 welcome
@@ -62,7 +62,7 @@ import type { MessageHandler, EdgeSession, EdgePusher } from './ws-server.js';
 import type { CaptchaCoordinator } from './captcha-coordinator.js';
 import type { CaptchaAssistService } from './captcha-assist.js';
 import type { TaskPlanner } from '../planner/types.js';
-import type { LlmClient } from '../llm/qwen.js';
+import type { TextCompletionPort } from '../kernel/llm-contract.js';
 import type { EventBus } from '../event-bus/index.js';
 import type { PublishApprovalCardData } from './feishu-card-contract.js';
 import type { BotChatStore } from '../cache/bot-chat-store.js';
@@ -73,7 +73,7 @@ import {
   facebookPostKey,
   isCanonicalFacebookFeedVideoNoteId,
 } from '../platform/facebook-presented-video.js';
-import { isWritingLanguage } from '../soul/writing-language.js';
+import { isWritingLanguage } from '../kernel/writing-language.js';
 import type { WritingLanguage } from '../kernel/soul-types.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountStateManager } from '../account-state.js';
@@ -153,7 +153,7 @@ export type HandshakeOutcome = { ok: true } | { ok: false; code: string; message
 
 export interface HandlerDeps {
   planner: TaskPlanner;
-  llm: LlmClient;
+  llm: TextCompletionPort;
   cache: AnchorStore;
   /**
    * 发布审批卡下发口（change feishu-contract-seam / §4.6.2）：automation 只把结构化审批卡数据交出去，

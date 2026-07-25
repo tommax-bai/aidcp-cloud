@@ -17,14 +17,16 @@
  */
 
 import type { Soul } from '../kernel/soul-types.js';
-import type { LlmCallOpts } from '../kernel/llm-contract.js';
+import type { TextCompletionPort } from '../kernel/llm-contract.js';
 import type { RoleName } from '../event-bus/types.js';
 import { XHS_COMMENT_PROFILE, type CommentPlatformProfile } from '../platform/index.js';
 
-/** 角色侧只需文本补全；opts 携带角色键，客户端按角色解析模型/温度。 */
-export interface RoleLlmLike {
-  complete(prompt: string, opts?: LlmCallOpts): Promise<string>;
-}
+/**
+ * 角色侧只需文本补全；opts 携带角色键，客户端按角色解析模型/温度。
+ * 形状收口到 kernel 的 TextCompletionPort（此前仓里有三份逐字相同的私有声明）；本名等值再导出，
+ * 既有导入方一字不改。
+ */
+export type RoleLlmLike = TextCompletionPort;
 
 /** 精选集样本的窄投影（来自 CuratedContentStore.selectForCreation，调用方按账号取）。 */
 export interface CuratedSampleForTerms {

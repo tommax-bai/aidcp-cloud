@@ -36,3 +36,30 @@ export type SchedulerTriggerResult = {
 export interface PublishGenerationPort {
   trigger(input: TriggerInput): Promise<SchedulerTriggerResult>;
 }
+
+// ── change cloud-coupling-phase0：发布触发的结果契约收口到本文件 ──────────────────────
+// 此前这四段住在 automation 属主的 publish-scheduler 实现文件里，于是 automation 的委托任务执行器
+// 与 content 的首作协调器为了几个纯类型双双直连那个实现文件。它们的公共依赖
+// SchedulerApprovalCardResult 本来就在这儿，落这里是复用不是新建。
+
+/** 洗稿参照笔记（change curated-note-actions）：管理后台精选页人工指定，注入创作输入独立参照块。 */
+export type ReferenceNote = NonNullable<TriggerInput['generateInput']['referenceNote']>;
+
+/** 同步触发被拒的原因。started=false 时供 HTTP 回执直译，取值即对外文案键。 */
+export type ClaimRejectReason = 'duplicate_source' | 'already_running' | 'publish_capacity' | 'publish_busy';
+
+/**
+ * 一轮触发的终态。
+ * reason = 触发原因（manual_feishu / concept_threshold(...) / risk_window(...)）；
+ * status = 编排终态（pending_approval/published/draft 正常，failed/timeout/skipped 非正常）；
+ * failureReason = 编排非正常收敛时的可读原因（来自编排器，供飞书回执 surface「为什么」）。
+ */
+export type TriggerOutcome =
+  | { result: 'triggered'; reason: string; status: string; recordId?: number | null; failureReason?: string; approvalCard?: SchedulerApprovalCardResult }
+  | { result: 'skipped'; reason: string }
+  | { result: 'blocked'; reason: string };
+
+/** console 洗稿同步触发结果：started=false 时 reason 供 HTTP 回执直译；started=true 时 outcome 在本轮收敛时 settle。 */
+export type BeginRewriteResult =
+  | { started: true; outcome: Promise<TriggerOutcome> }
+  | { started: false; reason: ClaimRejectReason };

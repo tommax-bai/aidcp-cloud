@@ -22,10 +22,10 @@ import type { BehaviorGuidelines, LikeAffinity, Soul, WritingLanguage } from '..
 import type { YamlValue } from '../kernel/yaml.js';
 import { loadSoulFromValue, loadSoulFromYaml, serializeSoul } from '../soul/index.js';
 import { DEFAULT_LIKE_AFFINITY, generatedLikePrinciple, LIKE_AFFINITY_VALUES } from '../kernel/like-affinity.js';
-import type { RoleName } from '../event-bus/types.js';
-import { type RoleLlmLike } from './comment-search-term-generator.js';
+import type { TextCompletionPort } from '../kernel/llm-contract.js';
 
-const ROLE_NAME: RoleName = 'persona_generator';
+// change cloud-coupling-phase0：`as const` 替代跨边界的角色名联合标注；防线见 content-role-names 合同测试。
+const ROLE_NAME = 'persona_generator' as const;
 const ROLE_KEY = `browse:${ROLE_NAME}`;
 const DEFAULT_MAX_RETRIES = 2;
 export const LIKE_AFFINITY_KEYWORD_PREFIX = 'like_affinity:';
@@ -54,7 +54,7 @@ export function extractLikeAffinitySelection(keywordSelections: string[]): {
 }
 
 export interface PersonaGeneratorOptions {
-  llm: RoleLlmLike;
+  llm: TextCompletionPort;
   /** 单次生成失败后的最大重试次数（默认 2；含首次共尝试 3 次）。 */
   maxRetries?: number;
 }
@@ -75,8 +75,8 @@ export type PersonaGenerateOutcome =
   | { ok: false; reason: 'no_keywords' | 'generation_failed' | 'persona_invalid' };
 
 export class PersonaGenerator {
-  readonly roleName: RoleName = ROLE_NAME;
-  private readonly llm: RoleLlmLike;
+  readonly roleName = ROLE_NAME;
+  private readonly llm: TextCompletionPort;
   private readonly maxRetries: number;
 
   constructor(options: PersonaGeneratorOptions) {

@@ -8,10 +8,11 @@
 import type { EventBus } from '../event-bus/index.js';
 import type { RoleEventMap, RoleName } from '../event-bus/types.js';
 import type { Soul } from '../kernel/soul-types.js';
-import type { LlmCallOpts } from '../kernel/llm-contract.js';
+import type { TextCompletionPort } from '../kernel/llm-contract.js';
 
 /** 角色侧只需文本补全（保留弱接口，便于测试桩只实现 complete）；opts 可选，按角色解析模型/温度。 */
-type RoleLlm = { complete(prompt: string, opts?: LlmCallOpts): Promise<string> };
+/** 收口到 kernel 的 TextCompletionPort：本文件此前私藏第三份逐字相同的声明。 */
+type RoleLlm = TextCompletionPort;
 
 export interface RoleOptions {
   eventBus: EventBus;

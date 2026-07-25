@@ -13,7 +13,6 @@
 import { BaseRole } from './base-role.js';
 import type { RoleOptions } from './base-role.js';
 import type { NoteData } from '../kernel/note-detail.js';
-import type { RoleName } from '../event-bus/types.js';
 import { topicKeysFromTitle, type ValuableCommentInput } from '../kernel/valuable-comment-types.js';
 
 export interface ValuableCommentArchivistOptions extends RoleOptions {
@@ -22,7 +21,8 @@ export interface ValuableCommentArchivistOptions extends RoleOptions {
 }
 
 export class ValuableCommentArchivist extends BaseRole {
-  readonly roleName: RoleName = 'valuable_comment_archivist';
+  // change cloud-coupling-phase0：同上，`as const` 保住字面量类型，防线见 content-role-names 合同测试。
+  readonly roleName = 'valuable_comment_archivist' as const;
   private readonly getNoteData: (noteId: string) => NoteData | null;
   private readonly archive: (input: ValuableCommentInput) => Promise<void>;
   private unsubscribers: (() => void)[] = [];

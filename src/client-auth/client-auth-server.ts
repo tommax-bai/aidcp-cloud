@@ -43,7 +43,7 @@ import type {
 } from '../publish-agent/draft-refinement.js';
 import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
 import type { AccountPersonaService } from '../config/account-persona-service.js';
-import { isWritingLanguage } from '../soul/writing-language.js';
+import { isWritingLanguage } from '../kernel/writing-language.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import type { RiskStatus } from '../risk/types.js';
 import type { SetOperatorAliasResult } from '../account-store.js';

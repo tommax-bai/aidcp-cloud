@@ -5,15 +5,28 @@
  * 保守的文本-语言启发式三态校验。供 content（发布角色 / 评论撰写 prompt）与 automation（评论撰写 /
  * 去 AI 味）两域直接依赖。
  *
- * `isWritingLanguage` 及其依赖的模块级 `WRITING_LANGUAGE_SET`（`new Set(...)`）**不进 kernel**：
- * 门禁 §4.7 kernel 准入把模块级 `const = new Set/Map` 列为「进程内活状态（可变单例）」而禁止，
- * 故守卫函数与该 Set + `WRITING_LANGUAGE_VALUES` 留在 `src/soul/writing-language.ts`（api）。
+ * `isWritingLanguage` 与 `WRITING_LANGUAGE_VALUES` **已于 change cloud-coupling-phase0 迁入本文件**。
+ * 此前它们留在 `src/soul/writing-language.ts`（api），理由是守卫依赖一个模块级 `new Set(...)`，
+ * 而门禁把模块级 `const = new Set/Map` 判为「进程内活状态（可变单例）」直接拒入 —— 但**挡住的是那个 Set，
+ * 不是守卫本身**：取值只有三个，用只读数组的 `includes` 一样判，且再没有任何可变单例。
+ * 原 api 文件退化为纯再导出（不能整文件搬走：桶链上还有别的消费方经它取用）。
  *
  * kernel 准入：无 SQL / 无 HTTP / 无 fetch / 无模块级可变单例 / 不反向依赖业务层。
  */
 import type { WritingLanguage } from './soul-types.js';
 
 export type WritingLanguageCheck = 'match' | 'mismatch' | 'uncertain';
+
+/** 写作语言的全部合法取值（与 `WritingLanguage` 联合逐字对齐，由 satisfies 保证不漂）。 */
+export const WRITING_LANGUAGE_VALUES = ['zh-CN', 'en', 'vi'] as const satisfies readonly WritingLanguage[];
+
+/**
+ * 写作语言守卫。用只读数组的 `includes` 而不是模块级 Set：三个取值，查找差异不可观测，
+ * 但换来「kernel 里没有任何进程内活状态」这条准入硬要求。
+ */
+export function isWritingLanguage(value: unknown): value is WritingLanguage {
+  return typeof value === 'string' && (WRITING_LANGUAGE_VALUES as readonly string[]).includes(value);
+}
 
 export function writingLanguageLabel(language: WritingLanguage): string {
   switch (language) {

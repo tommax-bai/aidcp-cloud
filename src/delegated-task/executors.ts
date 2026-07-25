@@ -1,7 +1,6 @@
 import type { CommentTerminalObservation } from '../comment-agent/comment-scheduler.js';
 import type { TargetedCommentResult } from '../comment-agent/comment-task-runner.js';
-import type { TriggerOutcome } from '../publish-agent/publish-scheduler.js';
-import type { ReferenceNote } from '../publish-agent/publish-scheduler.js';
+import type { ReferenceNote, TriggerOutcome } from '../kernel/publish-generation-types.js';
 import type { ReferenceImageSnapshot } from '../kernel/publish-pipeline-types.js';
 import type { DelegatedTaskExecutor, DelegatedExecutionResult } from './worker.js';
 import type { DelegatedTask } from './types.js';
