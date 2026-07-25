@@ -99,3 +99,38 @@ test('属主判据不可用 → 明确失败，绝不「查不到就当通过」
   );
   assert.equal(stub.queries.length, 0, '判据不可用时 MUST NOT 连库「试一下」再放行');
 });
+
+/* ── Block④ 三仓提取 · 批次 0：判定范围跟随「本进程连了哪些属主库」 ────────────────────
+ * 两条即够：收窄时只判该属主（不替没连的库背书），空集合不许把门关掉。
+ */
+
+test('owners 收窄：只判本进程连的属主，不给没连的库出结论', async () => {
+  const files = await loadMigrationFiles();
+  const stub = ledgerStub(files.map((f) => versionOf(f.name)));
+
+  const result = await runSchemaContractGate({
+    client: stub.client,
+    mode: 'enforce',
+    owners: ['content'],
+  });
+
+  assert.equal(result.pass, true);
+  assert.deepEqual(
+    result.owners.map((o) => o.owner),
+    ['content'],
+    '本进程没连 api / automation 的库，就没有立场声称它们的 schema 对或不对',
+  );
+});
+
+test('owners 传空集合视为未指定：MUST 判满三个属主，绝不把门静默关掉', async () => {
+  const files = await loadMigrationFiles();
+  const stub = ledgerStub(files.map((f) => versionOf(f.name)));
+
+  const result = await runSchemaContractGate({ client: stub.client, mode: 'enforce', owners: [] });
+
+  assert.deepEqual(
+    result.owners.map((o) => o.owner),
+    ['content', 'automation', 'api'],
+    '「一个库都不判」永远不该是默认结果——那等于一次静默的门失效',
+  );
+});

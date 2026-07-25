@@ -203,16 +203,19 @@ interface LedgerGroup {
   injected?: LedgerQueryable;
 }
 
-function buildGroups(options?: { client?: LedgerQueryable; clients?: Partial<Record<PgOwner, LedgerQueryable>> }): LedgerGroup[] {
+function buildGroups(
+  owners: readonly PgOwner[],
+  options?: { client?: LedgerQueryable; clients?: Partial<Record<PgOwner, LedgerQueryable>> },
+): LedgerGroup[] {
   if (options?.clients) {
-    return PG_OWNERS.map((owner) => ({ owners: [owner], injected: options.clients?.[owner] }));
+    return owners.map((owner) => ({ owners: [owner], injected: options.clients?.[owner] }));
   }
   if (options?.client) {
-    // 注入单一账本 = 显式声明「三属主共用这一个账本」：只读一次，喂给全部属主判定。
-    return [{ owners: [...PG_OWNERS], injected: options.client }];
+    // 注入单一账本 = 显式声明「这些属主共用这一个账本」：只读一次，喂给组内每个属主判定。
+    return [{ owners: [...owners], injected: options.client }];
   }
   const byFingerprint = new Map<string, LedgerGroup>();
-  for (const owner of PG_OWNERS) {
+  for (const owner of owners) {
     const config = resolveOwnerPgConfig(owner) as pg.ClientConfig;
     const key = connectionFingerprint(config);
     const existing = byFingerprint.get(key);
@@ -239,12 +242,13 @@ async function readGroupLedger(group: LedgerGroup): Promise<{ versions: string[]
   }
 }
 
-function describeTargets(groups: LedgerGroup[]): string {
+function describeTargets(groups: LedgerGroup[], owners: readonly PgOwner[]): string {
   if (groups.length === 1 && groups[0].owners.length === PG_OWNERS.length) {
     const vars = PG_OWNERS.map(pgOwnerUrlEnvVar).join(' / ');
     return `三属主账本回落同一连接目标（${vars} 均未设）：读一次账本、判三次`;
   }
-  return `账本连接目标 ${groups.length} 个：${groups.map((g) => g.owners.join('+')).join('，')}`;
+  const scoped = owners.length === PG_OWNERS.length ? '' : `（本进程只连 ${owners.join('+')}）`;
+  return `账本连接目标 ${groups.length} 个：${groups.map((g) => g.owners.join('+')).join('，')}${scoped}`;
 }
 
 /**
@@ -259,8 +263,24 @@ export async function runSchemaContractGate(options?: {
   mode?: SchemaGateMode;
   /** 属主判据来源（测试可注入一个失败的加载器，验证「判据没了 MUST NOT 放行」） */
   loadScopes?: () => Promise<MigrationOwnerScopes>;
+  /**
+   * 本进程**真正打开了哪些属主库连接**（Block④ 三仓提取 · 批次 0）。缺省＝全部三个。
+   *
+   * **判据必须是「开了哪些池」，不是「跑的是哪个服务模式」。** 今天组合根在基础段
+   * `server.ts:957-959` **无条件建三个池、零模式门控** ⇒ 任何模式都连三个库，按模式收窄会让门
+   * 校验得比进程实际用的少 —— 那正是本门存在的意义（enforce 假绿）的反面。等池按属主收窄之后，
+   * 调用方传的集合自然跟着变小，门无需再改。
+   *
+   * 传入集合外的属主**不读账本、不判定、不出现在结论里**：本进程既然不连那个库，
+   * 就没有立场声称它的 schema 对或不对。
+   */
+  owners?: readonly PgOwner[];
 }): Promise<SchemaGateResult> {
   const mode = options?.mode ?? parseSchemaGateMode(readEnvString('AIDCP_SCHEMA_GATE'));
+  // 本进程连了哪些属主库就判哪些（缺省全部三个 ⇒ 与改动前逐字节一致）。空集合视为未指定：
+  // 「一个库都不判」永远不该是默认结果，那等于把门关掉。
+  const owners: readonly PgOwner[] =
+    options?.owners && options.owners.length > 0 ? options.owners : PG_OWNERS;
   const prefix = (owner: PgOwner) => `[aidcp-cloud] schema 契约门（${mode}/${owner}）`;
   const allowAheadRaw = readEnvString('AIDCP_ALLOW_SCHEMA_AHEAD');
 
@@ -279,7 +299,7 @@ export async function runSchemaContractGate(options?: {
 
   if (!scopes || !index) {
     // 判据不可用 = 无法证明任何属主的 schema 正确。MUST NOT 连库「试一下」再放行。
-    for (const owner of PG_OWNERS) {
+    for (const owner of owners) {
       const decision = evaluateSchemaGate({
         ledgerVersions: [],
         ledgerError: `属主判据不可用（${scopeError}）`,
@@ -292,8 +312,8 @@ export async function runSchemaContractGate(options?: {
       results.push({ owner, decision, conclusion: formatGateConclusion(decision) });
     }
   } else {
-    const groups = buildGroups(options);
-    console.log(`[aidcp-cloud] schema 契约门（${mode}） ${describeTargets(groups)}`);
+    const groups = buildGroups(owners, options);
+    console.log(`[aidcp-cloud] schema 契约门（${mode}） ${describeTargets(groups, owners)}`);
     if (index.residue.length > 0) {
       // 残留 = 头声明为空、判不出属主、按安全方向计入全部属主的那批（见 migration-owners.ts 文件头第 2 点）。
       // 启动日志只报数（逐条清单由 `npm run migrate status` 打），但绝不省略这一行。
@@ -308,7 +328,7 @@ export async function runSchemaContractGate(options?: {
       for (const owner of group.owners) byOwner.set(owner, ledger);
     }
 
-    for (const owner of PG_OWNERS) {
+    for (const owner of owners) {
       const scope = scopes[owner];
       const ledger = byOwner.get(owner) ?? { versions: [], error: '本属主没有账本连接' };
       const decision = evaluateSchemaGate({

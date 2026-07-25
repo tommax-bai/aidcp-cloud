@@ -393,7 +393,7 @@ import type { ConfigMirrorBumpSink } from './kernel/config-mirror-bump-types.js'
 import { allowsTransportWhenGateUnknown } from './config/mirror-stop-work.js';
 import { noteMirrorStaleRefusal } from './config-mirror-freshness.js';
 import { automationOperationDescriptorFor } from './comm/operation-registry.js';
-import { resolveOwnerPgConfig } from './kernel/pg-owner-connection-resolver.js';
+import { PG_OWNERS, resolveOwnerPgConfig, type PgOwner } from './kernel/pg-owner-connection-resolver.js';
 import { ModelConfigStore } from './config/model-config-store.js';
 import { RoleConfigStore } from './config/role-config-store.js';
 import { createRoleConfigPanel } from './config/role-config-facade.js';
@@ -939,7 +939,12 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 这一门把它变成一次显式的启动失败。
   // MUST 跑在任何存储 init() 之前；MUST NOT 包 try/catch（吞掉它等于恢复静默假成功）。
   // 默认 warn 模式：判定照做、结论照打，不拒绝启动；切 enforce 后不通过即在此处抛错退出。
-  await runSchemaContractGate();
+  //
+  // Block④ 三仓提取 · 批次 0：判定范围＝**本进程要连哪些属主库**（pgOwnersForProcess），
+  // 不是「跑的是哪个服务模式」。今天基础段无条件建三个池 ⇒ 恒为全部三个，与改动前逐字节一致。
+  // 判据放在 pgOwnersForProcess 一处，建池与本门共用；下面还有一条启动期断言把两者钉死，
+  // 防止将来收窄了池却漏改门（那会让门去校验一个本进程根本没连的库，或反过来漏校验真在用的库）。
+  await runSchemaContractGate({ owners: pgOwnersForProcess() });
 
   // ── 跨进程配置镜像失效通道（change config-mirror-cross-process-invalidation）────────────
   // dev 与 ol 是两个 cloud 进程共用同一个 PostgreSQL 库，其中 8 张是无 execution_target 列的全局配置表。
@@ -957,6 +962,10 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   const apiPool = new pg.Pool({ ...resolveOwnerPgConfig('api'), max: 30 });
   const automationPool = new pg.Pool({ ...resolveOwnerPgConfig('automation'), max: 30 });
   const contentPool = new pg.Pool({ ...resolveOwnerPgConfig('content'), max: 30 });
+  // Block④ 批次 0：把「建了哪些属主池」与「schema 契约门校验了哪些属主」钉成同一件事。
+  // 上面三行今天无条件建三个池（零模式门控），所以 pgOwnersForProcess() 也必须是全部三个。
+  // 批次 0d 按消费方收窄池时，改 pgOwnersForProcess 一处即可，本断言会当场抓出漏改的一侧。
+  assertOwnerPoolsMatchProcessOwners({ api: apiPool, automation: automationPool, content: contentPool });
   // config_mirror_version 属 api；configMirrorPool 即 api 池（保持既有变量名，全部现有 `pool: configMirrorPool` 引用零改）。
   // ✅ L3 blocker 已解（change block3-l3-config-mirror-bump-decouple）：quota/pacing/session/resume 四个
   //    automation 配置 store 不再在自己的写事务里同连接 bump 本 api 表，改为「本域 outbox 行同事务入队 →
@@ -5899,6 +5908,32 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   ctx.server = server;
   ctx.sessionLimitPanel = sessionLimitPanel;
   ctx.triggerPublishDispatchOnApprove = triggerPublishDispatchOnApprove;
+}
+
+/**
+ * 本进程要连**哪些属主库** —— 建池与启动期 schema 契约门共用的**唯一事实源**（Block④ 批次 0）。
+ *
+ * 今天恒为全部三个：基础段 `server.ts` 的三行建池**无条件执行、零模式门控**，任何服务模式都连三个库。
+ * 因此 MUST NOT 按 `AIDCP_SERVICE` 收窄本函数 —— 那会让契约门校验得比进程实际使用的少，
+ * 正好造出这道门存在的意义（enforce 假绿）的反面：库里少一张表，门却说通过。
+ *
+ * 批次 0d 把基础段的池按消费方收窄之后，改这里一处即可，契约门自动跟随；
+ * 两侧是否一致由 {@link assertOwnerPoolsMatchProcessOwners} 在启动期钉死。
+ */
+function pgOwnersForProcess(): readonly PgOwner[] {
+  return PG_OWNERS;
+}
+
+/** 建池集合必须与 {@link pgOwnersForProcess} 逐个吻合；对不上即拒绝启动（不是告警）。 */
+function assertOwnerPoolsMatchProcessOwners(pools: Partial<Record<PgOwner, unknown>>): void {
+  const declared = [...pgOwnersForProcess()].sort();
+  const built = (Object.keys(pools) as PgOwner[]).filter((o) => pools[o] !== undefined).sort();
+  if (declared.join(',') !== built.join(',')) {
+    throw new Error(
+      `owner_pool_scope_mismatch: 声明要连 [${declared.join(',')}]，实际建池 [${built.join(',')}]。` +
+        `两者必须一致 —— 否则要么 schema 契约门在校验本进程没连的库，要么真在用的库没被校验。`,
+    );
+  }
 }
 
 /**
