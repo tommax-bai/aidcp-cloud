@@ -1,0 +1,10 @@
+# generated from boundaries/table-ownership.json — DO NOT EDIT BY HAND
+# regenerate: npx tsx scripts/db-split/generate-owner-table-lists.ts
+# owner=content count=7
+account_facebook_publish_image
+account_facebook_publish_image_set
+concepts
+curated_content
+llm_billing_price_snapshot
+llm_token_usage
+publish_draft_refinement_jobs

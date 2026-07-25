@@ -1,0 +1,44 @@
+# generated from boundaries/table-ownership.json — DO NOT EDIT BY HAND
+# regenerate: npx tsx scripts/db-split/generate-owner-table-lists.ts
+# owner=automation count=41
+alerts
+anchor_staging
+anchors
+delegated_task_attempts
+delegated_task_events
+delegated_tasks
+event_outbox
+event_outbox_cursor
+facebook_comment_audit
+facebook_group_join_audit
+facebook_group_membership
+facebook_group_target
+facebook_group_target_scope
+group_route
+hot_lead_queue
+interaction_api_requests
+interaction_auth_state
+interaction_feed
+interaction_messages
+interaction_offboard_audit
+interaction_offboards
+interaction_reply_jobs
+interaction_runtime_controls
+interaction_send_attempts
+interaction_sync_batches
+interaction_sync_cursors
+interaction_target_meta
+interaction_threads
+liked_notes
+pacing_floor_config
+quota_config
+resume_config
+resume_config_global
+risk_counter_outbox
+risk_counters
+risk_interactions
+risk_state
+schema_migrations
+session_config
+session_config_global
+valuable_comments
