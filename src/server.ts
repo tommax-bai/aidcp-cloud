@@ -424,6 +424,9 @@ import { ReplyAiService } from './interactions/reply-ai.js';
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
 // change offboard-saga：把跨 owner 离场写收口到各属主的窄写入口，由组合根注入（拆进程时换成内部 HTTP）。
 import { OffboardWriteAdapter } from './interactions/offboard-write-adapter.js';
+// Block③ L3：离场写适配器的**读侧配对**——api 的客户环境生命周期经 kernel 端口向 automation 取只读投影。
+import { PgClientEnvAutomationRead } from './interactions/client-env-automation-read.js';
+import type { ClientEnvAutomationReader } from './kernel/client-env-automation-types.js';
 import { InteractionApiWrites } from './interactions/interaction-api-writes.js';
 // 环境级行锁实现（api 属主 client_environments / client_env_scope），由组合根注入 InteractionStore（automation）。
 import { lockEnvironmentRow, lockEnvironmentScopeRows } from './db/environment-row-lock.js';
@@ -943,7 +946,26 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
   // 对外客户身份 + 客户↔环境归属（change edge-client-customer-auth）。独立表,与内部运营登录物理隔离。
-  const clientUserStore = new ClientUserStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter() });
+  // Block③ L3：本 store 自己的读写走 api 属主池；automation 属主表（离场记录 / 微信互动授权绑定 /
+  // 风控态）的**顶层只读**改经端口取投影，本 store 不直连 automation 的库、也不知其表结构。
+  //   - monolith / core / automation / content：跑在本进程 automation 池上的本地实现，逐字节等价、零 HTTP。
+  //   - api：segC 未跑 ⇒ 本进程不该持有 automation 属主表的连接；HTTP 客户端待 Block② 补，暂 fail-closed
+  //     （各方法 reject 具名错误），镜像 segD 的 panelAutomationRead / publishStatusLocal 先例；
+  //     api 模式当前未部署，此路不改现网行为。
+  // ⚠️ 尚未解耦（不在本刀范围）：本 store 另有 8 处 automation 读夹在事务内 / 带跨库行锁（环境注销
+  //    关键路径），以及 OffboardWriteAdapter 那条「接调用方事务句柄」的跨域联合提交——都要靠最终一致
+  //    重设计，见 aidcp/docs/cloud-block3-l3-cutover-plan.md。
+  const clientEnvAutomationRead: ClientEnvAutomationReader =
+    serviceModeFromEnv() === 'api'
+      ? {
+          offboardForUser: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
+          activeWechatOffboards: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
+          wechatBoundEnvKeys: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
+          wechatEnvKeysForAccount: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
+          riskStateProjection: () => Promise.reject(new Error('client_env_automation_read_unavailable_in_api_mode')),
+        }
+      : new PgClientEnvAutomationRead({ pool: automationPool });
+  const clientUserStore = new ClientUserStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardWrites: new OffboardWriteAdapter(), automationReads: clientEnvAutomationRead });
   try {
     await mirrorVersionStore.init();
     await modelConfigStore.init();

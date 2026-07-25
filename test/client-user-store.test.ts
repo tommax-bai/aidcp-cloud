@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import pg from 'pg';
 import { CLIENT_USERS_SCHEMA_SQL, ClientUserStore } from '../src/client-auth/client-user-store.js';
 import { shanghaiDayStartMs } from '../src/time/shanghai-day.js';
+import type { ClientEnvAutomationReader } from '../src/kernel/client-env-automation-types.js';
 
 /**
  * client-user-env-picker：`listAllEnvironments` 的**映射逻辑**单测（行 → ClientEnvironmentView）。
@@ -18,6 +19,22 @@ function fakePool(handler: (sql: string, params?: unknown[]) => { rows: unknown[
     query: async (sql: string, params?: unknown[]) => handler(sql, params),
   };
   return pool as unknown as pg.Pool;
+}
+
+/**
+ * Block③ L3：automation 属主表只读投影端口的测试桩。默认「空世界」——无未清除离场记录、
+ * 无微信互动绑定、无风控行；每个用例只覆盖自己关心的那一两个方法。
+ * 端口**未注入**时 store 会当场抛具名错（见下方 fail-loud 用例），不会静默回落成空集。
+ */
+function fakeAutomationReads(overrides: Partial<ClientEnvAutomationReader> = {}): ClientEnvAutomationReader {
+  return {
+    offboardForUser: async () => null,
+    activeWechatOffboards: async () => [],
+    wechatBoundEnvKeys: async () => [],
+    wechatEnvKeysForAccount: async () => [],
+    riskStateProjection: async () => [],
+    ...overrides,
+  };
 }
 
 test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度', async () => {
@@ -35,7 +52,7 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
       ],
     };
   });
-  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool, automationReads: fakeAutomationReads() });
   const envs = await store.listAllEnvironments();
   assert.equal(envs.length, 2);
   assert.deepEqual(envs[0], {
@@ -61,7 +78,7 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
 
 test('listAllEnvironments: json_agg 为 null 时回落空 assignees（count 0）', async () => {
   const pool = fakePool(() => ({ rows: [{ env_key: 'p3', label: null, platform: null, assignees: null }] }));
-  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool, automationReads: fakeAutomationReads() });
   const [env] = await store.listAllEnvironments();
   assert.deepEqual(env.assignees, []);
   assert.equal(env.assigneeCount, 0);
@@ -74,7 +91,7 @@ test('listAllEnvironments: binding-missing hold 映射为不含伪 accountId 的
     hold_id: '6f421ba8-b921-4c5d-bff2-65f330e3c227', hold_reason: 'admin_revoked',
     hold_requested_at: requestedAt,
   }] }));
-  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool, automationReads: fakeAutomationReads() });
   const [env] = await store.listAllEnvironments();
   assert.deepEqual(env.cleanup, {
     kind: 'binding_missing', revocationId: '6f421ba8-b921-4c5d-bff2-65f330e3c227',
@@ -89,7 +106,7 @@ test('listAllEnvironments: 缺表(42P01)fail-closed 回落空数组，不抛', a
     err.code = '42P01';
     throw err;
   });
-  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool, automationReads: fakeAutomationReads() });
   assert.deepEqual(await store.listAllEnvironments(), []);
 });
 
@@ -99,8 +116,186 @@ test('listAllEnvironments: 非缺表错误照常抛出（不吞真故障）', as
     err.code = 'ECONNREFUSED';
     throw err;
   });
-  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool, automationReads: fakeAutomationReads() });
   await assert.rejects(() => store.listAllEnvironments(), /connection refused/);
+});
+
+/**
+ * Block③ 物理拆库 L3（读侧解耦）：automation 属主表（离场记录 / 微信互动授权绑定 / 风控态）
+ * 的**顶层只读**改经 kernel 端口取投影，本 store 不再直连别域的库。
+ *
+ * 这一组锁的是「原来一条跨库 SQL 拆成本地读 + 端口取集合 + 本地合入」之后**语义没漂**：
+ * 离场回执按 envKey 1:1 合入、风控态按 accountId 合入且缺行=null、候选筛选的序与截断不变、
+ * 端口缺表与本地缺表同口径 fail-closed、端口未注入当场响亮报错。
+ * 真 SQL 侧（并集 CTE 的 unnest 分支、GROUP BY 去掉 o.* 后的行数）仍靠真库核 → 真机 backlog 簇 61。
+ */
+test('listAllEnvironments: 离场回执取自端口投影，环境键并集把端口的 envKey 传进 $1', async () => {
+  const requestedAt = new Date('2026-07-20T02:00:00Z');
+  const purgeDueAt = new Date('2026-07-27T02:00:00Z');
+  let seenParams: unknown[] | undefined;
+  const pool = fakePool((sql, params) => {
+    assert.match(sql, /SELECT unnest\(\$1::text\[\]\) AS env_key/); // 第四支环境键来自端口
+    assert.doesNotMatch(sql, /interaction_offboards|risk_state/); // 本地 SQL 已无 automation 属主表
+    seenParams = params;
+    return { rows: [{ env_key: 'wechat-env', label: null, platform: null, assignees: null }] };
+  });
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    automationReads: fakeAutomationReads({
+      activeWechatOffboards: async () => [{
+        offboardId: 'ob-1', envKey: 'wechat-env', accountId: 'acct-1', state: 'dispatched',
+        reason: 'admin_revoked', requestedAt: requestedAt.getTime(), purgeDueAt: purgeDueAt.getTime(),
+      }],
+    }),
+  });
+  const [env] = await store.listAllEnvironments();
+  assert.deepEqual(seenParams, [['wechat-env']]);
+  assert.deepEqual(env.cleanup, {
+    kind: 'offboard_pending', offboardId: 'ob-1', envKey: 'wechat-env', accountId: 'acct-1',
+    state: 'dispatched', reason: 'admin_revoked',
+    requestedAt: requestedAt.getTime(), purgeDueAt: purgeDueAt.getTime(),
+  });
+});
+
+test('listAllEnvironments: 风控态按 accountId 从端口合入；无风控行 = null（等价 LEFT JOIN）', async () => {
+  let askedFor: string[] | undefined;
+  const pool = fakePool(() => ({ rows: [
+    { env_key: 'e1', assignees: null, account_id: 'acct-with-risk', account_platform: 'wechat_channels' },
+    { env_key: 'e2', assignees: null, account_id: 'acct-no-risk', account_platform: 'wechat_channels' },
+    // 悬空绑定：account_platform 为 null（accounts 无此行）⇒ 原查询链上也取不到风控态，不进批量入参。
+    { env_key: 'e3', assignees: null, account_id: 'acct-dangling', account_platform: null },
+  ] }));
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    automationReads: fakeAutomationReads({
+      riskStateProjection: async (ids) => {
+        askedFor = ids;
+        return [{ accountId: 'acct-with-risk', status: 'restricted', quotaLevel: 'conservative' }];
+      },
+    }),
+  });
+  const envs = await store.listAllEnvironments();
+  assert.deepEqual(askedFor, ['acct-with-risk', 'acct-no-risk']);
+  assert.equal(envs[0].account?.riskStatus, 'restricted');
+  assert.equal(envs[0].account?.riskQuotaLevel, 'conservative');
+  assert.equal(envs[1].account?.riskStatus, null);
+  assert.equal(envs[1].account?.riskQuotaLevel, null);
+  assert.equal(envs[2].account, null); // 悬空绑定照旧不产出账号块
+});
+
+test('listAllEnvironments: 端口侧缺表(42P01)与本地缺表同口径 fail-closed 回空', async () => {
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool(() => ({ rows: [] })),
+    automationReads: fakeAutomationReads({
+      activeWechatOffboards: async () => {
+        throw Object.assign(new Error('relation "interaction_offboards" does not exist'), { code: '42P01' });
+      },
+    }),
+  });
+  assert.deepEqual(await store.listAllEnvironments(), []);
+});
+
+test('getOffboard: 经端口取投影并映射为视图；端口无行 → null（本地池不参与）', async () => {
+  const requestedAt = new Date('2026-07-21T03:00:00Z');
+  const purgeDueAt = new Date('2026-07-28T03:00:00Z');
+  const pool = fakePool(() => { throw new Error('本地池不该被 getOffboard 触达'); });
+  const seen: { offboardId: string; userId: string }[] = [];
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    automationReads: fakeAutomationReads({
+      offboardForUser: async (offboardId, userId) => {
+        seen.push({ offboardId, userId });
+        return offboardId === 'ob-1'
+          ? { offboardId: 'ob-1', envKey: 'env-1', accountId: 'acct-1', state: 'pending_edge',
+              reason: 'environment_unbind', requestedAt: requestedAt.getTime(), purgeDueAt: purgeDueAt.getTime() }
+          : null;
+      },
+    }),
+  });
+  assert.deepEqual(await store.getOffboard('user-a', 'ob-1'), {
+    offboardId: 'ob-1', envKey: 'env-1', accountId: 'acct-1', state: 'pending_edge',
+    reason: 'environment_unbind', requestedAt: requestedAt.getTime(), purgeDueAt: purgeDueAt.getTime(),
+  });
+  assert.equal(await store.getOffboard('user-a', 'ob-missing'), null);
+  // 归属过滤下推到属主侧：两个参数都原样带过去，绝不在本地放宽。
+  assert.deepEqual(seen, [
+    { offboardId: 'ob-1', userId: 'user-a' },
+    { offboardId: 'ob-missing', userId: 'user-a' },
+  ]);
+});
+
+test('hasPendingRevocationHold: 无微信绑定直接 false（不查本地池）；有绑定则按 envKey 查 hold', async () => {
+  const noBinding = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool(() => { throw new Error('无绑定时不该查本地池'); }),
+    automationReads: fakeAutomationReads(),
+  });
+  assert.equal(await noBinding.hasPendingRevocationHold('acct-none'), false);
+
+  let seenParams: unknown[] | undefined;
+  const withBinding = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool((sql, params) => {
+      assert.match(sql, /FROM client_env_revocation_holds h/);
+      assert.doesNotMatch(sql, /interaction_auth_state/); // 跨库 JOIN 已拆掉
+      seenParams = params;
+      return { rows: [{ present: true }] };
+    }),
+    automationReads: fakeAutomationReads({ wechatEnvKeysForAccount: async () => ['env-held'] }),
+  });
+  assert.equal(await withBinding.hasPendingRevocationHold('acct-late'), true);
+  assert.deepEqual(seenParams, [['env-held']]);
+});
+
+test('reconcileRevocationHolds: 候选按原序筛掉无绑定的 hold 并截断到 limit', async () => {
+  const holds = ['h-a', 'h-b', 'h-c', 'h-d'].map((env_key) => ({ env_key }));
+  const locked: string[] = [];
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (/FROM client_environments WHERE env_key = \$1 FOR UPDATE/.test(sql)) {
+        locked.push(String((params ?? [])[0]));
+        return { rows: [{ '?column?': 1 }], rowCount: 1 };
+      }
+      return { rows: [] }; // hold 重取空 → 本候选跳过，不产出离场记录
+    },
+    release() {},
+  };
+  let askedFor: string[] | undefined;
+  const pool = {
+    connect: async () => client,
+    query: async (sql: string) => {
+      assert.match(sql, /FROM client_env_revocation_holds h\n\s+ORDER BY h.requested_at,h.env_key/);
+      assert.doesNotMatch(sql, /interaction_auth_state/);
+      return { rows: holds };
+    },
+  } as unknown as pg.Pool;
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    automationReads: fakeAutomationReads({
+      wechatBoundEnvKeys: async (envKeys) => {
+        askedFor = envKeys;
+        return ['h-d', 'h-b', 'h-c']; // 端口返回顺序无关：原序由本地 hold 查询决定
+      },
+    }),
+  });
+  assert.deepEqual(await store.reconcileRevocationHolds(2), []);
+  assert.deepEqual(askedFor, ['h-a', 'h-b', 'h-c', 'h-d']);
+  assert.deepEqual(locked, ['h-b', 'h-c']); // 无绑定的 h-a 被剔除；limit=2 截断掉 h-d
+});
+
+test('automation 读端口未注入：跨域读当场抛具名错，绝不静默回落空集', async () => {
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: fakePool(() => ({ rows: [] })),
+  });
+  await assert.rejects(() => store.getOffboard('u', 'ob'), /client_env_automation_read_port_not_configured/);
+  await assert.rejects(() => store.hasPendingRevocationHold('acct'), /client_env_automation_read_port_not_configured/);
+  await assert.rejects(() => store.listAllEnvironments(), /client_env_automation_read_port_not_configured/);
 });
 
 /**

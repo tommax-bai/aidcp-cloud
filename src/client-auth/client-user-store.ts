@@ -27,6 +27,7 @@ import { isMirrorStale, type ConfigMirrorKey } from '../config-mirror-freshness.
 import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-version-store.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import type { OffboardWritePort, OffboardRow } from './offboard-write-port.js';
+import type { ClientEnvAutomationReader } from '../kernel/client-env-automation-types.js';
 
 const { Pool } = pg;
 
@@ -446,6 +447,16 @@ export interface ClientUserStoreOptions {
    * （fail-loud，绝非静默假成功）。不触发离场路径的调用方无需注入。
    */
   offboardWrites?: OffboardWritePort;
+  /**
+   * automation 属主表（离场记录 / 微信互动授权绑定 / 风控态）的**只读投影端口**
+   * （Block③ 物理拆库 L3）。生产由组合根 server.ts 按运行模式注入；本文件只从 kernel 取类型，
+   * **绝不直连 automation 的库、也不知道其表结构**。
+   *
+   * 缺省 = 不注入，只有真正走到跨域读路径时才当场抛具名错（fail-loud，绝非静默假成功 / 假空集）——
+   * 与同类 `offboardWrites` 逐字同范式：本类构造点 30+（多数只碰 api 属主表、从不触达跨域读），
+   * 必填只会把噪声摊到全部构造点，而端口缺失的失败模式在两种写法下都是「当场响亮报错」。
+   */
+  automationReads?: ClientEnvAutomationReader;
 }
 
 /**
@@ -469,6 +480,7 @@ export class ClientUserStore {
   private readonly pool: pg.Pool;
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private readonly offboardWrites?: OffboardWritePort;
+  private readonly automationReads?: ClientEnvAutomationReader;
   /** 同步 WS 出口闸镜像：删除生命周期中的 AdsPower env 不再接收普通自动化命令。 */
   private blockedAutomationEnvKeys = new Set<string>();
   /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
@@ -482,6 +494,16 @@ export class ClientUserStore {
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
     this.offboardWrites = options.offboardWrites;
+    this.automationReads = options.automationReads;
+  }
+
+  /**
+   * automation 属主表的只读投影端口（Block③ L3）：未注入即当场抛错，
+   * 绝不静默回落到「直连本地池自己查 automation 的表」，也绝不假装空集。
+   */
+  private automationRead(): ClientEnvAutomationReader {
+    if (!this.automationReads) throw new Error('client_env_automation_read_port_not_configured');
+    return this.automationReads;
   }
 
   private offboardReceipt(offboard: ClientOffboardView): ClientCleanupReceipt {
@@ -650,15 +672,14 @@ export class ClientUserStore {
     } finally { client.release(); }
   }
 
+  /**
+   * 单条离场记录（Block③ L3：离场表属 automation，改经只读端口取投影，本层不直连别域的库）。
+   * 归属过滤（offboardId + userId 双条件）下推到属主侧，与改动前同一条件、同「不命中返 null」语义。
+   */
   async getOffboard(userId: string, offboardId: string): Promise<ClientOffboardView | null> {
-    const { rows } = await this.pool.query<{
-      offboard_id: string; env_key: string; account_id: string; state: ClientOffboardView['state'];
-      reason: ClientOffboardView['reason']; requested_at: Date; purge_due_at: Date;
-    }>(`SELECT offboard_id,env_key,account_id,state,reason,requested_at,purge_due_at
-          FROM interaction_offboards WHERE offboard_id=$1 AND user_id=$2`, [offboardId, userId]);
-    const row = rows[0];
-    return row ? { offboardId: row.offboard_id, envKey: row.env_key, accountId: row.account_id,
-      state: row.state, reason: row.reason, requestedAt: row.requested_at.getTime(), purgeDueAt: row.purge_due_at.getTime() } : null;
+    const row = await this.automationRead().offboardForUser(offboardId, userId);
+    return row ? { offboardId: row.offboardId, envKey: row.envKey, accountId: row.accountId,
+      state: row.state, reason: row.reason, requestedAt: row.requestedAt, purgeDueAt: row.purgeDueAt } : null;
   }
 
   /** Persist only a hash of the signed grant identity; the bearer token never enters PostgreSQL or audit rows. */
@@ -1870,9 +1891,24 @@ export class ClientUserStore {
    * **红线（N2）**：这是**跨用户聚合**读，与「客户可达读只有吃 userId 的 scoped 方法」直接冲突——
    * **只准接入受内部 JWT 的 panel 端点（GET /api/client-environments），绝不注入 client-auth-server**，
    * 否则客户可拿到跨客户归属、结构性泄漏。缺表（首启竞态）fail-closed 回落空数组。
+   *
+   * **Block③ L3（读侧解耦）**：本读原是一条横跨 api 与 automation 两域表的巨型聚合。现拆为三步——
+   * ① 经端口取 automation 的未清除离场记录（既作环境键并集的一支，也作清理回执的来源）；
+   * ② 本地只聚合 api 属主表（注册表 / 归属 / 客户 / 账号 / 删除请求 / 安装 / 撤权 hold）；
+   * ③ 经端口批量取风控态，按 accountId 本地合入。
+   * 等价性：离场表对 (platform, env_key) 在未清除态上唯一、`risk_state` 以 account_id 为主键 ⇒
+   * 原两处 LEFT JOIN 均 1:1、不放大行数，故「缺行 = null / 无回执」的语义逐字保留，行数与排序不变。
+   * 快照：三次查询不再是同一快照，但环境键并集与清理回执取自**同一份**离场投影，两者自洽；
+   * 风控态是纯展示字段，读偏差最多让某账号的风控徽章晚一拍。唯一可见的窗口是 hold 与离场记录
+   * **分属两次读**：撤权对账恰好在两次读之间把 hold 换成离场记录时，本页该环境的清理回执可能短暂为空
+   * （原单快照下必现其一）。纯展示、下次刷新即自愈；**注册表本身的行不会因此消失**——环境键并集里
+   * 那一支取自离场投影，注册行已删的环境照样列出，与原 CTE 分支同。
    */
   async listAllEnvironments(): Promise<ClientEnvironmentView[]> {
     try {
+      // automation 属主：未清除的微信离场记录。环境键并集的第四支 + 下方清理回执，共用这一份。
+      const activeOffboards = await this.automationRead().activeWechatOffboards();
+      const offboardByEnvKey = new Map(activeOffboards.map((row) => [row.envKey, row]));
       const { rows } = await this.pool.query<{
         env_key: string;
         environment_name: string | null;
@@ -1885,8 +1921,6 @@ export class ClientUserStore {
         account_operator_alias: string | null;
         account_platform: string | null;
         group_label: string | null;
-        risk_status: string | null;
-        risk_quota_level: string | null;
         binding_observed_at: Date | null;
         lifecycle_state: ClientEnvironmentView['lifecycle']['state'] | null;
         deleted_at: Date | null;
@@ -1901,13 +1935,9 @@ export class ClientUserStore {
         hold_id: string | null;
         hold_reason: ClientCleanupHoldView['reason'] | null;
         hold_requested_at: Date | null;
-        offboard_id: string | null;
-        offboard_account_id: string | null;
-        offboard_state: ClientOffboardView['state'] | null;
-        offboard_reason: ClientOffboardView['reason'] | null;
-        offboard_requested_at: Date | null;
-        offboard_purge_due_at: Date | null;
       }>(
+        // 第四支环境键由端口提供（原为 `SELECT env_key FROM interaction_offboards WHERE …`），
+        // 谓词与那份投影同源；空数组时 unnest 产 0 行，与原「无未清除离场记录」逐字同。
         `WITH keys AS (
            SELECT env_key FROM client_environments
            UNION
@@ -1915,7 +1945,7 @@ export class ClientUserStore {
            UNION
            SELECT env_key FROM client_env_revocation_holds
            UNION
-           SELECT env_key FROM interaction_offboards WHERE platform='wechat_channels' AND state <> 'purged'
+           SELECT unnest($1::text[]) AS env_key
          )
          SELECT k.env_key,
                 COALESCE(
@@ -1933,23 +1963,19 @@ export class ClientUserStore {
                   FILTER (WHERE u.user_id IS NOT NULL) AS assignees,
                 max(e.account_id) AS account_id,max(a.label) AS account_label,max(a.nickname) AS account_nickname,
                 max(a.operator_alias) AS account_operator_alias,max(a.platform) AS account_platform,
-                max(a.group_label) AS group_label,max(r.status) AS risk_status,max(r.quota_level) AS risk_quota_level,
+                max(a.group_label) AS group_label,
                 max(e.binding_observed_at) AS binding_observed_at,
                 COALESCE(max(e.lifecycle_state), 'active') AS lifecycle_state,max(e.deleted_at) AS deleted_at,
                 d.request_id,d.requested_by AS deletion_requested_by,d.requested_at AS deletion_requested_at,
                 d.result_kind,d.result_error,d.result_at,
                 i.installation_id,i.last_seen_at AS installation_seen_at,
-                h.revocation_id AS hold_id,h.reason AS hold_reason,h.requested_at AS hold_requested_at,
-                o.offboard_id,o.account_id AS offboard_account_id,o.state AS offboard_state,
-                o.reason AS offboard_reason,o.requested_at AS offboard_requested_at,
-                o.purge_due_at AS offboard_purge_due_at
+                h.revocation_id AS hold_id,h.reason AS hold_reason,h.requested_at AS hold_requested_at
          FROM keys k
          LEFT JOIN client_environments e ON e.env_key = k.env_key
          LEFT JOIN client_env_scope s
            ON s.env_key = k.env_key AND s.source = 'admin'
          LEFT JOIN client_users u ON u.user_id = s.user_id
          LEFT JOIN accounts a ON a.account_id = e.account_id
-         LEFT JOIN risk_state r ON r.account_id = a.account_id
          LEFT JOIN LATERAL (
            SELECT request_id,requested_by,requested_at,result_kind,result_error,result_at
            FROM client_environment_deletion_requests d0 WHERE d0.env_key=k.env_key
@@ -1961,29 +1987,37 @@ export class ClientUserStore {
            ORDER BY last_seen_at DESC LIMIT 1
          ) i ON true
          LEFT JOIN client_env_revocation_holds h ON h.env_key = k.env_key
-         LEFT JOIN interaction_offboards o
-           ON o.env_key = k.env_key AND o.platform='wechat_channels' AND o.state <> 'purged'
          GROUP BY k.env_key,h.revocation_id,h.reason,h.requested_at,
-                  o.offboard_id,o.account_id,o.state,o.reason,o.requested_at,o.purge_due_at,
                   d.request_id,d.requested_by,d.requested_at,d.result_kind,d.result_error,d.result_at,
                   i.installation_id,i.last_seen_at
          ORDER BY k.env_key ASC`,
+        [activeOffboards.map((row) => row.envKey)],
+      );
+      // 风控态：只对**账号行确实存在**（account_platform 非空）的绑定取，与原
+      // `accounts LEFT JOIN risk_state` 的连接链逐字同——悬空绑定在原查询里也拿不到风控态。
+      const riskAccountIds = [...new Set(
+        rows.filter((r) => r.account_id && r.account_platform).map((r) => r.account_id as string),
+      )];
+      const riskByAccountId = new Map(
+        (await this.automationRead().riskStateProjection(riskAccountIds)).map((row) => [row.accountId, row]),
       );
       return rows.map((r) => {
         const assignees = (r.assignees ?? []).map((a) => ({ userId: a.userId, name: a.name }));
+        // 离场回执从端口那份投影按 envKey 索引取（原 LEFT JOIN o 的 1:1 命中/缺失）。
+        const offboard = offboardByEnvKey.get(r.env_key);
         const cleanup: ClientCleanupReceipt | null = r.hold_id && r.hold_reason && r.hold_requested_at
           ? {
               kind: 'binding_missing', revocationId: r.hold_id, envKey: r.env_key,
               state: 'binding_missing', reason: r.hold_reason, requestedAt: r.hold_requested_at.getTime(),
             }
-          : r.offboard_id && r.offboard_account_id && r.offboard_state && r.offboard_reason &&
-              r.offboard_requested_at && r.offboard_purge_due_at
+          : offboard
             ? {
-                kind: 'offboard_pending', offboardId: r.offboard_id, envKey: r.env_key,
-                accountId: r.offboard_account_id, state: r.offboard_state, reason: r.offboard_reason,
-                requestedAt: r.offboard_requested_at.getTime(), purgeDueAt: r.offboard_purge_due_at.getTime(),
+                kind: 'offboard_pending', offboardId: offboard.offboardId, envKey: r.env_key,
+                accountId: offboard.accountId, state: offboard.state, reason: offboard.reason,
+                requestedAt: offboard.requestedAt, purgeDueAt: offboard.purgeDueAt,
               }
             : null;
+        const risk = r.account_id ? riskByAccountId.get(r.account_id) : undefined;
         return {
           envKey: r.env_key,
           environmentName: r.environment_name ?? r.env_key,
@@ -2002,7 +2036,7 @@ export class ClientUserStore {
                   accountId: r.account_id!, label: r.account_label, nickname: r.account_nickname,
                   operatorAlias: r.account_operator_alias, displayName: display.name,
                   platform: r.account_platform!, groupLabel: r.group_label,
-                  riskStatus: r.risk_status, riskQuotaLevel: r.risk_quota_level,
+                  riskStatus: risk?.status ?? null, riskQuotaLevel: risk?.quotaLevel ?? null,
                 };
               })()
             : null,
@@ -2204,12 +2238,21 @@ export class ClientUserStore {
    */
   async reconcileRevocationHolds(limit = 50): Promise<ClientOffboardView[]> {
     const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 50));
-    const { rows: candidates } = await this.pool.query<{ env_key: string }>(
+    // Block③ L3：候选扫描原为 `holds`(api) JOIN `interaction_auth_state`(automation) 的跨库同查询，
+    // 现拆为「本地按序取 hold + 端口问哪些环境已有微信绑定 + 本地按原序取前 N」。
+    // 等价性：属主表 (platform, env_key) 唯一 ⇒ 原 JOIN 1:1、不放大基数，故「先排序后截断」与
+    // 「JOIN 后 ORDER BY … LIMIT」选出的是同一批同序候选。
+    // 基数：本地这次不带 LIMIT，但 hold 表本身有界——每环境至多一行（UNIQUE(env_key)），
+    // 且行在下方物化成离场记录时即删除，存量只等于「已撤权但仍无微信绑定」的环境数。
+    // 注意：本方法下方**事务内**那条 hold+auth_state 联查仍是跨库读（带 FOR UPDATE 行锁），
+    // 属「须监督」批、不在本刀范围内；候选扫描解耦不改变它。
+    const { rows: holds } = await this.pool.query<{ env_key: string }>(
       `SELECT h.env_key
          FROM client_env_revocation_holds h
-         JOIN interaction_auth_state a ON a.env_key=h.env_key AND a.platform='wechat_channels'
-        ORDER BY h.requested_at,h.env_key LIMIT $1`, [boundedLimit],
+        ORDER BY h.requested_at,h.env_key`,
     );
+    const bound = new Set(await this.automationRead().wechatBoundEnvKeys(holds.map((h) => h.env_key)));
+    const candidates = holds.filter((h) => bound.has(h.env_key)).slice(0, boundedLimit);
     const offboards: ClientOffboardView[] = [];
     for (const candidate of candidates) {
       const client = await this.pool.connect();
@@ -2247,15 +2290,29 @@ export class ClientUserStore {
     return offboards;
   }
 
+  /**
+   * 该账号是否还挂着未了结的撤权 hold（Block③ L3：原 `interaction_auth_state`(automation)
+   * JOIN `client_env_revocation_holds`(api) 的跨库同查询已拆两步）。
+   *
+   * 等价性：属主表 (platform, env_key) 唯一、(platform, account_id) 为主键 ⇒ 原 JOIN 是 1:1，
+   * 「先取该账号的环境键、再本地查 hold 是否存在」与原 EXISTS 逐字同真值。
+   * 账号无绑定 ⇒ 原 JOIN 空集 ⇒ false；这里提前短路，同结果、少一次本地查询。
+   *
+   * **失败方向必须是抛，MUST NOT 吞成 false**：本方法的消费方把 `!hasPendingRevocationHold`
+   * 当作放行条件（互动读 / 回复 / 私信的闸），false 是「没有 hold、可以放行」。把跨域读失败降级成
+   * false，等于给一个正在被撤权的环境重新放开互动写——比读失败严重得多。故这里既不 catch 缺表、
+   * 也不 catch 端口错误；调用侧（握手路径）自己有 fail-closed 兜底。
+   */
   async hasPendingRevocationHold(accountId: string): Promise<boolean> {
+    const envKeys = await this.automationRead().wechatEnvKeysForAccount(accountId);
+    if (!envKeys.length) return false;
     const { rows } = await this.pool.query<{ present: boolean }>(
       `SELECT EXISTS (
          SELECT 1
-           FROM interaction_auth_state a
-           JOIN client_env_revocation_holds h ON h.env_key=a.env_key
-          WHERE a.platform='wechat_channels' AND a.account_id=$1
+           FROM client_env_revocation_holds h
+          WHERE h.env_key = ANY($1::text[])
        ) AS present`,
-      [accountId],
+      [envKeys],
     );
     return rows[0]?.present === true;
   }

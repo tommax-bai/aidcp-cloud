@@ -875,6 +875,11 @@
     "note": "§4.7 src/ 根文件：组合根，无继承者"
   },
   {
+    "path": "src/interactions/client-env-automation-read.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】change block3-l3-client-user-read-port 新写：kernel 端口 ClientEnvAutomationReader 的 automation 属主实现（PgClientEnvAutomationRead），跑在组合根注入的 automation 池上，只读 automation 属主表 interaction_offboards / interaction_auth_state / risk_state（SQL 从 client-user-store 逐字迁来）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件是同目录 offboard-write-adapter.ts（离场表单写者）的读侧配对，同域同段（§4.6.1 离场 saga 段），归 automation。请求回写 §4.7 见 docpatch RK-block3"
+  },
+  {
     "path": "src/interactions/contract.ts",
     "layer": "automation",
     "note": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段"
@@ -993,6 +998,11 @@
     "path": "src/kernel/account-identity.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/account-store.ts 析出 RETIRED_ACCOUNT_ID 退役保留账号哨兵字符串常量（'default'）。零 import、零 SQL、无进程内活状态。account-store.ts 从 kernel 导入并等值再导出，内部判定复用。供 publish-agent 发布媒体存储跨边界比对，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
+  },
+  {
+    "path": "src/kernel/client-env-automation-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change block3-l3-client-user-read-port 新写：客户环境生命周期（api 属主 client-auth/client-user-store）对 automation 域的只读投影端口契约（ClientEnvAutomationReader 接口 + OffboardProjection / EnvRiskStateProjection 纯行类型 + OffboardProjectionState/Reason 字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 panel-automation-types（面板专用跨表聚合读端口）同类、形状各按消费方定：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/interactions/client-env-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 客户环境读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
   },
   {
     "path": "src/kernel/comment-approval-notice.ts",
