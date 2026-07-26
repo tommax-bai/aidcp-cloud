@@ -7,14 +7,36 @@ import {
   type EdgePresenceSnapshot,
   type PublishInFlightSnapshot,
   type SyncReadOwnerSnapshotSource,
+  type SyncReadPayloadByStream,
 } from '../kernel/sync-read-facts.js';
 import type {
+  SyncReadJson,
   SyncReadSnapshotEnvelope,
   SyncReadStream,
 } from '../kernel/sync-read-snapshot.js';
 
 const DEFAULT_FRESH_MS = 30_000;
 const PRESENCE_FRESH_MS = 45_000;
+
+export type AutomationRuntimeSyncReadStream =
+  | 'edge_presence'
+  | 'publish_in_flight'
+  | 'captcha_availability'
+  | 'automation_config_mirror_health';
+
+export interface AutomationSyncReadGenerationSource {
+  observe(
+    stream: AutomationRuntimeSyncReadStream,
+    value: SyncReadJson,
+  ): Promise<string>;
+}
+
+export interface AutomationSyncReadChangedEmitter {
+  emit(
+    stream: AutomationRuntimeSyncReadStream,
+    generation: string,
+  ): Promise<{ emitted: boolean; generation: string }>;
+}
 
 export interface AutomationSyncReadRuntimeSources {
   versionOf(mirrorKey: ConfigMirrorKey): Promise<number | null>;
@@ -28,38 +50,18 @@ export interface AutomationSyncReadRuntimeSources {
 export class AutomationSyncReadSnapshotSource
   implements SyncReadOwnerSnapshotSource
 {
-  private readonly generation = new Map<SyncReadStream, bigint>([
-    ['edge_presence', 1n],
-    ['publish_in_flight', 1n],
-    ['captcha_availability', 1n],
-    ['automation_config_mirror_health', 1n],
-  ]);
-
   constructor(
     private readonly executionTarget: DeploymentTarget,
     private readonly sources: AutomationSyncReadRuntimeSources,
+    private readonly generationSource: AutomationSyncReadGenerationSource,
+    private readonly changedEmitter: AutomationSyncReadChangedEmitter,
   ) {}
 
-  markChanged(
-    stream:
-      | 'edge_presence'
-      | 'publish_in_flight'
-      | 'captcha_availability'
-      | 'automation_config_mirror_health',
-  ): string {
-    const next = (this.generation.get(stream) ?? 0n) + 1n;
-    this.generation.set(stream, next);
-    return next.toString();
-  }
-
-  currentGeneration(
-    stream:
-      | 'edge_presence'
-      | 'publish_in_flight'
-      | 'captcha_availability'
-      | 'automation_config_mirror_health',
-  ): string {
-    return (this.generation.get(stream) ?? 1n).toString();
+  async publishChanged(
+    stream: AutomationRuntimeSyncReadStream,
+    observedAt = Date.now(),
+  ): Promise<SyncReadSnapshotEnvelope<any>> {
+    return this.snapshot(stream, observedAt);
   }
 
   async snapshot<S extends SyncReadStream>(
@@ -81,45 +83,55 @@ export class AutomationSyncReadSnapshotSource
       }) as SyncReadSnapshotEnvelope<any>;
     }
     if (stream === 'edge_presence') {
-      return makeSyncReadFactEnvelope({
-        executionTarget: this.executionTarget,
-        stream: 'edge_presence',
-        cursor: this.currentGeneration(stream),
-        asOf: observedAt,
-        freshUntil: observedAt + PRESENCE_FRESH_MS,
-        value: this.sources.edgePresence(),
-      }) as SyncReadSnapshotEnvelope<any>;
+      return this.runtimeSnapshot(
+        stream,
+        this.sources.edgePresence(),
+        observedAt,
+        PRESENCE_FRESH_MS,
+      );
     }
     if (stream === 'publish_in_flight') {
-      return makeSyncReadFactEnvelope({
-        executionTarget: this.executionTarget,
-        stream: 'publish_in_flight',
-        cursor: this.currentGeneration(stream),
-        asOf: observedAt,
-        freshUntil: observedAt + DEFAULT_FRESH_MS,
-        value: this.sources.publishInFlight(),
-      }) as SyncReadSnapshotEnvelope<any>;
+      return this.runtimeSnapshot(
+        stream,
+        this.sources.publishInFlight(),
+        observedAt,
+        DEFAULT_FRESH_MS,
+      );
     }
     if (stream === 'captcha_availability') {
-      return makeSyncReadFactEnvelope({
-        executionTarget: this.executionTarget,
-        stream: 'captcha_availability',
-        cursor: this.currentGeneration(stream),
-        asOf: observedAt,
-        freshUntil: observedAt + DEFAULT_FRESH_MS,
-        value: this.sources.captchaAvailability(),
-      }) as SyncReadSnapshotEnvelope<any>;
+      return this.runtimeSnapshot(
+        stream,
+        this.sources.captchaAvailability(),
+        observedAt,
+        DEFAULT_FRESH_MS,
+      );
     }
     if (stream === 'automation_config_mirror_health') {
-      return makeSyncReadFactEnvelope({
-        executionTarget: this.executionTarget,
-        stream: 'automation_config_mirror_health',
-        cursor: this.currentGeneration(stream),
-        asOf: observedAt,
-        freshUntil: observedAt + DEFAULT_FRESH_MS,
-        value: this.sources.configMirrorHealth(),
-      }) as SyncReadSnapshotEnvelope<any>;
+      return this.runtimeSnapshot(
+        stream,
+        this.sources.configMirrorHealth(),
+        observedAt,
+        DEFAULT_FRESH_MS,
+      );
     }
     throw new Error(`sync_read_stream_not_owned_by_automation:${stream}`);
+  }
+
+  private async runtimeSnapshot<S extends AutomationRuntimeSyncReadStream>(
+    stream: S,
+    value: SyncReadPayloadByStream[S],
+    observedAt: number,
+    freshMs: number,
+  ): Promise<SyncReadSnapshotEnvelope<any>> {
+    const generation = await this.generationSource.observe(stream, value);
+    await this.changedEmitter.emit(stream, generation);
+    return makeSyncReadFactEnvelope({
+      executionTarget: this.executionTarget,
+      stream,
+      cursor: generation,
+      asOf: observedAt,
+      freshUntil: observedAt + freshMs,
+      value,
+    }) as SyncReadSnapshotEnvelope<any>;
   }
 }

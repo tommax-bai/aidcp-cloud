@@ -91,8 +91,12 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 注：`0084_automation_account_projection_sync_read`（change split-cloud-api-composition-root-4b）
  * 只给既有共享 B4 投影增加 post-4a 仍有 automation 消费者的 created_at/status；展示与卡片字段
  * 不进入投影。独立 automation 的相关闸门缺列即能力级 fail-closed，故只抬 KNOWN_MAX。
+ *
+ * 注：`0085_automation_sync_read_owner_generation`（change split-cloud-api-composition-root-4b）
+ * 只持久化 automation A3-A6 的 target-scoped digest/generation/outbox-coalesce 水位，不保存 runtime
+ * 业务 payload。缺表时独立 runtime snapshot 响亮失败，绝不把进程内重置 cursor 当作恢复。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0084_automation_account_projection_sync_read';
+export const KNOWN_MAX_SCHEMA_VERSION = '0085_automation_sync_read_owner_generation';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

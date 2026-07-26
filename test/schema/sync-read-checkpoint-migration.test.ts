@@ -91,6 +91,30 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!automation.includes('0082_api_sync_read_consumer_checkpoint'));
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0084_automation_account_projection_sync_read',
+    '0085_automation_sync_read_owner_generation',
   );
+});
+
+test('0085 keeps runtime owner generations durable, target-scoped and payload-free', async () => {
+  const sql = await readFile(
+    new URL(
+      '../../migrations/0085_automation_sync_read_owner_generation.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  assert.match(sql, /-- aidcp:kind=expand/);
+  assert.match(
+    sql,
+    /CREATE TABLE IF NOT EXISTS automation_sync_read_owner_generation/,
+  );
+  assert.match(sql, /PRIMARY KEY \(execution_target, stream\)/);
+  assert.match(sql, /\bgeneration\b/);
+  assert.match(sql, /\bpayload_digest\b/);
+  assert.match(sql, /\blast_emitted_generation\b/);
+  assert.doesNotMatch(
+    sql.replace(/^--.*$/gm, ''),
+    /\b(?:payload|value|account_id|record_ids|edge_id)\b/i,
+  );
+  assert.doesNotMatch(sql.replace(/^--.*$/gm, ''), /\b(?:DROP|ALTER)\b/i);
 });

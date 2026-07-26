@@ -148,7 +148,7 @@ export class ApiSyncReadMirrors {
     sourceService: 'automation';
     asOf: number | null;
     deliveryState: EvidenceState;
-    entries: AutomationConfigMirrorHealthSnapshot['entries'] | null;
+    entries: AutomationConfigMirrorHealthSnapshot['entries'];
   } {
     const view = this.automationHealth.view(now);
     const state = deliveryState(view.state);
@@ -156,7 +156,7 @@ export class ApiSyncReadMirrors {
       sourceService: 'automation',
       asOf: view.metadata?.sourceAsOf ?? null,
       deliveryState: state,
-      entries: state === 'fresh' ? view.value!.entries : null,
+      entries: state === 'fresh' ? view.value!.entries : [],
     };
   }
 

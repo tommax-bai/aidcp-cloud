@@ -183,7 +183,9 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
         isRecord(value) &&
         isNonNegativeInteger(value.edgeCount) &&
         isNonNegativeInteger(value.onlineEdgeCount) &&
+        value.onlineEdgeCount <= value.edgeCount &&
         Array.isArray(value.accountEdges) &&
+        hasUniqueStrings(value.accountEdges, 'accountId') &&
         value.accountEdges.every(
           (row) =>
             isRecord(row) &&
@@ -195,7 +197,8 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
       return (
         isRecord(value) &&
         Array.isArray(value.recordIds) &&
-        value.recordIds.every(isNonNegativeInteger)
+        value.recordIds.every(isNonNegativeInteger) &&
+        new Set(value.recordIds).size === value.recordIds.length
       );
     case 'captcha_availability':
       return (
@@ -211,12 +214,15 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
         isNonNegativeInteger(value.asOf) &&
         typeof value.enabled === 'boolean' &&
         isNonNegativeInteger(value.pollMs) &&
-        Array.isArray(value.entries)
+        Array.isArray(value.entries) &&
+        hasUniqueStrings(value.entries, 'mirrorKey') &&
+        value.entries.every(isAutomationHealthEntry)
       );
     case 'account_persona':
       return (
         isRecord(value) &&
         Array.isArray(value.accounts) &&
+        hasUniqueStrings(value.accounts, 'accountId') &&
         value.accounts.every(
           (row) =>
             isRecord(row) &&
@@ -230,7 +236,10 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
         isRecord(value) &&
         Array.isArray(value.blockedEnvironmentKeys) &&
         value.blockedEnvironmentKeys.every(isNonEmptyString) &&
+        new Set(value.blockedEnvironmentKeys).size ===
+          value.blockedEnvironmentKeys.length &&
         Array.isArray(value.slowStartAnchors) &&
+        hasUniqueStrings(value.slowStartAnchors, 'accountId') &&
         value.slowStartAnchors.every(
           (row) =>
             isRecord(row) &&
@@ -244,11 +253,12 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
       return (
         isRecord(value) &&
         Array.isArray(value.accounts) &&
+        hasUniqueStrings(value.accounts, 'accountId') &&
         value.accounts.every(
           (row) =>
             isRecord(row) &&
             isNonEmptyString(row.accountId) &&
-            typeof row.platform === 'string' &&
+            isNonEmptyString(row.platform) &&
             isNullableString(row.groupLabel) &&
             (row.createdAt === null || isNonNegativeInteger(row.createdAt)) &&
             (row.status === 'active' || row.status === 'paused'),
@@ -257,8 +267,12 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'content_schedule':
       return (
         isRecord(value) &&
-        (value.global === null || isRecord(value.global)) &&
-        Array.isArray(value.accounts)
+        (value.global === null ||
+          (isRecord(value.global) &&
+            isNullableString(value.global.contentActiveMask))) &&
+        Array.isArray(value.accounts) &&
+        hasUniqueStrings(value.accounts, 'accountId') &&
+        value.accounts.every(isContentScheduleAccount)
       );
     case 'hot_lead_config':
       return (
@@ -269,8 +283,19 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
         isFiniteNumber(value.floorHours)
       );
     case 'facebook_comment_config':
+      return (
+        isRecord(value) &&
+        Array.isArray(value.accounts) &&
+        hasUniqueStrings(value.accounts, 'accountId') &&
+        value.accounts.every(isFacebookCommentAccount)
+      );
     case 'facebook_group_join_automation_config':
-      return isRecord(value) && Array.isArray(value.accounts);
+      return (
+        isRecord(value) &&
+        Array.isArray(value.accounts) &&
+        hasUniqueStrings(value.accounts, 'accountId') &&
+        value.accounts.every(isFacebookGroupJoinAccount)
+      );
   }
 }
 
@@ -296,6 +321,88 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isNullableNonNegativeInteger(value: unknown): boolean {
+  return value === null || isNonNegativeInteger(value);
+}
+
+function hasUniqueStrings(rows: readonly unknown[], key: string): boolean {
+  const values = rows
+    .filter(isRecord)
+    .map((row) => row[key])
+    .filter((value): value is string => typeof value === 'string');
+  return values.length === rows.length && new Set(values).size === values.length;
+}
+
+function isAutomationHealthEntry(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.mirrorKey) &&
+    (value.tier === 'gate' || value.tier === 'parameter') &&
+    isNullableNonNegativeInteger(value.version) &&
+    isNullableNonNegativeInteger(value.lastComparedAt) &&
+    isNullableNonNegativeInteger(value.lastReloadedAt) &&
+    isNullableNonNegativeInteger(value.reloadFailingSince) &&
+    (value.state === 'fresh' || value.state === 'stale') &&
+    isNullableNonNegativeInteger(value.staleMs) &&
+    isNonNegativeInteger(value.observeStaleMs) &&
+    typeof value.haltsOnStale === 'boolean' &&
+    isNonNegativeInteger(value.staleForMs)
+  );
+}
+
+function isContentScheduleAccount(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.accountId) &&
+    typeof value.autoEnabled === 'boolean' &&
+    isActionMode(value.postMode) &&
+    isNonNegativeInteger(value.postDailyCap) &&
+    isActionMode(value.commentMode) &&
+    isNonNegativeInteger(value.commentDailyCap) &&
+    isActionMode(value.contactCommentMode) &&
+    isNonNegativeInteger(value.contactCommentDailyCap) &&
+    isNullableString(value.activeWeekMask) &&
+    isNullableString(value.contentActiveMask)
+  );
+}
+
+function isActionMode(
+  value: unknown,
+): value is 'off' | 'review' | 'auto_approve' {
+  return value === 'off' || value === 'review' || value === 'auto_approve';
+}
+
+function isFacebookCommentAccount(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.accountId) &&
+    Array.isArray(value.keywords) &&
+    value.keywords.every(isNonEmptyString) &&
+    Array.isArray(value.containers) &&
+    value.containers.every(
+      (container) =>
+        isRecord(container) &&
+        isNonEmptyString(container.url) &&
+        (container.name === undefined ||
+          typeof container.name === 'string'),
+    ) &&
+    (value.commentMode === 'generated' ||
+      value.commentMode === 'templates') &&
+    Array.isArray(value.commentTemplates) &&
+    value.commentTemplates.every(isNonEmptyString)
+  );
+}
+
+function isFacebookGroupJoinAccount(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.accountId) &&
+    typeof value.enabled === 'boolean' &&
+    isNonNegativeInteger(value.dailyCap) &&
+    isNullableString(value.weekMask)
+  );
 }
 
 function isJson(value: unknown): value is SyncReadJson {

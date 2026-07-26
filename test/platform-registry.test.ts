@@ -205,4 +205,12 @@ test('platform registry: named catalog functions are the single reader implement
     scheduledAutomationDeclarationsForPlatform('fb')?.join_group.supported,
     true,
   );
+  const declarations = scheduledAutomationDeclarationsForPlatform('xiaohongshu');
+  assert.ok(declarations?.post.supported);
+  (declarations.post.allowedModes as string[]).splice(0);
+  assert.deepEqual(availableScheduledAutomationActionsForPlatform('xiaohongshu')[0], {
+    action: 'post',
+    allowedModes: ['review', 'auto_approve'],
+    maxDailyCap: 50,
+  });
 });

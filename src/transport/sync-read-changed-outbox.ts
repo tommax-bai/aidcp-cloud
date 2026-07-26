@@ -9,7 +9,7 @@ import {
   type SyncReadStream,
 } from '../kernel/sync-read-snapshot.js';
 import {
-  emitOutboxEvent,
+  EVENT_OUTBOX_NOTIFY_CHANNEL,
   type OutboxEvent,
   type OutboxQueryable,
 } from './event-outbox.js';
@@ -21,8 +21,6 @@ type RuntimeStream =
   | 'automation_config_mirror_health';
 
 export class SyncReadChangedOutbox {
-  private readonly emitted = new Map<RuntimeStream, string>();
-
   constructor(
     private readonly executionTarget: DeploymentTarget,
     private readonly pool: OutboxQueryable,
@@ -34,28 +32,46 @@ export class SyncReadChangedOutbox {
     generation: string,
     client: OutboxQueryable = this.pool,
   ): Promise<{ emitted: boolean; generation: string }> {
-    const prior = this.emitted.get(stream);
-    if (
-      prior !== undefined &&
-      compareUnsignedSyncReadCursor(generation, prior) <= 0
-    ) {
-      return { emitted: false, generation: prior };
-    }
     const signal = syncReadChangedSignal({
       executionTarget: this.executionTarget,
       stream,
       generation,
     });
-    await emitOutboxEvent(
-      client,
-      {
-        topic: SYNC_READ_CHANGED_TOPIC,
-        executionTarget: this.executionTarget,
-        payload: signal,
-      },
-      this.logger,
+    const { rows } = await client.query<{ id: string | number }>(
+      `WITH claimed AS (
+         UPDATE automation_sync_read_owner_generation
+            SET last_emitted_generation = generation
+          WHERE execution_target = $1
+            AND stream = $2
+            AND generation = $3::numeric
+            AND last_emitted_generation < generation
+        RETURNING generation
+       )
+       INSERT INTO event_outbox (topic, payload, execution_target)
+       SELECT $4, $5::jsonb, $1
+         FROM claimed
+       RETURNING id`,
+      [
+        this.executionTarget,
+        stream,
+        generation,
+        SYNC_READ_CHANGED_TOPIC,
+        JSON.stringify(signal),
+      ],
     );
-    this.emitted.set(stream, generation);
+    if (rows.length === 0) return { emitted: false, generation };
+    try {
+      await client.query('SELECT pg_notify($1, $2)', [
+        EVENT_OUTBOX_NOTIFY_CHANNEL,
+        SYNC_READ_CHANGED_TOPIC,
+      ]);
+    } catch (error) {
+      this.logger.warn(
+        `[sync-read-changed] pg_notify failed; polling remains authoritative: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     return { emitted: true, generation };
   }
 }

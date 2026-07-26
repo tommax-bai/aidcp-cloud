@@ -90,7 +90,22 @@ export function scheduledAutomationDeclarationsForPlatform(
   platform: string | null | undefined,
 ): Record<ScheduledAutomationAction, ScheduledAutomationSupport> | null {
   try {
-    return SCHEDULED_AUTOMATION_CATALOG[normalizePlatformId(platform)];
+    const source = SCHEDULED_AUTOMATION_CATALOG[normalizePlatformId(platform)];
+    return Object.fromEntries(
+      SCHEDULED_AUTOMATION_ACTIONS.map((action) => {
+        const support = source[action];
+        return [
+          action,
+          support.supported
+            ? {
+                supported: true,
+                allowedModes: [...support.allowedModes],
+                maxDailyCap: support.maxDailyCap,
+              }
+            : { supported: false, reason: support.reason },
+        ];
+      }),
+    ) as Record<ScheduledAutomationAction, ScheduledAutomationSupport>;
   } catch {
     return null;
   }
