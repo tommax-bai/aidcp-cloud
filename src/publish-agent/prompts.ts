@@ -405,7 +405,7 @@ function buildFacebookCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigg
     recent,
     '',
     '【写作要求】',
-    '- 全文 100-500 字（Facebook 最佳阅读区间）。',
+    '- 全文 100-350 字（Facebook 最佳阅读区间）。',
     '- 开头直接进入观点、观察或具体场景；保留账号语气，不写营销话术、外链、@ 或话题标签。',
     '- 只使用素材中确有依据的事实，不伪造亲历、数据、人物或结果。',
     '- 避免模板化的总分总、编号排比、空泛总结和 AI 客套话。',

@@ -141,7 +141,8 @@ describe('ContentCreatorRole', () => {
     assert.match(ctx.get('createdContent')?.content ?? '', /retrieval results/);
     assert.match(prompt, /最终公开正文必须只使用英文自然表达/);
     assert.match(prompt, /Facebook 帖子创作者/);
-    assert.match(prompt, /全文 100-500 字（Facebook 最佳阅读区间）/);
+    assert.match(prompt, /全文 100-350 字（Facebook 最佳阅读区间）/);
+    assert.doesNotMatch(prompt, /全文 100-500 字/);
     assert.doesNotMatch(prompt, /正文约 80-600 个字符/);
     assert.doesNotMatch(prompt, /你在写一篇要发到小红书的笔记/);
   });
