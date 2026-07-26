@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+// aidcp:test-owner=cloud
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
