@@ -21,7 +21,6 @@ export type {
 } from '../kernel/platform-types.js';
 import type {
   PlatformId,
-  AvailableScheduledAutomationAction,
   DelegatedAction,
   DelegatedActionSupport,
   NoteScopedAction,
@@ -39,11 +38,16 @@ import {
   SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX,
 } from '../kernel/platform-types.js';
 import {
+  availableScheduledAutomationActionsForPlatform,
+  normalizePlatformForCatalog,
   SCHEDULED_AUTOMATION_ACTIONS,
   SCHEDULED_AUTOMATION_CATALOG,
   SCHEDULED_AUTOMATION_CATALOG_READER,
+  scheduledAutomationDeclarationsForPlatform,
 } from '../kernel/scheduled-automation-catalog.js';
 export {
+  availableScheduledAutomationActionsForPlatform,
+  normalizePlatformForCatalog,
   normalizePlatformId,
   SCHEDULED_CONTENT_DAILY_CAP_MAX,
   SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
@@ -51,6 +55,7 @@ export {
   SCHEDULED_AUTOMATION_ACTIONS,
   SCHEDULED_AUTOMATION_CATALOG,
   SCHEDULED_AUTOMATION_CATALOG_READER,
+  scheduledAutomationDeclarationsForPlatform,
 };
 
 const XHS_DELEGATED_ACTIONS: Record<DelegatedAction, DelegatedActionSupport> = {
@@ -326,36 +331,6 @@ export function identityCaptureStrategyForPlatform(
   platform: string | null | undefined,
 ): IdentityCaptureStrategy {
   return platformRegistryEntry(platform).identityCapture;
-}
-
-/**
- * 面板 catalog 的平台值：已知别名走统一归一化；未知值保留可诊断的 trim/lowercase 事实，
- * 绝不回落成小红书或其它已知平台。
- */
-export function normalizePlatformForCatalog(raw: string | null | undefined): string {
-  try {
-    return normalizePlatformId(raw);
-  } catch {
-    return raw?.trim().toLowerCase() || 'unknown';
-  }
-}
-
-/** 未知平台与无声明平台均 fail closed 为无动作。 */
-export function availableScheduledAutomationActionsForPlatform(
-  platform: string | null | undefined,
-): AvailableScheduledAutomationAction[] {
-  let entry: PlatformRegistryEntry;
-  try {
-    entry = platformRegistryEntry(platform);
-  } catch {
-    return [];
-  }
-  return SCHEDULED_AUTOMATION_ACTIONS.flatMap((action) => {
-    const support = entry.scheduledAutomation[action];
-    return support.supported
-      ? [{ action, allowedModes: [...support.allowedModes], maxDailyCap: support.maxDailyCap }]
-      : [];
-  });
 }
 
 export function commentProfileForPlatform(platform: string | null | undefined): CommentPlatformProfile {

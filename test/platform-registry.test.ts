@@ -4,11 +4,14 @@ import {
   PLATFORM_REGISTRY,
   XHS_COMMENT_PROFILE,
   FB_COMMENT_PROFILE,
+  SCHEDULED_AUTOMATION_CATALOG_READER,
   commentProfileForPlatform,
   defaultCommentSearchLabel,
   normalizePlatformId,
+  normalizePlatformForCatalog,
   availableScheduledAutomationActionsForPlatform,
   SCHEDULED_AUTOMATION_ACTIONS,
+  scheduledAutomationDeclarationsForPlatform,
   identityCaptureStrategyForPlatform,
 } from '../src/platform/index.js';
 import type { NoteScopedAction, PlatformRegistryEntry } from '../src/platform/index.js';
@@ -181,4 +184,25 @@ test('platform registry: exported scheduled catalog is recursively immutable at 
     allowedModes: ['review', 'auto_approve'],
     maxDailyCap: 50,
   });
+});
+
+test('platform registry: named catalog functions are the single reader implementation', () => {
+  assert.equal(
+    SCHEDULED_AUTOMATION_CATALOG_READER.normalizeForCatalog,
+    normalizePlatformForCatalog,
+  );
+  assert.equal(
+    SCHEDULED_AUTOMATION_CATALOG_READER.availableActions,
+    availableScheduledAutomationActionsForPlatform,
+  );
+  assert.equal(
+    SCHEDULED_AUTOMATION_CATALOG_READER.declarationsFor,
+    scheduledAutomationDeclarationsForPlatform,
+  );
+  assert.equal(normalizePlatformForCatalog(' FB '), 'facebook');
+  assert.equal(normalizePlatformForCatalog(' future-platform '), 'future-platform');
+  assert.equal(
+    scheduledAutomationDeclarationsForPlatform('fb')?.join_group.supported,
+    true,
+  );
 });

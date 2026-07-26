@@ -52,33 +52,41 @@ export const SCHEDULED_AUTOMATION_CATALOG = Object.freeze({
 >);
 
 export const SCHEDULED_AUTOMATION_CATALOG_READER: ScheduledAutomationCatalogReader = Object.freeze({
-  normalizeForCatalog: (platform: string | null | undefined) => {
-    try {
-      return normalizePlatformId(platform);
-    } catch {
-      return platform?.trim().toLowerCase() || 'unknown';
-    }
-  },
-  availableActions: (platform: string | null | undefined) => {
-    const declaration = declarationsFor(platform);
-    if (!declaration) return [];
-    return SCHEDULED_AUTOMATION_ACTIONS.flatMap((action) => {
-      const support = declaration[action];
-      return support.supported
-        ? [
-            {
-              action,
-              allowedModes: [...support.allowedModes],
-              maxDailyCap: support.maxDailyCap,
-            },
-          ]
-        : [];
-    });
-  },
-  declarationsFor,
+  normalizeForCatalog: normalizePlatformForCatalog,
+  availableActions: availableScheduledAutomationActionsForPlatform,
+  declarationsFor: scheduledAutomationDeclarationsForPlatform,
 });
 
-function declarationsFor(
+export function normalizePlatformForCatalog(
+  platform: string | null | undefined,
+): string {
+  try {
+    return normalizePlatformId(platform);
+  } catch {
+    return platform?.trim().toLowerCase() || 'unknown';
+  }
+}
+
+export function availableScheduledAutomationActionsForPlatform(
+  platform: string | null | undefined,
+) {
+  const declaration = scheduledAutomationDeclarationsForPlatform(platform);
+  if (!declaration) return [];
+  return SCHEDULED_AUTOMATION_ACTIONS.flatMap((action) => {
+    const support = declaration[action];
+    return support.supported
+      ? [
+          {
+            action,
+            allowedModes: [...support.allowedModes],
+            maxDailyCap: support.maxDailyCap,
+          },
+        ]
+      : [];
+  });
+}
+
+export function scheduledAutomationDeclarationsForPlatform(
   platform: string | null | undefined,
 ): Record<ScheduledAutomationAction, ScheduledAutomationSupport> | null {
   try {
