@@ -17,6 +17,7 @@
 
 import type { DispatchDraft } from '../kernel/publish-draft-contract.js';
 import type { CommandSequencer } from './command-sequencer.js';
+import { DEFAULT_PUBLISH_LEASE_MS } from './fill-budget.js';
 import { ApprovalUnreadableError, type ApprovalBlockedReason, type ApprovalVoidReason } from '../kernel/publish-approval-contract.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { EdgeTaskPriority } from '../comm/protocol.js';
@@ -705,7 +706,7 @@ export class PublishDispatcher {
           edgeId,
           kind: 'publish',
           priority,
-          leaseMs: Number(process.env.AIDCP_EDGE_PUBLISH_LEASE_MS ?? 10 * 60_000),
+          leaseMs: Number(process.env.AIDCP_EDGE_PUBLISH_LEASE_MS ?? DEFAULT_PUBLISH_LEASE_MS),
         },
         async (lease) => {
           // acquired 同时代表 edge 已 quiesced；此前不得推 approved/不得发送首条业务命令。
