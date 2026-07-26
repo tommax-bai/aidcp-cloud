@@ -70,7 +70,7 @@ test('runtime generation survives owner process restart and continues an API che
   assert.equal(api.apply(nextAfterRestart, 'owner_fetch').outcome, 'applied');
 });
 
-test('runtime snapshot is side-effect-free and only publishChanged observes mutable state', async () => {
+test('runtime fetch is side-effect-free and cannot renew an old owner observation', async () => {
   let online = 0;
   let observations = 0;
   let emitted = 0;
@@ -109,10 +109,11 @@ test('runtime snapshot is side-effect-free and only publishChanged observes muta
   assert.equal(emitted, 1);
   assert.equal(fetched.cursor, observed.cursor);
   assert.deepEqual(fetched.value, observed.value);
-  assert.equal(fetched.asOf, 50_000);
-  assert.equal(fetched.freshUntil, 95_000);
+  assert.equal(fetched.asOf, 100);
+  assert.equal(fetched.freshUntil, 45_100);
   assert.equal(fetched.value.onlineEdgeCount, 0);
-  assert.equal(api.apply(fetched, 'owner_fetch').outcome, 'freshness_renewed');
+  assert.equal(api.apply(fetched, 'owner_fetch').outcome, 'already_applied');
+  assert.equal(api.presence(50_000).state, 'stale');
 });
 
 test('runtime publish serializes per stream and rereads mutable state inside the critical section', async () => {

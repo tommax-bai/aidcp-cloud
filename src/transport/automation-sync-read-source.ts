@@ -138,16 +138,16 @@ export class AutomationSyncReadSnapshotSource
       }) as SyncReadSnapshotEnvelope<any>;
     }
     if (stream === 'edge_presence') {
-      return this.currentRuntimeSnapshot(stream, observedAt);
+      return this.currentRuntimeSnapshot(stream);
     }
     if (stream === 'publish_in_flight') {
-      return this.currentRuntimeSnapshot(stream, observedAt);
+      return this.currentRuntimeSnapshot(stream);
     }
     if (stream === 'captcha_availability') {
-      return this.currentRuntimeSnapshot(stream, observedAt);
+      return this.currentRuntimeSnapshot(stream);
     }
     if (stream === 'automation_config_mirror_health') {
-      return this.currentRuntimeSnapshot(stream, observedAt);
+      return this.currentRuntimeSnapshot(stream);
     }
     throw new Error(`sync_read_stream_not_owned_by_automation:${stream}`);
   }
@@ -171,7 +171,6 @@ export class AutomationSyncReadSnapshotSource
     S extends AutomationRuntimeSyncReadStream,
   >(
     stream: S,
-    observedAt: number,
   ): Promise<SyncReadSnapshotEnvelope<any>> {
     const durable = await this.generationSource.current(stream);
     const observed = this.observedRuntimeSnapshots.get(stream);
@@ -184,16 +183,10 @@ export class AutomationSyncReadSnapshotSource
     ) {
       throw new Error(`automation_sync_read_runtime_observation_stale:${stream}`);
     }
-    return makeSyncReadFactEnvelope({
-      executionTarget: this.executionTarget,
-      stream,
-      cursor: observed.cursor,
-      asOf: observedAt,
-      freshUntil:
-        observedAt +
-        (stream === 'edge_presence' ? PRESENCE_FRESH_MS : DEFAULT_FRESH_MS),
-      value: observed.value,
-    }) as SyncReadSnapshotEnvelope<any>;
+    // A fetch is delivery, not a new observation. Return the exact cached
+    // owner observation so a stopped/failed observer cannot keep old runtime
+    // facts fresh merely because the API continues polling this route.
+    return observed;
   }
 }
 

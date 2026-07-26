@@ -1140,7 +1140,6 @@ async function main(): Promise<void> {
   if (segments.segA) await segAApiFoundation(ctx);
   if (segments.segB) await segBContent(ctx);
   if (segments.segC) await segCAutomation(ctx);
-  if (mode === 'monolith') await startMonolithSyncReads(ctx);
   if (segments.segD) await segDApiServing(ctx);
   if (listeners.contentReadApi) await startContentReadApi(ctx);
   // Block② 2e：automation 独立进程起内部 API（供 api/content 进程访问 automation-owned 能力）。
@@ -5893,7 +5892,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     maxAttempts: readEnvNumber('AIDCP_SCHEDULED_RECONCILE_MAX_ATTEMPTS', 8),
     logger: console,
   });
-  ctx.scheduledPublishReconciler.start();
   // automation owner 的短应答 receiver：只受理唤醒，不把 dispatch Promise 或平台结局塞进 HTTP 生命周期。
   const publishDispatchTrigger =
     approvalAuthorityForAutomation && deploymentTarget
@@ -6599,6 +6597,18 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     logger: console,
   });
   console.log('[aidcp-cloud] 连接运行时注册表就绪（按连接多租户编排，握手建运行时、断连拆除）');
+
+  // 4b required mirrors are a startup barrier, not a post-listen health probe.
+  // Publish only the handles needed by the local-authority bootstrap, then
+  // complete owner fetch + checkpoint persistence before Edge can handshake.
+  ctx.captchaAssist = captchaAssist;
+  ctx.configMirrorRefresher = configMirrorRefresher;
+  ctx.publishDispatcher = publishDispatcher;
+  ctx.server = server;
+  if (serviceModeFromEnv() === 'monolith') {
+    await startMonolithSyncReads(ctx);
+  }
+  ctx.scheduledPublishReconciler?.start();
 
   // hello 处理会同步进入 runtimes.onHandshake()/busFor()。必须先完成运行时注册表装配再开放端口，
   // 否则 Cloud 重启窗口内的 Edge 会收到 handler_error，却可能留下只有自陈 identity/capability 的半握手连接。

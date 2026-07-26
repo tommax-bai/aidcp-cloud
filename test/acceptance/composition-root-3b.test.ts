@@ -81,8 +81,8 @@ test('3b composition: automation owns replay/receiver and reaches API owners onl
   const consumerStarted = automation.indexOf('riskCommandConsumer?.start();');
   const serverStarted = automation.indexOf('await server.start();');
   assert.ok(
-    serverStarted >= 0 && serverInstalled > serverStarted && consumerStarted > serverInstalled,
-    'risk consumer 必须在 Edge server 真实监听并安装后启动',
+    serverInstalled >= 0 && serverStarted > serverInstalled && consumerStarted > serverStarted,
+    'Edge server handle 可供 4b 启动闸使用，但 risk consumer 必须在真实监听后启动',
   );
   assert.doesNotMatch(automation, /\.claimApprovedCommands\(/, 'automation 不得预消费 API-owned approval outbox');
   assert.doesNotMatch(automation, /emitRiskCommand\(/, '客户恢复不得由组合根直接写 automation outbox');

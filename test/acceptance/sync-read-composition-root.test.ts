@@ -6,19 +6,27 @@ const serverPath = new URL('../../src/server.ts', import.meta.url);
 
 test('monolith restores 4b owner snapshots before API serving and never starts the legacy roster refresher', async () => {
   const source = await readFile(serverPath, 'utf8');
-  const automationStart = source.indexOf(
-    'if (segments.segC) await segCAutomation(ctx);',
+  const automationSegment = source.indexOf(
+    'async function segCAutomation(',
   );
   const syncReadStart = source.indexOf(
-    "if (mode === 'monolith') await startMonolithSyncReads(ctx);",
+    "if (serviceModeFromEnv() === 'monolith') {",
+    automationSegment,
   );
-  const apiServingStart = source.indexOf(
-    'if (segments.segD) await segDApiServing(ctx);',
+  const edgeListen = source.indexOf(
+    'await server.start();',
+    automationSegment,
+  );
+  const scheduledActivation = source.indexOf(
+    'ctx.scheduledPublishReconciler?.start();',
+    automationSegment,
   );
 
-  assert.ok(automationStart >= 0);
-  assert.ok(syncReadStart > automationStart);
-  assert.ok(apiServingStart > syncReadStart);
+  assert.ok(automationSegment >= 0);
+  assert.ok(syncReadStart > automationSegment);
+  assert.ok(scheduledActivation > syncReadStart);
+  assert.ok(edgeListen > syncReadStart);
+  assert.ok(edgeListen > scheduledActivation);
   assert.match(source, /projection\.applyOwnerSnapshot\(envelope\)/);
   assert.doesNotMatch(source, /projection\.(?:refresh|start)\(\)/);
 });
