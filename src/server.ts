@@ -346,6 +346,8 @@ import { registerReviewCardDeliveryRoutes } from './transport/review-card-delive
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
 import { registerPublishLogRoutes } from './transport/publish-log-http.js';
 import { registerPipelineLogRoutes } from './transport/pipeline-log-http.js';
+import { registerPublishCardExitRoutes } from './transport/publish-card-exit-http.js';
+import type { PublishCardExitPort } from './kernel/publish-card-exit-port.js';
 import type { PipelineLogSink } from './kernel/pipeline-log-contract.js';
 import type { PublishLogWriter } from './kernel/publish-log-writer-port.js';
 import { PublishStatusHttpClient, registerPublishStatusRoutes } from './transport/publish-status-http.js';
@@ -768,6 +770,12 @@ interface CompositionContext {
    */
   pipelineLogSink: PipelineLogSink;
   /**
+   * 发布候审的卡片出口（change cloud-batch2-content-main）：发卡 / 发通知 / 传图 / 默认群 /
+   * 落点解析 / 免审预授权，六个方法一组。基础段构造（实现全在本域），内容段只调。
+   * 拆进程后 content 侧换成 `PublishCardExitHttpClient`，**内容仓因此不需要飞书 SDK**。
+   */
+  publishCardExit: PublishCardExitPort;
+  /**
    * 候审预览读（change cloud-batch2-content-main）。内容段只在**界面推送口在场时**才调它 ——
    * 那个推送口由自动化段赋值，content 进程里恒缺席，故这条读在 content 里恒不可达。
    * content 的 `main()` MUST 注入 `unavailableInMode(...)`：不可达就该是不可达，
@@ -857,10 +865,12 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   registerPublishLogRoutes(httpServer, ctx.publishLogWriter);
   // 发布管线角色执行日志（change cloud-batch2-content-main）：`publish_pipeline_logs` 是本域属主表。
   registerPipelineLogRoutes(httpServer, ctx.pipelineLogSink);
+  // 发布候审卡片出口（change cloud-batch2-content-main）：飞书客户端 / 机器人会话表 / 授权台账都在本域。
+  registerPublishCardExitRoutes(httpServer, ctx.publishCardExit);
   const actual = await httpServer.listen(port);
   console.log(
     `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}` +
-      `（config-mirror bump + review-card-delivery + publish-log + pipeline-log 落地端点）`,
+      `（config-mirror bump + review-card-delivery + publish-log + pipeline-log + publish-card-exit 落地端点）`,
   );
 }
 
@@ -2147,6 +2157,26 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.sessionConfigStore = sessionConfigStore;
   ctx.tokenUsageStore = tokenUsageStore;
   ctx.writeApprovalDecision = writeApprovalDecision;
+  // ── 发布候审的卡片出口（change cloud-batch2-content-main）────────────────────────────────
+  // 六个方法是一组：发卡 / 发通知 / 传图 / 默认群 / 落点解析 / 免审预授权。实现全长在本域——
+  // 飞书客户端与卡片构造、机器人会话表、授权台账。内容段原先分别拿着这四样东西自己拼，
+  // 于是**内容仓被迫依赖飞书 SDK**，而依赖集重算时飞书已判给 api：两者只能有一个成立，
+  // 正解是后者。卡片长什么样、发到哪个会话由属主侧决定，内容域只交结构化数据。
+  //
+  // `decidedVia` 在这里固定成排期免审那一档 —— 原本就写死在内容段里，只是挪了位置，逐字等价。
+  const publishCardExit: PublishCardExitPort = {
+    sendApprovalCard: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(data)),
+    sendCommandResult: (chatId, data) => messenger.sendCard(chatId, buildCommandResultCard(data)),
+    uploadImageFromUrl: (url) => messenger.uploadImageFromUrl(url),
+    getDefaultChat: () => botChatStore.getDefaultChat(),
+    resolveCardChatId: (originChatId, accountId) => resolveCardChatId(originChatId, accountId),
+    writeApprovalSignal: (requestId, approved, payload, decidedBy) =>
+      writeApprovalDecision(requestId, approved, payload, {
+        decidedBy: decidedBy ?? 'schedule:unknown_rule',
+        decidedVia: 'schedule_auto_approve',
+      }),
+  };
+
   ctx.accountDisplayName = accountDisplayName;
   ctx.accountDisplayNameCandidates = accountDisplayNameCandidates;
   ctx.accountState = accountState;
@@ -2171,6 +2201,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.resolveAccountChatId = resolveAccountChatId;
   ctx.resolveCardChatId = resolveCardChatId;
   ctx.resolveReviewCardDelivery = resolveReviewCardDelivery;
+  ctx.publishCardExit = publishCardExit;
   ctx.resolvePersona = resolvePersona;
 }
 
@@ -2181,12 +2212,10 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   const {
     accountDisplayName,
     anyImageKeyPresent,
-    botChatStore,
     curatedContentStore,
     dashscopeApiKey,
     facebookPublishMediaStore,
     llm,
-    messenger,
     modelConfigStore,
     ossUploader,
     providerRuntime,
@@ -2195,13 +2224,15 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     publishLogWriter,
     pendingPublishPreviewForAccount,
     pipelineLogSink,
-    resolveCardChatId,
+    // change cloud-batch2-content-main：卡片出口收成一个端口（发卡 / 发通知 / 传图 / 默认群 /
+    // 落点解析 / 免审预授权）。本段原先分别持有飞书客户端、机器人会话表、落点解析与授权写四样，
+    // 于是**内容仓被迫依赖飞书 SDK**；实现全在属主域，这里只调。
+    publishCardExit,
     // change cloud-batch2-content-main：候审卡投递判定改由基础段（属主侧）给成品。
     // 本段原先自己读 approvalPolicyStore + clientUserStore 现算——两者都绑 api 池，
     // content 拆成独立进程后连不上那个库。判定整段留属主侧，这里只调。
     resolveReviewCardDelivery,
     tokenUsageStore,
-    writeApprovalDecision,
     // change cloud-batch2-content-main：**apiPool 已从本段彻底消失**。
     // 内容段曾直接拿 api 池建两个 api 属主表的存储（发布台账 / 管线日志），两者都已上移到属主段，
     // 跨边界只剩窄端口。这一行的消失就是「内容域不再连另一个域的库」这条铁律在本段成立的机械证据。
@@ -2481,24 +2512,16 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
         await publishLogWriter.markImagesAttached!(id, count);
       },
     },
-    // change feishu-contract-seam（§4.6.2）：automation 侧发布出口只交出结构化数据，组合根在此侧构飞书卡 + 发送。
-    messenger: {
-      sendApprovalCard: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(data)),
-      sendCommandResult: (chatId, data) => messenger.sendCard(chatId, buildCommandResultCard(data)),
-      uploadImageFromUrl: (url) => messenger.uploadImageFromUrl(url),
-    },
-    botChatStore,
-    // change unify-card-routing-origin-then-team：审批卡目标走统一解析（来源会话 → 账号团队群 → 默认群）。
-    // 无来源会话的自动 / 排期发帖由此进入账号团队群，不再一律落默认群。
-    resolveCardChatId,
+    // change feishu-contract-seam（§4.6.2）：业务侧只交结构化数据，属主侧构飞书卡 + 发送。
+    // change cloud-batch2-content-main：发卡 / 默认群 / 落点解析（来源会话 → 账号团队群 → 默认群）/
+    // 免审预授权四样已收进同一个端口，实现全在属主域，本段只调 —— 同一个对象喂给这几个入参。
+    messenger: publishCardExit,
+    botChatStore: publishCardExit,
+    resolveCardChatId: publishCardExit.resolveCardChatId,
     resolveReviewCardDelivery,
     getAccountName: accountDisplayName,
     // 排期免审预授权（content-schedule）：与人工审批**同一个**授权写出口，决策主体 = 触发该免审的排期规则。
-    writeApprovalSignal: (requestId, approved, payload, decidedBy) =>
-      writeApprovalDecision(requestId, approved, payload, {
-        decidedBy: decidedBy ?? 'schedule:unknown_rule',
-        decidedVia: 'schedule_auto_approve',
-      }),
+    writeApprovalSignal: publishCardExit.writeApprovalSignal,
     // 批次 0b：下发触发由**自动化段**赋值。丢了它 = 稿件已记「已批准」却永远不会被发出去 ——
     // 这是本组三处里后果最重的一处，绝不允许静默短路。
     triggerApprovedDispatch: (requestId) =>

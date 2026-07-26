@@ -1290,6 +1290,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/publish-approval-store.ts 析出发布审批纯枚举 + 哨兵错误（APPROVAL_VOID_REASONS / ApprovalVoidReason / isApprovalVoidReason / APPROVAL_BLOCKED_REASONS / ApprovalBlockedReason 字面 tuple 与派生 union；ApprovalUnreadableError 纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg、无模块级 Set-Map。ApprovalDecisionStore 类 + pg 读写留 publish-approval-store.ts（automation）并从 kernel 导入等值再导出。供发布下发编排跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/publish-card-exit-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change cloud-batch2-content-main 新写：发布候审的卡片出口端口（PublishCardExitPort，六方法 sendApprovalCard/sendCommandResult/uploadImageFromUrl/getDefaultChat/resolveCardChatId/writeApprovalSignal）。零 SQL / HTTP / LLM / 模块级 Set-Map，仅 import kernel（feishu-card-contract / default-chat-provider）。实现全在 api 域（飞书客户端与卡片构造 src/feishu/、机器人会话表、授权台账），内容域只交结构化数据 ⇒ **aidcp-content 因此不需要飞书 SDK**，与批次 1 依赖集重算把飞书判给 api 的结论一致（此前内容段直调飞书，两者只能有一个成立）。失败语义：六方法一律原样抛（发卡失败由发布出口角色自己接住并如实记账；授权写失败吞掉即「以为已授权其实没写」；落点解析失败要让调用方诚实回没有目标）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-batch2"
+  },
+  {
     "path": "src/kernel/publish-draft-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P4-5 新写：发布草稿 / 排期 / 稿件精修的跨属主契约——记录形状（ScheduledPublishRecord / ScheduledReconcileUpdate / DispatchDraft / EditDraft* / RefineDraft* / DraftRefinement 六型）+ 三个窄端口（ScheduledPublishStore 3 方法 / DraftRefinementDrafts 2 方法 / DraftRefinementReadWritePort 4 方法，逐字复刻消费方当下的 Pick<Store,…>）。两个属主文件（api 的 publish-log-store.ts、content 的 draft-refinement.ts）自建 pg 池、含建表 DDL，整文件进不了 kernel，故只析出契约段并在原位等值再导出（api 同层的面板 / 删图 / 审批四个消费方逐字无感）。三条 import 全是 kernel（platform-types / publish-pipeline-types / deployment-target）。四条准入正则实跑零命中。消除 import 豁免 4 条（publish-dispatcher / scheduled-publish-reconciler / draft-refinement-worker -> publish-log-store.ts，client-auth-server -> draft-refinement.ts）。请求回写 §4.7 见 docpatch RK-P4-5"
@@ -2261,6 +2266,11 @@
   },
   {
     "path": "src/transport/pipeline-log-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/publish-card-exit-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
