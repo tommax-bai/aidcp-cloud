@@ -303,8 +303,13 @@ export class PgOffboardAdmissionLedger implements OffboardAdmissionLedgerPort {
         `DELETE FROM client_env_revocation_holds
           WHERE materialized_at IS NOT NULL
             AND execution_target=$2
+            AND materialized_at <= $3::timestamptz
             AND NOT (env_key = ANY($1::text[]))`,
-        [[...seenEnvKeys], this.executionTarget],
+        [
+          [...seenEnvKeys],
+          this.executionTarget,
+          new Date(input.observedAt).toISOString(),
+        ],
       );
       const receipt: ReconcileActiveOffboardSnapshotOutcome = {
         outcome: 'applied',

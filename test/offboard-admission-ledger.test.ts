@@ -21,6 +21,7 @@ interface StoredSnapshot {
 function ledgerPool(options: {
   adopted?: number;
   released?: number;
+  materializedHoldAt?: number;
   claimRows?: unknown[];
   admissionRow?: unknown;
   updatedRevision?: number;
@@ -74,7 +75,12 @@ function ledgerPool(options: {
         return { rows: [], rowCount: options.adopted ?? 0 };
       }
       if (sql.includes('DELETE FROM client_env_revocation_holds')) {
-        return { rows: [], rowCount: options.released ?? 0 };
+        const rowCount = options.materializedHoldAt === undefined
+          ? options.released ?? 0
+          : options.materializedHoldAt <= Date.parse(String(params[2]))
+            ? 1
+            : 0;
+        return { rows: [], rowCount };
       }
       if (sql.includes('WITH due AS')) {
         return { rows: options.claimRows ?? [], rowCount: options.claimRows?.length ?? 0 };
@@ -141,6 +147,38 @@ test('offboard snapshot: complete 真快照原子 adopt/release，同 commandId 
       error instanceof OffboardAdmissionLedgerError
       && error.code === 'offboard_admission_command_collision',
   );
+});
+
+test('offboard snapshot: 只释放观察水位前已物化的缺席 hold，不误删读取后并发物化', async () => {
+  const observedAt = 1_000;
+  const before = ledgerPool({ materializedHoldAt: observedAt - 1 });
+  const after = ledgerPool({ materializedHoldAt: observedAt + 1 });
+  const input = {
+    commandId: 'snapshot-watermark',
+    complete: true as const,
+    observedAt,
+    rows: [],
+  };
+
+  assert.equal(
+    (await new PgOffboardAdmissionLedger(before.pool, 'dev')
+      .reconcileActiveOffboardSnapshot(input)).released,
+    1,
+  );
+  assert.equal(
+    (await new PgOffboardAdmissionLedger(after.pool, 'dev')
+      .reconcileActiveOffboardSnapshot(input)).released,
+    0,
+  );
+
+  for (const db of [before, after]) {
+    const release = db.statements.find(
+      (entry) => entry.sql.includes('DELETE FROM client_env_revocation_holds'),
+    );
+    assert.ok(release);
+    assert.match(release.sql, /materialized_at <= \$3::timestamptz/);
+    assert.equal(release.params[2], new Date(observedAt).toISOString());
+  }
 });
 
 test('offboard snapshot: 不接受未证明完整的快照，避免假空释放全部 admission', async () => {
