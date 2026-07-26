@@ -250,3 +250,32 @@ test('无持久授权（未接线 / 尚未批准）→ 回落既有在途集合�
   assert.equal(inFlight.active[0].status, 'dispatching');
 });
 
+test('in-flight 证据不可用时不把空集合推断成待审或下发中，durable projection 仍优先', () => {
+  const unavailable = buildPublishLifecycle({
+    queue: { status: 'idle', snapshot: null, runs: [] },
+    pending: [publish()],
+    recent: [],
+    inFlightEvidence: { state: 'stale', asOf: 1_700_000_000_000, recordIds: null },
+  });
+  assert.deepEqual(unavailable.inFlightEvidence, { state: 'stale', asOf: 1_700_000_000_000 });
+  assert.equal(unavailable.active[0].statusSummary, '下发状态暂不可用');
+  assert.equal(stateOf(unavailable, 'approval'), 'evidence_unavailable');
+  assert.equal(stateOf(unavailable, 'dispatch'), 'evidence_unavailable');
+
+  const durable = buildPublishLifecycle({
+    queue: { status: 'idle', snapshot: null, runs: [] },
+    pending: [publish()],
+    recent: [],
+    inFlightEvidence: { state: 'invalid', asOf: 1_700_000_000_000, recordIds: null },
+    approvalDispatch: new Map([[101, {
+      approved: true,
+      dispatchState: 'dispatching',
+      dispatchBlockedReason: null,
+      decidedAt: 1_699_999_940_000,
+    }]]),
+    now: 1_700_000_000_000,
+  });
+  assert.equal(durable.active[0].status, 'dispatching');
+  assert.equal(stateOf(durable, 'approval'), 'completed');
+  assert.equal(stateOf(durable, 'dispatch'), 'running');
+});

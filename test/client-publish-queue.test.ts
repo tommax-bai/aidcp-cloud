@@ -105,6 +105,7 @@ test('客户发布队列只输出白名单字段、按账号隔离并压缩为�
       status: 'submitted',
       stages: [stage('approval', 'completed'), stage('dispatch', 'completed')],
     })],
+    inFlightEvidence: { state: 'fresh', asOf: 3_100 },
   };
   const view = projectClientPublishQueue({
     accountId: 'acct-target',
@@ -140,11 +141,56 @@ test('客户发布队列只输出白名单字段、按账号隔离并压缩为�
   assert.equal(view.active[0].stages[3].summary, '发布结果：等待发布');
   assert.equal(view.recent[0].stages[2].summary, '发布确认：已确认');
   assert.equal(view.recent[0].statusLabel, '平台确认中，请勿重复操作');
+  assert.deepEqual(view.inFlightEvidence, { state: 'fresh', asOf: 3_100 });
   const serialized = JSON.stringify(view);
   for (const secret of [
     'acct-target', 'acct-other', 'internal fact', 'internal snapshot', 'internal-claim-token',
     'internal-source-ref', 'internal-step', 'internalPrompt', 'internalTarget', 'internal-run',
   ]) assert.doesNotMatch(serialized, new RegExp(secret));
+});
+
+test('客户队列透传不可用证据，并从确定汇总排除不确定稿件', () => {
+  const uncertain = journey({
+    stages: [
+      stage('source', 'completed'),
+      stage('content', 'completed'),
+      stage('approval', 'evidence_unavailable'),
+      stage('dispatch', 'evidence_unavailable'),
+    ],
+  });
+  const durable = journey({
+    journeyId: 'publish:22',
+    recordId: 22,
+    status: 'dispatching',
+    dispatchState: 'dispatching',
+    stages: [
+      stage('source', 'completed'),
+      stage('content', 'completed'),
+      stage('approval', 'completed'),
+      stage('dispatch', 'running'),
+    ],
+  });
+  const view = projectClientPublishQueue({
+    accountId: 'acct-target',
+    lifecycle: {
+      status: 'running',
+      active: [uncertain, durable],
+      recent: [],
+      inFlightEvidence: { state: 'stale', asOf: 2_900 },
+    },
+    tasks: [],
+  });
+
+  assert.deepEqual(view.inFlightEvidence, { state: 'stale', asOf: 2_900 });
+  assert.deepEqual(view.summary, { inProgress: 1, waitingForYou: 0, cancellable: 0 });
+  assert.deepEqual(
+    view.active[0].stages.slice(2).map((item) => [item.key, item.state, item.summary]),
+    [
+      ['approval', 'evidence_unavailable', '发布确认：下发状态暂不可用'],
+      ['dispatch', 'evidence_unavailable', '发布结果：下发状态暂不可用'],
+    ],
+  );
+  assert.equal(view.active[1].dispatchState, 'dispatching', 'durable dispatch proof remains authoritative');
 });
 
 test('取消回执诚实区分立即终态与规划中的安全停止', () => {

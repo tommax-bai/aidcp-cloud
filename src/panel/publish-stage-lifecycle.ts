@@ -20,7 +20,15 @@ export type PublishStageState =
   | 'completed'
   | 'partial'
   | 'failed'
-  | 'skipped';
+  | 'skipped'
+  | 'evidence_unavailable';
+
+export type PublishEvidenceState = 'fresh' | 'unknown' | 'stale' | 'invalid';
+
+export interface PublishInFlightEvidenceView {
+  state: PublishEvidenceState;
+  asOf: number | null;
+}
 
 export interface PublishStageView {
   key: PublishStageKey;
@@ -100,6 +108,7 @@ export interface PublishLifecycleProjection {
   status: 'idle' | 'running' | 'waiting_human';
   active: PublishJourneyView[];
   recent: PublishJourneyView[];
+  inFlightEvidence: PublishInFlightEvidenceView;
 }
 
 export interface QueueRunLike {
@@ -350,6 +359,7 @@ function journeyFromRun(run: QueueRunLike, active: boolean): PublishJourneyView 
 function persistedStages(
   row: PanelPublish,
   approvedForDispatch: boolean,
+  inFlightEvidenceUnavailable: boolean,
   dispatch: ApprovalDispatchProjection | null,
   snapshot: Record<string, unknown> | null,
   now: number,
@@ -367,6 +377,13 @@ function persistedStages(
       ];
 
   if (row.status === 'pending_approval') {
+    if (!dispatch && inFlightEvidenceUnavailable) {
+      return [
+        ...base,
+        stage('approval', 'evidence_unavailable', '下发状态暂不可用'),
+        stage('dispatch', 'evidence_unavailable', '下发状态暂不可用'),
+      ];
+    }
     if (!approvedForDispatch) {
       return [...base, stage('approval', 'waiting_human', '等待人工审批'), stage('dispatch', 'pending', '审批通过后下发')];
     }
@@ -411,6 +428,7 @@ function persistedStages(
 function journeyFromPublish(
   row: PanelPublish,
   inFlight: boolean,
+  inFlightEvidenceUnavailable: boolean,
   snapshot: Record<string, unknown> | null,
   dispatch: ApprovalDispatchProjection | null,
   now: number,
@@ -447,7 +465,9 @@ function journeyFromPublish(
   // 前端落进 default 分支（枚举漂移 → 整页白屏），而增量可选字段被旧前端安全忽略。
   const blockedLabel = describeDispatchBlockedReason(dispatch?.dispatchBlockedReason);
   const statusSummary =
-    status === 'dispatching' && dispatch?.dispatchState === 'pending_dispatch'
+    !dispatch && inFlightEvidenceUnavailable
+      ? '下发状态暂不可用'
+      : status === 'dispatching' && dispatch?.dispatchState === 'pending_dispatch'
       ? blockedLabel
         ? `已批准·待下发（${blockedLabel}）`
         : '已批准·待下发'
@@ -464,7 +484,7 @@ function journeyFromPublish(
     active: status === 'waiting_approval' || status === 'dispatching',
     status,
     statusSummary,
-    stages: persistedStages(row, approvedForDispatch, dispatch, snapshot, now),
+    stages: persistedStages(row, approvedForDispatch, inFlightEvidenceUnavailable, dispatch, snapshot, now),
     snapshot,
     ...(dispatch
       ? {
@@ -482,6 +502,9 @@ export function buildPublishLifecycle(input: {
   pending: PanelPublish[];
   recent: PanelPublish[];
   inFlightRecordIds?: Iterable<number>;
+  inFlightEvidence?: PublishInFlightEvidenceView & {
+    recordIds: Iterable<number> | null;
+  };
   /**
    * 持久授权记录的下发进度（按 recordId）。缺省 → 回落既有进程内在途集合（零回归）。
    * 这是「已批准·待下发」在进程重启后仍成立的唯一来源。
@@ -490,9 +513,15 @@ export function buildPublishLifecycle(input: {
   recentLimit?: number;
   now?: number;
 }): PublishLifecycleProjection {
-  const inFlight = new Set(input.inFlightRecordIds ?? []);
-  const approvalDispatch = input.approvalDispatch;
   const now = input.now ?? Date.now();
+  const evidence = input.inFlightEvidence ?? {
+    state: 'fresh' as const,
+    asOf: now,
+    recordIds: input.inFlightRecordIds ?? [],
+  };
+  const inFlight = new Set(evidence.state === 'fresh' ? evidence.recordIds ?? [] : []);
+  const inFlightEvidenceUnavailable = evidence.state !== 'fresh';
+  const approvalDispatch = input.approvalDispatch;
   const aggregateSnapshot = record(input.queue.snapshot);
   const aggregateRecordId = resultRecordId(aggregateSnapshot);
   // panelStore 的正式实现会按 status 过滤；这里仍 fail-closed 再核一次，避免旧实现/测试桩把终态塞进 active。
@@ -507,6 +536,7 @@ export function buildPublishLifecycle(input: {
   const pending = pendingRows.map((row) => journeyFromPublish(
     row,
     inFlight.has(row.id),
+    inFlightEvidenceUnavailable,
     aggregateRecordId === row.id ? aggregateSnapshot : null,
     approvalDispatch?.get(row.id) ?? null,
     now,
@@ -519,6 +549,7 @@ export function buildPublishLifecycle(input: {
     .slice(0, recentLimit)
     .map((row) => journeyFromPublish(
       row,
+      false,
       false,
       aggregateRecordId === row.id ? aggregateSnapshot : null,
       approvalDispatch?.get(row.id) ?? null,
@@ -553,5 +584,6 @@ export function buildPublishLifecycle(input: {
         : 'idle',
     active,
     recent,
+    inFlightEvidence: { state: evidence.state, asOf: evidence.asOf },
   };
 }

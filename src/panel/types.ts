@@ -170,14 +170,24 @@ export interface PanelDeps {
   publishLogStore: PublishLogStore;
   botChatStore: BotChatStore;
   eventBus: EventFanoutPort;
-  /** 在线边缘登记（结构类型，便于测试造桩）。onlineEdgeCount 为 staleness 校验后的真实在线数（D9）。 */
+  /** 在线边缘登记（结构类型，便于测试造桩）。monolith 本地权威仍从这里读取。 */
   edgeServer: { edgeCount(): number; onlineEdgeCount(): number };
+  /**
+   * 4b API-local Edge presence 镜像窄端口。独立 API 组合根必须注入；
+   * 未注入时仅保留当前 monolith 的 edgeServer 本地权威语义。
+   */
+  edgePresenceEvidence?: () => PanelEdgePresenceEvidence;
   /** 只读查询层（dashboard / accounts / content / analytics 聚合）。 */
   panelStore: PanelStoreReader;
   /** 发布队列状态读端口（/api/content/queue）；Block② 2e 起改经数据网关异步读端口注入。 */
   publishStatus: { getStatus(): Promise<QueueStatusLike> };
-  /** 发布下发段只读在途集合；未注入时面板保守地只显示待审，不猜测已批准。 */
+  /** 旧 monolith 发布下发段只读在途集合；4b 独立 API 使用 publishInFlightEvidence。 */
   publishDispatcher?: { getInFlightRecordIds(): number[] };
+  /**
+   * 4b API-local dispatcher in-flight 镜像窄端口。只有 fresh 的完整集合能补足分类；
+   * unknown/stale/invalid 时 recordIds 必须为 null。
+   */
+  publishInFlightEvidence?: () => PanelPublishInFlightEvidence;
   /** Unified public-write confirmation/task API. When absent, delegated endpoints fail closed with 503. */
   delegatedTasks?: DelegatedTaskServicePort;
   /**
@@ -380,6 +390,11 @@ export interface PanelDeps {
    */
   configMirrorHealth?: () => PanelConfigMirrorHealth;
   /**
+   * 4b 分进程健康聚合端口。返回值已经按消费服务分段；panel 仍会 fail-closed 正规化，
+   * 确保非 fresh 段不会把旧 entry 的 fresh 状态泄露成当前结论。
+   */
+  configMirrorServicesHealth?: () => PanelConfigMirrorHealthResponse;
+  /**
    * 操作兜底 floor 配置（change pacing-floor-config-min-interval）。未注入则 /api/pacing* 返回 503。
    * 写非乐观回真态；非法数字整块拒（invalid_value / unknown_operation），绝不部分落库；生效值经读出口 clamp、
    * 保证配置只能抬高延迟、抬不穿非零下限；只动 pacing_floor_config，不碰风控状态单写路径。
@@ -493,8 +508,13 @@ export interface DashboardSummary {
    * console 据此渲染「数据截至 …」：每轮轮询后 asOf 推进即证明界面在实时更新、未冻结。
    */
   asOf: number;
-  /** 活态在线边缘数（staleness 校验后、死连接不计，D9）；为 0 时 console 如实提示「系统当前未在浏览，故无新数据」。 */
-  edgesOnline: number;
+  /**
+   * fresh presence 的在线数；证据 unknown/stale/invalid 时为 null，绝不以零或最后好值代替。
+   */
+  edgesOnline: number | null;
+  edgePresenceState: PanelEvidenceState;
+  /** owner observation 时刻；从未装载时为 null，与本次响应 asOf 分离。 */
+  edgePresenceAsOf: number | null;
   /** 今日全局计数；publish 键为 publish_log 真实数（覆盖 risk_counters 同名键）。 */
   totals: TodayTotals;
   /** 按账号切片（V1 task 9.6）；带当日配额上限 + 饱和标记，拿不到 controller 时诚实缺省（不编造上限）。 */
@@ -929,6 +949,31 @@ export interface PanelConfigMirrorHealth {
   enabled: boolean;
   pollMs: number;
   entries: PanelConfigMirrorHealthEntry[];
+}
+
+export type PanelEvidenceState = 'fresh' | 'unknown' | 'stale' | 'invalid';
+
+export interface PanelEdgePresenceEvidence {
+  state: PanelEvidenceState;
+  asOf: number | null;
+  onlineEdgeCount: number | null;
+}
+
+export interface PanelPublishInFlightEvidence {
+  state: PanelEvidenceState;
+  asOf: number | null;
+  recordIds: ReadonlySet<number> | null;
+}
+
+export interface PanelConfigMirrorServiceHealth {
+  sourceService: 'api' | 'automation';
+  asOf: number | null;
+  deliveryState: PanelEvidenceState;
+  entries: PanelConfigMirrorHealthEntry[];
+}
+
+export interface PanelConfigMirrorHealthResponse {
+  services: PanelConfigMirrorServiceHealth[];
 }
 
 /** 引流线索热度过滤阈值生效值 + 审计（GET /api/hot-lead-config 形状，change feed-hot-lead-group-comment）。 */

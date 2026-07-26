@@ -40,6 +40,7 @@ export interface ClientPublishQueueJourney {
   status: PublishJourneyStatus;
   statusLabel: string;
   stages: ClientPublishQueueStage[];
+  dispatchState?: 'pending_dispatch' | 'dispatching' | 'consumed' | 'void';
 }
 
 export interface ClientPublishQueueView {
@@ -51,6 +52,8 @@ export interface ClientPublishQueueView {
   tasks: ClientPublishQueueTask[];
   active: ClientPublishQueueJourney[];
   recent: ClientPublishQueueJourney[];
+  /** 4b additive evidence; optional only so independently rolled older providers remain source-compatible. */
+  inFlightEvidence?: PublishLifecycleProjection['inFlightEvidence'];
 }
 
 export interface ClientPublishQueueCancelReceipt {
@@ -137,6 +140,7 @@ function projectTask(task: DelegatedTask): ClientPublishQueueTask | null {
 function aggregateState(stages: PublishStageView[]): PublishStageState {
   if (stages.length === 0) return 'pending';
   const states = stages.map((stage) => stage.state);
+  if (states.includes('evidence_unavailable')) return 'evidence_unavailable';
   if (states.includes('failed')) return 'failed';
   if (states.includes('waiting_human')) return 'waiting_human';
   if (states.includes('retrying')) return 'retrying';
@@ -171,6 +175,7 @@ function stageSummary(
     partial: '部分完成',
     failed: '未完成',
     skipped: '本次跳过',
+    evidence_unavailable: '下发状态暂不可用',
   };
   return `${label}：${suffix[state]}`;
 }
@@ -206,6 +211,7 @@ function projectJourney(
     status: journey.status,
     statusLabel: JOURNEY_STATUS_LABELS[journey.status],
     stages: STAGE_GROUPS.map((group) => projectStageGroup(journey.stages, group)),
+    ...(journey.dispatchState ? { dispatchState: journey.dispatchState } : {}),
   };
 }
 
@@ -225,16 +231,21 @@ export function projectClientPublishQueue(input: {
   const recent = input.lifecycle.recent
     .filter((journey) => journey.accountId === input.accountId)
     .map(projectJourney);
+  const uncertain = (journey: ClientPublishQueueJourney) =>
+    !journey.dispatchState
+    && journey.stages.some((stage) => stage.state === 'evidence_unavailable');
+  const definiteActive = active.filter((journey) => !uncertain(journey));
 
   return {
     summary: {
-      inProgress: tasks.length + active.length,
-      waitingForYou: active.filter((journey) => journey.status === 'waiting_approval').length,
+      inProgress: tasks.length + definiteActive.length,
+      waitingForYou: definiteActive.filter((journey) => journey.status === 'waiting_approval').length,
       cancellable: tasks.filter((task) => !task.cancelRequested).length,
     },
     tasks,
     active,
     recent,
+    inFlightEvidence: input.lifecycle.inFlightEvidence,
   };
 }
 

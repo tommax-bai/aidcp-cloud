@@ -276,7 +276,9 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     assert.equal(sum.status, 200);
     const sumBody = (await sum.json()) as {
       asOf: number;
-      edgesOnline: number;
+      edgesOnline: number | null;
+      edgePresenceState: string;
+      edgePresenceAsOf: number | null;
       totals: { like: number; search: number; publish: number };
       totalsByAccount: { accountId: string; totals: { like: number; search: number } }[];
       likeRate: { rate: number };
@@ -292,6 +294,8 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
       `asOf 应为服务端处理该请求时刻（got ${sumBody.asOf}）`,
     );
     assert.equal(sumBody.edgesOnline, 3);
+    assert.equal(sumBody.edgePresenceState, 'fresh');
+    assert.equal(sumBody.edgePresenceAsOf, sumBody.asOf, 'monolith local authority uses the response observation');
     assert.equal(sumBody.totals.like, 10);
     assert.equal(sumBody.totals.search, 2);
     assert.equal(sumBody.totals.publish, 1);
@@ -372,6 +376,7 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     assert.equal(pub.items.length, 1);
     const queue = (await (await fetch(`${base}/api/content/queue`, { headers: auth })).json()) as {
       status: string;
+      inFlightEvidence: { state: string; asOf: number | null };
       lifecycle: { status: string; active: unknown[]; recent: Array<{ status: string; stages: unknown[] }> };
     };
     assert.equal(queue.status, 'idle');
@@ -379,6 +384,7 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     assert.equal(queue.lifecycle.active.length, 0, '终态发布记录不得进入活跃稿件');
     assert.equal(queue.lifecycle.recent[0].status, 'published');
     assert.equal(queue.lifecycle.recent[0].stages.length, 8, '面板 API 返回八阶段投影');
+    assert.deepEqual(queue.inFlightEvidence, { state: 'unknown', asOf: null });
     const lr = (await (await fetch(`${base}/api/analytics/like-rate`, { headers: auth })).json()) as {
       healthy: boolean;
     };
@@ -386,6 +392,105 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
 
     // 未知受保护路由 → 404
     assert.equal((await fetch(`${base}/api/nope`, { headers: auth })).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP 4b DTO：presence 不可用不报零，镜像按服务分段，queue 不用空集合补造结论', async () => {
+  const pending = {
+    ...(await mockPanelStore.publishedHistory(1))[0],
+    id: 81,
+    status: 'pending_approval',
+  };
+  const panelStore = {
+    ...mockPanelStore,
+    publishedHistory: async (
+      _limit: number,
+      _accountId?: string,
+      status?: string,
+    ) => status === 'pending_approval' ? [pending] : [pending],
+  };
+  const dtoDeps = {
+    ...(deps as object),
+    panelStore,
+    edgePresenceEvidence: () => ({
+      state: 'stale' as const,
+      asOf: 1_700_000_000_000,
+      onlineEdgeCount: 9,
+    }),
+    publishInFlightEvidence: () => ({
+      state: 'stale' as const,
+      asOf: 1_700_000_000_100,
+      recordIds: null,
+    }),
+    configMirrorServicesHealth: () => ({
+      services: [
+        {
+          sourceService: 'api',
+          asOf: 1_700_000_000_200,
+          deliveryState: 'fresh' as const,
+          entries: [],
+        },
+        {
+          sourceService: 'automation',
+          asOf: 1_700_000_000_000,
+          deliveryState: 'stale' as const,
+          entries: [{
+            mirrorKey: 'content_schedule',
+            tier: 'gate' as const,
+            version: 2,
+            lastComparedAt: 1,
+            lastReloadedAt: 1,
+            reloadFailingSince: null,
+            state: 'fresh' as const,
+            staleMs: 1_000,
+            observeStaleMs: 1_000,
+            haltsOnStale: true,
+            staleForMs: 0,
+          }],
+        },
+      ],
+    }),
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(dtoDeps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${h.port}`;
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const summary = (await (await fetch(`${base}/api/dashboard/summary`, { headers: auth })).json()) as {
+      edgesOnline: number | null;
+      edgePresenceState: string;
+      edgePresenceAsOf: number | null;
+    };
+    assert.equal(summary.edgesOnline, null);
+    assert.equal(summary.edgePresenceState, 'stale');
+    assert.equal(summary.edgePresenceAsOf, 1_700_000_000_000);
+
+    const mirrors = (await (await fetch(`${base}/api/config-mirrors`, { headers: auth })).json()) as {
+      services: Array<{ sourceService: string; deliveryState: string; entries: unknown[] }>;
+    };
+    assert.deepEqual(mirrors.services.map((service) => [
+      service.sourceService,
+      service.deliveryState,
+      service.entries.length,
+    ]), [
+      ['api', 'fresh', 0],
+      ['automation', 'stale', 0],
+    ]);
+
+    const queue = (await (await fetch(`${base}/api/content/queue`, { headers: auth })).json()) as {
+      inFlightEvidence: { state: string; asOf: number | null };
+      lifecycle: { active: Array<{ statusSummary: string; stages: Array<{ key: string; state: string }> }> };
+    };
+    assert.deepEqual(queue.inFlightEvidence, { state: 'stale', asOf: 1_700_000_000_100 });
+    assert.equal(queue.lifecycle.active[0].statusSummary, '下发状态暂不可用');
+    assert.deepEqual(
+      queue.lifecycle.active[0].stages.slice(-2).map((stage) => [stage.key, stage.state]),
+      [
+        ['approval', 'evidence_unavailable'],
+        ['dispatch', 'evidence_unavailable'],
+      ],
+    );
   } finally {
     await h.close();
   }
