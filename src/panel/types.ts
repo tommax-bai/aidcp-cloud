@@ -229,7 +229,22 @@ export interface PanelDeps {
   /** 账号命令（durable，与飞书 actions 共享 accountState 底层）；返回真实结果（resume 带恢复 edge 数）。 */
   commandActions: {
     pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;
-    resume(accountId: string): Promise<{ accountId: string; status: 'active'; resumedEdges: number }>;
+    resume(accountId: string): Promise<
+      | {
+          accountId: string;
+          status: 'active';
+          accountState: 'active';
+          edgeResume: 'applied';
+          resumedEdges: number;
+        }
+      | {
+          accountId: string;
+          status: 'active';
+          accountState: 'active';
+          edgeResume: 'failed' | 'unknown';
+          reason: string;
+        }
+    >;
     /**
      * 调度启停（V1 task 9.4）：start/stop 现役单全局 RoleDispatcher；回报真实在线 edge 数。
      * 偏离：单账号现实下为全局开关（accountId 信息性）；per-edge 拆分留到真多账号（design 步骤 8）。

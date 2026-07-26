@@ -39,6 +39,10 @@ const SINGLE_SERVICE_KEYS: ReadonlyArray<{ prefix: string; ownerDir: string }> =
   // 每 executionTarget 单实例写者锁（change risk-state-cross-process-integrity）。
   // key = (AUTOMATION_WRITER_LOCK_NAME, executionTarget)，两个引用点都在 risk/writer-lock.ts。
   { prefix: 'AUTOMATION_WRITER_LOCK_NAME', ownerDir: 'risk' },
+  // 4a offboard admission 的 command/capability 串行化只保护 API owner ledger；
+  // 命名空间显式区分，拆库后随 API 权威表一起迁移，不承担跨服务互斥。
+  { prefix: 'OFFBOARD_ADMISSION_COMMAND_LOCK_PREFIX', ownerDir: 'client-auth' },
+  { prefix: 'OFFBOARD_ADMISSION_CAPABILITY_LOCK_PREFIX', ownerDir: 'client-auth' },
 ];
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -110,8 +114,8 @@ describe('AC-LOCK advisory lock 归属（绝不跨服务共用）', () => {
     }
     assert.deepEqual(
       [...boundaries],
-      ['automation'],
-      '当前全部 advisory lock 只应活在 automation 边界内；出现第二个边界即为跨界共用。',
+      ['api', 'automation'],
+      'advisory lock 只可在已登记的单一 owner 边界内使用；出现其它边界或未登记命名空间即违规。',
     );
   });
 });

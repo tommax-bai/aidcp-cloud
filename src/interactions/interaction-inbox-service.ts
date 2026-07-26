@@ -13,6 +13,7 @@ import type {
   InteractionSyncBatchPayload,
 } from '../kernel/interaction-types.js';
 import { InteractionError } from '../kernel/interaction-types.js';
+import type { AccountRuntimeAuthorityPort } from '../kernel/api-direct-port.js';
 
 export class InteractionInboxService {
   constructor(private readonly deps: {
@@ -22,8 +23,7 @@ export class InteractionInboxService {
     controllerFor: (accountId: string) => InteractionRiskController | undefined | Promise<InteractionRiskController | undefined>;
     metrics: InteractionMetrics;
     dispatchAuto?: (input: { accountId: string; envKey: string; jobId: string; expectedVersion: number }) => Promise<unknown>;
-    getNickname?: (accountId: string) => string | null | undefined;
-    setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
+    recordNickname?: AccountRuntimeAuthorityPort['recordNickname'];
     logger?: Pick<Console, 'warn'>;
   }) {}
 
@@ -49,12 +49,13 @@ export class InteractionInboxService {
     this.deps.metrics.increment('interaction_auth_status_total', { status: payload.status });
 
     const nickname = payload.status === 'active' ? payload.identity?.displayName.trim() : '';
-    if (!nickname || !this.deps.setNickname) return;
-    if (this.deps.getNickname?.(payload.accountId)?.trim() === nickname) return;
+    if (!nickname || !this.deps.recordNickname) return;
 
     try {
-      await Promise.resolve(this.deps.setNickname(payload.accountId, nickname));
-      this.deps.metrics.increment('interaction_account_nickname_total', { status: 'updated' });
+      const result = await this.deps.recordNickname(payload.accountId, nickname);
+      this.deps.metrics.increment('interaction_account_nickname_total', {
+        status: result.outcome,
+      });
     } catch (error) {
       this.deps.metrics.increment('interaction_account_nickname_total', { status: 'failed' });
       this.deps.logger?.warn(

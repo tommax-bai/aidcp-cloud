@@ -60,17 +60,39 @@ test('automation internal API keeps non-risk owner routes when risk registry is 
 });
 
 test('every Feishu receiver production composition injects the durable approval write authority', async () => {
-  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
-  const compositions = [...source.matchAll(/new FeishuWsReceiver\(\{([\s\S]*?)\n  \}\);/g)].map((match) => match[1] ?? '');
+  const [source, feishuOwner] = await Promise.all([
+    readFile(new URL('../src/server.ts', import.meta.url), 'utf8'),
+    readFile(
+      new URL('../src/feishu/api-owner-composition.ts', import.meta.url),
+      'utf8',
+    ),
+  ]);
+  const compositions = [
+    ...feishuOwner.matchAll(/new FeishuWsReceiver\(\{([\s\S]*?)\n      \}\);/g),
+  ].map((match) => match[1] ?? '');
   assert.ok(compositions.length > 0, 'production must compose at least one Feishu receiver');
   for (const composition of compositions) {
-    assert.match(composition, /\bwriteApproval:\s*\(/, 'Feishu receiver must receive an explicit approval write port');
     assert.match(
       composition,
-      /\bwriteApprovalDecision\(/,
-      'Feishu approval ingress must converge on the shared durable approval authority',
+      /\bwriteApproval:\s*input\.writeApproval/,
+      'Feishu receiver must receive the explicit approval write port owned by its API composition',
     );
   }
+  const ingress = source.slice(
+    source.indexOf('const feishuIngress = await feishuOwner.startIngress({'),
+    source.indexOf('\n  ctx.botChatsProvider = feishuIngress.botChatsProvider;'),
+  );
+  assert.ok(ingress.length > 0, 'API composition must start Feishu ingress');
+  assert.match(
+    ingress,
+    /\bwriteApproval:\s*\([\s\S]{0,180}writeApprovalDecision\(/,
+    'API composition must feed Feishu ingress the shared durable approval authority',
+  );
+  assert.match(
+    source,
+    /await import\([\s\S]{0,100}\.\/feishu\/api-owner-composition\.js/,
+    'Feishu owner stack must be loaded dynamically only by API-containing modes',
+  );
 });
 
 /**

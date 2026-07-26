@@ -385,6 +385,11 @@
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
+    "path": "src/client-auth/offboard-admission-ledger.ts",
+    "layer": "api",
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
+  },
+  {
     "path": "src/client-auth/offboard-cleanup-grant.ts",
     "layer": "api",
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
@@ -416,6 +421,11 @@
   },
   {
     "path": "src/comm/daily-usage.ts",
+    "layer": "automation",
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
+  },
+  {
+    "path": "src/comm/edge-resume-command-receiver.ts",
     "layer": "automation",
     "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
@@ -456,6 +466,11 @@
   },
   {
     "path": "src/comm/protocol.ts",
+    "layer": "automation",
+    "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
+  },
+  {
+    "path": "src/comm/publish-ui-update-command-receiver.ts",
     "layer": "automation",
     "note": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9"
   },
@@ -526,6 +541,11 @@
   },
   {
     "path": "src/comment-agent/facebook-group-store.ts",
+    "layer": "automation",
+    "note": "§4.7：命令式评论与加群调度（13/13 automation）"
+  },
+  {
+    "path": "src/comment-agent/facebook-scope-command-receiver.ts",
     "layer": "automation",
     "note": "§4.7：命令式评论与加群调度（13/13 automation）"
   },
@@ -790,6 +810,11 @@
     "note": "§4.7：进程内总线，不跨服务（2/2 automation）"
   },
   {
+    "path": "src/feishu/api-owner-composition.ts",
+    "layer": "api",
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
+  },
+  {
     "path": "src/feishu/bot-chat-events.ts",
     "layer": "api",
     "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
@@ -846,6 +871,11 @@
   },
   {
     "path": "src/feishu/messenger.ts",
+    "layer": "api",
+    "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
+  },
+  {
+    "path": "src/feishu/structured-notification-delivery.ts",
     "layer": "api",
     "note": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）"
   },
@@ -960,6 +990,11 @@
     "note": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段"
   },
   {
+    "path": "src/interactions/offboard-admission-reconciler.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】change split-cloud-api-composition-root-4a D9 新写：automation 编排本地完整 active offboard 快照、本地物化与 API admission ledger 三项窄端口；不持 pool/事务句柄，不吞 result_unknown，归 automation owner。请求回写 §4.7。"
+  },
+  {
     "path": "src/interactions/offboard-cleanup-grant-ops.ts",
     "layer": "automation",
     "note": "【待定稿裁决】change block3-l3-grant-collapse 新写：kernel 端口 OffboardCleanupGrantOperations 的 automation 属主实现（PgOffboardCleanupGrantOps），持组合根注入的 automation 池、**自己开事务**，只写 automation 属主表 interaction_offboards / interaction_offboard_audit（三条 SQL 从同目录 offboard-write-adapter.ts 逐字迁来并内化）。src/interactions/ 目录规则 layer=automation 但 newFile=adjudicate，故逐文件裁定：本文件与 offboard-write-adapter.ts 同域同段（§4.6.1 离场 saga 段），差别只在「自开事务」vs「接调用方句柄」，归 automation。请求回写 §4.7 见 docpatch RK-block3"
@@ -1053,6 +1088,11 @@
     "path": "src/kernel/alert-resolution-port.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P2-2 新写：告警「按 id 勾销」的**窄操作端口**（AlertResolutionPort.resolveById）。**有意不搬 AlertStore 整型**——它传递依赖 AlertSeverity（automation 的 alert-notification.ts），整体抬入会造 kernel->automation 反向边、AC-BOUND-03 当场判失败。面板此前写 Pick<AlertStore,'resolveById'> 才拉进整份告警合同；改指本端口后消 1 条 api->automation 入边。同进程期由 PgAlertStore 结构性满足，组合根 src/server.ts 注入点零改动；签名漂移会在组合根那处赋值当场编译不过。与 offboard-cleanup-grant-types / interaction-auth-gate-types 同族（跨域**操作**端口）。零 import，四条正则逐条实跑通过。请求回写 §4.7 见 docpatch RK-P2-2"
+  },
+  {
+    "path": "src/kernel/api-direct-port.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-api-composition-root-4a 新写：3b 后 automation/API/content 三向 20 组 55 method slots 的纯 DTO、窄 port、version/target/error/token 方向常量与 source-derived inventory。只 import kernel 与 DeploymentTarget 类型；零 SQL、零 HTTP、零 SDK、零 owner 实现与模块级活状态。AccountOwnership 端口明确排除无 automation 消费者的 claimExecutionTarget，通知只暴露结构化 deliver，persona generation 不暴露通用 LLM。满足 §4.7 kernel 准入。"
   },
   {
     "path": "src/kernel/billing-price-refresh-types.ts",
@@ -1470,6 +1510,11 @@
     "note": "§4.7：模型客户端（4/4 content）"
   },
   {
+    "path": "src/llm/persona-generator-command-receiver.ts",
+    "layer": "content",
+    "note": "§4.7：模型客户端（4/4 content）"
+  },
+  {
     "path": "src/llm/providers.ts",
     "layer": "content",
     "note": "§4.7：模型客户端（4/4 content）"
@@ -1778,6 +1823,11 @@
     "path": "src/publish-agent/publish-scheduler.ts",
     "layer": "automation",
     "note": "【待定稿裁决 · 用户 2026-07-26 拍板】原判 api（§4.6.3「台账与审批段 7 文件之一」）。改判 automation 的**唯一理由是一条结构约束，不是就近原则**：委托任务的执行器（server.ts:5894 的守卫）**同时**需要评论调度器与本调度器，前者是 automation 属主；两者一旦分处两进程，那条 if 恒不成立，表现为 /delegate 收得下、存得住、永远不执行（启动期只有一条 warn，之后每条任务静默堆积）。它读的三类数据本来就跨三个域（点赞记录 automation / 精选库与概念池 content / 发布台账 api），所以留在哪一侧都要跨——改判只是换跨的方向，却省掉了委托执行链的跨进程重构。**改判零代价的机械依据**：本文件的 import 全部指向 kernel（15-27 行逐条核过），依赖一律靠构造注入的接口，故换层不产生任何新的跨层边；入边只有组装根（composition→任意层恒允许）。同段其余 6 个文件（publish-log-store / publish-pipeline-log-store / client-publish-approval 等）**维持 api 不动**——它们是真的台账与审批。请求回写 §4.6.3 见 docpatch R-batch3-scheduler"
+  },
+  {
+    "path": "src/publish-agent/publish-ui-update-producer.ts",
+    "layer": "api",
+    "note": "change split-cloud-api-composition-root-4a: API owner reads the publish_log preview/state locally and emits only the typed one-way UI update command; no SQL or automation implementation is imported"
   },
   {
     "path": "src/publish-agent/reference-image-guidance.ts",
@@ -2275,6 +2325,31 @@
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
+    "path": "src/transport/api-account-authority-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/api-aux-authority-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/api-direct-http-common.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/api-direct-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/api-publish-interaction-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/transport/config-mirror-bump-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
@@ -2331,6 +2406,11 @@
   },
   {
     "path": "src/transport/outbox-notify-listener.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/paired-command-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },

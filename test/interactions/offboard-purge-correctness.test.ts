@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
-import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
+import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 
 const NOW = 1_784_044_900_000;
@@ -86,8 +86,11 @@ function fakePool(world: FakeWorld): Pool {
 }
 
 function makeStore(world: FakeWorld): InteractionStore {
+  const pool = fakePool(world);
   return new InteractionStore({
-    pool: fakePool(world), idGen: (prefix) => `${prefix}-test`, apiPurge: new InteractionApiWrites(),
+    pool,
+    idGen: (prefix) => `${prefix}-test`,
+    apiPurge: new PgInteractionApiWrites(pool),
   });
 }
 
@@ -183,17 +186,18 @@ test('双机竞争：另一台先翻了 purged 时不计数、不写审计、不
 test('崩溃重入：Step B 失败后绑定行仍在，重入重算出同一归属结论并清完剩余', async () => {
   const w = world();
   let replyCalls = 0;
-  const real = new InteractionApiWrites();
+  const pool = fakePool(w);
+  const real = new PgInteractionApiWrites(pool);
   const store = new InteractionStore({
-    pool: fakePool(w), idGen: (prefix) => `${prefix}-test`,
+    pool, idGen: (prefix) => `${prefix}-test`,
     apiPurge: {
-      purgeReplyConfigForAccount: async (client: Parameters<InteractionApiWrites['purgeReplyConfigForAccount']>[0], accountId: string) => {
+      purgeReplyConfigForAccount: async (accountId: string) => {
         replyCalls += 1;
         if (replyCalls === 1) throw new Error('simulated crash between steps');
-        return real.purgeReplyConfigForAccount(client, accountId);
+        return real.purgeReplyConfigForAccount(accountId);
       },
-      purgeExpiredAuditEvents: (client: Parameters<InteractionApiWrites['purgeExpiredAuditEvents']>[0], now: number) =>
-        real.purgeExpiredAuditEvents(client, now),
+      purgeExpiredAuditEvents: (now: number) =>
+        real.purgeExpiredAuditEvents(now),
     },
   });
   await assert.rejects(store.purgeDueOffboards(NOW), /simulated crash between steps/);

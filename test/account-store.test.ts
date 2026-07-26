@@ -74,6 +74,71 @@ test('setNickname: 拒空白 → no-op（绝不用空覆盖已有真名）', asy
   assert.equal(calls.length, 0);
 });
 
+function nicknameTransactionPool(
+  row: { nickname: string | null; label: string | null; operator_alias: string | null } | null,
+): { statements: Array<{ text: string; params: unknown[] }>; pool: pg.Pool } {
+  const statements: Array<{ text: string; params: unknown[] }> = [];
+  const client = {
+    query: async (text: string, params: unknown[] = []) => {
+      statements.push({ text, params });
+      if (/^SELECT nickname,label,operator_alias/.test(text)) {
+        return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+      }
+      if (/^UPDATE accounts SET nickname/.test(text)) {
+        return { rows: [{ nickname: params[1] }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release: () => undefined,
+  };
+  return {
+    statements,
+    pool: { connect: async () => client } as unknown as pg.Pool,
+  };
+}
+
+test('recordNickname: owner 事务内比较后 UPDATE-only，并回读真实昵称', async () => {
+  const { statements, pool } = nicknameTransactionPool({
+    nickname: '旧昵称',
+    label: '账号标签',
+    operator_alias: '运营别名',
+  });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  assert.deepEqual(await store.recordNickname('acc-1', '  新昵称  '), {
+    outcome: 'updated',
+    nickname: '新昵称',
+  });
+  assert.deepEqual(
+    statements.map((statement) => statement.text),
+    [
+      'BEGIN',
+      'SELECT nickname,label,operator_alias FROM accounts WHERE account_id=$1 FOR UPDATE',
+      'UPDATE accounts SET nickname=$2 WHERE account_id=$1 RETURNING nickname',
+      'COMMIT',
+    ],
+  );
+  assert.doesNotMatch(statements[2].text, /INSERT/);
+  assert.deepEqual(store.getDisplayName('acc-1'), { name: '运营别名', source: 'operator_alias' });
+});
+
+test('recordNickname: 同值不写、空白忽略、缺账号不造行', async () => {
+  const same = nicknameTransactionPool({ nickname: '同名', label: null, operator_alias: null });
+  const sameStore = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool: same.pool });
+  assert.deepEqual(await sameStore.recordNickname('acc-1', '同名'), {
+    outcome: 'unchanged',
+    nickname: '同名',
+  });
+  assert.ok(!same.statements.some((statement) => /^UPDATE accounts/.test(statement.text)));
+
+  assert.deepEqual(await sameStore.recordNickname('acc-1', '   '), { outcome: 'ignored_blank' });
+
+  const missing = nicknameTransactionPool(null);
+  const missingStore = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool: missing.pool });
+  assert.deepEqual(await missingStore.recordNickname('ghost', '昵称'), { outcome: 'account_not_found' });
+  assert.ok(!missing.statements.some((statement) => /^UPDATE accounts/.test(statement.text)));
+  assert.deepEqual(await missingStore.recordNickname('default', '昵称'), { outcome: 'account_not_found' });
+});
+
 test('setOperatorAlias: 非空 trim 后 UPDATE-only，写后统一目录立即返回人工来源', async () => {
   const { calls, pool } = fakePoolReturning([{
     operator_alias: '运营重点号', nickname: '平台真名', label: 'acc-1',

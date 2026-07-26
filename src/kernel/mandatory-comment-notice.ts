@@ -14,6 +14,8 @@ export interface MandatoryCommentOutcomeNoticeInput {
   reason?: string;
   accountId?: string;
   accountName?: string;
+  /** 命令来源会话；API owner 只用它做 origin-first 路由。 */
+  originChatId?: string;
   title?: string;
   authorName?: string;
 }

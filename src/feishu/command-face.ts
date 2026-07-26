@@ -26,13 +26,33 @@ import type { CommandActions } from './commands.js';
  */
 export interface PanelCommandActions {
   pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;
-  resume(accountId: string): Promise<{ accountId: string; status: 'active'; resumedEdges: number }>;
+  resume(accountId: string): Promise<AccountResumeResult>;
   dispatch(
     accountId: string,
     action: 'start' | 'stop',
   ): Promise<{ accountId: string; dispatch: 'started' | 'stopped'; changed: boolean; edgesOnline: number }>;
   dispatchActive(): boolean;
 }
+
+export type EdgeResumeOutcome =
+  | { state: 'applied'; resumedEdges: number }
+  | { state: 'failed' | 'unknown'; reason: string };
+
+export type AccountResumeResult =
+  | {
+      accountId: string;
+      status: 'active';
+      accountState: 'active';
+      edgeResume: 'applied';
+      resumedEdges: number;
+    }
+  | {
+      accountId: string;
+      status: 'active';
+      accountState: 'active';
+      edgeResume: 'failed' | 'unknown';
+      reason: string;
+    };
 
 /**
  * 账号级命令原子动作（窄端口，由组合根注入）。这是飞书 status/pause/resume 与面板 pause/resume 唯一
@@ -47,8 +67,8 @@ export interface AccountCommandPort {
   pause(accountId: string): Promise<void>;
   /** 恢复账号暂停态（不含解除 edge，见 resumeEdgesForAccount）。 */
   resume(accountId: string): Promise<void>;
-  /** 解除该账号名下被验证码暂停的 edge，返回真实恢复数（绝不乐观）。 */
-  resumeEdgesForAccount(accountId: string): number;
+  /** 解除该账号名下被验证码暂停的 edge；失败/未知不得伪造成恢复数 0。 */
+  resumeEdgesForAccount(accountId: string): EdgeResumeOutcome | Promise<EdgeResumeOutcome>;
 }
 
 export interface CommandFaceDeps {
@@ -129,8 +149,13 @@ export function createCommandFace(deps: CommandFaceDeps): CommandFace {
       const acct = await deps.account.requireCommandAccount(accountId);
       await deps.account.resume(acct);
       // 验证码人工恢复快路：解除该账号名下被暂停的 edge。
-      const resumedEdges = deps.account.resumeEdgesForAccount(acct);
-      log.log(`[feishu] 已恢复账号：${acct}（恢复 edge 数=${resumedEdges}）`);
+      const edge = await deps.account.resumeEdgesForAccount(acct);
+      if (edge.state !== 'applied') {
+        throw new Error(
+          `账号 ${acct} 已恢复为 active，但 Edge 恢复结果为 ${edge.state}：${edge.reason}`,
+        );
+      }
+      log.log(`[feishu] 已恢复账号：${acct}（恢复 edge 数=${edge.resumedEdges}）`);
     },
     bindChat: deps.bindChat,
     delegate: deps.delegate,
@@ -145,8 +170,22 @@ export function createCommandFace(deps: CommandFaceDeps): CommandFace {
     },
     resume: async (accountId) => {
       await deps.account.resume(accountId);
-      const resumedEdges = deps.account.resumeEdgesForAccount(accountId);
-      return { accountId, status: 'active' as const, resumedEdges };
+      const edge = await deps.account.resumeEdgesForAccount(accountId);
+      return edge.state === 'applied'
+        ? {
+            accountId,
+            status: 'active' as const,
+            accountState: 'active' as const,
+            edgeResume: 'applied' as const,
+            resumedEdges: edge.resumedEdges,
+          }
+        : {
+            accountId,
+            status: 'active' as const,
+            accountState: 'active' as const,
+            edgeResume: edge.state,
+            reason: edge.reason,
+          };
     },
     dispatch: deps.dispatch,
     dispatchActive: deps.dispatchActive,

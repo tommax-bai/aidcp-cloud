@@ -14,7 +14,6 @@
  */
 
 import { readFile, writeFile, unlink } from 'node:fs/promises';
-import * as lark from '@larksuiteoapi/node-sdk';
 import {
   QwenClient,
   type ChatLlmClient,
@@ -36,7 +35,6 @@ import { SimplePlanner } from './planner/index.js';
 // automation 归属 store 仍取自 automation 桶；content / api 归属 store 按其真实归属直连具体文件
 // （composition→任意层恒允许，不新增跨边界豁免；随 cache/index 按层拆桶同步调整，见该文件说明）。
 import { PgAnchorCache, GroupRouteStore, LikedNoteStore, ValuableCommentStore, InteractionFeedStore, topicKeysFromTitle } from './cache/index.js';
-import { BotChatStore } from './cache/bot-chat-store.js';
 import { ConceptStore } from './cache/concept-store.js';
 import { NotificationContactStore } from './cache/notification-contact-store.js';
 import { CuratedContentStore, CuratedContentUnavailableError } from './cache/curated-content-store.js';
@@ -77,6 +75,7 @@ import {
 } from './risk/index.js';
 import { EventBus } from './event-bus/index.js';
 import type { NoteDetailData } from './kernel/note-detail.js';
+import type { PersonaGeneratorPort } from './kernel/persona-ports.js';
 import { RoleDispatcher } from './orchestrator/index.js';
 import type {
   RoleFactoryRegistry,
@@ -128,13 +127,11 @@ import type { BaseRole } from './agents/base-role.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from './agents/comment-search-term-generator.js';
 import { PersonaGenerator } from './agents/persona-generator.js';
 import { PersonaAutoFillService } from './agents/persona-auto-fill.js';
+import { PersonaGeneratorCommandReceiver } from './llm/persona-generator-command-receiver.js';
+import { EdgeResumeCommandReceiver } from './comm/edge-resume-command-receiver.js';
+import { PublishUiUpdateCommandReceiver } from './comm/publish-ui-update-command-receiver.js';
+import { FacebookScopeCommandReceiver } from './comment-agent/facebook-scope-command-receiver.js';
 import { CommentTargetPicker } from './agents/comment-target-picker.js';
-import { buildCommentApprovalCard } from './feishu/comment-approval-card.js';
-import { buildAlertCard, buildCommandResultCard, buildPublishApprovalCard } from './feishu/cards.js';
-import {
-  buildMandatoryCommentOutcomeCard,
-  buildMandatoryCommentPreAuthorizationCard,
-} from './feishu/mandatory-comment-cards.js';
 import type { MandatoryCommentOutcomeNoticeInput } from './orchestrator/role-dispatcher.js';
 import { CommentScheduler } from './comment-agent/comment-scheduler.js';
 import { buildFacebookCommentComposerPrompt } from './comment-agent/facebook-comment-composer-prompt.js';
@@ -148,27 +145,14 @@ import {
 } from './soul/index.js';
 
 
-import {
-  CommandRouter,
-  FeishuBotChatEventHandler,
-  FeishuMessenger,
-  FeishuWsReceiver,
-  buildFeishuEventDispatcher,
-  createBotChatsProvider,
-  isFeishuWsEnabled,
-  resolveDefaultChatId,
-  resolveChatIdForAccount,
-  resolveCardTarget,
-  writeApprovalSignal,
-  matchAccountByNickname,
-  createCommandFace,
-  type PublishApprovalPayload,
-  type PublishApprovalPreflightResult,
-} from './feishu/index.js';
+import type { PublishApprovalPayload } from './kernel/feishu-card-contract.js';
+import type { CommandFace, CommandFaceDeps } from './feishu/command-face.js';
+import type { ApiFeishuOwner } from './feishu/api-owner-composition.js';
 import { CommandSequencer } from './publish-agent/command-sequencer.js';
 import { ScheduledPublishReconciler } from './publish-agent/scheduled-publish-reconciler.js';
 import { createPublishDraftImageRemoveHandler } from './publish-agent/draft-image-remove.js';
 import { createClientPublishApprovalHandler } from './publish-agent/client-publish-approval.js';
+import { createPublishUiUpdateProducer } from './publish-agent/publish-ui-update-producer.js';
 import {
   PublishApprovalStore,
   ApprovalUnreadableError,
@@ -248,7 +232,6 @@ import {
 } from './publish-agent/image-providers.js';
 import { AccountStateManager } from './account-state.js';
 import { PgAccountStore, type AccountStore } from './account-store.js';
-import { resolveNotificationAccountName } from './account-display-name.js';
 // change textcard-cover-form：封面形态感知（vision 客户端 + 感知服务）与文字卡渲染出口。
 import { OpenAiCompatVisionClient, type VisionCallInfo } from './llm/vision.js';
 import {
@@ -336,11 +319,6 @@ import {
   platformRegistryEntry,
   SCHEDULED_AUTOMATION_CATALOG_READER,
 } from './platform/index.js';
-import {
-  buildDelegatedTaskConfirmationCard,
-  buildDelegatedTaskProgressCard,
-  handleDelegatedTaskCardAction,
-} from './feishu/delegated-task-card.js';
 import { TokenRevocationStore } from './panel/revocation.js';
 import {
   ClientUserStore,
@@ -348,6 +326,8 @@ import {
   LoginRateLimiter,
   projectClientPublishQueue,
 } from './client-auth/index.js';
+import { createEnvironmentHandshakeAuthority } from './client-auth/client-user-store.js';
+import { PgOffboardAdmissionLedger } from './client-auth/offboard-admission-ledger.js';
 // Block② 数据网关（决定①：api/panel 收口取数）。默认 local ⇒ getter 取到的就是原本地实例、零 HTTP、零行为变更。
 // 组合根（本文件属 composition 层）可合法 import transport 的 http 客户端，仅在 mode='http'（拆进程 2d）时经 remote thunk 构造。
 import { DataGateway, gatewayModeFromEnv } from './gateway/data-gateway.js';
@@ -357,12 +337,77 @@ import {
   segmentsForMode,
   listenersForMode,
   ownsPublishApprovalAuthorityForMode,
+  ownsApiFeishuForMode,
   panelEventTransportForMode,
   outboxRetentionForMode,
   DEFAULT_CONTENT_READ_API_PORT,
   type ServiceMode,
 } from './gateway/service-mode.js';
 import { InternalHttpClient, InternalHttpServer, INTERNAL_HTTP_TIMEOUT_CEILING_MS } from './transport/internal-http.js';
+import type {
+  AccountOwnershipAuthorityPort,
+  AccountPersonaAuthorityPort,
+  AccountRosterAuthorityPort,
+  AccountRuntimeAuthorityPort,
+  AutomationConfigCommandsPort,
+  AutomationPublishLogPort,
+  CommentApprovalPolicyPort,
+  EdgePublishCommandPort,
+  EdgeResumeCommandPort,
+  EnvironmentHandshakePort,
+  FacebookScopeCommandPort,
+  FirstPostProgressPort,
+  InteractionApiWritesPort,
+  InteractionAuthAuthorityPort,
+  NotificationContactsPort,
+  OffboardAdmissionLedgerPort,
+  PersonaGeneratorAuthorityPort,
+  PublishUiUpdateCommandPort,
+  ReplyConfigResolverPort,
+  StructuredNotificationDeliveryPort,
+} from './kernel/api-direct-port.js';
+import {
+  AccountOwnershipHttpClient,
+  AccountPersonaHttpClient,
+  AccountRosterHttpClient,
+  AccountRuntimeHttpClient,
+  AutomationConfigCommandsHttpClient,
+  AutomationPublishLogHttpClient,
+  CommentApprovalPolicyHttpClient,
+  EdgePublishCommandHttpClient,
+  EdgeResumeCommandHttpClient,
+  EnvironmentHandshakeHttpClient,
+  FacebookScopeCommandHttpClient,
+  FirstPostProgressHttpClient,
+  InteractionApiWritesHttpClient,
+  InteractionAuthHttpClient,
+  NotificationContactsHttpClient,
+  OffboardAdmissionLedgerHttpClient,
+  PersonaGeneratorCommandHttpClient,
+  PublishUiUpdateCommandHttpClient,
+  ReplyConfigResolverHttpClient,
+  StructuredNotificationHttpClient,
+  registerAccountOwnershipRoutes,
+  registerAccountPersonaRoutes,
+  registerAccountRosterRoutes,
+  registerAccountRuntimeRoutes,
+  registerAutomationConfigCommandsRoutes,
+  registerAutomationPublishLogRoutes,
+  registerCommentApprovalPolicyRoutes,
+  registerEdgePublishCommandRoutes,
+  registerEdgeResumeCommandRoutes,
+  registerEnvironmentHandshakeRoutes,
+  registerFacebookScopeCommandRoutes,
+  registerFirstPostProgressRoutes,
+  registerInteractionApiWritesRoutes,
+  registerInteractionAuthRoutes,
+  registerNotificationContactsRoutes,
+  registerOffboardAdmissionLedgerRoutes,
+  registerPersonaGeneratorCommandRoutes,
+  registerPublishUiUpdateCommandRoutes,
+  registerReplyConfigResolverRoutes,
+  registerStructuredNotificationRoutes,
+} from './transport/api-direct-http.js';
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
 import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
@@ -413,7 +458,10 @@ import {
   registerPanelConfigRoutes,
 } from './transport/panel-config-http.js';
 import type { FacebookGroupOpsPort } from './kernel/facebook-group-ops-types.js';
-import { registerFacebookGroupOpsRoutes } from './transport/facebook-group-ops-http.js';
+import {
+  FacebookGroupOpsHttpClient,
+  registerFacebookGroupOpsRoutes,
+} from './transport/facebook-group-ops-http.js';
 import {
   GroupRouteHttpClient,
   registerGroupRouteRoutes,
@@ -565,17 +613,90 @@ import { ReplyAiService } from './interactions/reply-ai.js';
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
 // change offboard-saga → Block③ L3：离场**执行台账**的属主侧操作，由组合根注入（拆进程时换成内部 HTTP）。
 import { PgOffboardMaterializationOps } from './interactions/offboard-write-adapter.js';
+import { AutomationOffboardAdmissionReconciler } from './interactions/offboard-admission-reconciler.js';
 import type { OffboardMaterializationOperations } from './kernel/offboard-materialization-types.js';
 // Block③ L3：离场写适配器的**读侧配对**——api 的客户环境生命周期经 kernel 端口向 automation 取只读投影。
 import { PgClientEnvAutomationRead } from './interactions/client-env-automation-read.js';
 import { PgOffboardCleanupGrantOps } from './interactions/offboard-cleanup-grant-ops.js';
 import type { OffboardCleanupGrantOperations } from './kernel/offboard-cleanup-grant-types.js';
 import type { ClientEnvAutomationReader } from './kernel/client-env-automation-types.js';
-import { InteractionApiWrites } from './interactions/interaction-api-writes.js';
+import { PgInteractionApiWrites } from './interactions/interaction-api-writes.js';
+import { createAutomationConfigCommands } from './config/content-schedule-store.js';
 
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
   return value && value.trim() ? value : undefined;
+}
+
+type PublishApprovalPreflightResult =
+  | { ok: true; accountId?: string; edgeId?: string }
+  | {
+      ok: false;
+      reason: 'account_offline' | 'publish_target_unavailable';
+      accountId?: string;
+    };
+
+function matchAccountNickname(
+  nickname: string,
+  candidates: Array<{
+    accountId: string;
+    displayName?: string | null;
+    names?: string[];
+  }>,
+):
+  | { ok: true; accountId: string }
+  | {
+      ok: false;
+      reason: 'not_found' | 'ambiguous';
+      available: string[];
+    } {
+  const normalized = nickname.trim().toLowerCase();
+  const available = candidates.map(
+    (candidate) => candidate.displayName?.trim() || '（未获取昵称）',
+  );
+  const matches = candidates.filter((candidate) =>
+    (candidate.names?.length
+      ? candidate.names
+      : [candidate.displayName ?? '']
+    ).some((name) => name.trim().toLowerCase() === normalized),
+  );
+  if (matches.length === 1) {
+    return { ok: true, accountId: matches[0].accountId };
+  }
+  return {
+    ok: false,
+    reason: matches.length === 0 ? 'not_found' : 'ambiguous',
+    available:
+      matches.length === 0
+        ? available
+        : matches.map(
+            (candidate) =>
+              candidate.displayName?.trim() || '（未获取昵称）',
+          ),
+  };
+}
+
+async function writeLegacyApprovalShadow(
+  requestId: string,
+  approved: boolean,
+  payload: PublishApprovalPayload,
+  timestamp: number,
+): Promise<void> {
+  const path = `/tmp/aidcp-publish-approve-${requestId}.json`;
+  try {
+    await writeFile(
+      path,
+      JSON.stringify({
+        requestId,
+        approved,
+        ts: timestamp,
+        payload,
+      }),
+      { flag: 'wx' },
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
 }
 
 function requirePublishApprovalInternalToken(): string {
@@ -586,6 +707,37 @@ function requirePublishApprovalInternalToken(): string {
     );
   }
   return token;
+}
+
+function requireDirectInternalToken(
+  envName:
+    | 'AIDCP_API_INTERNAL_TOKEN'
+    | 'AIDCP_AUTOMATION_INTERNAL_TOKEN'
+    | 'AIDCP_CONTENT_INTERNAL_TOKEN',
+): string {
+  const token = readEnvString(envName);
+  if (!token || /\s/.test(token)) {
+    throw new Error(`${envName} is required and must not contain whitespace`);
+  }
+  return token;
+}
+
+function personaGeneratorFromCommand(
+  command: PersonaGeneratorAuthorityPort,
+): PersonaGeneratorPort {
+  return {
+    async generate(input) {
+      const idempotencyKey = input.diversitySeed?.trim();
+      if (!idempotencyKey) {
+        throw new Error('persona_generation_idempotency_key_missing');
+      }
+      const receipt = await command.generate({ ...input, idempotencyKey });
+      if (receipt.outcome === 'collision') {
+        throw new Error('persona_generation_idempotency_collision');
+      }
+      return receipt.result;
+    },
+  };
 }
 
 function readEnvPort(name: string): number | undefined {
@@ -737,6 +889,24 @@ function parseForbiddenPorts(raw: string | undefined): number[] {
     .filter((n) => Number.isInteger(n) && n > 0);
 }
 
+interface ApiDirectAuthorities {
+  accountRoster?: AccountRosterAuthorityPort;
+  accountOwnership?: AccountOwnershipAuthorityPort;
+  accountRuntime?: AccountRuntimeAuthorityPort;
+  publishLog?: AutomationPublishLogPort;
+  edgePublish?: EdgePublishCommandPort;
+  interactionAuth?: InteractionAuthAuthorityPort;
+  interactionApiWrites?: InteractionApiWritesPort;
+  replyConfig?: ReplyConfigResolverPort;
+  accountPersona?: AccountPersonaAuthorityPort;
+  environmentHandshake?: EnvironmentHandshakePort;
+  commentApprovalPolicy?: CommentApprovalPolicyPort;
+  notificationContacts?: NotificationContactsPort;
+  firstPostProgress?: FirstPostProgressPort;
+  automationConfigCommands?: AutomationConfigCommandsPort;
+  offboardAdmissionLedger?: OffboardAdmissionLedgerPort;
+  notificationDelivery?: StructuredNotificationDeliveryPort;
+}
 
 interface CompositionContext {
   // late-bound real-ring ports & forward-declared handles (assigned in a later segment than a referencing closure)
@@ -747,23 +917,44 @@ interface CompositionContext {
   edgeServer?: EdgeCloudServer;
   runtimes?: ConnectionRuntimeRegistry;
   // single-assignment cross-segment handles
+  apiDirectAuthorities?: ApiDirectAuthorities;
+  apiFeishuOwner?: ApiFeishuOwner;
+  automationDispatchCommands?: Pick<
+    CommandFaceDeps,
+    'dispatch' | 'dispatchActive'
+  >;
+  automationEdgeResumeAuthority?: EdgeResumeCommandPort;
+  automationFacebookScopeAuthority?: FacebookScopeCommandPort;
+  automationPublishUiUpdateAuthority?: PublishUiUpdateCommandPort;
+  contentPersonaGeneratorAuthority?: PersonaGeneratorAuthorityPort;
+  publishUiUpdateCommand?: PublishUiUpdateCommandPort;
+  pushApiOwnedPublishPreview?: (recordId: number) => Promise<void>;
+  pushApiOwnedPublishState?: (
+    accountId: string,
+    recordId: number,
+    state: 'pending' | 'approved' | 'submitted' | 'rejected' | 'failed',
+    factVersion: number,
+    title?: string | null,
+  ) => Promise<void>;
   accountDisplayName: (accountId: string) => string | undefined;
   accountDisplayNameCandidates: (accountId: string) => string[];
   accountPersonaService?: AccountPersonaService;
+  accountProjectionStore?: PgAccountProjectionStore;
   accountState: AccountStateManager;
   accountStore: AccountStore | undefined;
   alertStore?: PgAlertStore | undefined;
   anyImageKeyPresent: boolean;
   approvalPolicyStore: ApprovalPolicyStore | undefined;
   approvePublishForClient?: ReturnType<typeof createClientPublishApprovalHandler>;
-  botChatsProvider?: ReturnType<typeof createBotChatsProvider>;
-  botChatStore: BotChatStore;
+  botChatsProvider?: Awaited<
+    ReturnType<ApiFeishuOwner['startIngress']>
+  >['botChatsProvider'];
   buildTodayUsageForAccount?: (accountId: string, edgeId?: string) => Promise<UiDailyUsagePayload>;
   cache: PgAnchorCache;
   captchaAssist?: CaptchaAssistService;
   categoryConfigStore: CategoryConfigStore;
   clientUserStore: ClientUserStore;
-  commandFace?: ReturnType<typeof createCommandFace>;
+  commandFace?: CommandFace;
   commentScheduler?: CommentScheduler | undefined;
   conceptStore: ConceptStore | undefined;
   configMirrorPool: pg.Pool;
@@ -808,7 +999,6 @@ interface CompositionContext {
   listAccountAutomationCatalog?: () => Promise<ContentScheduleCatalogRow[]>;
   llm: QwenClient;
   manualCommentAccounts: Set<string>;
-  messenger: FeishuMessenger;
   mirrorVersionStore: MirrorVersionStore;
   modelConfigStore: ModelConfigStore;
   notificationContactStore: NotificationContactStore | undefined;
@@ -887,8 +1077,6 @@ interface CompositionContext {
   readLiveContentVersion?: (recordId: number) => Promise<number | null>;
   readPublishApproval?: (requestId: string) => Promise<{ approved: boolean; contentVersion: number; revision: number; } | null>;
   refreshPublishPreview?: (recordId: number) => void;
-  resolveAccountChatId: (accountId: string | undefined) => Promise<string>;
-  resolveCardChatId: (originChatId: string | undefined | null, accountId: string | undefined) => Promise<string>;
   /**
    * 候审卡投递判定（change cloud-batch2-content-main）：基础段构造（判定要的两张表都是 api 属主），
    * 内容段只调。拆进程后 content 侧换成 `ReviewCardDeliveryHttpClient`，调用点一行不改。
@@ -958,6 +1146,65 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   const sink = ctx.configMirrorBumpSink;
   const port = readEnvPort('AIDCP_API_PORT') ?? DEFAULT_API_INTERNAL_API_PORT;
   const httpServer = new InternalHttpServer();
+  if (!ctx.deploymentTarget) {
+    throw new Error('AIDCP_DEPLOY_ENV is required for API direct-authority routes');
+  }
+  const directToken = requireDirectInternalToken('AIDCP_API_INTERNAL_TOKEN');
+  const direct = ctx.apiDirectAuthorities ?? {};
+  const registerDirect = (
+    name: keyof ApiDirectAuthorities,
+    register: () => void,
+  ): void => {
+    if (direct[name]) register();
+    else console.warn(`[aidcp-cloud] api 内部 API：4a ${name} route 未注册（owner capability 不可用）`);
+  };
+  registerDirect('accountRoster', () =>
+    registerAccountRosterRoutes(httpServer, direct.accountRoster!, directToken, ctx.deploymentTarget!));
+  registerDirect('accountOwnership', () =>
+    registerAccountOwnershipRoutes(httpServer, direct.accountOwnership!, directToken, ctx.deploymentTarget!));
+  registerDirect('accountRuntime', () =>
+    registerAccountRuntimeRoutes(httpServer, direct.accountRuntime!, directToken, ctx.deploymentTarget!));
+  registerDirect('publishLog', () =>
+    registerAutomationPublishLogRoutes(httpServer, direct.publishLog!, directToken, ctx.deploymentTarget!));
+  registerDirect('edgePublish', () =>
+    registerEdgePublishCommandRoutes(httpServer, direct.edgePublish!, directToken, ctx.deploymentTarget!));
+  registerDirect('interactionAuth', () =>
+    registerInteractionAuthRoutes(httpServer, direct.interactionAuth!, directToken, ctx.deploymentTarget!));
+  registerDirect('interactionApiWrites', () =>
+    registerInteractionApiWritesRoutes(httpServer, direct.interactionApiWrites!, directToken, ctx.deploymentTarget!));
+  registerDirect('replyConfig', () =>
+    registerReplyConfigResolverRoutes(httpServer, direct.replyConfig!, directToken, ctx.deploymentTarget!));
+  registerDirect('accountPersona', () =>
+    registerAccountPersonaRoutes(httpServer, direct.accountPersona!, directToken, ctx.deploymentTarget!));
+  registerDirect('environmentHandshake', () =>
+    registerEnvironmentHandshakeRoutes(httpServer, direct.environmentHandshake!, directToken, ctx.deploymentTarget!));
+  registerDirect('commentApprovalPolicy', () =>
+    registerCommentApprovalPolicyRoutes(httpServer, direct.commentApprovalPolicy!, directToken, ctx.deploymentTarget!));
+  registerDirect('notificationContacts', () =>
+    registerNotificationContactsRoutes(httpServer, direct.notificationContacts!, directToken, ctx.deploymentTarget!));
+  registerDirect('firstPostProgress', () =>
+    registerFirstPostProgressRoutes(httpServer, direct.firstPostProgress!, directToken, ctx.deploymentTarget!));
+  registerDirect('automationConfigCommands', () =>
+    registerAutomationConfigCommandsRoutes(
+      httpServer,
+      direct.automationConfigCommands!,
+      directToken,
+      ctx.deploymentTarget!,
+    ));
+  registerDirect('offboardAdmissionLedger', () =>
+    registerOffboardAdmissionLedgerRoutes(
+      httpServer,
+      direct.offboardAdmissionLedger!,
+      directToken,
+      ctx.deploymentTarget!,
+    ));
+  registerDirect('notificationDelivery', () =>
+    registerStructuredNotificationRoutes(
+      httpServer,
+      direct.notificationDelivery!,
+      directToken,
+      ctx.deploymentTarget!,
+    ));
   if (sink) registerConfigMirrorBumpRoutes(httpServer, sink);
   else console.warn('[aidcp-cloud] api 内部 API：配置镜像失效信号路由未注册（segA 未构造）');
   if (ctx.panelEventFanout && ctx.deploymentTarget) {
@@ -1035,6 +1282,40 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
 async function startAutomationInternalApi(ctx: CompositionContext): Promise<void> {
   const port = readEnvPort('AIDCP_AUTOMATION_PORT') ?? DEFAULT_AUTOMATION_INTERNAL_API_PORT;
   const httpServer = new InternalHttpServer();
+  if (!ctx.deploymentTarget) {
+    throw new Error('AIDCP_DEPLOY_ENV is required for automation command routes');
+  }
+  const directToken = requireDirectInternalToken('AIDCP_AUTOMATION_INTERNAL_TOKEN');
+  if (ctx.automationEdgeResumeAuthority) {
+    registerEdgeResumeCommandRoutes(
+      httpServer,
+      ctx.automationEdgeResumeAuthority,
+      directToken,
+      ctx.deploymentTarget,
+    );
+  } else {
+    console.warn('[aidcp-cloud] automation 内部 API：Edge resume route 未注册（本地 Edge server 不可用）');
+  }
+  if (ctx.automationFacebookScopeAuthority) {
+    registerFacebookScopeCommandRoutes(
+      httpServer,
+      ctx.automationFacebookScopeAuthority,
+      directToken,
+      ctx.deploymentTarget,
+    );
+  } else {
+    console.warn('[aidcp-cloud] automation 内部 API：Facebook scope routes 未注册（owner capability 不可用）');
+  }
+  if (ctx.automationPublishUiUpdateAuthority) {
+    registerPublishUiUpdateCommandRoutes(
+      httpServer,
+      ctx.automationPublishUiUpdateAuthority,
+      directToken,
+      ctx.deploymentTarget,
+    );
+  } else {
+    console.warn('[aidcp-cloud] automation 内部 API：Publish UI update route 未注册（UI snapshot 不可用）');
+  }
   const registry = ctx.riskRegistry;
   if (registry) {
     const local: RiskReadPort = {
@@ -1110,19 +1391,36 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
  * content 进程独占的内部 HTTP 读 API：把 segB 构造的本地 CuratedContentStore 的只读方法
  * 暴露为内部 HTTP route，供 core 进程经数据网关（gateway=http）远程取数。
  * 仅 content 模式调用；monolith 永不起（进程内本地实例直连）。
- * store 缺失（CuratedContentStore 初始化失败）时**不静默假成功**：如实告警、不注册路由。
+ * 每项 capability 独立注册；CuratedContentStore 缺失时只关闭精选库路由，
+ * 不得连带关闭 persona command 或 publish status/generation。
  */
 async function startContentReadApi(ctx: CompositionContext): Promise<void> {
   const store = ctx.curatedContentStore;
-  if (!store) {
-    console.warn(
-      '[aidcp-cloud] content 模式内部读 API 未起：CuratedContentStore 不可用（精选库初始化失败）',
-    );
-    return;
-  }
   const port = readEnvPort('AIDCP_CONTENT_PORT') ?? DEFAULT_CONTENT_READ_API_PORT;
   const httpServer = new InternalHttpServer();
-  registerCuratedContentRoutes(httpServer, store);
+  const capabilities: string[] = [];
+  if (ctx.contentPersonaGeneratorAuthority) {
+    if (!ctx.deploymentTarget) {
+      throw new Error('AIDCP_DEPLOY_ENV is required for content command routes');
+    }
+    registerPersonaGeneratorCommandRoutes(
+      httpServer,
+      ctx.contentPersonaGeneratorAuthority,
+      requireDirectInternalToken('AIDCP_CONTENT_INTERNAL_TOKEN'),
+      ctx.deploymentTarget,
+    );
+    capabilities.push('persona-generator');
+  } else {
+    console.warn('[aidcp-cloud] content 内部 API：PersonaGenerator route 未注册（owner capability 不可用）');
+  }
+  if (store) {
+    registerCuratedContentRoutes(httpServer, store);
+    capabilities.push('curated-content');
+  } else {
+    console.warn(
+      '[aidcp-cloud] content 内部 API：curated-content 路由未注册（CuratedContentStore 不可用）',
+    );
+  }
   // Block② 2e：把发布队列状态读 + 发布生成触发 additive 暴露到 content 侧内部读 API。
   // 生成 / 状态两条路由都由 content 自己的 publishOrchestrator 承载；缺则 warn 不注册（绝不静默假成功）。
   const contentPublishOrchestrator = ctx.publishOrchestrator;
@@ -1131,13 +1429,17 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
       getStatus: () => Promise.resolve(contentPublishOrchestrator.getStatus()),
     });
     registerPublishGenerationRoutes(httpServer, contentPublishOrchestrator);
+    capabilities.push('publish-status', 'publish-generation');
   } else {
     console.warn(
       '[aidcp-cloud] content 内部读 API：publish-status / publish-generation 路由未注册（PublishOrchestrator 不可用）',
     );
   }
   const actual = await httpServer.listen(port);
-  console.log(`[aidcp-cloud] content 内部读 API 已监听 127.0.0.1:${actual}（curated-content 读端点）`);
+  console.log(
+    `[aidcp-cloud] content 内部 API 已监听 127.0.0.1:${actual}` +
+      `（${capabilities.length > 0 ? capabilities.join(' + ') : 'no capabilities'}）`,
+  );
 }
 
 /**
@@ -1193,6 +1495,7 @@ async function wireOutboxNotifyWakeups(
 async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   const port = Number(process.env.AIDCP_PORT ?? 8787);
   const deploymentTarget = parseDeploymentTarget(readEnvString('AIDCP_DEPLOY_ENV'));
+  const serviceMode = serviceModeFromEnv();
 
   // schema 契约门（change cloud-schema-migration-executor 任务 6.3）：读迁移账本最高版本，与本构建
   // 声明的所需 / 已知版本按复合序比较。库比代码新（回滚场景）时旧代码会静默重建空表并开始写入 ——
@@ -1376,9 +1679,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // Facebook group join: operator target catalog, one-group-one-account assignment ledger,
   // and best-effort join audit. Join loop is default-off and shadow-first.
   const facebookGroupTargetStore = new FacebookGroupTargetStore({
-    // 唯一一处「运营会被当场挡住」的写路径（配 scope 前校验分组标签存在）在判否之前强制刷一次投影，
-    // 把常规滞后压到 0；刷不动照旧判否（fail-closed）。投影没起来则退化为按当前投影判定。
-    refreshAccountProjection: () => accountProjectionStore?.refresh() ?? Promise.resolve(),
     pool: automationPool,
     host: readEnvString('PGHOST'),
     port: readEnvPort('PGPORT'),
@@ -1443,7 +1743,15 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
             Promise.reject(new Error('offboard_materialization_unavailable_in_api_mode')),
         }
       : new PgOffboardMaterializationOps({ pool: automationPool });
-  const clientUserStore = new ClientUserStore({ pool: apiPool, schemaEnsurer: ensureCapabilitySchema, mirrorVersionBumper: mirrorVersionStore, offboardMaterialization, automationReads: clientEnvAutomationRead, cleanupGrantOps: offboardCleanupGrantOps });
+  const clientUserStore = new ClientUserStore({
+    pool: apiPool,
+    schemaEnsurer: ensureCapabilitySchema,
+    mirrorVersionBumper: mirrorVersionStore,
+    offboardMaterialization,
+    automationReads: clientEnvAutomationRead,
+    cleanupGrantOps: offboardCleanupGrantOps,
+    ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
+  });
   try {
     await mirrorVersionStore.init();
     await modelConfigStore.init();
@@ -1675,8 +1983,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     password: readEnvString('PGPASSWORD'),
   });
 
-  const botChatStore = new BotChatStore({ pool: apiPool });
-
   // 探测 schema（不再建表，change cloud-schema-migration-executor 第 5 节）；
   // PG 不可用时打印告警但不阻塞启动协议处理。缺对象与连不上库分别报出，MUST NOT 混成一句通用 warn。
   try {
@@ -1790,7 +2096,12 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
         legacySignal: {
           enabled: legacyApprovalSignalEnabled,
           write: async (requestId, approved, payload, ts) => {
-            await writeApprovalSignal({ writeFile, readFile }, requestId, approved, payload, ts);
+            await writeLegacyApprovalShadow(
+              requestId,
+              approved,
+              payload,
+              ts,
+            );
           },
         },
       })
@@ -1886,13 +2197,15 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 团队 → 群路由（change feishu-per-team-notification-routing，schema 自建于 init）：出站按账号 group_label 路由到对应群。
   // init 失败留 undefined（路由退化 → 一律落默认群，绝不崩、绝不静默丢）。空表 = 今天行为逐字一致。
   let groupRouteStore: GroupRouteStore | undefined;
-  try {
-    const grs = new GroupRouteStore({ pool: automationPool });
-    await grs.init();
-    groupRouteStore = grs;
-    console.log('[aidcp-cloud] GroupRouteStore 已就绪（group_route 表；账号→团队群路由）');
-  } catch (err) {
-    console.warn('[aidcp-cloud] GroupRouteStore 初始化失败，团队路由退化（一律落默认群）:', (err as Error).message);
+  if (serviceMode !== 'api' && serviceMode !== 'content') {
+    try {
+      const grs = new GroupRouteStore({ pool: automationPool });
+      await grs.init();
+      groupRouteStore = grs;
+      console.log('[aidcp-cloud] GroupRouteStore 已就绪（group_route 表；账号→团队群路由）');
+    } catch (err) {
+      console.warn('[aidcp-cloud] GroupRouteStore 初始化失败，团队路由退化（一律落默认群）:', (err as Error).message);
+    }
   }
 
 
@@ -1984,13 +2297,26 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     // accounts 属 api 单写。automation 侧原本有 10 处内联 accounts 的守卫读（三处夹在写路径 / 写事务内），
     // 现已全部改读本域投影表 ⇒ 守卫回到同库、留在单条语句内，跨库读与跨库事务在这批点位上消失。
     // 花名册来源经 kernel 端口取，**绝不**把 api 的连接池递给 automation 侧消费方：
-    //   - monolith / core / automation / content：本进程内 api 账号存储直读，逐字节等价、零 HTTP；
+    //   - monolith / core / content：本进程内 api 账号存储直读，逐字节等价、零 HTTP；
+    //   - automation：从 API owner 的全量 roster route 拉取，绝不使用本进程误建的 api store；
     //   - api：本进程不该驱动 automation 的守卫，投影也不属它 ⇒ fail-closed（reject 具名错误），
     //     镜像 clientEnvAutomationRead / offboardCleanupGrantOps 的既有范式。
-    // 拆进程后 automation 侧要改走内部 HTTP 取花名册：端口形状（只读、无参、返全量）就是为那一步留的，
-    // 但 api 侧今天还没有内部只读 API（只有 automation 起了一个），故该客户端留到 Block② 补。
+    const rosterMode = serviceModeFromEnv();
     const accountRosterSource: AccountRosterSourcePort =
-      serviceModeFromEnv() === 'api'
+      rosterMode === 'automation'
+        ? (() => {
+            const apiUrl = readEnvString('AIDCP_API_URL');
+            if (!apiUrl) throw new Error('AIDCP_API_URL is required in automation mode');
+            if (!deploymentTarget) {
+              throw new Error('AIDCP_DEPLOY_ENV is required in automation mode');
+            }
+            return new AccountRosterHttpClient(
+              new InternalHttpClient(apiUrl),
+              requireDirectInternalToken('AIDCP_API_INTERNAL_TOKEN'),
+              deploymentTarget,
+            );
+          })()
+        : rosterMode === 'api'
         ? {
             listAccountIdentities: () =>
               Promise.reject(new Error('account_roster_source_unavailable_in_api_mode')),
@@ -2215,34 +2541,36 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     );
   }
 
-  // 账号作用域出站的**唯一**群解析入口（change feishu-route-account-cards-by-team）：账号 → group_label → 团队群，
-  // 未绑定 / 任一层读失败一律回落默认群链、绝不静默丢。
-  // 依赖必须在此一处注入：逐处手工装配时漏传 groupRouteStore，解析器会「合法地」判定无团队路由 → 落默认群 →
-  // 投递成功、无异常、无 config-gap 日志，与「未接线」现象上不可区分（正是本 change 要修的那类静默失败）。
-  const resolveAccountChatId = (accountId: string | undefined): Promise<string> =>
-    resolveChatIdForAccount(accountId, {
+  // Feishu is API-owned and dynamically loaded only in API-bearing modes.
+  // automation/content therefore do not even load the SDK/card stack.
+  let apiFeishuOwner: ApiFeishuOwner | undefined;
+  if (ownsApiFeishuForMode(serviceMode)) {
+    const groupRoutes =
+      serviceMode === 'api'
+        ? new GroupRouteHttpClient(
+            new InternalHttpClient(
+              readEnvString('AIDCP_AUTOMATION_URL')
+                ?? (() => {
+                  throw new Error('AIDCP_AUTOMATION_URL is required in api mode');
+                })(),
+            ),
+          )
+        : groupRouteStore;
+    const { createApiFeishuOwner } = await import(
+      './feishu/api-owner-composition.js'
+    );
+    apiFeishuOwner = createApiFeishuOwner({
+      pool: apiPool,
       accountStore,
-      groupRouteStore,
-      botChatStore,
+      groupRoutes,
+      accountDisplayName,
+      publishApprovalDecisionWriter,
+      deploymentTarget,
       fallbackChatId: process.env.FEISHU_CHAT_ID,
       logger: console,
     });
-
-  // 一切出站卡片 / 告警的**唯一**目标解析入口（change unify-card-routing-origin-then-team）：
-  // 来源会话（命令触发）→ 账号团队群 → 默认群。同上，依赖只在此一处注入。
-  // 新增发送点一律走这里：内联 resolveDefaultChatId / getDefaultChat / FEISHU_CHAT_ID 会绕过
-  // config-gap 诊断，让「没接线」与「配错了」在运营视角不可区分。
-  const resolveCardChatId = (originChatId: string | undefined | null, accountId: string | undefined): Promise<string> =>
-    resolveCardTarget(
-      { originChatId, accountId },
-      {
-        accountStore,
-        groupRouteStore,
-        botChatStore,
-        fallbackChatId: process.env.FEISHU_CHAT_ID,
-        logger: console,
-      },
-    );
+    ctx.apiFeishuOwner = apiFeishuOwner;
+  }
 
   let facebookPublishMediaStore: FacebookPublishMediaStore | undefined;
   try {
@@ -2366,10 +2694,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     },
   });
 
-  // Block② 2e：飞书出站信使上提至恒跑的 segA（automation 模式也需要它）；FeishuMessenger 构造纯（只赋默认值、无网络/定时器）。
-  const messenger = new FeishuMessenger();
-
-  ctx.botChatStore = botChatStore;
   ctx.cache = cache;
   ctx.categoryConfigStore = categoryConfigStore;
   ctx.clientUserStore = clientUserStore;
@@ -2434,33 +2758,21 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     },
   };
 
-  const withAccountName = <T extends { accountId?: string; accountName?: string }>(data: T): T =>
-    data.accountName || !data.accountId ? data : { ...data, accountName: accountDisplayName(data.accountId) };
-  const publishCardExit: PublishCardExitPort = {
-    sendApprovalCard: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(withAccountName(data))),
-    sendCommandResult: (chatId, data) => messenger.sendCard(chatId, buildCommandResultCard(withAccountName(data))),
-    uploadImageFromUrl: (url) => messenger.uploadImageFromUrl(url),
-    getDefaultChat: () => botChatStore.getDefaultChat(),
-    resolveCardChatId: (originChatId, accountId) => resolveCardChatId(originChatId, accountId),
-    writeApprovalSignal: (requestId, approved, payload, decidedBy) => {
-      if (!publishApprovalDecisionWriter || !deploymentTarget) {
-        throw new Error('approval_decision_writer_unavailable');
-      }
-      return publishApprovalDecisionWriter.writeDecision({
-        requestId,
-        approved,
-        payload,
-        context: {
-          decidedBy,
-          decidedVia: 'schedule_auto_approve',
-        },
-        executionTarget: deploymentTarget,
-      });
-    },
-  };
+  const unavailablePublishCardExit = (): Promise<never> =>
+    Promise.reject(new Error('publish_card_exit_unavailable_in_this_service_mode'));
+  const publishCardExit: PublishCardExitPort =
+    apiFeishuOwner?.publishCardExit ?? {
+      sendApprovalCard: unavailablePublishCardExit,
+      sendCommandResult: unavailablePublishCardExit,
+      uploadImageFromUrl: unavailablePublishCardExit,
+      getDefaultChat: unavailablePublishCardExit,
+      resolveCardChatId: unavailablePublishCardExit,
+      writeApprovalSignal: unavailablePublishCardExit,
+    };
 
   ctx.accountDisplayName = accountDisplayName;
   ctx.accountDisplayNameCandidates = accountDisplayNameCandidates;
+  ctx.accountProjectionStore = accountProjectionStore;
   ctx.accountState = accountState;
   ctx.accountStore = accountStore;
   ctx.anyImageKeyPresent = anyImageKeyPresent;
@@ -2475,13 +2787,10 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.getSoul = getSoul;
   ctx.groupRouteStore = groupRouteStore;
   ctx.manualCommentAccounts = manualCommentAccounts;
-  ctx.messenger = messenger;
   ctx.notificationContactStore = notificationContactStore;
   ctx.personaAutoFillStore = personaAutoFillStore;
   ctx.personaPanel = personaPanel;
   ctx.personaStore = personaStore;
-  ctx.resolveAccountChatId = resolveAccountChatId;
-  ctx.resolveCardChatId = resolveCardChatId;
   ctx.resolveReviewCardDelivery = resolveReviewCardDelivery;
   ctx.publishCardExit = publishCardExit;
   ctx.imageModelSelection = imageModelSelection;
@@ -2493,6 +2802,203 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     : undefined;
   ctx.triggeredPublishRefs = delegatedTaskStore;
   ctx.resolvePersona = resolvePersona;
+
+  let apiReplyConfigAuthority: ReplyConfigResolverPort | undefined;
+  let apiAccountPersonaAuthority: AccountPersonaService | undefined;
+  if (serviceModeFromEnv() === 'api') {
+    const replyScopes = new ReplyConfigScopeStore({ pool: apiPool });
+    await replyScopes.init();
+    apiReplyConfigAuthority = new ReplyConfigResolver(replyScopes);
+
+    const contentUrl = readEnvString('AIDCP_CONTENT_URL');
+    if (!contentUrl) throw new Error('AIDCP_CONTENT_URL is required in api mode');
+    if (!deploymentTarget) throw new Error('AIDCP_DEPLOY_ENV is required in api mode');
+    const personaGenerator = personaGeneratorFromCommand(
+      new PersonaGeneratorCommandHttpClient(
+        new InternalHttpClient(contentUrl),
+        requireDirectInternalToken('AIDCP_CONTENT_INTERNAL_TOKEN'),
+        deploymentTarget,
+      ),
+    );
+    apiAccountPersonaAuthority = new AccountPersonaService({
+      generator: personaGenerator,
+      facade: personaPanel,
+      personaBinding: (accountId) => personaStore.bindingFor(accountId),
+      logger: console,
+    });
+    ctx.accountPersonaService = apiAccountPersonaAuthority;
+  }
+
+  const publishUiUpdateProducer = createPublishUiUpdateProducer({
+    loadPreview: (recordId) =>
+      publishLogStore.pendingPublishPreviewForRecord(recordId),
+    command: {
+      applyPublishUiUpdate: (input) => {
+        const command = ctx.publishUiUpdateCommand;
+        if (!command) {
+          throw new Error('publish_ui_update_command_unavailable');
+        }
+        return command.applyPublishUiUpdate(input);
+      },
+    },
+  });
+  const pushApiOwnedPublishPreview = async (
+    recordId: number,
+  ): Promise<void> => {
+    const result = await publishUiUpdateProducer.pushPreview(recordId);
+    if (result.outcome === 'no_record') {
+      throw new Error(`publish_ui_preview_no_record:${recordId}`);
+    }
+  };
+  const pushApiOwnedPublishState: NonNullable<
+    CompositionContext['pushApiOwnedPublishState']
+  > = async (accountId, recordId, state, factVersion, title) => {
+    await publishUiUpdateProducer.pushState(
+      accountId,
+      recordId,
+      state,
+      factVersion,
+      title,
+    );
+  };
+  ctx.pushApiOwnedPublishPreview = pushApiOwnedPublishPreview;
+  ctx.pushApiOwnedPublishState = pushApiOwnedPublishState;
+
+  const apiPublishLogAuthority: AutomationPublishLogPort = {
+    loadForDispatch: (recordId) => publishLogStore.loadForDispatch(recordId),
+    updateStatus: (recordId, status) => publishLogStore.updateStatus(recordId, status),
+    updatePostId: (recordId, postId, postUrl) =>
+      publishLogStore.updatePostId(recordId, postId, postUrl),
+    markScheduled: (recordId, scheduledAt, scheduledPlatformId) =>
+      publishLogStore.markScheduled(recordId, scheduledAt, scheduledPlatformId),
+    markImagesAttached: (recordId, imageCount) =>
+      publishLogStore.markImagesAttached(recordId, imageCount),
+    listDueScheduled: (limit, now) => publishLogStore.listDueScheduled(limit, now),
+    deferScheduledReconcile: (recordId, error, nextAt, maxAttempts) =>
+      publishLogStore.deferScheduledReconcile(recordId, error, nextAt, maxAttempts),
+    confirmScheduledPublished: (recordId, postId, postUrl) =>
+      publishLogStore.confirmScheduledPublished(recordId, postId, postUrl),
+    getMostRecentPublishTime: () => publishLogStore.getMostRecentPublishTime(),
+    recentPublishedContents: (limit) => publishLogStore.recentPublishedContents(limit),
+    editDraft: async (recordId, expectedVersion, patch, editor, expectedAccountId) => {
+      const result = await publishLogStore.editDraft(
+        recordId,
+        expectedVersion,
+        patch,
+        editor,
+        expectedAccountId,
+      );
+      if (result.ok && serviceModeFromEnv() === 'api') {
+        void pushApiOwnedPublishPreview(recordId).catch((error) => {
+          console.warn(
+            `[aidcp-cloud] publish draft edit 已提交，UI preview 投递失败 record=${recordId}: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
+      return result;
+    },
+    rejectPendingApproval: async (recordId) => {
+      const draft = await publishLogStore.loadForDispatch(recordId);
+      const rejected = await publishLogStore.rejectPendingApproval(recordId);
+      if (rejected && draft && serviceModeFromEnv() === 'api') {
+        void pushApiOwnedPublishState(
+          draft.accountId,
+          recordId,
+          'rejected',
+          draft.contentVersion,
+          draft.title,
+        ).catch((error) => {
+          console.warn(
+            `[aidcp-cloud] publish rejection 已提交，UI state 投递失败 record=${recordId}: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
+      return rejected;
+    },
+    pendingApprovalForAccount: (accountId) =>
+      publishLogStore.pendingApprovalForAccount(accountId),
+    pendingPublishPreviewForAccount: (accountId) =>
+      publishLogStore.pendingPublishPreviewForAccount(accountId),
+    lastPublishedForAccount: (accountId) => publishLogStore.lastPublishedForAccount(accountId),
+    countPendingForAccount: (accountId) => publishLogStore.countPendingForAccount(accountId),
+    countPendingAutonomousForAccount: (accountId) =>
+      publishLogStore.countPendingAutonomousForAccount(accountId),
+    countPublishedTodayForAccount: (accountId) =>
+      publishLogStore.countPublishedTodayForAccount(accountId),
+    countPublishedSinceForAccount: (accountId, since) =>
+      publishLogStore.countPublishedSinceForAccount(accountId, since),
+  };
+
+  const apiDirectAuthorities: ApiDirectAuthorities = {
+    publishLog: apiPublishLogAuthority,
+    edgePublish: {
+      removeDraftImage: async (input) => {
+        const handler = ctx.handlePublishDraftImageRemove;
+        if (!handler) throw new Error('edge_publish_image_remove_owner_unavailable');
+        return handler(input.payload, input.session);
+      },
+      decidePublishApproval: async (input) => {
+        const handler = ctx.approvePublishForClient;
+        if (!handler) throw new Error('edge_publish_approval_owner_unavailable');
+        return handler(input.payload, input.accountId);
+      },
+    },
+    interactionAuth: new PgInteractionAuthGate({ pool: apiPool }),
+    interactionApiWrites: new PgInteractionApiWrites(apiPool),
+    ...(apiReplyConfigAuthority ? { replyConfig: apiReplyConfigAuthority } : {}),
+    ...(apiAccountPersonaAuthority ? { accountPersona: apiAccountPersonaAuthority } : {}),
+    environmentHandshake: createEnvironmentHandshakeAuthority(
+      clientUserStore,
+      (envKey) =>
+        crossSegment(
+          ctx.personaAutoFill,
+          `personaAutoFill.notifyEnvironmentBound(${envKey})`,
+          'automation 段',
+          '环境已登记，但本进程没有发送人设补全提示',
+        )?.notifyEnvironmentBound(envKey),
+    ),
+    automationConfigCommands: createAutomationConfigCommands(
+      contentScheduleStore,
+      facebookCommentConfigStore,
+    ),
+    ...(apiFeishuOwner
+      ? { notificationDelivery: apiFeishuOwner.notificationDelivery }
+      : {}),
+    ...(approvalPolicyStore ? { commentApprovalPolicy: approvalPolicyStore } : {}),
+    ...(notificationContactStore ? { notificationContacts: notificationContactStore } : {}),
+    ...(firstPostOnboardingStore ? { firstPostProgress: firstPostOnboardingStore } : {}),
+    ...(deploymentTarget
+      ? { offboardAdmissionLedger: new PgOffboardAdmissionLedger(apiPool, deploymentTarget) }
+      : {}),
+  };
+  if (
+    accountStore?.listAccountIdentities
+    && accountStore.getExecutionTarget
+    && accountStore.resolveExecutionTarget
+    && accountStore.setExecutionTarget
+    && accountStore.ensureAccount
+    && accountStore.getPlatformOrNull
+    && accountStore.getContactInfo
+    && accountStore.recordNickname
+  ) {
+    apiDirectAuthorities.accountRoster = {
+      listAccountIdentities: () => accountStore.listAccountIdentities!(),
+    };
+    apiDirectAuthorities.accountOwnership = {
+      getExecutionTarget: (accountId) => accountStore.getExecutionTarget!(accountId),
+      resolveExecutionTarget: (accountId) => accountStore.resolveExecutionTarget!(accountId),
+      setExecutionTarget: (accountId, target) => accountStore.setExecutionTarget!(accountId, target),
+    };
+    apiDirectAuthorities.accountRuntime = {
+      ensureAccount: (accountId, platform) => accountStore.ensureAccount!(accountId, platform),
+      getPlatformOrNull: (accountId) => accountStore.getPlatformOrNull!(accountId),
+      getContactInfo: (accountId) => accountStore.getContactInfo!(accountId),
+      recordNickname: (accountId, nickname) => accountStore.recordNickname!(accountId, nickname),
+    };
+  }
+  ctx.apiDirectAuthorities = apiDirectAuthorities;
 }
 
 async function segBContent(ctx: CompositionContext): Promise<void> {
@@ -2528,6 +3034,16 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     // 内容段曾直接拿 api 池建两个 api 属主表的存储（发布台账 / 管线日志），两者都已上移到属主段，
     // 跨边界只剩窄端口。这一行的消失就是「内容域不再连另一个域的库」这条铁律在本段成立的机械证据。
   } = ctx;
+  const personaGenerator = new PersonaGenerator({
+    llm,
+    soulCodec: {
+      parseValue: loadSoulFromValue,
+      serialize: serializeSoul,
+      parseYaml: loadSoulFromYaml,
+    },
+  });
+  ctx.contentPersonaGeneratorAuthority =
+    new PersonaGeneratorCommandReceiver(personaGenerator);
   const publishCardExit: PublishCardExitPort =
     serviceModeFromEnv() === 'content'
       ? new PublishCardExitHttpClient(
@@ -2863,8 +3379,65 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, apiPool, approvalPolicyStore, automationPool, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore } = ctx;
+  const { accountDisplayName, accountState, accountStore, apiPool, automationPool, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore } = ctx;
   const seamMode = serviceModeFromEnv();
+  let apiDirectPorts = ctx.apiDirectAuthorities ?? {};
+  if (seamMode === 'automation') {
+    const apiUrl = readEnvString('AIDCP_API_URL');
+    if (!apiUrl) throw new Error('AIDCP_API_URL is required in automation mode');
+    if (!deploymentTarget) {
+      throw new Error('AIDCP_DEPLOY_ENV is required in automation mode');
+    }
+    const token = requireDirectInternalToken('AIDCP_API_INTERNAL_TOKEN');
+    const http = new InternalHttpClient(apiUrl);
+    apiDirectPorts = {
+      accountRoster: new AccountRosterHttpClient(http, token, deploymentTarget),
+      accountOwnership: new AccountOwnershipHttpClient(http, token, deploymentTarget),
+      accountRuntime: new AccountRuntimeHttpClient(http, token, deploymentTarget),
+      publishLog: new AutomationPublishLogHttpClient(http, token, deploymentTarget),
+      edgePublish: new EdgePublishCommandHttpClient(http, token, deploymentTarget),
+      interactionAuth: new InteractionAuthHttpClient(http, token, deploymentTarget),
+      interactionApiWrites: new InteractionApiWritesHttpClient(http, token, deploymentTarget),
+      replyConfig: new ReplyConfigResolverHttpClient(http, token, deploymentTarget),
+      accountPersona: new AccountPersonaHttpClient(http, token, deploymentTarget),
+      environmentHandshake: new EnvironmentHandshakeHttpClient(http, token, deploymentTarget),
+      commentApprovalPolicy: new CommentApprovalPolicyHttpClient(http, token, deploymentTarget),
+      notificationContacts: new NotificationContactsHttpClient(http, token, deploymentTarget),
+      firstPostProgress: new FirstPostProgressHttpClient(http, token, deploymentTarget),
+      automationConfigCommands: new AutomationConfigCommandsHttpClient(
+        http,
+        token,
+        deploymentTarget,
+      ),
+      offboardAdmissionLedger: new OffboardAdmissionLedgerHttpClient(
+        http,
+        token,
+        deploymentTarget,
+      ),
+      notificationDelivery: new StructuredNotificationHttpClient(
+        http,
+        token,
+        deploymentTarget,
+      ),
+    };
+  }
+  const automationPublishLog = apiDirectPorts.publishLog;
+  if (!automationPublishLog) {
+    throw new Error('automation_publish_log_authority_unavailable');
+  }
+  const deliverStructuredNotification = async (
+    notification: Parameters<StructuredNotificationDeliveryPort['deliver']>[0]['notification'],
+    commandId: string = randomUUID(),
+  ): Promise<void> => {
+    const delivery = apiDirectPorts.notificationDelivery;
+    if (!delivery) throw new Error('structured_notification_delivery_authority_unavailable');
+    const result = await delivery.deliver({ commandId, notification });
+    if (result.outcome === 'delivered') return;
+    if (result.outcome === 'unknown') {
+      throw new Error('structured_notification_delivery_result_unknown');
+    }
+    throw new Error(`structured_notification_not_delivered:${result.reason}`);
+  };
   const approvalAuthorityForAutomation: PublishApprovalAuthorityPort | undefined =
     seamMode === 'automation'
       ? new PublishApprovalAuthorityHttpClient(
@@ -2906,7 +3479,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
   // 判据三条全中才搬：① segA 赋值 ② 只有本段读 ③ **segA 自己不再引用它**。
   // segA 仍引用的一律留在 segA（含声明前就被惰性回调捕获的**前向引用**，那类最阴）。
-  const botChatEventHandler = new FeishuBotChatEventHandler(botChatStore);
   // 点赞笔记存储（liked_notes 表，发帖来源血缘）。init 失败留 undefined（血缘退化、不阻塞启动）。
   let likedNoteStore: LikedNoteStore | undefined;
   try {
@@ -2988,15 +3560,22 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     accountId: string,
     sourceMode: 'review' | 'auto_approve',
   ): Promise<'review' | 'auto_approve'> => {
-    if (!approvalPolicyStore) return sourceMode;
+    const policy = apiDirectPorts.commentApprovalPolicy;
+    if (!policy) {
+      console.warn(
+        `[approval-policy] 评论策略 authority 未接线，fail-closed 为 review account=${accountId}`,
+      );
+      return 'review';
+    }
     try {
-      const accountMode: AccountCommentApprovalMode = await approvalPolicyStore.getAccountCommentMode(accountId);
+      const accountMode: AccountCommentApprovalMode =
+        await policy.getAccountCommentMode(accountId);
       return accountMode === 'auto_approve_all' ? 'auto_approve' : sourceMode;
     } catch (error) {
       console.warn(
-        `[approval-policy] 评论策略读取失败，回落来源模式 account=${accountId} sourceMode=${sourceMode}: ${(error as Error).message}`,
+        `[approval-policy] 评论策略读取失败，fail-closed 为 review account=${accountId} sourceMode=${sourceMode}: ${(error as Error).message}`,
       );
-      return sourceMode;
+      return 'review';
     }
   };
   // RiskController 注册表（V1 task 9.1）：每账号一个 controller、单写 PER ACCOUNT、共享 PgRiskStore。
@@ -3123,17 +3702,16 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 它必须先于 riskStore 存在。MUST NOT 挪回下面去——挪回去 riskStore 拿到 undefined 会静默降级成
   // 无谓词 upsert，跨 target 接管保护无声消失。
   const ownershipPort: AccountOwnershipPort | undefined =
-    accountStore?.getExecutionTarget &&
-    accountStore.resolveExecutionTarget &&
-    accountStore.claimExecutionTarget &&
-    accountStore.setExecutionTarget
+    apiDirectPorts.accountOwnership
       ? {
-          getExecutionTarget: (accountId) => accountStore.getExecutionTarget!(accountId),
+          getExecutionTarget: (accountId) =>
+            apiDirectPorts.accountOwnership!.getExecutionTarget(accountId),
           // 三态归属读（change risk-ownership-via-port）：风控写路径的属主谓词经此取值。
-          resolveExecutionTarget: (accountId) => accountStore.resolveExecutionTarget!(accountId),
-          claimExecutionTarget: (accountId, target) => accountStore.claimExecutionTarget!(accountId, target),
+          resolveExecutionTarget: (accountId) =>
+            apiDirectPorts.accountOwnership!.resolveExecutionTarget(accountId),
           // 归属跟随当次连接（change risk-target-follows-active-session）：握手用它无条件改写归属。
-          setExecutionTarget: (accountId, target) => accountStore.setExecutionTarget!(accountId, target),
+          setExecutionTarget: (accountId, target) =>
+            apiDirectPorts.accountOwnership!.setExecutionTarget(accountId, target),
         }
       : undefined;
   // 缺归属读口 ⇒ 属主谓词无从取值 ⇒ 只能退回无谓词 upsert。这里就判掉并说明白，
@@ -3187,10 +3765,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // §5.1 把该表定为 api 单写、自动化握手回写 MUST 经窄内部接口、MUST NOT 直写表。形态同上面的
   // ownershipPort——automation 侧握手闭包只持这个窄口（EnvironmentRegistryPort），实现转发到 api 侧
   // clientUserStore 的窄方法；拆进程时把这个对象换成一次内部 HTTP 即可，握手调用点一行不改。
-  const environmentRegistryPort: EnvironmentRegistryPort = {
-    registerHandshakeEnvironment: (observation) =>
-      clientUserStore.registerHandshakeEnvironment(observation),
-  };
+  const environmentRegistryPort: EnvironmentRegistryPort =
+    apiDirectPorts.environmentHandshake ?? {
+      registerHandshakeEnvironment: () =>
+        Promise.reject(new Error('environment_handshake_authority_unavailable')),
+    };
   // 配置副本停手闸的单一适配器（change cloud-coupling-phase4-runtime-ports）：automation 侧的
   // handler / dispatcher / 风控三处都注入这一个对象。四个实参就是 api 侧那四个模块函数——它们在
   // **调用时**才读 ambient 事实源，故本适配器可以在镜像刷新器 start() 之前构造，无时序问题。
@@ -3463,7 +4042,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   let interactionSchemaMode: InteractionSchemaMode | undefined;
   let replyConfigStore: ReplyConfigStore | undefined;
   let replyConfigScopeStore: ReplyConfigScopeStore | undefined;
-  let replyConfigResolver: ReplyConfigResolver | undefined;
+  let localReplyConfigResolver: ReplyConfigResolver | undefined;
+  let replyConfigResolver: ReplyConfigResolverPort | undefined;
   let replyWorkflow: ReplyWorkflow | undefined;
   let interactionInbox: InteractionInboxService | undefined;
 
@@ -3485,13 +4065,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 发一张带有效期的条件写回执，automation 拿回执才落登录态。闸问不到 / 被拒 / 回执过期 ⇒ 拒绝写入。
     // api 模式（segC 未跑）同样 fail-closed，与同文件 clientEnvAutomationRead / offboardCleanupGrantOps 同范式。
     const interactionAuthGate: InteractionAuthGate =
-      serviceModeFromEnv() === 'api'
-        ? {
-            authorizeAuthStateWrite: () => Promise.reject(new Error('interaction_auth_gate_unavailable_in_api_mode')),
-            checkAccountScope: () => Promise.reject(new Error('interaction_auth_gate_unavailable_in_api_mode')),
-          }
-        : new PgInteractionAuthGate({ pool: apiPool, logger: console });
-    const interactionApiWrites = new InteractionApiWrites();
+      apiDirectPorts.interactionAuth ?? {
+        authorizeAuthStateWrite: () =>
+          Promise.reject(new Error('interaction_auth_gate_unavailable')),
+        checkAccountScope: () =>
+          Promise.reject(new Error('interaction_auth_gate_unavailable')),
+      };
+    const interactionApiWrites = apiDirectPorts.interactionApiWrites;
     // 配置面审计（interaction_audit_events 属 api 单写）改走本域 outbox + 中继：那笔 INSERT 与
     // automation 的业务写同事务，拆库后是跨库事务，端口换不掉「两个库要一起提交」。target 缺失 ⇒
     // 审计写入当场抛错（连带业务事务回滚），绝不把归属未知的审计静默落进队列。
@@ -3503,25 +4083,32 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     }
     interactionStore = new InteractionStore({
       pool: automationPool,
-      apiPurge: interactionApiWrites,
+      ...(interactionApiWrites ? { apiPurge: interactionApiWrites } : {}),
       authGate: interactionAuthGate,
       ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
       // 运行控制行的播种守卫经 api 域读平台（原为内联 `SELECT 1 FROM accounts`，拆库后必炸）。
       // 形态照抄 facebookPublishMediaStore 的 accountPlatformReader。
-      ...(accountStore?.getPlatformOrNull
-        ? { accountPlatform: { getPlatformOrNull: (id: string) => accountStore.getPlatformOrNull!(id) } }
+      ...(apiDirectPorts.accountRuntime
+        ? { accountPlatform: { getPlatformOrNull: (id: string) =>
+          apiDirectPorts.accountRuntime!.getPlatformOrNull(id) } }
         : {}),
     });
     // ⚠️ 这两个 store 住在 src/interactions/ 但它们的表**全是 api 属主**
     // （interaction_reply_configs / _versions / _scopes / _scope_versions / _scope_audit /
     //  reply_templates / reply_rules / account_reply_profiles / interaction_audit_events / accounts）
     // ⇒ 绑 **apiPool**，不是 automationPool。目录位置不是属主判据，`boundaries/table-ownership.json` 才是。
-    replyConfigStore = new ReplyConfigStore({ pool: apiPool });
-    replyConfigScopeStore = new ReplyConfigScopeStore({ pool: apiPool });
     interactionSchemaMode = await interactionStore.init();
-    await replyConfigStore.init();
-    await replyConfigScopeStore.init();
-    replyConfigResolver = new ReplyConfigResolver(replyConfigScopeStore);
+    if (seamMode === 'automation') {
+      replyConfigResolver = apiDirectPorts.replyConfig;
+      if (!replyConfigResolver) throw new Error('reply_config_resolver_unavailable');
+    } else {
+      replyConfigStore = new ReplyConfigStore({ pool: apiPool });
+      replyConfigScopeStore = new ReplyConfigScopeStore({ pool: apiPool });
+      await replyConfigStore.init();
+      await replyConfigScopeStore.init();
+      localReplyConfigResolver = new ReplyConfigResolver(replyConfigScopeStore);
+      replyConfigResolver = localReplyConfigResolver;
+    }
     const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(Date.now() - interactionAiTimeoutMs * 2);
     interactionMetrics.gauge('interaction_recovered_classifying_jobs', resetClassifying);
     const replyAi = new ReplyAiService(
@@ -3530,8 +4117,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     );
     replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigResolver, replyAi, {
       accountNameFor: accountDisplayName,
-      ...(accountStore?.getContactInfo ? {
-        contactInfoFor: (accountId: string) => accountStore!.getContactInfo!(accountId),
+      ...(apiDirectPorts.accountRuntime ? {
+        contactInfoFor: (accountId: string) =>
+          apiDirectPorts.accountRuntime!.getContactInfo(accountId),
       } : {}),
       canAutoQueue: async (context, snapshot, preview) =>
         ctx.interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
@@ -3542,9 +4130,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       workflow: replyWorkflow,
       controllerFor: interactionRiskControllerFor,
       metrics: interactionMetrics,
-      ...(accountStore ? {
-        getNickname: (accountId: string) => accountStore.getNickname?.(accountId),
-        setNickname: (accountId: string, nickname: string) => accountStore.setNickname?.(accountId, nickname),
+      ...(apiDirectPorts.accountRuntime ? {
+        recordNickname: (accountId: string, nickname: string) =>
+          apiDirectPorts.accountRuntime!.recordNickname(accountId, nickname),
       } : {}),
       logger: console,
       dispatchAuto: (input) => {
@@ -3576,7 +4164,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           if (!record) {
             throw new Error(`interaction_audit_relay_undecodable_payload id=${event.id}`);
           }
-          await interactionApiWrites.insertAuditEvent(apiPool, record);
+          if (!interactionApiWrites) {
+            throw new Error('interaction_api_writes_unavailable');
+          }
+          await interactionApiWrites.insertAuditEvent(record);
         }]]),
         logger: console,
       });
@@ -3609,16 +4200,24 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     } else if (interactionSchemaMode === 'legacy_read_only') {
       console.warn('[aidcp-cloud] 入站 interaction 域以兼容只读模式就绪（migration 0046 未执行；读取已恢复；评论回复/私信发送强制关闭）');
     } else {
-      console.log(`[aidcp-cloud] 入站 interaction 域已就绪（migration 0048；回复策略解析模式 ${replyConfigResolver.mode}；完整读写能力受写总开关控制）`);
+      console.log(
+        `[aidcp-cloud] 入站 interaction 域已就绪（migration 0048；回复策略解析模式 ${
+          localReplyConfigResolver?.mode ?? 'remote'
+        }；完整读写能力受写总开关控制）`,
+      );
     }
   } catch (error) {
     await Promise.allSettled([
-      interactionStore?.close(), replyConfigStore?.close(), replyConfigScopeStore?.close(), replyConfigResolver?.close(),
+      interactionStore?.close(),
+      replyConfigStore?.close(),
+      replyConfigScopeStore?.close(),
+      localReplyConfigResolver?.close(),
     ]);
     interactionStore = undefined;
     interactionSchemaMode = undefined;
     replyConfigStore = undefined;
     replyConfigScopeStore = undefined;
+    localReplyConfigResolver = undefined;
     replyConfigResolver = undefined;
     replyWorkflow = undefined;
     interactionInbox = undefined;
@@ -3938,206 +4537,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
    */
   let contentSchedulerRef: ContentScheduler | undefined;
 
-  // 飞书事件接收（官方 SDK 长连接，主动连飞书，无需公网 IP / HTTP 端口）
-  // MVP：账号启停/查询动作先打桩（后续接云端调度器 → plan.request）
-  // retire-default-account：飞书无参命令解析「唯一真实账号」；解析不出（0 或多个）抛错 → 路由层回「请显式指定账号」，绝不回落 default。
-  const requireCommandAccount = async (accountId?: string): Promise<string> => {
-    if (accountId) return accountId;
-    const single = await resolveSingleAccountId();
-    if (single) return single;
-    throw new Error('当前为 0 个或多个账号，请显式指定账号，例如 `/status <accountId>`');
-  };
-  // 按昵称解析 /publish 的目标账号（严格只认昵称、不接 id）：缺省 → 唯一真实账号；
-  // 找不到 / 重名 → 诚实抛错（带可用昵称清单），由路由层回报给运营。
-  const resolveAccountByNickname = async (nickname?: string): Promise<string> => {
-    if (!nickname) {
-      const single = await resolveSingleAccountId();
-      if (single) return single;
-      throw new Error('当前为 0 个或多个账号，请用昵称指定，例如 `/publish 工程师大白`');
-    }
-    if (!accountStore) throw new Error('账号存储未就绪，无法按昵称解析账号');
-    const all = await accountStore.listAll();
-    const candidates = all.map((a) => ({
-      accountId: a.accountId,
-      displayName: accountDisplayName(a.accountId) ?? null,
-      names: accountDisplayNameCandidates(a.accountId),
-    }));
-    const r = matchAccountByNickname(nickname, candidates);
-    if (r.ok) return r.accountId;
-    if (r.reason === 'ambiguous') {
-      throw new Error(`有多个账号匹配昵称「${nickname}」（${r.available.join('、')}），请去重后再试`);
-    }
-    throw new Error(`找不到昵称「${nickname}」的账号。可用昵称：${r.available.join('、') || '(无)'}`);
-  };
-  // 命令作用域（change feishu-per-team-notification-routing）：账号影响类命令只在「管理群」受理，外部 / 非管理群一律诚实拒。
-  // 管理群 = 独立显式 env 白名单 FEISHU_MANAGEMENT_CHAT_IDS（逗号分隔）——**不由 /bind 授予、不复用 is_default**（防自助提权）。
-  // 未配置（env 空）→ 放行全部（零回归 / 滚动上线 ramp：先零变更部署，待就绪再显式设白名单收紧）。
-  const managementChatIds = new Set(
-    (readEnvString('FEISHU_MANAGEMENT_CHAT_IDS') ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-  // change consolidate-command-face（§4.6.7）：飞书 + 面板两条命令入口收敛到单一 api 侧命令面（受理 + 鉴权）。
-  // 账号级原子动作（status/pause/resume/恢复 edge）在命令面里定义一次、两条入口共用；复杂 / 依赖自动化运行时的
-  // 处理器（delegate/publish/comment/dispatch）由组合根在此以窄端口注入——server / *Scheduler / delegatedTaskService /
-  // runtimes / dispatchActive 在下方晚绑定，命令运行时才触发，闭包引用安全。
-  const commandFace = createCommandFace({
-    account: {
-      requireCommandAccount,
-      getStatus: (accountId) => accountState.getStatus(accountId),
-      pause: (accountId) => accountState.pause(accountId),
-      resume: (accountId) => accountState.resume(accountId),
-      resumeEdgesForAccount: (accountId) => server.resumeEdgesForAccount(accountId),
-    },
-    bindChat: (record) => botChatStore.setDefault(record),
-    delegate: async (text, context) => {
-      if (!delegatedTaskService) throw new Error('委托任务服务未就绪，未执行任何写操作。');
-      // change restore-delegated-command-card-origin-chat：命令来源会话专取 chatId（私聊=p2p 会话、群=群 id），
-      // 与偏向 messageId、参与去重键的 sourceRef 解耦，作为委托任务操作员向卡片（审批 / 终态）的投递目标。
-      const result = await delegatedTaskService.createFromText(text, {
-        sourceRef: context?.messageId ?? context?.chatId,
-        originChatId: context?.chatId,
-      });
-      if (result.kind === 'control') {
-        const req = result.request;
-        const task = req.action === 'pause'
-          ? await delegatedTaskService.pause(req.taskId)
-          : req.action === 'resume'
-            ? await delegatedTaskService.resume(req.taskId)
-            : req.action === 'cancel'
-              ? await delegatedTaskService.cancel(req.taskId)
-              : await delegatedTaskService.get(req.taskId);
-        return {
-          command: text,
-          ok: true,
-          title: '委托任务当前状态',
-          message: `任务 ${task.id} 当前为 ${task.status}，真实完成 ${task.progress.successCount}/${task.targetSuccessCount}。`,
-          accountId: task.accountId,
-          accountName: task.accountName,
-          platformName: task.platform,
-          card: buildDelegatedTaskProgressCard(task),
-        };
-      }
-      // 精确旧命令（/publish、/comment）直接排队、不出确认卡：解析无歧义，二次确认是冗余点击。
-      // 且**静默受理**——不发队列提示卡，只留已读表情；结果由任务自身的正常业务结果卡回报（评论结果卡 /
-      // 发帖人审卡）。自然语言委托仍出确认卡（账号/数量/截止靠推断、可能解析错）。两路的内容/评论人审都不变。
-      if (result.autoQueued) {
-        return {
-          command: text,
-          ok: true,
-          title: '委托任务已直接排队',
-          message: '精确命令已直接入队；结果由任务自身的结果卡回报。',
-          accountId: result.task.accountId,
-          accountName: result.task.accountName,
-          platformName: result.task.platform,
-          silent: true,
-        };
-      }
-      return {
-        command: text,
-        ok: true,
-        title: result.created ? '委托任务待确认' : '已存在相同待确认任务',
-        message: '确认前不会执行任何平台写动作。',
-        accountId: result.task.accountId,
-        accountName: result.task.accountName,
-        platformName: result.task.platform,
-        card: buildDelegatedTaskConfirmationCard(result.confirmation),
-      };
-    },
-    // 手动 /publish <昵称>：越过风控 canDo（人工授权），发布前飞书人审仍铁定生效（AC-PUB）。
-    // 按昵称解析目标账号（严格只认昵称）→ 落 publish_log.account_id + 命令定向到该账号在线节点；缺省 → 唯一真实账号。
-    // 回执据**真实编排终态**判 ok/level：成功（已生成进人审）=绿、未触发/未产出=黄、失败/不可用=红，并把失败原因带进正文。
-    // 红线：「触发动作成功」≠「发帖成功」——绝不把 failed/skipped 染成绿色 ✅ 误导人以为已发。
-    publish: async (nickname?: string, options?: { sourceChatId?: string }) => {
-      if (!ctx.publishScheduler) {
-        return { ok: false, level: 'error', title: '发帖未触发', message: '发帖触发器未就绪（PG / 概念池不可用），未发起任何编排。' };
-      }
-      const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runPublish 走 fail 分支（红 ❌）
-      const note = `（账号昵称 \`${nickname ?? '(唯一账号)'}\`；人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）`;
-      const o = await ctx.publishScheduler.triggerManual(acct, { manualApprovalChatId: options?.sourceChatId });
-      // 触发动作本身被拒（解析不出唯一账号等）：没成功但非崩 → 黄色 ⚠️。
-      if (o.result !== 'triggered') {
-        return { ok: false, level: 'warning', title: '发帖未触发', message: `账号 \`${acct}\` 未触发：${o.reason}` };
-      }
-      const head = `已触发（${o.reason}）→ 账号 \`${acct}\` → 编排状态 ${o.status}`;
-      const why = o.failureReason ? `\n原因：${o.failureReason}` : '';
-      // 失败 / 超时：真失败 → 红色 ❌，带上具体原因（中止角色+理由 / 超时 / 异常）。
-      if (o.status === 'failed' || o.status === 'timeout') {
-        return { ok: false, level: 'error', title: '发帖编排失败', message: `${head}${why}\n（编排在生成候审阶段失败，未发审批卡；请查云端日志或重试 /publish）` };
-      }
-      // 跳过：触发了但没产出稿件（已有编排在跑 / 选题判定不发）→ 黄色 ⚠️，非失败但也别染绿。
-      if (o.status === 'skipped') {
-        return { ok: false, level: 'warning', title: '发帖未产出', message: `${head}${why}` };
-      }
-      if (o.approvalCard && !o.approvalCard.sent) {
-        const target = o.approvalCard.targetChatId ? `目标会话 \`${o.approvalCard.targetChatId}\`` : '未解析到目标会话';
-        const error = o.approvalCard.error ? `\n发卡错误：${o.approvalCard.error}` : '';
-        return {
-          ok: false,
-          level: 'warning',
-          title: '草稿已生成，审批卡未送达',
-          message: `${head}\n已生成待审草稿，但审批卡没有送达（${target}）。${error}\n请在控制台审批，或修复飞书会话权限后重试。`,
-        };
-      }
-      // 正常出口（pending_approval / published / draft / needs_review）：已生成并进入人审或已发 → 绿色 ✅。
-      return { ok: true, level: 'success', title: '已触发发帖编排', message: `${head}\n${note}` };
-    },
-    // 手动 /comment <昵称>（change comment-search-command）：按昵称解析账号 → 触发按需评论任务。
-    // 回执据**触发结果**判 ok/level（开跑绿 / 未触发黄 / 失败红）；最终评/未评结果由 scheduler 异步补结果卡片。
-    comment: async (nickname?: string, options?: { injectContact?: boolean; joinGroup?: boolean; joinGroupUrl?: string; force?: boolean; fastReturnToFeed?: boolean }) => {
-      if (!commentScheduler) {
-        return { ok: false, level: 'error', title: '按需评论未就绪', message: '评论触发器未就绪（启动中或依赖不可用），未发起任务。' };
-      }
-      const acct = await resolveAccountByNickname(nickname); // 找不到/重名 → 抛错，runComment 走 fail 分支（红 ❌）
-      // injectContact（change generalize-contact-info）：--contact 时注入账号联系方式；缺联系方式 fail-closed 由 scheduler 处置。
-      // joinGroup（change facebook-manual-join-comment）：--join 时先加入一个新群、加入成功后在该新群里评论（仅 FB）。
-      // joinGroupUrl（change facebook-comment-review-and-targeted-join）：--join=<url> 时加入**指定群**（只归该账号）而非库内下一个。
-      // manualOverride（change manual-comment-bypass-quota）：飞书手动 /comment 是操作员命令 → 加群 + 评论整条链跳过节奏 / 风控配额闸
-      // （会话加群额度 + 加群速率 + 评论速率 + 评论日上限 + 硬风控状态），与已无配额闸的手动 XHS /comment 对齐；自动排期路径不带此旗标。
-      // force（change manual-comment-force-flag）：--force 时放开相关性 + 每笔记去重两道软筛选（仍守人审/安全校验/诚实闸）。
-      // 与 manualOverride **分开传**——manualOverride 只绕配额、force 只绕相关性/去重，二者独立语义，绝不合并。
-      return commentScheduler.triggerManual(acct, {
-        injectContact: options?.injectContact,
-        joinFirst: options?.joinGroup,
-        joinGroupUrl: options?.joinGroupUrl,
-        manualOverride: true,
-        force: options?.force === true,
-        fastReturnToFeed: options?.fastReturnToFeed === true,
-      });
-    },
-    // 调度启停全局开关（面板 /dispatch）：切所有连接运行时的会话（start 经诚实人设闸 / stop 全停）；回报真实在线 edge 数，绝不乐观。
-    // accountId 信息性（当前为全局开关）；no-op（已 active/已 stop）以 changed=false 诚实可辨。
-    dispatch: async (accountId, action) => {
-      const want = action === 'start';
-      const changed = dispatchActive !== want;
-      if (changed) {
-        dispatchActive = want; // 先置标志，使 startAll 的启动闸看到 active
-        if (want) ctx.runtimes?.startAll();
-        else ctx.runtimes?.endAll('panel_dispatch_stop');
-      }
-      return {
-        accountId,
-        dispatch: want ? ('started' as const) : ('stopped' as const),
-        changed,
-        edgesOnline: server.onlineEdgeCount(),
-      };
-    },
-    dispatchActive: () => dispatchActive,
-    managementChatIds,
-  });
-  const actions = commandFace.actions;
-  const isCommandChatAuthorized = commandFace.isCommandChatAuthorized;
-  const commandRouter = new CommandRouter(actions, undefined, undefined, isCommandChatAuthorized);
-  const messenger = ctx.messenger;
-  // 机器人所在群 provider（change feishu-bot-chat-name-display）：实时取飞书真实群名 + 标默认群 + 降级来源。
-  // 成功结果缓存 60s（避免每次开页打飞书）；失败（缺 im:chat:readonly 权限 / 网络）降级回 bot_chats 表、不缓存（下次自动重试）。
-  const botChatsProvider = createBotChatsProvider({
-    messenger,
-    botChatStore,
-    fallbackChatId: process.env.FEISHU_CHAT_ID,
-    logger: console,
-  });
+  // Feishu is API-owned. segD composes the command face, cards and WS ingress;
+  // this automation segment exposes only its domain services through ctx/ports.
   // A 阶段1 发布指令编排器 / 验证码协助均经 edgeServer 推送（server 在下方构造，闭包运行时已就绪）。
 
   let edgeTaskLeases!: EdgeTaskLeaseClient;
@@ -4175,14 +4576,29 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 验证码事件协调器：消费 risk.captcha_detected/cleared（迁状态 + 按 edge 暂停 + 去重发飞书）。
   const captcha = new CaptchaCoordinator({
     resolveController,
-    // change feishu-contract-seam（§4.6.2）：automation 侧只交出结构化 AlertData，组合根在此侧构飞书卡 + 发送。
-    sendAlertCard: (chatId, alert) => messenger.sendCard(chatId, buildAlertCard(alert)),
+    deliverAlert: (alert) =>
+      deliverStructuredNotification({
+        kind: 'alert',
+        input: {
+          severity:
+            alert.severity === 'P0'
+              ? 'critical'
+              : alert.severity === 'P1'
+                ? 'error'
+                : alert.severity === 'P2'
+                  ? 'warning'
+                  : 'info',
+          title: alert.title,
+          detail: alert.detail,
+          accountId: alert.accountId,
+          actionText: alert.actionText,
+          actionUrl: alert.actionUrl,
+        },
+      }),
     // V1 task 9.5：验证码告警落库（飞书卡发送点写入、清除点 resolveByEdge）。
     alertStore,
-    getAccountName: accountDisplayName,
     assist: captchaAssist,
-    // change unify-card-routing-origin-then-team：验证码告警按账号路由到团队群（无账号 → 默认群）。
-    resolveChatId: (accountId) => resolveCardChatId(undefined, accountId),
+    resolveChatId: async () => '',
   });
   // A 阶段1 发布指令编排器：逐条下发 publish.command、按 recordId+seq 关联 publish.command.result。
   // FB 正文逐字输入：填写这一步的预算随正文长度伸缩下发；上限按发布租约 TTL 收敛，
@@ -4251,7 +4667,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 读某草稿当前内容版本号（edit-note-draft-before-publish）：面板/飞书授权前的写时预检用；不存在/出错 → null。
   const readLiveContentVersion = async (recordId: number): Promise<number | null> => {
     try {
-      const draft = await publishLogStore.loadForDispatch(recordId);
+      const draft = await automationPublishLog.loadForDispatch(recordId);
       return draft ? draft.contentVersion : null;
     } catch {
       return null;
@@ -4263,13 +4679,29 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
 
   // 调度启停态（面板 /dispatch 全局开关）：false 时新 / 现有连接不启动浏览会话。
   let dispatchActive = true;
-  // 建号自助人设生成器（change edge-persona-keyword-generation）：复用共享 llm（按角色 browse:persona_generator
-  // 解析模型/温度、按 accountId 记账），生成 persona.generate 的草稿。
-  const personaGenerator = new PersonaGenerator({
-    llm,
-    // P4-11：Soul 编解码由组合根注入（api 属主实现），content 侧的生成角色不再直连 soul 加载器。
-    soulCodec: { parseValue: loadSoulFromValue, serialize: serializeSoul, parseYaml: loadSoulFromYaml },
-  });
+  let personaGenerator: PersonaGeneratorPort | undefined;
+  if (seamMode === 'monolith') {
+    personaGenerator = new PersonaGenerator({
+      llm,
+      soulCodec: {
+        parseValue: loadSoulFromValue,
+        serialize: serializeSoul,
+        parseYaml: loadSoulFromYaml,
+      },
+    });
+  } else if (seamMode === 'core') {
+    const contentUrl = readEnvString('AIDCP_CONTENT_URL');
+    if (!contentUrl || !deploymentTarget) {
+      throw new Error('content_persona_generator_authority_unavailable');
+    }
+    personaGenerator = personaGeneratorFromCommand(
+      new PersonaGeneratorCommandHttpClient(
+        new InternalHttpClient(contentUrl),
+        requireDirectInternalToken('AIDCP_CONTENT_INTERNAL_TOKEN'),
+        deploymentTarget,
+      ),
+    );
+  }
   const personaFirstPostOnboarding = firstPostOnboardingStore
     ? {
         armFirstBind: async (accountId: string) => {
@@ -4281,16 +4713,26 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         },
       }
     : undefined;
-  const accountPersonaService = new AccountPersonaService({
-    generator: personaGenerator,
-    facade: personaPanel,
-    firstPostOnboarding: personaFirstPostOnboarding,
-    // 三态判据（task 4.2/4.3）：当代客户端的绑定态只经这条 HTTP 拉取面下发（WS 面对它们不推），
-    // 所以「未知 MUST NOT 压成权威的未绑」必须在这里也接上，与 ui-snapshot 同一判据同一事实源。
-    personaBinding: (accountId) => personaStore.bindingFor(accountId),
-    logger: console,
-  });
-  const personaAutoFill = personaAutoFillStore
+  const accountPersonaService = personaGenerator
+    ? new AccountPersonaService({
+        generator: personaGenerator,
+        facade: personaPanel,
+        firstPostOnboarding: personaFirstPostOnboarding,
+        personaBinding: (accountId) => personaStore.bindingFor(accountId),
+        logger: console,
+      })
+    : undefined;
+  const accountPersonaPort =
+    seamMode === 'automation'
+      ? apiDirectPorts.accountPersona
+      : accountPersonaService;
+  if (!accountPersonaPort) {
+    throw new Error('account_persona_authority_unavailable');
+  }
+  if (accountPersonaService) {
+    apiDirectPorts.accountPersona = accountPersonaService;
+  }
+  const personaAutoFill = seamMode !== 'automation' && personaAutoFillStore
     ? new PersonaAutoFillService({
         store: personaAutoFillStore,
         clientUsers: clientUserStore,
@@ -4335,12 +4777,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     planner,
     llm,
     cache,
-    // change feishu-contract-seam（§4.6.2）：automation 侧只交出结构化审批卡数据，组合根在此侧构飞书卡 + 发送。
-    approvalCardSink: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(data)),
-    botChatStore,
-    // change unify-card-routing-origin-then-team：边缘发起的发布审批卡也走统一解析（账号团队群 → 默认群）。
-    resolveCardChatId,
-    approvalChatId: process.env.FEISHU_CHAT_ID,
+    publishApprovalNotifier: (data) =>
+      deliverStructuredNotification(
+        { kind: 'publish_approval', input: data },
+        `publish-approval:${data.requestId}`,
+      ),
     eventBus,
     accountState,
     captcha,
@@ -4348,10 +4789,33 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     commandSequencer,
     edgeTaskLeases,
     // 单账号人设应用服务由旧 WS 与 customer-auth HTTP 共用，生成幂等与写入语义只有一份。
-    personaService: accountPersonaService,
+    personaService: accountPersonaPort,
     // 该函数声明在下方审批装配段；用闭包延迟取值，避免 handler 初始化时触发 TDZ。
-    publishApprovalAction: (payload, session) => handlePublishApprovalAction(payload, session),
-    publishDraftImageRemove: (payload, session) => handlePublishDraftImageRemove(payload, session),
+    publishApprovalAction: (payload, session) => {
+      if (seamMode !== 'automation') {
+        return handlePublishApprovalAction(payload, session);
+      }
+      if (!session.accountId || !apiDirectPorts.edgePublish) {
+        return Promise.resolve({
+          requestId: payload?.requestId ?? '',
+          ok: false,
+          reason: 'edge_publish_authority_unavailable',
+        });
+      }
+      return apiDirectPorts.edgePublish.decidePublishApproval({
+        payload,
+        accountId: session.accountId,
+      });
+    },
+    publishDraftImageRemove: (payload, session) =>
+      seamMode === 'automation'
+        ? apiDirectPorts.edgePublish?.removeDraftImage({ payload, session })
+          ?? Promise.resolve({
+            requestId: payload?.requestId ?? '',
+            ok: false,
+            reason: 'edge_publish_authority_unavailable',
+          })
+        : handlePublishDraftImageRemove(payload, session),
     // 多租户路由：私有总线（入站事件灌本连接通道）/ 握手建运行时 / 按连接真实账号解析 controller。
     busFor: (session) => ctx.runtimes!.busFor(session),
     onHandshake: (session) => ctx.runtimes!.onHandshake(session),
@@ -4450,12 +4914,20 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               accountId: session.accountId ?? null,
             },
           )
-          .then(() => personaAutoFill?.notifyEnvironmentBound(envKey))
           .catch((err) => console.warn(`[client-env] 自动登记环境失败 edge=${eid}: ${err instanceof Error ? err.message : String(err)}`));
       }
     },
   });
   ctx.edgeServer = server;
+  ctx.automationEdgeResumeAuthority =
+    new EdgeResumeCommandReceiver({ wsServer: server });
+  if (ctx.accountProjectionStore) {
+    ctx.automationFacebookScopeAuthority =
+      new FacebookScopeCommandReceiver({
+        owner: facebookGroupTargetStore,
+        refreshAccountProjection: () => ctx.accountProjectionStore!.refresh(),
+      });
+  }
   ctx.interactionSender = interactionStore && replyConfigResolver
     ? new InteractionSendOrchestrator({
       store: interactionStore,
@@ -4495,14 +4967,14 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       workflow: replyWorkflow,
       grantsFor: (actor) => interactionPanelGrants.get(actor) ?? new Set(),
       cursorSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
-      resolutionMode: replyConfigResolver?.mode,
+      resolutionMode: localReplyConfigResolver?.mode,
       onRuntimeControlsUpdated: deliverInteractionRuntimeControls,
     })
     : undefined;
-  const scopeInteractionInternalApi = replyConfigScopeStore && replyConfigResolver && replyWorkflow
+  const scopeInteractionInternalApi = replyConfigScopeStore && localReplyConfigResolver && replyWorkflow
     ? new InteractionScopeInternalApi({
       scopes: replyConfigScopeStore,
-      resolver: replyConfigResolver,
+      resolver: localReplyConfigResolver,
       workflow: replyWorkflow,
       grantsFor: (actor) => interactionPanelGrants.get(actor) ?? new Set(),
       cursorSecret: readEnvString('AIDCP_PANEL_JWT_SECRET') ?? '',
@@ -4573,6 +5045,15 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     void drainInteractionRecovery();
   }
   if (interactionOffboarding) {
+    const offboardAdmissionReconciler =
+      deploymentTarget && apiDirectPorts.offboardAdmissionLedger
+        ? new AutomationOffboardAdmissionReconciler({
+            automationRead: new PgClientEnvAutomationRead({ pool: automationPool }),
+            materializationOps: new PgOffboardMaterializationOps({ pool: automationPool }),
+            admissionLedger: apiDirectPorts.offboardAdmissionLedger,
+            workerId: `offboard-reconcile-${deploymentTarget}`,
+          })
+        : undefined;
     let offboardRetryRunning = false;
     const retryOffboards = (): void => {
       if (offboardRetryRunning) return;
@@ -4580,8 +5061,14 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       void (async () => {
         try {
           // 承重兜底通道：认领属主台账里 api 侧还没记上的清理 + 释放已清除的准入 + 重放尚未物化的准入。
-          const materialized = await clientUserStore.reconcileCleanupAdmissions();
-          for (const offboard of materialized) {
+          if (!offboardAdmissionReconciler) {
+            throw new Error('offboard_admission_reconciler_unavailable');
+          }
+          const reconciliation = await offboardAdmissionReconciler.reconcile({
+            commandId: randomUUID(),
+            now: Date.now(),
+          });
+          for (const offboard of reconciliation.materializedOffboards) {
             if (!offboard.accountId) continue;
             const edgeId = server.resolveEdgeIdForAccount(offboard.accountId);
             if (edgeId) await interactionOffboarding?.dispatchPending(offboard.accountId, edgeId);
@@ -4648,10 +5135,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       riskStore.totalsForAccountSince(accountId, minuteSince),
       riskStore.totalsForAccountSince(accountId, hourSince),
       riskStore.todayTotalsForAccount(accountId),
-      sessionStartedAt === null ? Promise.resolve(null) : publishLogStore.countPublishedSinceForAccount(accountId, sessionStartedAt),
-      publishLogStore.countPublishedSinceForAccount(accountId, minuteSince),
-      publishLogStore.countPublishedSinceForAccount(accountId, hourSince),
-      publishLogStore.countPublishedTodayForAccount(accountId),
+      sessionStartedAt === null ? Promise.resolve(null) : automationPublishLog.countPublishedSinceForAccount(accountId, sessionStartedAt),
+      automationPublishLog.countPublishedSinceForAccount(accountId, minuteSince),
+      automationPublishLog.countPublishedSinceForAccount(accountId, hourSince),
+      automationPublishLog.countPublishedTodayForAccount(accountId),
     ]);
 
     // 计数面也按平台投影（change platform-honest-usage-metrics）。三条纪律，缺一条就复活一个谎：
@@ -4706,9 +5193,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     };
 
     const payload: UiDailyUsagePayload = { asOf, totals: dayTotals, windows };
-    if (firstPostOnboardingStore) {
+    if (apiDirectPorts.firstPostProgress) {
       try {
-        const firstPost = await firstPostOnboardingStore.get(accountId);
+        const firstPost = await apiDirectPorts.firstPostProgress.getFirstPostProgress(accountId);
         if (firstPost && (firstPost.state === 'searching' || firstPost.state === 'generating')) {
           const sinceTotals = await riskStore.totalsForAccountSince(accountId, firstPost.startedAt);
           const viewed = Number.isFinite(sinceTotals.view) ? Math.max(0, Math.floor(Number(sinceTotals.view))) : 0;
@@ -4806,10 +5293,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 权威判据，**三态**——副本陈旧时返回 'unknown'，快照层据此不下发 personaBound 字段（未知≠未绑）。
     personaBinding: (accountId) => personaStore.bindingFor(accountId),
     getPersonaWritingLanguage: (accountId) => resolvePersona(accountId)?.writing_language ?? null,
-    lastPublishedForAccount: (accountId) => publishLogStore.lastPublishedForAccount(accountId),
-    pendingApprovalForAccount: (accountId) => publishLogStore.pendingApprovalForAccount(accountId),
+    lastPublishedForAccount: (accountId) => automationPublishLog.lastPublishedForAccount(accountId),
+    pendingApprovalForAccount: (accountId) => automationPublishLog.pendingApprovalForAccount(accountId),
     pendingPublishPreviewForAccount: async (accountId) => {
-      return toUiPublishPreview(await publishLogStore.pendingPublishPreviewForAccount(accountId));
+      return toUiPublishPreview(await automationPublishLog.pendingPublishPreviewForAccount(accountId));
     },
     readApproval: readPublishApproval,
     todayUsageForAccount: buildTodayUsageForAccount,
@@ -4817,6 +5304,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     logger: console,
   });
   const uiSnapshotService = ctx.uiSnapshot;
+  const publishUiUpdateReceiver = new PublishUiUpdateCommandReceiver({
+    uiSnapshot: uiSnapshotService,
+  });
+  ctx.automationPublishUiUpdateAuthority = publishUiUpdateReceiver;
+  if (seamMode !== 'automation') {
+    ctx.publishUiUpdateCommand = publishUiUpdateReceiver;
+  }
 
   function toUiPublishPreview(preview: Awaited<ReturnType<PublishLogStore['pendingPublishPreviewForAccount']>>) {
     if (!preview) return null;
@@ -4840,8 +5334,32 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 去重只是形式要求，真正的 exactly-once 由 risk_counters.outbox_id 唯一索引承担。
     await recordRiskFact(accountId, 'publish', `publish:${accountId}:${Date.now()}:${randomUUID()}`);
   };
+  const dispatchPublishStore =
+    seamMode === 'automation'
+      ? {
+          loadForDispatch: (recordId: number) =>
+            automationPublishLog.loadForDispatch(recordId),
+          updateStatus: (id: number, status: Parameters<typeof automationPublishLog.updateStatus>[1]) =>
+            automationPublishLog.updateStatus(id, status),
+          updatePostId: (id: number, postId: string, postUrl?: string | null) =>
+            automationPublishLog.updatePostId(id, postId, postUrl),
+          markScheduled: (
+            id: number,
+            scheduledAt: number,
+            scheduledPlatformId?: string | null,
+          ) => automationPublishLog.markScheduled(id, scheduledAt, scheduledPlatformId),
+          markImagesAttached: (id: number, count: number) =>
+            automationPublishLog.markImagesAttached(id, count),
+          listPendingApprovalIds: () =>
+            Promise.reject(
+              new Error(
+                'publish_pending_scan_uses_authenticated_3b_listPendingDispatch',
+              ),
+            ),
+        }
+      : publishLogStore;
   const publishDispatcher = new PublishDispatcher({
-    store: publishLogStore,
+    store: dispatchPublishStore,
     sequencer: commandSequencer,
     edgeTaskLeases,
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
@@ -4893,8 +5411,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // change unify-card-routing-origin-then-team：文案本就账号作用域（渲染了账号名）→ 按账号路由到团队群。
     notifyDispatchEvent: (notice) => {
       void (async () => {
-        const chatId = await resolveCardChatId(undefined, notice.accountId);
-        if (!chatId) return;
         const name = accountDisplayName(notice.accountId) ?? '（未获取昵称）';
         const ref = notice.recordId !== undefined ? `草稿 #${notice.recordId}${notice.title ? `「${notice.title}」` : ''}` : '';
         const text =
@@ -4915,8 +5431,17 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               : notice.kind === 'preempted_exhausted'
               ? `⚠️ 发布反复被打断：账号「${name}」${ref} 连续多次被更高优先任务抢占，已暂停自动重投、仍保持待审（未烧稿）。稍后手动重新批准即可再次尝试。`
               : `🟢 发布熔断解除：账号「${name}」人工批准确认，恢复下发已批队列。`;
-        await messenger.sendText(chatId, text);
-      })().catch(() => {});
+        await deliverStructuredNotification({
+          kind: 'operational_text',
+          input: { route: 'account', accountId: notice.accountId, text },
+        });
+      })().catch((error) => {
+        console.warn(
+          `[publish-dispatch] 运维通知发送失败 kind=${notice.kind} account=${notice.accountId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
     },
     facebookPublishMedia: facebookPublishMediaStore
       ? {
@@ -4929,7 +5454,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     logger: console,
   });
   ctx.scheduledPublishReconciler = new ScheduledPublishReconciler({
-    store: publishLogStore,
+    store: automationPublishLog,
     sequencer: commandSequencer,
     edgeTaskLeases,
     resolveEdgeIdForAccount: (accountId) => server.resolveEdgeIdForAccount(accountId),
@@ -4971,11 +5496,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     const m = /^publish-(\d+)$/.exec(requestId);
     if (!m) return;
     const recordId = Number(m[1]);
-    void publishLogStore
+    void automationPublishLog
       .loadForDispatch(recordId)
       .then(async (draft) => {
         if (!draft || draft.status !== 'pending_approval') return;
-        await publishLogStore.rejectPendingApproval(recordId);
+        await automationPublishLog.rejectPendingApproval(recordId);
         if (draft.platform === 'facebook' && draft.metadata?.facebookMedia && facebookPublishMediaStore) {
           await facebookPublishMediaStore
             .releaseReservation(draft.metadata.facebookMedia.setId, draft.metadata.facebookMedia.reservationId)
@@ -4994,9 +5519,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     const m = /^publish-(\d+)$/.exec(requestId);
     if (!m) return { ok: true };
     const recordId = Number(m[1]);
-    let draft: Awaited<ReturnType<typeof publishLogStore.loadForDispatch>>;
+    let draft: Awaited<ReturnType<typeof automationPublishLog.loadForDispatch>>;
     try {
-      draft = await publishLogStore.loadForDispatch(recordId);
+      draft = await automationPublishLog.loadForDispatch(recordId);
     } catch (err) {
       console.warn(
         `[aidcp-cloud] 授权发布前置检查失败，无法读取草稿 requestId=${requestId}: ${
@@ -5022,6 +5547,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
    * （客户端删配图以应答回带的写后真态为主刷新路径）。
    */
   const refreshPublishPreview = (recordId: number): void => {
+    if (seamMode === 'automation') {
+      console.warn(
+        `[ui-snapshot] automation 端不再跨 owner 读取 record preview；等待 API owner 的 publish UI update command recordId=${recordId}`,
+      );
+      return;
+    }
     void publishLogStore
       .pendingPublishPreviewForRecord(recordId)
       .then((preview) => {
@@ -5036,7 +5567,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       );
   };
 
-  if (draftRefinementStore && imageProvider) {
+  if (seamMode !== 'automation' && draftRefinementStore && imageProvider) {
     const worker = new DraftRefinementWorker({
       store: draftRefinementStore,
       drafts: publishLogStore,
@@ -5067,19 +5598,19 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 客户端预览内删配图（change client-preview-image-delete）：闸序与红线在 draft-image-remove.ts（可单测），
   // 这里只做接线——读草稿 / 探审批签名 / 既有单写 editDraft / 读活版本 / 重推预览。
   const handlePublishDraftImageRemove = createPublishDraftImageRemoveHandler({
-    loadDraft: (recordId) => publishLogStore.loadForDispatch(recordId),
+    loadDraft: (recordId) => automationPublishLog.loadForDispatch(recordId),
     readApproval: (requestId) => readPublishApproval(requestId),
     editDraft: (recordId, expectedVersion, patch, editor) =>
-      publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
+      automationPublishLog.editDraft(recordId, expectedVersion, patch, editor),
     readLiveVersion: (recordId) => readLiveContentVersion(recordId),
     refreshPreview: (recordId) => refreshPublishPreview(recordId),
   });
 
   const approvePublishForClient = createClientPublishApprovalHandler({
-    loadDraft: (recordId) => publishLogStore.loadForDispatch(recordId),
+    loadDraft: (recordId) => automationPublishLog.loadForDispatch(recordId),
     readApproval: (requestId) => readPublishApproval(requestId),
     editDraft: (recordId, expectedVersion, patch, editor) =>
-      publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
+      automationPublishLog.editDraft(recordId, expectedVersion, patch, editor),
     preflight: (requestId) => preflightApprovePublish(requestId),
     // 客户端内审批：决策人 = 那台客户端所绑账号（真实主体，MUST NOT 常量占位）。
     writeApproval: (requestId, approved, approvalPayload, decidedBy) =>
@@ -5170,22 +5701,23 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       resolveAccountId: async (row) => {
         const match = /^publish-(\d+)$/.exec(row.requestId);
         if (!match) return null;
-        const draft = await publishLogStore.loadForDispatch(Number(match[1]));
+        const draft = await automationPublishLog.loadForDispatch(Number(match[1]));
         return draft?.accountId ?? null;
       },
       notify: async ({ requestId, envKey, accountId, waitingMs }) => {
-        const chatId = await resolveCardChatId(undefined, accountId ?? undefined);
-        // 无可用群 = 这条 P1 没有飞书接收端。MUST 抛错让看门狗如实记为「未送达」，
-        // 静默 return 会被计成已送达（旧行为），等于告警自己也静默了。
-        if (!chatId) throw new Error('pending_dispatch_alert_chat_not_configured');
         const name = accountId ? (accountDisplayName(accountId) ?? accountId) : '（未知账号）';
-        await messenger.sendText(
-          chatId,
-          `🔴 已批准稿件长时间待下发：${requestId}（账号 ${name}${envKey ? ` / 环境 ${envKey}` : ''}）` +
+        await deliverStructuredNotification({
+          kind: 'operational_text',
+          input: {
+            route: accountId ? 'account' : 'default',
+            ...(accountId ? { accountId } : {}),
+            text:
+              `🔴 已批准稿件长时间待下发：${requestId}（账号 ${name}${envKey ? ` / 环境 ${envKey}` : ''}）` +
             `已等待 ${Math.round(waitingMs / 60_000)} 分钟，` +
             '且**没有任何已知阻塞原因**（非离线 / 非排队 / 非熔断 / 非验证码暂停）。' +
             '这通常意味着下发侧失联，请排查云端下发段与数据库连通性。稿件仍保持待审、授权仍有效。',
-        );
+          },
+        }, `pending-dispatch-watchdog:${requestId}:${Math.trunc(waitingMs / 60_000)}`);
       },
     });
     pendingDispatchWatchdog.start(Math.max(60_000, dispatchScanMs));
@@ -5198,15 +5730,19 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const commentApprovalEnabled = process.env.AIDCP_COMMENT_APPROVAL === 'true';
   const commentApproval: CommentApprovalPort = {
     request: async ({ requestId, noteId, text, title, authorName, accountId, accountName, originChatId }) => {
-      // change unify-card-routing-origin-then-team：来源会话（命令触发）→ 账号团队群 → 默认群。
-      // 此前这里写死默认群：命令触发的卡不回来源会话、自动化的卡不进账号团队群——同一行造成两个报障现象。
-      const chatId = await resolveCardChatId(originChatId, accountId);
-      if (!chatId) {
-        console.error('[comment] 无可用飞书群，评论审批卡未发出（将超时跳过、不发）');
-        return;
-      }
-      const displayName = resolveNotificationAccountName(accountId, accountName, accountDisplayName);
-      await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text, title, authorName, accountId, accountName: displayName }));
+      await deliverStructuredNotification({
+        kind: 'comment_approval',
+        input: {
+          requestId,
+          noteId,
+          text,
+          title,
+          authorName,
+          accountId,
+          accountName,
+          originChatId,
+        },
+      }, `comment-approval:${requestId}`);
     },
     isApproved: async (requestId: string) => {
       const decision = await readPublishApproval(requestId);
@@ -5233,15 +5769,16 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     input: CommentApprovalNoticeInput & { contactIncluded?: boolean; originChatId?: string },
     source: 'mandatory_persona' | 'account_global' | 'comment_scheduler',
   ): Promise<void> => {
-    const chatId = await resolveCardChatId(input.originChatId, input.accountId);
-    if (!chatId) throw new Error('auto_approve_chat_not_configured');
-    const displayName = resolveNotificationAccountName(input.accountId, input.accountName, accountDisplayName);
     const mandatory = source === 'mandatory_persona';
-    await messenger.sendCard(
-      chatId,
+    await deliverStructuredNotification(
       mandatory
-        ? buildMandatoryCommentPreAuthorizationCard({ ...input, accountName: displayName })
-        : buildCommandResultCard({
+        ? {
+            kind: 'mandatory_comment_pre_authorization',
+            input,
+          }
+        : {
+            kind: 'command_result',
+            input: {
             command: input.contactIncluded ? '联系评论（免审）' : '评论（免审）',
             ok: true,
             level: 'success',
@@ -5251,17 +5788,20 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               `**目标**：${input.title?.trim() || input.authorName?.trim() || '目标内容'}\n` +
               `**正文预览**：${input.text.replace(/\s+/g, ' ').trim().slice(0, 160) || '（空）'}`,
             accountId: input.accountId,
-            accountName: displayName,
-          }),
+            accountName: input.accountName,
+            originChatId: input.originChatId,
+          },
+        },
+      `comment-auto-approved:${source}:${input.requestId}`,
     );
     console.log(`[comment] 免审通知已发 source=${source} account=${input.accountId ?? '-'} requestId=${input.requestId} note=${input.noteId}`);
   };
 
   const notifyMandatoryCommentOutcome = async (input: MandatoryCommentOutcomeNoticeInput): Promise<void> => {
-    const chatId = await resolveAccountChatId(input.accountId);
-    if (!chatId) throw new Error('mandatory_comment_outcome_chat_not_configured');
-    const displayName = resolveNotificationAccountName(input.accountId, input.accountName, accountDisplayName);
-    await messenger.sendCard(chatId, buildMandatoryCommentOutcomeCard({ ...input, accountName: displayName }));
+    await deliverStructuredNotification(
+      { kind: 'mandatory_comment_outcome', input },
+      `mandatory-comment-outcome:${input.requestId}:${input.outcome}`,
+    );
     console.log(
       `[comment] mandatory 终态通知已发 outcome=${input.outcome} account=${input.accountId ?? '-'} requestId=${input.requestId} note=${input.noteId}`,
     );
@@ -5277,13 +5817,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const onConfigError = async (session: { edgeId?: string; machineLabel?: string }, message: string): Promise<void> => {
     console.error(`[aidcp-cloud] 握手配置错误 edge=${session.edgeId ?? '-'}: ${message}`);
     try {
-      const chatId = await resolveDefaultChatId({ botChatStore, fallbackChatId: process.env.FEISHU_CHAT_ID, logger: console });
-      if (chatId) {
-        await messenger.sendText(
-          chatId,
-          `⚠️ 边缘节点握手被拒（配置错误）：edge=\`${session.edgeId ?? '-'}\`${session.machineLabel ? `（${session.machineLabel}）` : ''} 未声明 accountId。\n请为该节点启动器显式设置 AIDCP_ACCOUNT_ID（默认账号写 default）。`,
-        );
-      }
+      await deliverStructuredNotification({
+        kind: 'operational_text',
+        input: {
+          route: 'default',
+          text: `⚠️ 边缘节点握手被拒（配置错误）：edge=\`${session.edgeId ?? '-'}\`${session.machineLabel ? `（${session.machineLabel}）` : ''} 未声明 accountId。\n请为该节点启动器显式设置 AIDCP_ACCOUNT_ID（默认账号写 default）。`,
+        },
+      });
     } catch (err) {
       console.error('[aidcp-cloud] 配置错误飞书告警发送失败:', (err as Error).message);
     }
@@ -5363,11 +5903,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // （评论/@/点赞/收藏/关注发送者），按该连接真实账号追加进事件流水。每连接握手 buildDispatcher 调一次 →
     // 一连接订阅一次（避免 setup/restart 重复订阅重复记录）。记录失败只吞 + 准确日志：绝不冒充飞书失败、
     // 绝不阻塞巡视；append 幂等，下轮安全重试。预览 dispatcher 无边缘会话 → 永不触发（不在默认账号空记）。
-    if (notificationContactStore) {
+    if (apiDirectPorts.notificationContacts) {
       ctx.bus.on('notification.items.arrived', (p) => {
         const items = p?.items ?? [];
         if (!items.length) return;
-        notificationContactStore!.appendEvents(ctx.accountId, items).catch((err) =>
+        apiDirectPorts.notificationContacts!.appendEvents(ctx.accountId, items).catch((err) =>
           console.warn(
             `[notification-contacts] 记录失败 account=${ctx.accountId}（巡视照常，下轮幂等重试）:`,
             (err as Error).message,
@@ -5502,10 +6042,22 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                   canComment: async (a) => (await resolveController(a)).canDo('comment'),
                   recordComment: async (a) =>
                     recordRiskFact(a, 'comment', `contact-comment:${a}:${Date.now()}:${randomUUID()}`),
-                  countAttemptsToday: (a) => contentScheduleStore.countContactAttemptsToday(a),
+                  countAttemptsToday: (a) =>
+                    apiDirectPorts.automationConfigCommands
+                      ? apiDirectPorts.automationConfigCommands.countContactAttemptsToday(a)
+                      : Promise.reject(
+                          new Error('automation_config_commands_authority_unavailable'),
+                        ),
                   getDailyCap: async (a) => contentScheduleStore.effectiveScheduleFor(a).contactCommentDailyCap,
                   recordAttempt: (a, source, snap) =>
-                    contentScheduleStore.recordContactCommentAttempt(a, { source, ...(snap ?? {}) }),
+                    apiDirectPorts.automationConfigCommands
+                      ? apiDirectPorts.automationConfigCommands.recordContactCommentAttempt(
+                          a,
+                          { source, ...(snap ?? {}) },
+                        )
+                      : Promise.reject(
+                          new Error('automation_config_commands_authority_unavailable'),
+                        ),
                 },
               ),
           }
@@ -5516,17 +6068,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       // 账号 → group_label → group_route.chat_id 命中即投；未绑定 / 读失败一律回落默认群、绝不静默丢。
       // 这是本 change 的核心投递点（账号的平台入站消息 = 各团队要收的"消息"）；其余审批卡 / 运维告警仍走默认群（面向运营方）。
       notifyComments: async (items) => {
-        const chatId = await resolveAccountChatId(ctx.accountId);
-        if (!chatId) {
-          console.error(`[notification] 无可用飞书群，评论/@ 通知未发出 account=${ctx.accountId}`);
-          return;
-        }
-        const lines = items.map(
-          (it) =>
-            `• ${it.fromUser || '某用户'}（${it.kind === 'mention' ? '@你' : '评论'}）：${it.content}` +
-            (it.noteTitle ? ` · 《${it.noteTitle}》` : ''),
-        );
-        await messenger.sendText(chatId, `📬 小红书新消息（${items.length}）\n${lines.join('\n')}`);
+        await deliverStructuredNotification({
+          kind: 'notification_inbox',
+          accountId: ctx.accountId,
+          items,
+        });
       },
       // 下行指令只发回**发起该决策的连接**（按 edgeId 定向，不再广播 → 不串号）。单连接时等价于原广播。
       sendCommand: (command) => {
@@ -5600,14 +6146,25 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     buildDispatcher,
     ensureAccount: async (accountId, platform) => {
       try {
-        await accountStore?.ensureAccount?.(accountId, platform);
+        const accountRuntime = apiDirectPorts.accountRuntime;
+        if (!accountRuntime) throw new Error('account_runtime_authority_unavailable');
+        await accountRuntime.ensureAccount(accountId, platform);
       } catch (err) {
         console.warn(`[aidcp-cloud] ensureAccount(${accountId}) 失败（不阻塞握手）:`, (err as Error).message);
       }
     },
-    getAccountPlatform: async (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
-    getNickname: (accountId) => accountStore?.getNickname?.(accountId) ?? null,
-    setNickname: (accountId, nickname) => accountStore?.setNickname?.(accountId, nickname),
+    getAccountPlatform: async (accountId) => {
+      const accountRuntime = apiDirectPorts.accountRuntime;
+      if (!accountRuntime) throw new Error('account_runtime_authority_unavailable');
+      return (await accountRuntime.getPlatformOrNull(accountId)) ?? 'xiaohongshu';
+    },
+    recordNickname: (accountId, nickname) => {
+      const accountRuntime = apiDirectPorts.accountRuntime;
+      if (!accountRuntime) {
+        return Promise.reject(new Error('account_runtime_authority_unavailable'));
+      }
+      return accountRuntime.recordNickname(accountId, nickname).then(() => undefined);
+    },
     onConfigError,
     closeEdge: (sessionId) => server.closeEdge(sessionId),
     logger: console,
@@ -5731,7 +6288,16 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     facebookAudit: (row) => {
       void facebookCommentAuditStore.append(row);
     },
-    facebookResolveContainerName: (accountId, url, name) => facebookCommentConfigStore.resolveContainerName(accountId, url, name),
+    facebookResolveContainerName: (accountId, url, name) =>
+      apiDirectPorts.automationConfigCommands
+        ? apiDirectPorts.automationConfigCommands.resolveFacebookContainerName(
+            accountId,
+            url,
+            name,
+          )
+        : Promise.reject(
+            new Error('automation_config_commands_authority_unavailable'),
+          ),
     facebookCoverageConfigFor: async (accountId) => {
       // FB 配置不再手填群组；正常评论目标统一来自该账号已加入群组账本。仍保留原 warmup/cooldown
       // 与 relaxed 兜底（最久没评优先），但不再要求 AIDCP_FB_GROUP_COVERAGE_ALL / allowlist 选中。
@@ -5782,16 +6348,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // --join=<url>（change facebook-comment-review-and-targeted-join）：加入指定群、只归该账号（同一 TDZ-safe 闭包，scheduler 稍后构造）。
     facebookJoinSpecificGroup: (accountId, groupUrl, opts) => facebookGroupJoinScheduler.joinSpecificGroup(accountId, groupUrl, opts),
     postResultCard: async (accountId, receipt, source, originChatId) => {
-      // change unify-card-routing-origin-then-team：来源会话（手动 /comment）→ 账号团队群（自动排期）→ 默认群。
-      // 与该任务的审批卡同一解析、同一目标——此前两张卡走两段不同代码、两种兜底，正是「两卡两群」的机制根因。
-      const chatId = await resolveCardChatId(originChatId, accountId);
-      if (!chatId) {
-        console.warn('[comment] 无可用飞书群，结果卡片未发出');
-        return;
-      }
-      await messenger.sendCard(
-        chatId,
-        buildCommandResultCard({
+      await deliverStructuredNotification({
+        kind: 'command_result',
+        input: {
           // 触发来源可辨识（change comment-keep-open-through-approval）：自动排期评论 vs 人工 /comment。
           command: source ?? '/comment',
           ok: receipt.ok,
@@ -5799,9 +6358,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           title: receipt.title,
           message: receipt.message,
           accountId,
-          accountName: accountDisplayName(accountId),
-        }),
-      );
+          originChatId,
+        },
+      });
     },
     logger: console,
   });
@@ -5859,7 +6418,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     ctx.publishScheduler = new PublishScheduler({
       conceptStore,
       likedStore: likedNoteStore,
-      publishLog: publishLogStore,
+      publishLog: automationPublishLog,
       resolveRisk: resolveController,
       resolveSingleAccountId,
       getPlatform: (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
@@ -5878,7 +6437,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       minHoursBetween: Number(process.env.AIDCP_PUBLISH_MIN_HOURS ?? 24),
       // 并发准入（change parallel-rewrite-drafts）：账号在途帽（claim + DB 待审之和，覆盖全部触发入口）
       // + 全局并发生成帽（保护 LLM/生图供应商；上线先压 AIDCP_PUBLISH_IMAGE_CONCURRENCY 观察成功率）。
-      countPendingForAccount: (accountId) => publishLogStore.countPendingForAccount(accountId),
+      countPendingForAccount: (accountId) => automationPublishLog.countPendingForAccount(accountId),
       pendingCapPerAccount: Number(process.env.AIDCP_PUBLISH_PENDING_CAP_PER_ACCOUNT ?? 20),
       maxConcurrentRuns: Number(process.env.AIDCP_PUBLISH_MAX_CONCURRENT_RUNS ?? 3),
       logger: console,
@@ -5901,10 +6460,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           }),
         scheduleFor: (accountId) => contentScheduleStore.effectiveScheduleFor(accountId),
         riskStatus: async (accountId) => (await resolveController(accountId)).getState().status,
-        postedTodayCount: (accountId) => publishLogStore.countPublishedTodayForAccount(accountId),
+        postedTodayCount: (accountId) => automationPublishLog.countPublishedTodayForAccount(accountId),
         // 日上限口径（change parallel-rewrite-drafts）：自主在途按真实条数计（防两张自动草稿都获批超发）；
         // 洗稿候选（source_reference 非空）不占排期日上限——由账号在途帽独立兜量，不堵 cap=1 账号的排期。
-        pendingAutonomousCount: (accountId) => publishLogStore.countPendingAutonomousForAccount(accountId),
+        pendingAutonomousCount: (accountId) => automationPublishLog.countPendingAutonomousForAccount(accountId),
         getPlatform: (accountId) => accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu',
         availablePublishMediaCount: (accountId) =>
           facebookPublishMediaStore ? facebookPublishMediaStore.availableCount(accountId) : Promise.resolve(0),
@@ -5954,25 +6513,17 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           } catch (e) {
             message = (e as Error).message;
           }
-          // 账号业务结果卡：按账号路由到团队群（未绑定 / 读失败回落默认群）。
-          const chatId = await resolveAccountChatId(accountId);
-          if (!chatId) {
-            console.warn(`[content-scheduler] 无可用飞书群，排期结果卡未发出 account=${accountId} title=${title}`);
-            return;
-          }
-          await messenger
-            .sendCard(
-              chatId,
-              buildCommandResultCard({
+          await deliverStructuredNotification({
+            kind: 'command_result',
+            input: {
                 command: '排期发帖（自动）',
                 ok,
                 level,
                 title,
                 message,
                 accountId,
-                accountName: accountDisplayName(accountId),
-              }),
-            )
+              },
+            })
             .catch((e) => console.warn('[content-scheduler] 排期结果卡发送失败：', (e as Error).message));
         },
         // 评论动作三件套（change content-schedule-comments）：commentScheduler 未建（PG 缺）则不注入 → 调度器整体跳过评论动作。
@@ -5982,24 +6533,17 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               // 触发回执非 ok（配额拒 / 离线 / 未绑人设 / 在跑）回黄卡如实说明；任务终态结果卡由评论链自补（postResultCard），此处绝不重复发。
               triggerComment: async (accountId: string, approvalMode) => {
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
-                  const chatId = await resolveAccountChatId(accountId);
-                  if (!chatId) {
-                    console.warn(`[content-scheduler] 无可用飞书群，排期评论回执卡未发出 account=${accountId} title=${title}`);
-                    return;
-                  }
-                  await messenger
-                    .sendCard(
-                      chatId,
-                      buildCommandResultCard({
+                  await deliverStructuredNotification({
+                    kind: 'command_result',
+                    input: {
                         command: '排期评论（自动）',
                         ok: false,
                         level,
                         title,
                         message,
                         accountId,
-                        accountName: accountDisplayName(accountId),
-                      }),
-                    )
+                      },
+                    })
                     .catch((e) => console.warn('[content-scheduler] 排期评论回执卡发送失败：', (e as Error).message));
                 };
                 try {
@@ -6027,24 +6571,17 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               // 尝试型持久日上限——触发回执 ok（任务真开跑）即记 attempt（被人审拒/无目标也占额度，保守方向）。
               triggerContactComment: async (accountId: string, approvalMode) => {
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
-                  const chatId = await resolveAccountChatId(accountId);
-                  if (!chatId) {
-                    console.warn(`[content-scheduler] 无可用飞书群，排期联系评论回执卡未发出 account=${accountId} title=${title}`);
-                    return;
-                  }
-                  await messenger
-                    .sendCard(
-                      chatId,
-                      buildCommandResultCard({
+                  await deliverStructuredNotification({
+                    kind: 'command_result',
+                    input: {
                         command: '排期联系评论（自动）',
                         ok: false,
                         level,
                         title,
                         message,
                         accountId,
-                        accountName: accountDisplayName(accountId),
-                      }),
-                    )
+                      },
+                    })
                     .catch((e) => console.warn('[content-scheduler] 排期联系评论回执卡发送失败：', (e as Error).message));
                 };
                 try {
@@ -6066,14 +6603,23 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                     return;
                   }
                   // 任务真开跑 → 记一条持久 attempt（尝试型日上限；重启不清零、绝不超发）。终态结果卡评论链自补。
-                  await contentScheduleStore.recordContactCommentAttempt(accountId).catch((e) =>
-                    console.warn('[content-scheduler] 联系评论 attempt 记录失败（上限将偏松，需关注）：', (e as Error).message),
-                  );
+                  const configCommands = apiDirectPorts.automationConfigCommands;
+                  if (!configCommands) {
+                    throw new Error('automation_config_commands_authority_unavailable');
+                  }
+                  await configCommands.recordContactCommentAttempt(accountId);
                 } catch (e) {
                   await sendReceiptCard('error', '排期联系评论：触发异常', (e as Error).message);
                 }
               },
-              contactAttemptsTodayCount: (accountId: string) => contentScheduleStore.countContactAttemptsToday(accountId),
+              contactAttemptsTodayCount: (accountId: string) =>
+                apiDirectPorts.automationConfigCommands
+                  ? apiDirectPorts.automationConfigCommands.countContactAttemptsToday(
+                      accountId,
+                    )
+                  : Promise.reject(
+                      new Error('automation_config_commands_authority_unavailable'),
+                    ),
             }
           : {}),
         triggerJoin: (accountId: string) => facebookGroupJoinScheduler.triggerScheduled(accountId),
@@ -6087,24 +6633,17 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
          */
         onCellAbandoned: (accountId: string, action: string, reason: string) => {
           void (async () => {
-            const chatId = await resolveAccountChatId(accountId);
-            if (!chatId) {
-              console.warn(`[content-scheduler] 无可用飞书群，放弃卡未发出 account=${accountId} action=${action} reason=${reason}`);
-              return;
-            }
-            await messenger
-              .sendCard(
-                chatId,
-                buildCommandResultCard({
+            await deliverStructuredNotification({
+              kind: 'command_result',
+              input: {
                   command: `排期${action === 'comment' ? '评论' : action === 'contact_comment' ? '联系评论' : action === 'join' ? '加群' : '发帖'}（自动）`,
                   ok: false,
                   level: 'warning',
                   title: '本小时未能开始，已放弃',
                   message: `多次尝试后仍未接管边端（原因：${reason}）。本小时未搜索、未选中、未发布；下一个小时格会重新尝试。`,
                   accountId,
-                  accountName: accountDisplayName(accountId),
-                }),
-              )
+                },
+              })
               .catch((e) => console.warn('[content-scheduler] 放弃卡发送失败：', (e as Error).message));
           })();
         },
@@ -6147,7 +6686,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // DelegatedTask execution is late-bound after both schedulers and PublishDispatcher are ready.
   if (delegatedTaskStore && delegatedTaskService && commentScheduler && ctx.publishScheduler) {
     const loadCandidate = async (recordId: number) => {
-      const draft = await publishLogStore.loadForDispatch(recordId);
+      const draft = await automationPublishLog.loadForDispatch(recordId);
       if (!draft) return null;
       const platform = draft.platform ?? 'xiaohongshu';
       // Delegated candidates belong to the existing proactive publishing
@@ -6170,7 +6709,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       publishes: ctx.publishScheduler,
       loadCandidate,
       approveCandidate: async (candidate, decidedBy) => {
-        const draft = await publishLogStore.loadForDispatch(candidate.recordId);
+        const draft = await automationPublishLog.loadForDispatch(candidate.recordId);
         if (!draft || draft.contentVersion !== candidate.contentVersion) return loadCandidate(candidate.recordId);
         const requestId = `publish-${candidate.recordId}`;
         const preflight = await preflightApprovePublish(requestId);
@@ -6191,7 +6730,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         return loadCandidate(candidate.recordId);
       },
       rejectCandidate: async (candidate, decidedBy) => {
-        const draft = await publishLogStore.loadForDispatch(candidate.recordId);
+        const draft = await automationPublishLog.loadForDispatch(candidate.recordId);
         if (!draft || draft.contentVersion !== candidate.contentVersion) return loadCandidate(candidate.recordId);
         const requestId = `publish-${candidate.recordId}`;
         const tags = Array.isArray(draft.metadata?.topics)
@@ -6204,12 +6743,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           { decidedBy, decidedVia: 'delegated_task' },
         );
         if (!result.written && result.alreadyDecided !== false) throw new Error('candidate_already_approved');
-        await publishLogStore.rejectPendingApproval(candidate.recordId);
+        await automationPublishLog.rejectPendingApproval(candidate.recordId);
         notifyPublishRejected(requestId);
         return loadCandidate(candidate.recordId);
       },
       modifyCandidate: async (candidate, patch) => {
-        const result = await publishLogStore.editDraft(candidate.recordId, candidate.contentVersion, patch, 'delegated-task');
+        const result = await automationPublishLog.editDraft(candidate.recordId, candidate.contentVersion, patch, 'delegated-task');
         if (!result.ok) throw new Error(`candidate_edit_${result.reason}`);
         refreshPublishPreview(candidate.recordId);
         return loadCandidate(candidate.recordId);
@@ -6237,25 +6776,26 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         // change restore-delegated-command-card-origin-chat：命令触发的终态卡回来源会话（操作员触发、操作员收结果）；
         // 无来源会话（自动 / 排期 / 旧行）补集式回落账号→团队群路由，零回归。
         const originChatId = task.originChatId?.trim();
-        const chatId = originChatId || (await resolveAccountChatId(task.accountId));
-        if (!chatId) return;
         const commandLabel = task.actionFamily === 'comment' ? '评论' : '发帖';
         console.log(
           `[delegated-task] ${commandLabel}终态失败卡 task=${task.id} account=${task.accountId} sink=${originChatId ? 'origin' : 'account_team'}`,
         );
         try {
-          await messenger.sendCard(chatId, buildCommandResultCard({
-            command: commandLabel,
-            ok: false,
-            level: receipt.level,
-            title: receipt.title,
-            message: receipt.message,
-            accountId: task.accountId,
-            accountName: accountDisplayName(task.accountId),
-            // change delegated-terminal-failure-reason：平台名 additive 补齐（cards.ts 的 platformLine 是
-            // 现成条件片段）——多账号多平台并行时，光有昵称不够定位是哪条线出的事。
-            platformName: platformRegistryEntry(task.platform).displayName,
-          }));
+          await deliverStructuredNotification({
+            kind: 'command_result',
+            input: {
+              command: commandLabel,
+              ok: false,
+              level: receipt.level,
+              title: receipt.title,
+              message: receipt.message,
+              accountId: task.accountId,
+              originChatId,
+              // change delegated-terminal-failure-reason：平台名 additive 补齐（cards.ts 的 platformLine 是
+              // 现成条件片段）——多账号多平台并行时，光有昵称不够定位是哪条线出的事。
+              platformName: platformRegistryEntry(task.platform).displayName,
+            },
+          }, `delegated-task-result:${task.id}:${task.status}`);
           delegatedTaskNotificationGate.markSent(task);
         } catch (err) {
           console.warn(`[delegated-task] ${commandLabel}失败结果卡发送失败 task=${task.id}: ${(err as Error).message}`);
@@ -6276,50 +6816,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     console.warn('[aidcp-cloud] DelegatedTask 执行器未就绪（评论或发布 scheduler 缺失）；任务服务保持 fail-visible');
   }
   // 旧 TODO(temp) /debug/publish 调试口已删除（A 阶段4）：发帖只经 PublishScheduler 三扳机 + 发布前人审。
-  const feishuReceiver = new FeishuWsReceiver({
-    commandRouter,
-    messenger,
-    // 飞书与 Web / 客户端 / 委托任务共用同一持久授权写出口；拆进独立服务后也只注入端口，
-    // receiver 不持有数据库、文件信号或进程内替代事实源。
-    writeApproval: (requestId, approved, payload, context) =>
-      writeApprovalDecision(requestId, approved, payload, context),
-    // 通过即切：飞书「授权发布」首写成功即触发下发段（仅 publish-<n>）。
-    onApproved: (trigger) => {
-      void triggerPublishDispatchOnApprove(trigger.requestId, trigger.revision, trigger.kind).catch((err) => {
-        console.warn('[aidcp-cloud] feishu human_reconfirm trigger 失败:', err instanceof Error ? err.message : String(err));
-      });
-    },
-    // 陪伴界面：取消首写成功 → rejected 推给在线边缘（仅 publish-<n>）。
-    onRejected: notifyPublishRejected,
-    // 写时版本预检（edit-note-draft-before-publish）：飞书卡片授权前比对活版本与卡片烤入版本；
-    // 不一致 → 不写签名、回「请到控制台重新审批」替换卡（云端无法主动刷新已发出的老卡片）。
-    readLiveContentVersion,
-    preflightApprovePublish: (requestId) => preflightApprovePublish(requestId),
-    onDelegatedTaskAction: (value) => delegatedTaskService
-      ? handleDelegatedTaskCardAction(delegatedTaskService, value)
-      : Promise.resolve(null),
-  });
-  if (isFeishuWsEnabled()) {
-    try {
-      const wsClient = new lark.WSClient({
-        appId: process.env.FEISHU_APP_ID ?? '',
-        appSecret: process.env.FEISHU_APP_SECRET ?? '',
-        onReady: () => console.log('[aidcp-cloud] 飞书长连接已建立（WSClient onReady）'),
-        onError: (err) => console.error('[aidcp-cloud] 飞书长连接错误:', err.message),
-        onReconnecting: () => console.warn('[aidcp-cloud] 飞书长连接重连中…'),
-        onReconnected: () => console.log('[aidcp-cloud] 飞书长连接已重连'),
-      });
-      await wsClient.start({
-        eventDispatcher: buildFeishuEventDispatcher(feishuReceiver, botChatEventHandler, console),
-      });
-      console.log('[aidcp-cloud] 飞书事件接收已启动（WSClient 长连接）');
-    } catch (err) {
-      console.warn('[aidcp-cloud] 飞书长连接启动失败（事件接收不可用）:', (err as Error).message);
-    }
-  } else {
-    console.warn('[aidcp-cloud] 飞书长连接已禁用（AIDCP_FEISHU_WS_ENABLED=false）；当前进程不接收飞书事件');
-  }
-
+  // Feishu WS ingress is composed by segD after API owner and remote command
+  // clients are available.
   // 角色 prompt 只读预览（change role-prompt-visibility）：借仅供预览的 RoleDispatcher 渲染真实 prompt。
   // 人设选择框（change prompt-preview-persona-selector）：给定 accountId 时把预览 dispatcher 当前账号临时切到
   // 该账号、同步渲染、finally 还原（previewPrompt 全程同步、单线程无交错，故原子安全）；hasPersona 用不回落的
@@ -6344,10 +6842,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   ctx.accountPersonaService = accountPersonaService;
   ctx.alertStore = alertStore;
   ctx.approvePublishForClient = approvePublishForClient;
-  ctx.botChatsProvider = botChatsProvider;
   ctx.buildTodayUsageForAccount = buildTodayUsageForAccount;
   ctx.captchaAssist = captchaAssist;
-  ctx.commandFace = commandFace;
   ctx.commentScheduler = commentScheduler;
   ctx.configMirrorRefresher = configMirrorRefresher;
   ctx.handlePublishDraftImageRemove = handlePublishDraftImageRemove;
@@ -6356,7 +6852,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   ctx.interactionOffboarding = interactionOffboarding;
   ctx.interactionPermissionOverview = interactionPermissionOverview;
   ctx.listAccountAutomationCatalog = listAccountAutomationCatalog;
-  ctx.messenger = messenger;
   ctx.notifyPublishRejected = notifyPublishRejected;
   ctx.panelUsers = panelUsers;
   ctx.personaAutoFill = personaAutoFill;
@@ -6369,6 +6864,24 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   ctx.riskRegistry = riskRegistry;
   ctx.rolePromptProvider = rolePromptProvider;
   ctx.server = server;
+  ctx.automationDispatchCommands = {
+    dispatch: async (accountId, action) => {
+      const want = action === 'start';
+      const changed = dispatchActive !== want;
+      if (changed) {
+        dispatchActive = want;
+        if (want) ctx.runtimes?.startAll();
+        else ctx.runtimes?.endAll('panel_dispatch_stop');
+      }
+      return {
+        accountId,
+        dispatch: want ? 'started' : 'stopped',
+        changed,
+        edgesOnline: server.onlineEdgeCount(),
+      };
+    },
+    dispatchActive: () => dispatchActive,
+  };
   // risk.command backlog 只能在真实 Edge resume 依赖就绪后开始消费；此前 LISTEN wake 会被未启动 consumer 忽略，
   // start() 立即跑首轮并承接全部 backlog，不丢通知。
   riskCommandConsumer?.start();
@@ -6470,7 +6983,7 @@ function crossSegment<T>(
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, botChatStore, botChatsProvider, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commandFace, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, apiFeishuOwner, approvalPolicyStore, approvePublishForClient, automationPool, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
   // ── Block④ 三仓提取 · 批次 0c：面板配置外观从 segC 上提到本段 ────────────────────────
   // 判据＝**构造只依赖 segA**（llm / modelConfigStore / 六个配置 store 全在 segA）。它们只被本段消费，
   // 原先建在 segC 再经 ctx 绕一圈回来 —— 那让 api 模式白白依赖 automation 段。就地建，零跨段依赖。
@@ -6571,9 +7084,347 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   const { deploymentTarget } = ctx; // 'dev'|'ol'|null（segA 设）；outbox emit / 消费的 executionTarget。
   const panelEventFanout = mode === 'api' ? new PanelEventFanout(console) : undefined;
   ctx.panelEventFanout = panelEventFanout;
+  const configuredAutomationUrl = readEnvString('AIDCP_AUTOMATION_URL');
+  if (mode === 'api' && !configuredAutomationUrl) {
+    throw new Error('AIDCP_AUTOMATION_URL is required in api mode');
+  }
+  if (mode === 'api' && !deploymentTarget) {
+    throw new Error('AIDCP_DEPLOY_ENV is required in api mode');
+  }
   const automationBaseUrl =
-    readEnvString('AIDCP_AUTOMATION_URL') ?? `http://127.0.0.1:${DEFAULT_AUTOMATION_INTERNAL_API_PORT}`;
+    configuredAutomationUrl ?? `http://127.0.0.1:${DEFAULT_AUTOMATION_INTERNAL_API_PORT}`;
   const automationHttp = new InternalHttpClient(automationBaseUrl);
+  const automationDirectToken =
+    mode === 'api'
+      ? requireDirectInternalToken('AIDCP_AUTOMATION_INTERNAL_TOKEN')
+      : undefined;
+  const edgeResumeCommand =
+    mode === 'api' && deploymentTarget && automationDirectToken
+      ? new EdgeResumeCommandHttpClient(
+          automationHttp,
+          automationDirectToken,
+          deploymentTarget,
+        )
+      : undefined;
+  const facebookScopeCommand =
+    mode === 'api' && deploymentTarget && automationDirectToken
+      ? new FacebookScopeCommandHttpClient(
+          automationHttp,
+          automationDirectToken,
+          deploymentTarget,
+        )
+      : undefined;
+  const publishUiUpdateCommand =
+    mode === 'api' && deploymentTarget && automationDirectToken
+      ? new PublishUiUpdateCommandHttpClient(
+          automationHttp,
+          automationDirectToken,
+          deploymentTarget,
+        )
+      : ctx.publishUiUpdateCommand;
+  ctx.publishUiUpdateCommand = publishUiUpdateCommand;
+  const feishuOwner = requireSegment(
+    apiFeishuOwner,
+    'apiFeishuOwner',
+    'api',
+  );
+  const requireCommandAccount = async (
+    accountId?: string,
+  ): Promise<string> => {
+    if (accountId) return accountId;
+    if (!accountStore) {
+      throw new Error('account_store_unavailable');
+    }
+    const accounts = await accountStore.listAll();
+    if (accounts.length === 1) return accounts[0].accountId;
+    throw new Error(
+      '当前为 0 个或多个账号，请显式指定账号，例如 `/status <accountId>`',
+    );
+  };
+  const resolveAccountByNickname = async (
+    nickname?: string,
+  ): Promise<string> => {
+    if (!accountStore) {
+      throw new Error('账号存储未就绪，无法按昵称解析账号');
+    }
+    const accounts = await accountStore.listAll();
+    if (!nickname) {
+      if (accounts.length === 1) return accounts[0].accountId;
+      throw new Error(
+        '当前为 0 个或多个账号，请用昵称指定，例如 `/publish 工程师大白`',
+      );
+    }
+    const result = matchAccountNickname(
+      nickname,
+      accounts.map((account) => ({
+        accountId: account.accountId,
+        displayName: accountDisplayName(account.accountId) ?? null,
+        names: ctx.accountDisplayNameCandidates(account.accountId),
+      })),
+    );
+    if (result.ok) return result.accountId;
+    if (result.reason === 'ambiguous') {
+      throw new Error(
+        `有多个账号匹配昵称「${nickname}」（${result.available.join('、')}），请去重后再试`,
+      );
+    }
+    throw new Error(
+      `找不到昵称「${nickname}」的账号。可用昵称：${result.available.join('、') || '(无)'}`,
+    );
+  };
+  const resumeEdgesForAccount: CommandFaceDeps['account']['resumeEdgesForAccount'] =
+    async (accountId) => {
+      if (mode !== 'api') {
+        if (!server) {
+          return {
+            state: 'failed',
+            reason: 'edge_resume_authority_unavailable',
+          };
+        }
+        return {
+          state: 'applied',
+          resumedEdges: server.resumeEdgesForAccount(accountId),
+        };
+      }
+      if (!edgeResumeCommand) {
+        return {
+          state: 'failed',
+          reason: 'edge_resume_authority_unavailable',
+        };
+      }
+      try {
+        const receipt = await edgeResumeCommand.resumeEdgesForAccount({
+          commandId: randomUUID(),
+          accountId,
+        });
+        return receipt.outcome === 'collision'
+          ? {
+              state: 'failed',
+              reason: 'edge_resume_command_collision',
+            }
+          : {
+              state: 'applied',
+              resumedEdges: receipt.resumedEdges,
+            };
+      } catch (error) {
+        const code =
+          typeof error === 'object'
+          && error !== null
+          && typeof (error as { code?: unknown }).code === 'string'
+            ? (error as { code: string }).code
+            : 'edge_resume_failed';
+        return {
+          state:
+            code === 'edge_resume_result_unknown'
+              ? 'unknown'
+              : 'failed',
+          reason: code,
+        };
+      }
+    };
+  const managementChatIds = new Set(
+    (readEnvString('FEISHU_MANAGEMENT_CHAT_IDS') ?? '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  const commandFace: CommandFace = feishuOwner.createCommandFace({
+    account: {
+      requireCommandAccount,
+      getStatus: (accountId) => ctx.accountState.getStatus(accountId),
+      pause: (accountId) => ctx.accountState.pause(accountId),
+      resume: (accountId) => ctx.accountState.resume(accountId),
+      resumeEdgesForAccount,
+    },
+    bindChat: (record) => feishuOwner.botChatStore.setDefault(record),
+    delegate: async (text, context) => {
+      if (!delegatedTaskService) {
+        throw new Error('automation_operator_command_unavailable:delegate');
+      }
+      const result = await delegatedTaskService.createFromText(text, {
+        sourceRef: context?.messageId ?? context?.chatId,
+        originChatId: context?.chatId,
+      });
+      if (result.kind === 'control') {
+        const request = result.request;
+        const task =
+          request.action === 'pause'
+            ? await delegatedTaskService.pause(request.taskId)
+            : request.action === 'resume'
+              ? await delegatedTaskService.resume(request.taskId)
+              : request.action === 'cancel'
+                ? await delegatedTaskService.cancel(request.taskId)
+                : await delegatedTaskService.get(request.taskId);
+        return {
+          command: text,
+          ok: true,
+          title: '委托任务当前状态',
+          message:
+            `任务 ${task.id} 当前为 ${task.status}，真实完成 ` +
+            `${task.progress.successCount}/${task.targetSuccessCount}。`,
+          accountId: task.accountId,
+          accountName: task.accountName,
+          platformName: task.platform,
+          card: feishuOwner.buildDelegatedTaskProgressCard(task),
+        };
+      }
+      if (result.autoQueued) {
+        return {
+          command: text,
+          ok: true,
+          title: '委托任务已直接排队',
+          message: '精确命令已直接入队；结果由任务自身的结果卡回报。',
+          accountId: result.task.accountId,
+          accountName: result.task.accountName,
+          platformName: result.task.platform,
+          silent: true,
+        };
+      }
+      return {
+        command: text,
+        ok: true,
+        title: result.created
+          ? '委托任务待确认'
+          : '已存在相同待确认任务',
+        message: '确认前不会执行任何平台写动作。',
+        accountId: result.task.accountId,
+        accountName: result.task.accountName,
+        platformName: result.task.platform,
+        card: feishuOwner.buildDelegatedTaskConfirmationCard(
+          result.confirmation,
+        ),
+      };
+    },
+    publish: async (nickname, options) => {
+      if (!ctx.publishScheduler) {
+        return {
+          ok: false,
+          level: 'error',
+          title: '发帖未触发',
+          message:
+            mode === 'api'
+              ? 'automation_operator_command_unavailable:publish'
+              : '发帖触发器未就绪（PG / 概念池不可用），未发起任何编排。',
+        };
+      }
+      const accountId = await resolveAccountByNickname(nickname);
+      const outcome = await ctx.publishScheduler.triggerManual(accountId, {
+        manualApprovalChatId: options?.sourceChatId,
+      });
+      if (outcome.result !== 'triggered') {
+        return {
+          ok: false,
+          level: 'warning',
+          title: '发帖未触发',
+          message: `账号 \`${accountId}\` 未触发：${outcome.reason}`,
+        };
+      }
+      const head =
+        `已触发（${outcome.reason}）→ 账号 \`${accountId}\` → ` +
+        `编排状态 ${outcome.status}`;
+      const why = outcome.failureReason
+        ? `\n原因：${outcome.failureReason}`
+        : '';
+      if (outcome.status === 'failed' || outcome.status === 'timeout') {
+        return {
+          ok: false,
+          level: 'error',
+          title: '发帖编排失败',
+          message:
+            `${head}${why}\n（编排在生成候审阶段失败，未发审批卡；` +
+            '请查云端日志或重试 /publish）',
+        };
+      }
+      if (outcome.status === 'skipped') {
+        return {
+          ok: false,
+          level: 'warning',
+          title: '发帖未产出',
+          message: `${head}${why}`,
+        };
+      }
+      if (outcome.approvalCard && !outcome.approvalCard.sent) {
+        const target = outcome.approvalCard.targetChatId
+          ? `目标会话 \`${outcome.approvalCard.targetChatId}\``
+          : '未解析到目标会话';
+        const error = outcome.approvalCard.error
+          ? `\n发卡错误：${outcome.approvalCard.error}`
+          : '';
+        return {
+          ok: false,
+          level: 'warning',
+          title: '草稿已生成，审批卡未送达',
+          message:
+            `${head}\n已生成待审草稿，但审批卡没有送达（${target}）。` +
+            `${error}\n请在控制台审批，或修复飞书会话权限后重试。`,
+        };
+      }
+      return {
+        ok: true,
+        level: 'success',
+        title: '已触发发帖编排',
+        message:
+          `${head}\n（账号昵称 \`${nickname ?? '(唯一账号)'}\`；` +
+          '人工授权越过风控，但发布前仍需飞书人审 approved=true 才会真发）',
+      };
+    },
+    comment: async (nickname, options) => {
+      if (!commentScheduler) {
+        return {
+          ok: false,
+          level: 'error',
+          title: '按需评论未就绪',
+          message:
+            mode === 'api'
+              ? 'automation_operator_command_unavailable:comment'
+              : '评论触发器未就绪（启动中或依赖不可用），未发起任务。',
+        };
+      }
+      const accountId = await resolveAccountByNickname(nickname);
+      return commentScheduler.triggerManual(accountId, {
+        injectContact: options?.injectContact,
+        joinFirst: options?.joinGroup,
+        joinGroupUrl: options?.joinGroupUrl,
+        manualOverride: true,
+        force: options?.force === true,
+        fastReturnToFeed: options?.fastReturnToFeed === true,
+      });
+    },
+    dispatch:
+      ctx.automationDispatchCommands?.dispatch
+      ?? (() =>
+        Promise.reject(
+          new Error('automation_operator_command_unavailable:dispatch'),
+        )),
+    dispatchActive:
+      ctx.automationDispatchCommands?.dispatchActive
+      ?? (() => {
+        throw new Error('automation_operator_command_unavailable:dispatch');
+      }),
+    managementChatIds,
+  });
+  ctx.commandFace = commandFace;
+  const facebookGroupOpsForPanel: FacebookGroupOpsPort =
+    mode === 'api'
+      ? new FacebookGroupOpsHttpClient(automationHttp)
+      : {
+          listTargets: (options) => facebookGroupTargetStore.listTargets(options),
+          listFacets: () => facebookGroupTargetStore.listFacets(),
+          setEnabled: (groupUrl, enabled) =>
+            facebookGroupTargetStore.setEnabled(groupUrl, enabled),
+          accountProgress: () => facebookGroupTargetStore.accountProgress(),
+          listAssignments: (limit) => facebookGroupMembershipStore.listAssignments(limit),
+          reclaimStaleAssignments: (ttlMs) =>
+            facebookGroupMembershipStore.reclaimStaleAssignments(ttlMs),
+          scopedTargetCountForAccount: (accountId) =>
+            facebookGroupTargetStore.scopedTargetCountForAccount(accountId),
+          scopedTargetCountsForAccounts: (accountIds) =>
+            facebookGroupTargetStore.scopedTargetCountsForAccounts(accountIds),
+          latestScheduledResult: (accountId) =>
+            facebookGroupJoinAuditStore.latestScheduledResult(accountId),
+          latestScheduledResults: (accountIds) =>
+            facebookGroupJoinAuditStore.latestScheduledResults(accountIds),
+        };
   const publishDispatchTrigger: PublishDispatchTriggerPort | undefined =
     mode === 'api'
       ? new PublishDispatchTriggerHttpClient(
@@ -6596,6 +7447,151 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
       kind,
     });
   };
+  const feishuIngress = await feishuOwner.startIngress({
+    commandFace,
+    writeApproval: (requestId, approved, payload, context) =>
+      writeApprovalDecision(
+        requestId,
+        approved,
+        payload,
+        context,
+      ),
+    onApproved: (trigger) => {
+      void triggerPublishDispatchOnApprove(
+        trigger.requestId,
+        trigger.revision,
+        trigger.kind,
+      ).catch((error) => {
+        console.warn(
+          `[aidcp-cloud] Feishu human_reconfirm trigger failed requestId=${trigger.requestId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    },
+    onRejected: (requestId) => {
+      const match = /^publish-(\d+)$/.exec(requestId);
+      if (!match) return;
+      const recordId = Number(match[1]);
+      const authority = ctx.apiDirectAuthorities?.publishLog;
+      if (!authority) {
+        console.warn(
+          `[aidcp-cloud] Feishu rejection owner unavailable requestId=${requestId}`,
+        );
+        return;
+      }
+      void authority.rejectPendingApproval(recordId).catch((error) => {
+        console.warn(
+          `[aidcp-cloud] Feishu rejection materialization failed requestId=${requestId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    },
+    readLiveContentVersion: async (recordId) => {
+      const draft = await publishLogStore.loadForDispatch(recordId);
+      return draft?.contentVersion ?? null;
+    },
+    preflightApprovePublish: async (requestId) => {
+      const match = /^publish-(\d+)$/.exec(requestId);
+      if (!match) return { ok: true };
+      const draft = await publishLogStore.loadForDispatch(Number(match[1]));
+      return draft
+        ? { ok: true, accountId: draft.accountId }
+        : {
+            ok: false,
+            reason: 'publish_target_unavailable',
+          };
+    },
+    ...(delegatedTaskService ? { delegatedTasks: delegatedTaskService } : {}),
+  });
+  ctx.botChatsProvider = feishuIngress.botChatsProvider;
+  if (mode === 'api') {
+    const approvalClient = ctx.publishApprovalClient;
+    const publishAuthority = ctx.apiDirectAuthorities?.publishLog;
+    if (!approvalClient || !publishAuthority) {
+      throw new Error('api_publish_owner_authority_unavailable');
+    }
+    const apiReadLiveContentVersion = async (recordId: number): Promise<number | null> => {
+      const draft = await publishLogStore.loadForDispatch(recordId);
+      return draft?.contentVersion ?? null;
+    };
+    const apiRefreshPublishPreview = (recordId: number): void => {
+      const pushPreview = ctx.pushApiOwnedPublishPreview;
+      if (!pushPreview) {
+        console.warn(
+          `[publish-ui-update] API draft action preview producer unavailable recordId=${recordId}`,
+        );
+        return;
+      }
+      void pushPreview(recordId).catch((err) =>
+        console.warn(
+          `[publish-ui-update] API draft action preview delivery failed recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    };
+    ctx.handlePublishDraftImageRemove = createPublishDraftImageRemoveHandler({
+      loadDraft: (recordId) => publishLogStore.loadForDispatch(recordId),
+      readApproval: (requestId) => approvalClient.readApproval(requestId),
+      editDraft: (recordId, expectedVersion, patch, editor) =>
+        publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
+      readLiveVersion: apiReadLiveContentVersion,
+      refreshPreview: apiRefreshPublishPreview,
+    });
+    ctx.approvePublishForClient = createClientPublishApprovalHandler({
+      loadDraft: (recordId) => publishLogStore.loadForDispatch(recordId),
+      readApproval: (requestId) => approvalClient.readApproval(requestId),
+      editDraft: (recordId, expectedVersion, patch, editor) =>
+        publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
+      preflight: async (requestId) => {
+        const match = /^publish-(\d+)$/.exec(requestId);
+        if (!match) return { ok: true };
+        const draft = await publishLogStore.loadForDispatch(Number(match[1]));
+        return draft
+          ? { ok: true }
+          : { ok: false, reason: 'publish_target_unavailable' };
+      },
+      writeApproval: (requestId, approved, payload, decidedBy) =>
+        ctx.writeApprovalDecision(requestId, approved, payload, {
+          decidedBy: `client:${decidedBy}`,
+          decidedVia: 'client',
+        }),
+      triggerApproved: (trigger) => {
+        void triggerPublishDispatchOnApprove(
+          trigger.requestId,
+          trigger.revision,
+          trigger.kind,
+        ).catch((err) =>
+          console.warn(
+            `[aidcp-cloud] API owner human_reconfirm trigger failed requestId=${trigger.requestId}: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      },
+      notifyRejected: (requestId) => {
+        const match = /^publish-(\d+)$/.exec(requestId);
+        if (!match) return;
+        void publishAuthority.rejectPendingApproval(Number(match[1])).catch((err) =>
+          console.warn(
+            `[aidcp-cloud] API owner publish rejection materialization failed requestId=${requestId}: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      },
+      readDispatchState: async (requestId) => {
+        const row = await approvalClient.readApproval(requestId);
+        if (!row || !row.approved) return null;
+        if (row.dispatchState === 'dispatching') {
+          return { dispatchState: 'dispatching' as const };
+        }
+        if (row.dispatchState !== 'pending_dispatch') return null;
+        return row.dispatchBlockedReason
+          ? {
+              dispatchState: 'blocked' as const,
+              dispatchBlockedReason: row.dispatchBlockedReason,
+            }
+          : { dispatchState: 'pending_dispatch' as const };
+      },
+    });
+  }
   if (mode === 'api' && publishApprovalStore && deploymentTarget && publishDispatchTrigger) {
     const relay = new PublishApprovalOutboxRelay({
       executionTarget: deploymentTarget,
@@ -6781,7 +7777,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           // change risk-target-follows-active-session：归属跟随当次连接，面板不再有「改归属」端点，
           // 也不按归属禁用风控写（写改回账号级）。currentDriverTarget 只读展示直接来自 panel-store。
           publishLogStore,
-          botChatStore,
+          botChatStore: feishuOwner.botChatStore,
           eventBus: panelEventFanout ?? eventBus,
           edgeServer: requireSegment(server, 'server', 'automation'),
           // Block③ L3：面板自己的读走 api 属主池（accounts/persona_config/publish_log）；
@@ -6804,7 +7800,24 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             if (approved && !result.written && result.alreadyDecided === true) {
               await triggerPublishDispatchOnApprove(requestId, result.revision, 'human_reconfirm');
             }
-            else if (!approved && result.written) requireSegment(notifyPublishRejected, 'notifyPublishRejected', 'automation')(requestId);
+            else if (!approved && result.written) {
+              if (mode === 'api') {
+                const match = /^publish-(\d+)$/.exec(requestId);
+                if (match) {
+                  await requireSegment(
+                    ctx.apiDirectAuthorities?.publishLog,
+                    'apiDirectAuthorities.publishLog',
+                    'api',
+                  ).rejectPendingApproval(Number(match[1]));
+                }
+              } else {
+                requireSegment(
+                  notifyPublishRejected,
+                  'notifyPublishRejected',
+                  'automation',
+                )(requestId);
+              }
+            }
             return result;
           },
           // 授权下发进度投影（change publish-approval-signal-to-database，task 4.6）：
@@ -6833,21 +7846,54 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           publishDraft: {
             edit: (recordId, expectedVersion, patch, editor) =>
               publishLogStore.editDraft(recordId, expectedVersion, patch, editor),
-            liveVersion: (...a) => requireSegment(readLiveContentVersion, 'readLiveContentVersion', 'automation')(...a),
-            hasDecision: async (recordId) => (await requireSegment(readPublishApproval, 'readPublishApproval', 'automation')(`publish-${recordId}`)) !== null,
+            liveVersion: (recordId) =>
+              mode === 'api'
+                ? publishLogStore
+                    .loadForDispatch(recordId)
+                    .then((draft) => draft?.contentVersion ?? null)
+                : requireSegment(
+                    readLiveContentVersion,
+                    'readLiveContentVersion',
+                    'automation',
+                  )(recordId),
+            hasDecision: async (recordId) =>
+              mode === 'api'
+                ? (await requireSegment(
+                    ctx.publishApprovalClient,
+                    'publishApprovalClient',
+                    'api',
+                  ).readApproval(`publish-${recordId}`)) !== null
+                : (await requireSegment(
+                    readPublishApproval,
+                    'readPublishApproval',
+                    'automation',
+                  )(`publish-${recordId}`)) !== null,
           },
-          notifyPublishPreviewChanged: (recordId) => requireSegment(refreshPublishPreview, 'refreshPublishPreview', 'automation')(recordId),
-          // change consolidate-command-face（§4.6.7）：面板账号命令与飞书命令共用同一命令面，账号级
-          // pause/resume/恢复 edge 与调度启停不再在此内联第二份，收敛到上方 createCommandFace 一处。
-          // commandFace 属 segC（automation·命令下发到边缘）；api 模式本进程无它 ⇒ 守卫成诚实报错桩，
-          // 让面板照常启动、读侧端点可用；命令下发是自动化域、拆进程后另经跨段路由（不在本刀）。
-          // monolith/core 下 commandFace 存在 ⇒ 就是原 panelCommandActions、逐字节等价。
-          commandActions: commandFace
-            ? commandFace.panelCommandActions
-            : {
-                pause: () => Promise.reject(new Error('command_dispatch_unavailable_in_api_mode')),
-                resume: () => Promise.reject(new Error('command_dispatch_unavailable_in_api_mode')),
-              },
+          notifyPublishPreviewChanged: (recordId) => {
+            if (mode === 'api') {
+              const pushPreview = ctx.pushApiOwnedPublishPreview;
+              if (!pushPreview) {
+                console.warn(
+                  `[publish-ui-update] panel preview producer unavailable recordId=${recordId}`,
+                );
+                return;
+              }
+              void pushPreview(recordId).catch((err) =>
+                console.warn(
+                  `[publish-ui-update] panel preview delivery failed recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              );
+              return;
+            }
+            requireSegment(
+              refreshPublishPreview,
+              'refreshPublishPreview',
+              'automation',
+            )(recordId);
+          },
+          // 面板与 Feishu 共用上方 segD 的同一个 API command face。
+          // API mode 的 resume 保留 account-state-first + remote Edge partial truth。
+          commandActions: commandFace.panelCommandActions,
           // 账号属性写入（change editable-account-group-label + account-group-chat-injection → generalize-contact-info）：经账号存储单写；
           // 存储未就绪 → 不注入，路由回 503。setContactInfo 可选（存储方法存在时才挂，否则该子路由单独 503）。
           accountAttr: accountStore?.setGroupLabel
@@ -6913,15 +7959,54 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               facebookCommentConfigStore.setAccount(accountId, patch, updatedBy),
           },
           facebookGroupTargets: {
-            importTargets: (inputs, importBatch, options) => facebookGroupTargetStore.importTargets(inputs, importBatch, options),
-            listTargets: (options) => facebookGroupTargetStore.listTargets(options),
-            listFacets: () => facebookGroupTargetStore.listFacets(),
-            setEnabled: (groupUrl, enabled) => facebookGroupTargetStore.setEnabled(groupUrl, enabled),
-            replaceTargetScopes: (groupUrls, accountGroupLabels, updatedBy) =>
-              facebookGroupTargetStore.replaceTargetScopes(groupUrls, accountGroupLabels, updatedBy),
-            accountProgress: () => facebookGroupTargetStore.accountProgress(),
-            listAssignments: (limit) => facebookGroupMembershipStore.listAssignments(limit),
-            reclaimStaleAssignments: (ttlMs) => facebookGroupMembershipStore.reclaimStaleAssignments(ttlMs),
+            importTargets: async (inputs, importBatch, options) => {
+              if (mode !== 'api') {
+                return facebookGroupTargetStore.importTargets(inputs, importBatch, options);
+              }
+              if (!facebookScopeCommand) {
+                throw new Error('facebook_scope_authority_unavailable');
+              }
+              const receipt = await facebookScopeCommand.importTargets({
+                commandId: randomUUID(),
+                inputs,
+                importBatch,
+                ...(options ? { options } : {}),
+              });
+              if (receipt.outcome === 'collision') {
+                throw new Error('facebook_scope_command_collision');
+              }
+              return receipt.result;
+            },
+            listTargets: (options) => facebookGroupOpsForPanel.listTargets(options),
+            listFacets: () => facebookGroupOpsForPanel.listFacets(),
+            setEnabled: (groupUrl, enabled) =>
+              facebookGroupOpsForPanel.setEnabled(groupUrl, enabled),
+            replaceTargetScopes: async (groupUrls, accountGroupLabels, updatedBy) => {
+              if (mode !== 'api') {
+                return facebookGroupTargetStore.replaceTargetScopes(
+                  groupUrls,
+                  accountGroupLabels,
+                  updatedBy,
+                );
+              }
+              if (!facebookScopeCommand) {
+                throw new Error('facebook_scope_authority_unavailable');
+              }
+              const receipt = await facebookScopeCommand.replaceTargetScopes({
+                commandId: randomUUID(),
+                groupUrls,
+                accountGroupLabels,
+                updatedBy,
+              });
+              if (receipt.outcome === 'collision') {
+                throw new Error('facebook_scope_command_collision');
+              }
+              return receipt.result;
+            },
+            accountProgress: () => facebookGroupOpsForPanel.accountProgress(),
+            listAssignments: (limit) => facebookGroupOpsForPanel.listAssignments(limit),
+            reclaimStaleAssignments: (ttlMs) =>
+              facebookGroupOpsForPanel.reclaimStaleAssignments(ttlMs),
           },
           captchaAssist: captchaAssist?.isAvailable() ? captchaAssist : undefined,
           // 模型与凭据配置（change console-model-provider-config + model-config-volcengine-provider）。明文密钥绝不经此回传。
@@ -7024,7 +8109,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               }
             : undefined,
           // 机器人所在群 provider（change feishu-bot-chat-name-display）：GET /api/bot-chats 实时取飞书真实群名 + 默认群标记。
-          botChats: botChatsProvider,
+          botChats: ctx.botChatsProvider,
           // 精选内容后台管理（change curated-content-admin-page）。同一精选语料 store 实例：读=按账号列表/筛选面、写=删单条/清空壳行。
           // init 失败留 undefined 时面板自然 503，绝不崩边-云闭环。
           // 注：面板 curatedContent 走更宽的 PanelCuratedContent 端口（含 listForPanel/facets/delete/clear），
@@ -7081,21 +8166,15 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                     receipt = { ok: false, level: 'warning', title: '参照创作未产出', message: `账号 \`${accountLabel}\`「${sourceLabel}」编排状态 skipped${o.failureReason ? `（${o.failureReason}）` : ''}` };
                   }
                   if (!receipt) return;
-                  // 账号业务结果卡：按账号路由到团队群（未绑定 / 读失败回落默认群）。
-                  const chatId = await resolveAccountChatId(accountId);
-                  if (!chatId) return;
-                  await messenger.sendCard(
-                    chatId,
-                    buildCommandResultCard({
-                      command: '参照创作',
-                      ok: receipt.ok,
-                      level: receipt.level,
-                      title: receipt.title,
-                      message: receipt.message,
-                      accountId,
-                      accountName,
-                    }),
-                  );
+                  await feishuOwner.sendCommandResult(accountId, {
+                    command: '参照创作',
+                    ok: receipt.ok,
+                    level: receipt.level,
+                    title: receipt.title,
+                    message: receipt.message,
+                    accountId,
+                    accountName,
+                  });
                 })
                 .catch((err) => console.warn(`[curated-actions] 参照创作编排异常 account=${accountId}：${(err as Error).message}`));
               return { triggered: true }; // 触发已发起；HTTP 立即回触发态
@@ -7288,12 +8367,50 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           publishDraftActions: {
             edit: async (recordId, expectedVersion, patch, accountId, actor) => {
               const result = await publishLogStore.editDraft(recordId, expectedVersion, patch, actor, accountId);
-              if (result.ok) requireSegment(refreshPublishPreview, 'refreshPublishPreview', 'automation')(recordId);
+              if (result.ok) {
+                if (mode === 'api') {
+                  const pushPreview = ctx.pushApiOwnedPublishPreview;
+                  if (!pushPreview) {
+                    console.warn(
+                      `[publish-ui-update] panel edit preview producer unavailable recordId=${recordId}`,
+                    );
+                  } else {
+                    await pushPreview(recordId).catch((err) =>
+                      console.warn(
+                        `[publish-ui-update] panel edit preview delivery failed recordId=${recordId}: ${err instanceof Error ? err.message : String(err)}`,
+                      ),
+                    );
+                  }
+                } else {
+                  requireSegment(refreshPublishPreview, 'refreshPublishPreview', 'automation')(recordId);
+                }
+              }
               return result;
             },
-            approve: (payload, accountId, actor) => requireSegment(approvePublishForClient, 'approvePublishForClient', 'automation')(payload, accountId, actor),
+            approve: (payload, accountId, actor) =>
+              mode === 'api'
+                ? requireSegment(
+                    ctx.approvePublishForClient,
+                    'approvePublishForClient',
+                    'api',
+                  )(payload, accountId, actor)
+                : requireSegment(
+                    approvePublishForClient,
+                    'approvePublishForClient',
+                    'automation',
+                  )(payload, accountId, actor),
             removeImage: (payload, accountId, actor) =>
-              requireSegment(handlePublishDraftImageRemove, 'handlePublishDraftImageRemove', 'automation')(payload, { accountId, actor }),
+              mode === 'api'
+                ? requireSegment(
+                    ctx.handlePublishDraftImageRemove,
+                    'handlePublishDraftImageRemove',
+                    'api',
+                  )(payload, { accountId, actor })
+                : requireSegment(
+                    handlePublishDraftImageRemove,
+                    'handlePublishDraftImageRemove',
+                    'automation',
+                  )(payload, { accountId, actor }),
           },
           draftRefinements: draftRefinementStore,
           // D5 活体佐证（change curated-envkey-account-binding）：不可逆写要求绑定账号此刻活在该环境上。

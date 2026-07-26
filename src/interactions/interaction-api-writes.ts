@@ -81,3 +81,52 @@ export class InteractionApiWrites {
     return result.rowCount ?? 0;
   }
 }
+
+/**
+ * 4a API-owner boundary adapter. Callers pass only domain DTOs; the adapter
+ * owns the API pool and therefore cannot accidentally execute API SQL through
+ * an automation connection.
+ *
+ * The legacy `InteractionApiWrites` remains the SQL implementation so the
+ * monolith keeps its existing call sites while independent automation can use
+ * this pure facade.
+ */
+export class PgInteractionApiWrites {
+  private readonly writes = new InteractionApiWrites();
+
+  constructor(private readonly pool: pg.Pool) {}
+
+  async insertAuditEvent(
+    record: InteractionAuditEventRecord,
+  ): Promise<{ outcome: 'inserted' | 'duplicate' }> {
+    const inserted = await this.writes.insertAuditEvent(this.pool, record);
+    return { outcome: inserted ? 'inserted' : 'duplicate' };
+  }
+
+  async purgeReplyConfigForAccount(accountId: string): Promise<{ removedRows: number }> {
+    return this.inOwnerTransaction(async (client) => ({
+      removedRows: await this.writes.purgeReplyConfigForAccount(client, accountId),
+    }));
+  }
+
+  async purgeExpiredAuditEvents(now: number): Promise<{ removedRows: number }> {
+    return this.inOwnerTransaction(async (client) => ({
+      removedRows: await this.writes.purgeExpiredAuditEvents(client, now),
+    }));
+  }
+
+  private async inOwnerTransaction<T>(operation: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await operation(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+}

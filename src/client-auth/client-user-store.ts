@@ -56,6 +56,11 @@ import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import type { ClientEnvAutomationReader, OffboardProjection } from '../kernel/client-env-automation-types.js';
 import type { OffboardCleanupGrantOperations } from '../kernel/offboard-cleanup-grant-types.js';
 import type { OffboardMaterializationOperations } from '../kernel/offboard-materialization-types.js';
+import type {
+  EnvironmentHandshakePort,
+  HandshakeEnvironmentObservation,
+} from '../kernel/api-direct-port.js';
+import { parseDeploymentTarget, type DeploymentTarget } from '../deployment-target.js';
 
 const { Pool } = pg;
 
@@ -268,8 +273,20 @@ CREATE TABLE IF NOT EXISTS client_env_revocation_holds (
   materialized_at     TIMESTAMPTZ,
   -- 无互动绑定时是否允许属主直接落终态 tombstone（只有客户自助建号那条路允许）。
   unbound_terminal_ok BOOLEAN     NOT NULL DEFAULT false,
+  -- 4a owner-local claim：network hop 期间不持事务锁，靠 revision/token/expiry 做 CAS。
+  admission_revision  BIGINT      NOT NULL DEFAULT 1 CHECK (admission_revision >= 1),
+  claim_token         TEXT,
+  claimed_by          TEXT,
+  claim_expires_at    TIMESTAMPTZ,
+  -- Durable reconcile/claim work is target-local even though the business environment fact is shared.
+  execution_target    TEXT NOT NULL CHECK (execution_target IN ('dev','ol')),
   requested_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (
+    (claim_token IS NULL AND claimed_by IS NULL AND claim_expires_at IS NULL)
+    OR
+    (claim_token IS NOT NULL AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL)
+  )
 );
 CREATE INDEX IF NOT EXISTS client_env_revocation_holds_requested_idx
   ON client_env_revocation_holds (requested_at, env_key);
@@ -508,6 +525,8 @@ function provisioningProofMatches(proof: string, expectedHash: string): boolean 
 
 export interface ClientUserStoreOptions {
   pool?: pg.Pool;
+  /** Server-injected target for durable admission work; never inferred from env/account/client input. */
+  executionTarget?: DeploymentTarget;
   /** schema 保障能力注入端口（必填、无默认）：组合根传 automation 的 ensureCapabilitySchema，本文件只从 kernel 取类型。 */
   schemaEnsurer: SchemaEnsurer;
   /**
@@ -572,6 +591,7 @@ export class ClientUserStore {
   private readonly offboardMaterialization?: OffboardMaterializationOperations;
   private readonly automationReads?: ClientEnvAutomationReader;
   private readonly cleanupGrantOperations?: OffboardCleanupGrantOperations;
+  private readonly executionTarget?: DeploymentTarget;
   /** 同步 WS 出口闸镜像：删除生命周期中的 AdsPower env 不再接收普通自动化命令。 */
   private blockedAutomationEnvKeys = new Set<string>();
   /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
@@ -587,6 +607,7 @@ export class ClientUserStore {
     this.offboardMaterialization = options.offboardMaterialization;
     this.automationReads = options.automationReads;
     this.cleanupGrantOperations = options.cleanupGrantOps;
+    this.executionTarget = options.executionTarget;
   }
 
   /**
@@ -644,19 +665,25 @@ export class ClientUserStore {
     input: { userId: string; envKey: string; reason: ClientOffboardView['reason']; actor: string | null;
       unboundTerminalOk: boolean },
   ): Promise<AdmissionRow> {
+    const executionTarget = parseDeploymentTarget(this.executionTarget);
+    if (!executionTarget) {
+      throw new Error('offboard_admission_execution_target_not_configured');
+    }
     const { rows } = await client.query<AdmissionRow>(
       `INSERT INTO client_env_revocation_holds
-         (revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,requested_at,updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())
+         (revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,
+          execution_target,requested_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now())
        ON CONFLICT (env_key) DO UPDATE
          SET updated_at=client_env_revocation_holds.updated_at
+         WHERE client_env_revocation_holds.execution_target=EXCLUDED.execution_target
        RETURNING revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,
                  materialized_at,requested_at`,
       [crypto.randomUUID(), input.envKey, input.userId, input.reason, input.actor,
-        crypto.randomUUID(), input.unboundTerminalOk],
+        crypto.randomUUID(), input.unboundTerminalOk, executionTarget],
     );
     const row = rows[0];
-    if (!row) throw new Error('revocation_hold_insert_failed');
+    if (!row) throw new Error('offboard_admission_execution_target_conflict');
     return row;
   }
 
@@ -2322,6 +2349,9 @@ export class ClientUserStore {
    * 那会把 1 的认领变成空操作、把 2 变成**误删全部准入行** = 正在清理的环境全部重新可改派。
    */
   async reconcileCleanupAdmissions(limit = 50): Promise<ClientOffboardView[]> {
+    if (!this.executionTarget) {
+      throw new Error('offboard_reconcile_execution_target_not_configured');
+    }
     const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 50));
     // 拿不到属主投影就整轮抛出去（调用方 warn 后下一轮重来），绝不假空集。
     const active = await this.automationRead().activeWechatOffboards();
@@ -2334,9 +2364,9 @@ export class ClientUserStore {
       await this.pool.query(
         `INSERT INTO client_env_revocation_holds
            (revocation_id,env_key,user_id,reason,revoked_by,offboard_id,unbound_terminal_ok,
-            materialized_at,requested_at,updated_at)
+            materialized_at,execution_target,requested_at,updated_at)
          SELECT md5('cleanup-admission:' || k.env_key || ':' || k.offboard_id)::uuid,
-                k.env_key,NULL,k.reason,NULL,k.offboard_id,false,now(),k.requested_at,now()
+                k.env_key,NULL,k.reason,NULL,k.offboard_id,false,now(),$5,k.requested_at,now()
            FROM unnest($1::text[],$2::text[],$3::text[],$4::timestamptz[])
                 AS k(env_key,offboard_id,reason,requested_at)
          ON CONFLICT (env_key) DO NOTHING`,
@@ -2345,6 +2375,7 @@ export class ClientUserStore {
           active.map((row) => row.offboardId),
           active.map((row) => row.reason),
           active.map((row) => new Date(row.requestedAt).toISOString()),
+          this.executionTarget,
         ],
       );
     }
@@ -2352,8 +2383,10 @@ export class ClientUserStore {
     // 2. 释放：已物化、且台账里已无未清除记录 ⇒ 清理结束，环境重新可改派。
     await this.pool.query(
       `DELETE FROM client_env_revocation_holds
-        WHERE materialized_at IS NOT NULL AND NOT (env_key = ANY($1::text[]))`,
-      [[...activeByEnvKey.keys()]],
+        WHERE materialized_at IS NOT NULL
+          AND execution_target=$2
+          AND NOT (env_key = ANY($1::text[]))`,
+      [[...activeByEnvKey.keys()], this.executionTarget],
     );
 
     // 3. 物化：已受理、尚未物化的准入逐条重放（顺序与改造前候选序一致：requested_at, env_key）。
@@ -2362,9 +2395,10 @@ export class ClientUserStore {
               materialized_at,requested_at
          FROM client_env_revocation_holds
         WHERE materialized_at IS NULL
+          AND execution_target=$2
         ORDER BY requested_at,env_key
         LIMIT $1`,
-      [boundedLimit],
+      [boundedLimit, this.executionTarget],
     );
     const offboards: ClientOffboardView[] = [];
     for (const row of pending) {
@@ -2405,4 +2439,21 @@ export class ClientUserStore {
   async close(): Promise<void> {
     await this.pool.end();
   }
+}
+
+/**
+ * 4a handshake authority. Persona auto-fill is deliberately sequenced after
+ * the API owner has committed the environment observation; a failed registry
+ * write never emits a half-completed binding notification.
+ */
+export function createEnvironmentHandshakeAuthority(
+  environments: Pick<ClientUserStore, 'registerHandshakeEnvironment'>,
+  onRegistered?: (envKey: string) => Promise<void> | void,
+): EnvironmentHandshakePort {
+  return {
+    async registerHandshakeEnvironment(observation: HandshakeEnvironmentObservation): Promise<void> {
+      await environments.registerHandshakeEnvironment(observation);
+      await onRegistered?.(observation.envKey);
+    },
+  };
 }

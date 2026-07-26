@@ -5,6 +5,7 @@ import {
   serviceModeFromEnv,
   segmentsForMode,
   listenersForMode,
+  ownsApiFeishuForMode,
   ownsPublishApprovalAuthorityForMode,
   panelEventTransportForMode,
   outboxRetentionForMode,
@@ -98,6 +99,15 @@ describe('service-mode 纯选择器（Block② 2d：env → 段/监听计划，�
     );
     assert.equal(ownsPublishApprovalAuthorityForMode('content'), false);
     assert.equal(ownsPublishApprovalAuthorityForMode('automation'), false);
+  });
+
+  it('Feishu SDK/card/chat owner 只在 api-containing 模式构造', () => {
+    assert.deepEqual(
+      ALL_MODES.filter(ownsApiFeishuForMode),
+      ['monolith', 'api', 'core'],
+    );
+    assert.equal(ownsApiFeishuForMode('content'), false);
+    assert.equal(ownsApiFeishuForMode('automation'), false);
   });
 });
 

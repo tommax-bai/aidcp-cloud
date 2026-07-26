@@ -81,6 +81,7 @@
       "src/kernel/llm-usage-types.ts",
       "src/kernel/billing-price-refresh-types.ts",
       "src/kernel/alert-resolution-port.ts",
+      "src/kernel/api-direct-port.ts",
       "src/kernel/event-fanout-port.ts",
       "src/kernel/risk-contract.ts",
       "src/kernel/facebook-publish-media-types.ts",

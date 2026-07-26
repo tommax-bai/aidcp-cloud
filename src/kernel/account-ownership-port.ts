@@ -42,8 +42,6 @@ export interface AccountOwnershipPort {
    * MUST NOT 让实现方把 `account_not_found` 折成 `unowned`。
    */
   resolveExecutionTarget(accountId: string): Promise<ExecutionTargetResolution>;
-  /** 仅当归属为空时原子占位。已被占位 → already_owned_by（附真实属主），MUST NOT 覆盖。保留供运维/兼容口，握手路径已改用 setExecutionTarget。 */
-  claimExecutionTarget(accountId: string, target: DeploymentTarget): Promise<ClaimExecutionTargetResult>;
   /**
    * 无条件把归属改写为当前 target（change risk-target-follows-active-session）。
    * 归属**跟随当次连接**：每次握手都调用它，把 accounts.execution_target 更新为正在接入的 target。

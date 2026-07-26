@@ -6,7 +6,7 @@ import pg from 'pg';
 import { ClientUserStore } from '../../src/client-auth/client-user-store.js';
 import { PgOffboardMaterializationOps } from '../../src/interactions/offboard-write-adapter.js';
 import { PgClientEnvAutomationRead } from '../../src/interactions/client-env-automation-read.js';
-import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
+import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
 import { PgInteractionAuthGate } from '../../src/interactions/interaction-auth-gate.js';
@@ -174,7 +174,7 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       offboardMaterialization: new PgOffboardMaterializationOps({ pool }),
       // Block③ L3：automation 属主表的顶层只读经端口取；真库单库下与直读逐字节等价。
       automationReads: new PgClientEnvAutomationRead({ pool }) });
-    const interactions = new InteractionStore({ pool, clock: () => 1_784_044_830_000, apiPurge: new InteractionApiWrites(),
+    const interactions = new InteractionStore({ pool, clock: () => 1_784_044_830_000, apiPurge: new PgInteractionApiWrites(pool),
       authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
     try {
       await users.init();
@@ -371,7 +371,7 @@ test('PostgreSQL: provisioned video environment without an auth binding gets ter
       offboardMaterialization: new PgOffboardMaterializationOps({ pool }),
       // Block③ L3：automation 属主表的顶层只读经端口取；真库单库下与直读逐字节等价。
       automationReads: new PgClientEnvAutomationRead({ pool }) });
-    const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites(),
+    const interactions = new InteractionStore({ pool, apiPurge: new PgInteractionApiWrites(pool),
       authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
     try {
       await users.init();
@@ -462,7 +462,7 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
       offboardMaterialization: new PgOffboardMaterializationOps({ pool }),
       // Block③ L3：automation 属主表的顶层只读经端口取；真库单库下与直读逐字节等价。
       automationReads: new PgClientEnvAutomationRead({ pool }) });
-    const interactions = new InteractionStore({ pool, apiPurge: new InteractionApiWrites(),
+    const interactions = new InteractionStore({ pool, apiPurge: new PgInteractionApiWrites(pool),
       authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
     try {
       await users.init();

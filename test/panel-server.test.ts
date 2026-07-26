@@ -99,7 +99,13 @@ const deps = {
   writeApprovalSignal: async (_requestId: string, _approved: boolean) => ({ written: true }),
   commandActions: {
     pause: async (id: string) => ({ accountId: id, status: 'paused' }),
-    resume: async (id: string) => ({ accountId: id, status: 'active', resumedEdges: 2 }),
+    resume: async (id: string) => ({
+      accountId: id,
+      status: 'active',
+      accountState: 'active',
+      edgeResume: 'applied',
+      resumedEdges: 2,
+    }),
     dispatch: async (id: string, action: 'start' | 'stop') => {
       const want = action === 'start';
       const changed = dispatchActiveState !== want;

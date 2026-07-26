@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
+import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 
 /** Step A 清的 automation 表（绑定行 interaction_auth_state 已挪到 Step C，与翻 purged 同事务）。 */
 const AUTOMATION_TABLES = [
@@ -50,16 +50,16 @@ test('purge saga: Step B failure leaves automation data purged but offboard un-p
   const pool = { connect: async () => client } as unknown as Pool;
 
   // 用真实 api 写者，只在第一次调用时人为失败，验证「窄接口 + 重入」。
-  const realApi = new InteractionApiWrites();
+  const realApi = new PgInteractionApiWrites(pool);
   let replyCalls = 0;
   const apiPurge = {
-    purgeReplyConfigForAccount: async (c: Parameters<InteractionApiWrites['purgeReplyConfigForAccount']>[0], accountId: string) => {
+    purgeReplyConfigForAccount: async (accountId: string) => {
       replyCalls += 1;
       if (replyCalls === 1) throw new Error('simulated step B failure');
-      return realApi.purgeReplyConfigForAccount(c, accountId);
+      return realApi.purgeReplyConfigForAccount(accountId);
     },
-    purgeExpiredAuditEvents: (c: Parameters<InteractionApiWrites['purgeExpiredAuditEvents']>[0], now: number) =>
-      realApi.purgeExpiredAuditEvents(c, now),
+    purgeExpiredAuditEvents: (now: number) =>
+      realApi.purgeExpiredAuditEvents(now),
   };
   const store = new InteractionStore({ pool, idGen: (p) => `${p}-test`, apiPurge });
 

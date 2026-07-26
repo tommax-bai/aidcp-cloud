@@ -1,6 +1,6 @@
 # generated from boundaries/table-ownership.json — DO NOT EDIT BY HAND
 # regenerate: npx tsx scripts/db-split/generate-owner-table-lists.ts
-# owner=api count=47
+# owner=api count=49
 account_comment_approval_policy
 account_content_schedule
 account_facebook_comment_config
@@ -8,6 +8,8 @@ account_reply_profiles
 accounts
 bot_chats
 category_config
+client_env_admission_command_receipts
+client_env_admission_snapshot_state
 client_env_provisioning_intents
 client_env_revocation_holds
 client_env_scope
