@@ -31,8 +31,7 @@ const activeAuth: InteractionAuthStatusPayload = {
 };
 
 function createService(input: {
-  currentNickname?: string | null;
-  setNickname: (accountId: string, nickname: string) => Promise<void> | void;
+  recordNickname: (accountId: string, nickname: string) => Promise<void> | void;
   events: string[];
   metrics?: InteractionMetrics;
   warnings?: string[];
@@ -46,10 +45,10 @@ function createService(input: {
     configs: {} as ReplyConfigStore,
     controllerFor: () => undefined,
     metrics: input.metrics ?? new InteractionMetrics(),
-    getNickname: () => input.currentNickname,
-    setNickname: async (accountId, nickname) => {
+    recordNickname: async (accountId, nickname) => {
       input.events.push(`nickname:${accountId}:${nickname}`);
-      await input.setNickname(accountId, nickname);
+      await input.recordNickname(accountId, nickname);
+      return { outcome: 'updated', nickname };
     },
     logger: { warn: (message) => { input.warnings?.push(String(message)); } },
   });
@@ -57,22 +56,22 @@ function createService(input: {
 
 test('active Video Channels auth persists the verified display name after auth scope persistence', async () => {
   const events: string[] = [];
-  const service = createService({ events, setNickname: () => undefined });
+  const service = createService({ events, recordNickname: () => undefined });
 
   await service.onAuthStatus(activeAuth);
 
   assert.deepEqual(events, ['auth', 'nickname:acct-wechat-a:视频号昵称']);
 });
 
-test('auth nickname enrichment ignores unverified states, missing identity and unchanged nicknames', async () => {
+test('auth nickname enrichment ignores unverified states and missing identity', async () => {
   const events: string[] = [];
-  const service = createService({ currentNickname: '视频号昵称', events, setNickname: () => undefined });
+  const service = createService({ events, recordNickname: () => undefined });
 
   await service.onAuthStatus(activeAuth);
   await service.onAuthStatus({ ...activeAuth, status: 'reauth_required' });
   await service.onAuthStatus({ ...activeAuth, identity: null });
 
-  assert.deepEqual(events, ['auth', 'auth', 'auth']);
+  assert.deepEqual(events, ['auth', 'nickname:acct-wechat-a:视频号昵称', 'auth', 'auth']);
 });
 
 test('nickname enrichment failure does not reject an already persisted auth status', async () => {
@@ -83,7 +82,7 @@ test('nickname enrichment failure does not reject an already persisted auth stat
     events,
     warnings,
     metrics,
-    setNickname: () => { throw new Error('nickname-store-unavailable'); },
+    recordNickname: () => { throw new Error('nickname-store-unavailable'); },
   });
 
   await service.onAuthStatus(activeAuth);

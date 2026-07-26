@@ -11,6 +11,9 @@
       "pg_advisory_unlock": 1,
       "pg_try_advisory_lock": 1
     },
+    "src/client-auth/offboard-admission-ledger.ts": {
+      "pg_advisory_xact_lock": 2
+    },
     "src/interactions/interaction-store.ts": {
       "pg_advisory_xact_lock": 2
     },

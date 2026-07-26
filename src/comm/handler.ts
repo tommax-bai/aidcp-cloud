@@ -160,6 +160,8 @@ export interface HandlerDeps {
    * 由组合根注入的 api 侧实现负责 `buildPublishApprovalCard` + messenger 发送。未注入则视为未配置审批群。
    */
   approvalCardSink?: (chatId: string, data: PublishApprovalCardData) => Promise<void>;
+  /** 4a API notification authority exit; owns chat routing and card construction. */
+  publishApprovalNotifier?: (data: PublishApprovalCardData) => Promise<void>;
   botChatStore?: DefaultChatProvider;
   /**
    * 卡片目标统一解析（change unify-card-routing-origin-then-team）：来源会话 → 账号团队群 → 默认群。
@@ -1386,7 +1388,7 @@ export class DefaultMessageHandler implements MessageHandler {
     ) {
       throw new Error('invalid_publish_approval_request');
     }
-    if (!this.deps.approvalCardSink) {
+    if (!this.deps.publishApprovalNotifier && !this.deps.approvalCardSink) {
       throw new Error('publish_approval_chat_not_configured');
     }
     this.logger.log('[comm] 收到 publish.approval_request:', {
@@ -1394,6 +1396,20 @@ export class DefaultMessageHandler implements MessageHandler {
       edgeId: payload.edgeId ?? session.edgeId,
       sessionId: session.sessionId,
     });
+    if (this.deps.publishApprovalNotifier) {
+      await this.deps.publishApprovalNotifier({
+        requestId: payload.requestId,
+        title: payload.title,
+        content: payload.content,
+        tags: payload.tags,
+        accountId: session.accountId,
+      });
+      this.logger.log('[comm] publish.approval_request 已交付 API notification authority:', {
+        requestId: payload.requestId,
+        accountId: session.accountId ?? null,
+      });
+      return;
+    }
     // change unify-card-routing-origin-then-team：优先走统一解析（本路径无命令来源会话 → 落账号团队群
     // → 默认群；解析器内部已把未绑团队 / 读失败补集回落，绝不外抛）。未注入解析器时保持既有默认群链。
     let chatId = '';
@@ -1438,7 +1454,7 @@ export class DefaultMessageHandler implements MessageHandler {
         // 只声称走了哪条解析路径；落点如实由 chatId 呈现（account_scope 内部可能已补集回落默认群）。
         source: this.deps.resolveCardChatId ? 'account_scope' : 'default_chat_chain',
       });
-      await this.deps.approvalCardSink(chatId, {
+      await this.deps.approvalCardSink!(chatId, {
         requestId: payload.requestId,
         title: payload.title,
         content: payload.content,

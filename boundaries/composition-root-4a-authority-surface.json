@@ -1,0 +1,244 @@
+{
+  "schemaVersion": 1,
+  "change": "split-cloud-api-composition-root-4a",
+  "baseCloudSha": "67941e495ad52c22b08e4a85ef530245b2fac517",
+  "expectedGroups": 20,
+  "expectedMethodSlots": 55,
+  "expectedProductionConsumerSlots": 55,
+  "directions": {
+    "automation-to-api": {
+      "groups": 16,
+      "methodSlots": 50
+    },
+    "api-to-automation": {
+      "groups": 3,
+      "methodSlots": 4
+    },
+    "api-to-content": {
+      "groups": 1,
+      "methodSlots": 1
+    }
+  },
+  "groups": [
+    {
+      "id": "account-roster-source",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/account-store.ts",
+      "consumer": "automation account projection and Facebook scope guard",
+      "methods": ["listAccountIdentities"]
+    },
+    {
+      "id": "account-ownership",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/account-store.ts",
+      "consumer": "automation handshake and risk ownership",
+      "methods": ["getExecutionTarget", "resolveExecutionTarget", "setExecutionTarget"]
+    },
+    {
+      "id": "account-runtime-authority",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/account-store.ts",
+      "consumer": "automation connection, reply and comment workflows",
+      "methods": ["ensureAccount", "getPlatformOrNull", "getContactInfo", "recordNickname"]
+    },
+    {
+      "id": "publish-log-for-automation",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/publish-agent/publish-log-store.ts",
+      "consumer": "automation dispatcher, snapshots and delegated executor",
+      "methods": [
+        "loadForDispatch",
+        "updateStatus",
+        "updatePostId",
+        "markScheduled",
+        "markImagesAttached",
+        "listDueScheduled",
+        "deferScheduledReconcile",
+        "confirmScheduledPublished",
+        "getMostRecentPublishTime",
+        "recentPublishedContents",
+        "editDraft",
+        "rejectPendingApproval",
+        "pendingApprovalForAccount",
+        "pendingPublishPreviewForAccount",
+        "lastPublishedForAccount",
+        "countPendingForAccount",
+        "countPendingAutonomousForAccount",
+        "countPublishedTodayForAccount",
+        "countPublishedSinceForAccount"
+      ]
+    },
+    {
+      "id": "edge-publish-commands",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/publish-agent/draft-image-remove.ts",
+      "consumer": "automation-owned Edge WebSocket command handlers",
+      "methods": ["removeDraftImage", "decidePublishApproval"]
+    },
+    {
+      "id": "interaction-auth-gate",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/interactions/interaction-auth-gate.ts",
+      "consumer": "automation interaction writes",
+      "methods": ["authorizeAuthStateWrite", "checkAccountScope"]
+    },
+    {
+      "id": "interaction-api-writes",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/interactions/interaction-api-writes.ts",
+      "consumer": "automation interaction outbox, retention and offboard",
+      "methods": ["insertAuditEvent", "purgeReplyConfigForAccount", "purgeExpiredAuditEvents"]
+    },
+    {
+      "id": "reply-config-resolver",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/interactions/reply-config-store.ts",
+      "consumer": "automation reply workflow",
+      "methods": ["resolve", "getPublished", "getSnapshotForJob"]
+    },
+    {
+      "id": "account-persona",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/config/account-persona-service.ts",
+      "consumer": "automation Edge command handler",
+      "methods": ["generate", "persist"]
+    },
+    {
+      "id": "environment-handshake",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/client-auth/client-user-store.ts",
+      "consumer": "automation Edge handshake",
+      "methods": ["registerHandshakeEnvironment"]
+    },
+    {
+      "id": "comment-approval-policy",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/config/approval-policy-store.ts",
+      "consumer": "automation comment approval gate",
+      "methods": ["getAccountCommentMode"]
+    },
+    {
+      "id": "notification-contacts",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/cache/notification-contact-store.ts",
+      "consumer": "automation notification observer",
+      "methods": ["appendEvents"]
+    },
+    {
+      "id": "first-post-progress",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/onboarding/first-post-onboarding-store.ts",
+      "consumer": "automation daily usage snapshot",
+      "methods": ["getFirstPostProgress"]
+    },
+    {
+      "id": "automation-config-commands",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/config/content-schedule-store.ts",
+      "consumer": "automation browse and comment workflows",
+      "methods": ["countContactAttemptsToday", "recordContactCommentAttempt", "resolveFacebookContainerName"]
+    },
+    {
+      "id": "offboard-admission-ledger",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/client-auth/client-user-store.ts",
+      "consumer": "automation-owned offboard reconcile loop",
+      "methods": ["reconcileActiveOffboardSnapshot", "claimPendingMaterializations", "recordMaterializationReceipt"]
+    },
+    {
+      "id": "api-notification-exit",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/feishu/messenger.ts",
+      "consumer": "automation notices",
+      "methods": ["deliver"]
+    },
+    {
+      "id": "edge-resume-command",
+      "direction": "api-to-automation",
+      "owner": "automation",
+      "ownerSourceFile": "src/comm/ws-server.ts",
+      "consumer": "API account resume command face",
+      "methods": ["resumeEdgesForAccount"]
+    },
+    {
+      "id": "facebook-scope-commands",
+      "direction": "api-to-automation",
+      "owner": "automation",
+      "ownerSourceFile": "src/comment-agent/facebook-group-store.ts",
+      "consumer": "API Facebook group panel",
+      "methods": ["importTargets", "replaceTargetScopes"]
+    },
+    {
+      "id": "publish-ui-update",
+      "direction": "api-to-automation",
+      "owner": "automation",
+      "ownerSourceFile": "src/comm/ui-snapshot.ts",
+      "consumer": "API publish preview and state projection",
+      "methods": ["applyPublishUiUpdate"]
+    },
+    {
+      "id": "persona-generator",
+      "direction": "api-to-content",
+      "owner": "content",
+      "ownerSourceFile": "src/agents/persona-generator.ts",
+      "consumer": "API account persona authority",
+      "methods": ["generate"]
+    }
+  ],
+  "approvedAlternates": [
+    {
+      "id": "pending-publish-scan",
+      "description": "The automation dispatcher may scan pending publish approvals through the authenticated 3b listPendingDispatch authority; listPendingApprovalIds is not a new 4a slot.",
+      "oneOf": [
+        "publishApprovalClient.listPendingDispatch",
+        "automationPublishLog.listPendingApprovalIds"
+      ]
+    },
+    {
+      "id": "publish-preview-projection",
+      "description": "Preview truth may be read through the 4a publish authority, or read owner-locally in API and projected through applyPublishUiUpdate.",
+      "oneOf": [
+        "automationPublishLog.pendingPublishPreviewForAccount",
+        "publishLogStore.pendingPublishPreviewForAccount+publishUiUpdateCommand.applyPublishUiUpdate"
+      ]
+    }
+  ],
+  "excludedMethods": [
+    "claimExecutionTarget",
+    "resolveCardChatId",
+    "resolveAccountChatId",
+    "bindBotChat",
+    "getApproval",
+    "listPendingDispatch",
+    "listPendingApprovalIds",
+    "pendingPublishPreviewForRecord",
+    "voidApproval",
+    "markDispatching",
+    "markConsumed",
+    "releaseToPending",
+    "setBlockedReason",
+    "writeDecision",
+    "triggerApproved",
+    "getSoul",
+    "weekActiveMask",
+    "edgeCount",
+    "onlineEdgeCount",
+    "resolveEdgeIdForAccount"
+  ]
+}

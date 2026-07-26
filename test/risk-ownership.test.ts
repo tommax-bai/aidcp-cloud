@@ -330,7 +330,6 @@ function runtimeRegistry(opts: {
         getExecutionTarget: async () => opts.owner,
         resolveExecutionTarget: async () =>
           opts.owner ? ({ outcome: 'owned', target: opts.owner } as const) : ({ outcome: 'unowned' } as const),
-        claimExecutionTarget: async () => ({ outcome: 'claimed', target: 'dev' }),
         setExecutionTarget: async (accountId) => {
           sets.push(accountId);
           return opts.setResult ?? { outcome: 'claimed', target: 'dev' };

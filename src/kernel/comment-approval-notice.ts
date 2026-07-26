@@ -11,5 +11,7 @@ export interface CommentApprovalNoticeInput {
   authorName?: string;
   accountId?: string;
   accountName?: string;
+  /** 命令来源会话；API owner 只用它做 origin-first 路由，不进入卡片正文或授权 payload。 */
+  originChatId?: string;
   approvalSource?: 'mandatory_persona' | 'account_global';
 }

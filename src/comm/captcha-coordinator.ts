@@ -41,6 +41,8 @@ export interface CaptchaCoordinatorDeps {
    * 由组合根注入的 api 侧实现负责 `buildAlertCard` + messenger 发送。未注入则不发飞书告警（向后兼容）。
    */
   sendAlertCard?: (chatId: string, alert: AlertData) => Promise<void>;
+  /** 4a API notification authority exit; when present it owns routing and card construction. */
+  deliverAlert?: (alert: AlertData) => Promise<void>;
   /** 解析目标飞书群（注入，便于与发布审批共用解析口径）。 */
   /**
    * 目标群解析（change unify-card-routing-origin-then-team）：传入告警归属账号 → 该账号团队群 → 默认群。
@@ -181,7 +183,7 @@ export class CaptchaCoordinator {
     assistActionUrl?: string,
     throttled = false,
   ): Promise<void> {
-    if (!this.deps.sendAlertCard) return;
+    if (!this.deps.deliverAlert && !this.deps.sendAlertCard) return;
     // change fb-throttle-popup-zh-frequency-copy：type 决定告警面貌，故先于冷却算出。
     // 确凿的平台限流独立成型：P0 + 专属标题 + 独立 type（面板可过滤）；未命中语义判据的未知遮罩仍走
     // 既有泛化 P1/'block'，行为不变。type 取值不需要 DB 迁移（alerts.type 为裸 TEXT 无 CHECK；只有
@@ -228,17 +230,6 @@ export class CaptchaCoordinator {
       }
     }
 
-    let chatId = '';
-    try {
-      chatId = await this.deps.resolveChatId(accountId);
-    } catch (err) {
-      this.logger.warn('[captcha] 解析目标群失败:', err instanceof Error ? err.message : String(err));
-    }
-    if (!chatId) {
-      this.logger.error('[captcha] 无可用飞书群，告警未发出', { edgeId: edgeId ?? UNKNOWN_EDGE, type });
-      return;
-    }
-
     const alert: AlertData = {
       severity,
       title,
@@ -249,7 +240,26 @@ export class CaptchaCoordinator {
     };
 
     try {
-      await this.deps.sendAlertCard(chatId, alert);
+      if (this.deps.deliverAlert) {
+        await this.deps.deliverAlert(alert);
+        this.logger.log('[captcha] 飞书告警已交付 API notification authority', {
+          edgeId: edgeId ?? UNKNOWN_EDGE,
+          type,
+          severity: alert.severity,
+        });
+        return;
+      }
+      let chatId = '';
+      try {
+        chatId = await this.deps.resolveChatId(accountId);
+      } catch (err) {
+        this.logger.warn('[captcha] 解析目标群失败:', err instanceof Error ? err.message : String(err));
+      }
+      if (!chatId) {
+        this.logger.error('[captcha] 无可用飞书群，告警未发出', { edgeId: edgeId ?? UNKNOWN_EDGE, type });
+        return;
+      }
+      await this.deps.sendAlertCard!(chatId, alert);
       this.logger.log('[captcha] 飞书告警已发', { edgeId: edgeId ?? UNKNOWN_EDGE, chatId, type, severity: alert.severity });
     } catch (err) {
       // 红线：发送失败记录、不静默吞。

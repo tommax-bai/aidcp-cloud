@@ -74,8 +74,8 @@ type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
  */
 export interface InteractionApiPurgePort {
   /** 返回真实删除的总行数（离场清理要把「删了几行」如实留痕，MUST NOT 只回 void 让调用方假设已删）。 */
-  purgeReplyConfigForAccount(q: Queryable, accountId: string): Promise<number>;
-  purgeExpiredAuditEvents(q: Queryable, now: number): Promise<number>;
+  purgeReplyConfigForAccount(accountId: string): Promise<{ removedRows: number }>;
+  purgeExpiredAuditEvents(now: number): Promise<{ removedRows: number }>;
 }
 
 /**
@@ -1902,8 +1902,9 @@ export class InteractionStore implements InteractionStoreReaderPort {
       // Step B：经窄接口清 api 属主的 reply 配置面（独立事务，DELETE 幂等，中断重入照删剩余）。
       // 归属核验未通过时**整步跳过**：这五张表无 env 维度，按账号删会命中在用绑定的活数据。
       if (picked.accountScoped) {
-        picked.counts.reply_config = await this.withPurgeTx(
-          (client) => this.requireApiPurge().purgeReplyConfigForAccount(client, picked.account_id));
+        const replyConfig = await this.requireApiPurge()
+          .purgeReplyConfigForAccount(picked.account_id);
+        picked.counts.reply_config = replyConfig.removedRows;
       }
       // Step C：删绑定行 + 状态守卫翻 purged + 审计（独立事务，已 purged 则空过、不重复计数）。
       const flipped = await this.withPurgeTx(async (client) => {
@@ -2017,10 +2018,10 @@ export class InteractionStore implements InteractionStoreReaderPort {
     );
     // interaction_audit_events 属 api 单写：经窄接口下发这条过期删除，automation 侧不再直删该表
     // （change offboard-saga）。每条语句本就各自独立提交，故行为逐位等价。
-    const audits = await this.requireApiPurge().purgeExpiredAuditEvents(this.pool, now);
+    const audits = await this.requireApiPurge().purgeExpiredAuditEvents(now);
     return {
       comments: comments.rowCount ?? 0, dms: dms.rowCount ?? 0, replyJobs: replyJobs.rowCount ?? 0,
-      apiRequests: apiRequests.rowCount ?? 0, audits,
+      apiRequests: apiRequests.rowCount ?? 0, audits: audits.removedRows,
     };
   }
 

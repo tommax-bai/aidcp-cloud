@@ -42,6 +42,8 @@ export interface CommandResult {
   accountId?: string;
   /** 账号展示名。仅用于卡片文案；路由与审计仍使用 accountId。 */
   accountName?: string;
+  /** 命令来源会话；API owner 只用它做 origin-first 路由。 */
+  originChatId?: string;
   /** 发布/命令平台展示名。 */
   platformName?: string;
 }
@@ -62,6 +64,8 @@ export interface PublishApprovalCardData extends PublishApprovalPayload {
   accountId?: string;
   /** 发布账号展示名/昵称；展示优先级高于 accountId。 */
   accountName?: string;
+  /** 触发来源会话；API owner 只用它做 origin-first 路由，不进入授权 payload。 */
+  originChatId?: string;
   /** 发布平台展示名。 */
   platformName?: string;
   /** 已选择的发帖素材数量（FB 素材池等手工素材）。 */

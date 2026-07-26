@@ -6,6 +6,13 @@ async function serverSource(): Promise<string> {
   return readFile(new URL('../../src/server.ts', import.meta.url), 'utf8');
 }
 
+async function apiFeishuOwnerSource(): Promise<string> {
+  return readFile(
+    new URL('../../src/feishu/api-owner-composition.ts', import.meta.url),
+    'utf8',
+  );
+}
+
 function functionBody(source: string, startMarker: string, endMarker: string): string {
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start + startMarker.length);
@@ -86,14 +93,26 @@ test('3b composition: API panel uses local fanout and restricted recovery uses c
   const api = functionBody(source, 'async function segDApiServing(', '\nmain().catch(');
   assert.match(api, /const panelEventFanout = mode === 'api' \? new PanelEventFanout/);
   assert.match(api, /eventBus: panelEventFanout \?\? eventBus/);
-  assert.match(api, /riskCommands\.submitRestrictedRecovery\(/);
-  assert.match(api, /riskCommands\.restrictedRecoveryOutcomeOf\(/);
-  assert.doesNotMatch(api, /recoverRestrictedForAccount:/);
-  assert.doesNotMatch(api, /resumeEdgesForAccount:/);
+  const restrictedRecovery = functionBody(
+    api,
+    '          environmentRisk: {',
+    '          persona: {',
+  );
+  assert.match(restrictedRecovery, /riskCommands\.submitRestrictedRecovery\(/);
+  assert.match(restrictedRecovery, /riskCommands\.restrictedRecoveryOutcomeOf\(/);
+  assert.doesNotMatch(restrictedRecovery, /recoverRestrictedForAccount:/);
+  assert.doesNotMatch(
+    restrictedRecovery,
+    /edgeResumeCommand|resumeEdgesForAccount|ctx\.accountState\.resume/,
+    '3b restricted recovery must remain disjoint from the 4a generic Edge resume command',
+  );
 });
 
 test('3b composition: approval decision store/writer stays physical to API-containing modes', async () => {
-  const source = await serverSource();
+  const [source, feishuOwner] = await Promise.all([
+    serverSource(),
+    apiFeishuOwnerSource(),
+  ]);
   const foundation = functionBody(
     source,
     'async function segAApiFoundation(',
@@ -110,7 +129,12 @@ test('3b composition: approval decision store/writer stays physical to API-conta
   );
   assert.match(
     foundation,
-    /writeApprovalSignal:[\s\S]*publishApprovalDecisionWriter\.writeDecision\(\{/,
+    /createApiFeishuOwner\(\{[\s\S]{0,360}publishApprovalDecisionWriter,/,
+    'API Feishu owner must receive the shared durable decision writer',
+  );
+  assert.match(
+    feishuOwner,
+    /writeApprovalSignal:[\s\S]{0,420}deps\.publishApprovalDecisionWriter\.writeDecision\(\{/,
     'schedule approval must enter the validated API writer instead of a second local outlet',
   );
 

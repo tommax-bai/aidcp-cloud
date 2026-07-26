@@ -124,6 +124,11 @@ export class FirstPostOnboardingStore {
     return rows[0] ? toRow(rows[0]) : null;
   }
 
+  /** 4a automation-facing name; remains the same API-owned read and truth shape. */
+  async getFirstPostProgress(accountId: string): Promise<FirstPostOnboardingRow | null> {
+    return this.get(accountId);
+  }
+
   /** Atomic account claim: duplicate/concurrent curated events can move searching only once. */
   async claim(accountId: string, sourceId: string): Promise<boolean> {
     const { rowCount } = await this.pool.query(

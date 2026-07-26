@@ -72,6 +72,8 @@ export interface RuntimeRegistryDeps {
   getNickname?: (accountId: string) => string | null;
   /** 写入账号昵称；必须只在账号已通过平台校验后调用。 */
   setNickname?: (accountId: string, nickname: string) => Promise<void> | void;
+  /** API owner-side compare-and-write; independent automation uses this instead of sync get-then-set. */
+  recordNickname?: (accountId: string, nickname: string) => Promise<void>;
   /** 缺/空 accountId → 配置错误告警（拒绝握手，不建会话、不偷映射 default）。 */
   onConfigError: (session: EdgeSession, message: string) => void | Promise<void>;
   /** 同 edgeId 重连顶替：收掉该 sessionId 的旧 ws（→ ws close → onDisconnect 拆除其运行时）。 */
@@ -179,7 +181,15 @@ export class ConnectionRuntimeRegistry {
     await this.resolveOwnership(accountId);
 
     const helloNickname = session.accountNickname?.trim();
-    if (helloNickname && this.deps.setNickname) {
+    if (helloNickname && this.deps.recordNickname) {
+      try {
+        await this.deps.recordNickname(accountId, helloNickname);
+      } catch (err) {
+        this.deps.logger?.warn?.(
+          `[runtime] persist hello nickname failed for account=${accountId}: ${(err as Error).message}`,
+        );
+      }
+    } else if (helloNickname && this.deps.setNickname) {
       const existingNickname = this.deps.getNickname?.(accountId)?.trim() ?? '';
       if (existingNickname !== helloNickname) {
         try {

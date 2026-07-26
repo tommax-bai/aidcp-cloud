@@ -151,6 +151,21 @@ export interface AccountStore {
    */
   setNickname?(accountId: string, nickname: string): Promise<void>;
   /**
+   * API-owner nickname observation used across the 4a boundary.
+   *
+   * Unlike the legacy `setNickname`, this operation is UPDATE-only: the
+   * handshake must have completed `ensureAccount` first, and a nickname
+   * observation must never create an otherwise unknown account.
+   */
+  recordNickname?(
+    accountId: string,
+    nickname: string,
+  ): Promise<
+    | { outcome: 'updated' | 'unchanged'; nickname: string }
+    | { outcome: 'ignored_blank' }
+    | { outcome: 'account_not_found' }
+  >;
+  /**
    * 同步读账号昵称（change account-real-nickname）：读 init() 预热 + setNickname 写后更新的进程内缓存，
    * 返回 string|null（缺行/库内 NULL=null）。**同步**是为采集收尾做差异写库判定，
    * 不让 PG await 阻塞回 feed。缺省 → 调用方按 null 处理。
@@ -428,6 +443,63 @@ export class PgAccountStore implements AccountStore {
       nickname: value,
       label: previous?.label ?? accountId,
     });
+  }
+
+  /**
+   * Owner-local idempotent nickname observation for the 4a account runtime
+   * authority. The comparison and conditional write share one API transaction,
+   * so a remote caller never performs a stale get-then-set sequence.
+   */
+  async recordNickname(
+    accountId: string,
+    nickname: string,
+  ): Promise<
+    | { outcome: 'updated' | 'unchanged'; nickname: string }
+    | { outcome: 'ignored_blank' }
+    | { outcome: 'account_not_found' }
+  > {
+    if (accountId === RETIRED_ACCOUNT_ID) return { outcome: 'account_not_found' };
+    const clean = nickname.trim();
+    if (!clean) return { outcome: 'ignored_blank' };
+    const value = clean.length > 64 ? clean.slice(0, 64) : clean;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const current = await client.query<{ nickname: string | null; label: string | null; operator_alias: string | null }>(
+        `SELECT nickname,label,operator_alias FROM accounts WHERE account_id=$1 FOR UPDATE`,
+        [accountId],
+      );
+      const row = current.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        return { outcome: 'account_not_found' };
+      }
+      if (row.nickname === value) {
+        await client.query('COMMIT');
+        return { outcome: 'unchanged', nickname: value };
+      }
+      const updated = await client.query<{ nickname: string }>(
+        `UPDATE accounts SET nickname=$2 WHERE account_id=$1 RETURNING nickname`,
+        [accountId, value],
+      );
+      if (!updated.rows[0]) {
+        await client.query('ROLLBACK');
+        return { outcome: 'account_not_found' };
+      }
+      await client.query('COMMIT');
+      this.displayNameCache.set(accountId, {
+        accountId,
+        operatorAlias: row.operator_alias ?? null,
+        nickname: updated.rows[0].nickname,
+        label: row.label ?? accountId,
+      });
+      return { outcome: 'updated', nickname: updated.rows[0].nickname };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   /**

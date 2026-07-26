@@ -3,6 +3,7 @@ import type http from 'node:http';
 import type { ClientUserStore } from '../client-auth/client-user-store.js';
 import type { ReplyConfigStore } from './reply-config-store.js';
 import type { ReplyConfigResolver } from './reply-config-resolver.js';
+import type { ReplyConfigResolverPort } from '../kernel/api-direct-port.js';
 // automation 编排层经窄注入端口持有（不再直接 import send-orchestrator / reply-workflow 具体类）。
 import type { InteractionSendPort, ReplyWorkflowWritePort } from './interaction-automation-ports.js';
 import {
@@ -105,7 +106,10 @@ type ReplyConfigProjection = {
   source?: { type: 'group' | 'default'; groupLabel: string | null };
 };
 
-type CustomerConfigReader = ReplyConfigStore | ReplyConfigResolver;
+type CustomerConfigReader =
+  | ReplyConfigStore
+  | ReplyConfigResolver
+  | ReplyConfigResolverPort;
 
 async function replyConfigSummary(configs: CustomerConfigReader, accountId: string): Promise<ReplyConfigProjection> {
   try {

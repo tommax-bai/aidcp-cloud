@@ -3,7 +3,11 @@ import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import pg from 'pg';
-import { CLIENT_USERS_SCHEMA_SQL, ClientUserStore } from '../src/client-auth/client-user-store.js';
+import {
+  CLIENT_USERS_SCHEMA_SQL,
+  ClientUserStore,
+  createEnvironmentHandshakeAuthority,
+} from '../src/client-auth/client-user-store.js';
 import { shanghaiDayStartMs } from '../src/time/shanghai-day.js';
 import type { ClientEnvAutomationReader } from '../src/kernel/client-env-automation-types.js';
 
@@ -352,15 +356,23 @@ test('getOffboard：既无台账也无准入才回 null（真正的 not_found �
 
 test('物化失败方向：属主不可达时回执降级为 accepted、不写 materialized_at，绝不假装已清理', async () => {
   const writes: string[] = [];
+  let admissionParams: unknown[] | undefined;
   const client = {
-    query: async (sql: string) => {
+    query: async (sql: string, params?: unknown[]) => {
       if (/FROM client_users WHERE user_id/.test(sql)) return { rows: [{ status: 'enabled' }], rowCount: 1 };
       if (/FROM client_environments WHERE env_key = \$1 FOR UPDATE/.test(sql)) return { rows: [{ '?column?': 1 }], rowCount: 1 };
       if (/FROM client_env_scope s/.test(sql)) {
         return { rows: [{ label: null, platform: 'wechat_channels', source: 'admin',
           assigned_by: 'admin', assigned_at: new Date(0) }], rowCount: 1 };
       }
-      if (/INSERT INTO client_env_revocation_holds/.test(sql)) return { rows: [admissionRow({ reason: 'environment_unbind' })], rowCount: 1 };
+      if (/INSERT INTO client_env_revocation_holds/.test(sql)) {
+        admissionParams = params;
+        assert.match(
+          sql,
+          /WHERE client_env_revocation_holds\.execution_target=EXCLUDED\.execution_target/,
+        );
+        return { rows: [admissionRow({ reason: 'environment_unbind' })], rowCount: 1 };
+      }
       return { rows: [], rowCount: 0 };
     },
     release() {},
@@ -371,6 +383,7 @@ test('物化失败方向：属主不可达时回执降级为 accepted、不写 m
   } as unknown as pg.Pool;
   const store = new ClientUserStore({
     schemaEnsurer: ensureCapabilitySchema, pool,
+    executionTarget: 'dev',
     automationReads: fakeAutomationReads({ boundAccountForEnv: async () => 'acct-1' }),
     offboardMaterialization: {
       materializeEnvironmentOffboard: async () => { throw new Error('automation_unreachable'); },
@@ -380,7 +393,53 @@ test('物化失败方向：属主不可达时回执降级为 accepted、不写 m
   assert.ok(result.ok);
   assert.equal(result.offboard.state, 'accepted');
   assert.equal(result.offboard.accountId, null);
+  assert.equal(admissionParams?.[7], 'dev', 'new durable admission must persist server target');
   assert.ok(!writes.some((sql) => sql.includes('materialized_at=now()')), '没物化就绝不盖回执');
+});
+
+test('新离场准入缺少 server target 时整笔回滚，不写 NULL durable work', async () => {
+  const seen: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      seen.push(sql);
+      if (/FROM client_users WHERE user_id/.test(sql)) {
+        return { rows: [{ status: 'enabled' }], rowCount: 1 };
+      }
+      if (/FROM client_environments WHERE env_key = \$1 FOR UPDATE/.test(sql)) {
+        return { rows: [{ '?column?': 1 }], rowCount: 1 };
+      }
+      if (/FROM client_env_scope s/.test(sql)) {
+        return {
+          rows: [{
+            label: null,
+            platform: 'wechat_channels',
+            source: 'admin',
+            assigned_by: 'admin',
+            assigned_at: new Date(0),
+          }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  const pool = {
+    connect: async () => client,
+    query: async () => ({ rows: [] }),
+  } as unknown as pg.Pool;
+  const store = new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    automationReads: fakeAutomationReads({ boundAccountForEnv: async () => 'acct-1' }),
+  });
+
+  await assert.rejects(
+    () => store.beginEnvironmentOffboard('user-1', 'env-1'),
+    /offboard_admission_execution_target_not_configured/,
+  );
+  assert.ok(!seen.some((sql) => sql.includes('INSERT INTO client_env_revocation_holds')));
+  assert.equal(seen[seen.length - 1], 'ROLLBACK');
 });
 
 test('beginEnvironmentOffboard：确无绑定且非自助建号时仍然拒绝（归属不撤、准入不写）', async () => {
@@ -423,6 +482,7 @@ test('对账循环：属主投影读不到时整轮抛出，绝不把空集当�
   const statements: string[] = [];
   const store = new ClientUserStore({
     schemaEnsurer: ensureCapabilitySchema,
+    executionTarget: 'dev',
     pool: fakePool((sql) => { statements.push(sql); return { rows: [] }; }),
     automationReads: fakeAutomationReads({
       activeWechatOffboards: async () => { throw new Error('automation_read_down'); },
@@ -437,6 +497,7 @@ test('对账循环：认领属主台账里没被记上的清理，释放已清�
   const materialized: string[] = [];
   const store = new ClientUserStore({
     schemaEnsurer: ensureCapabilitySchema,
+    executionTarget: 'dev',
     pool: fakePool((sql, params) => {
       statements.push({ sql, params });
       if (/FROM client_env_revocation_holds\s+WHERE materialized_at IS NULL/.test(sql)) {
@@ -467,6 +528,7 @@ test('对账循环：认领属主台账里没被记上的清理，释放已清�
   const release = statements.find((s) => s.sql.includes('DELETE FROM client_env_revocation_holds'));
   assert.ok(release && release.sql.includes('materialized_at IS NOT NULL'), '只释放已物化的准入');
   assert.deepEqual((release!.params ?? [])[0], ['env-live'], '仍在台账里的环境不许被释放');
+  assert.equal((release!.params ?? [])[1], 'dev', 'durable reconcile 只释放本 target admission');
   assert.deepEqual(materialized, ['ob-pending']);
   assert.deepEqual(out.map((o) => [o.envKey, o.accountId]), [['env-pending', 'acct-pending']]);
   assert.ok(statements.some((s) => s.sql.includes('materialized_at=now()')), '物化成功要盖回执');
@@ -531,6 +593,51 @@ test('registerHandshakeEnvironment: 单条观测走一次 auto upsert，字段�
   assert.deepEqual(calls[0].params, ['ok9', '大白', 'facebook', 'auto', null]);
 });
 
+test('environment handshake authority: owner 登记提交后才触发 persona auto-fill', async () => {
+  const trace: string[] = [];
+  const port = createEnvironmentHandshakeAuthority(
+    {
+      registerHandshakeEnvironment: async (observation) => {
+        trace.push(`registered:${observation.envKey}`);
+      },
+    },
+    async (envKey) => {
+      trace.push(`persona:${envKey}`);
+    },
+  );
+  await port.registerHandshakeEnvironment({
+    envKey: 'env-1',
+    label: '一号环境',
+    platform: 'facebook',
+    accountId: 'account-1',
+  });
+  assert.deepEqual(trace, ['registered:env-1', 'persona:env-1']);
+});
+
+test('environment handshake authority: owner 登记失败时不触发 persona auto-fill', async () => {
+  let personaCalls = 0;
+  const port = createEnvironmentHandshakeAuthority(
+    {
+      registerHandshakeEnvironment: async () => {
+        throw new Error('registry_write_failed');
+      },
+    },
+    async () => {
+      personaCalls += 1;
+    },
+  );
+  await assert.rejects(
+    () => port.registerHandshakeEnvironment({
+      envKey: 'env-1',
+      label: null,
+      platform: null,
+      accountId: null,
+    }),
+    /registry_write_failed/,
+  );
+  assert.equal(personaCalls, 0);
+});
+
 test('ownsEnv: user A only owns rows explicitly scoped to user A', async () => {
   const pool = fakePool((sql, params) => {
     assert.match(sql, /WHERE s\.user_id = \$1 AND s\.env_key = \$2/);
@@ -573,6 +680,10 @@ test('schema archives and removes legacy customer claims, then enforces one auth
   assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_environments\s*\([\s\S]*?env_key\s+TEXT\s+PRIMARY KEY/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS client_env_revocation_holds/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /env_key\s+TEXT\s+NOT NULL UNIQUE/);
+  assert.match(
+    CLIENT_USERS_SCHEMA_SQL,
+    /execution_target\s+TEXT\s+NOT NULL CHECK \(execution_target IN \('dev','ol'\)\)/,
+  );
   assert.match(CLIENT_USERS_SCHEMA_SQL, /client_env_scope_cleanup_hold_guard/);
   assert.match(CLIENT_USERS_SCHEMA_SQL, /CONSTRAINT = 'client_env_scope_cleanup_hold'/);
 });

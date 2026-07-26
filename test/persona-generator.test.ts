@@ -11,7 +11,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { serializeSoul, loadSoulFromValue, loadSoulFromYaml } from '../src/soul/index.js';
+import { serializeSoul, loadSoulFromYaml } from '../src/soul/index.js';
 import type { SoulCodec } from '../src/kernel/soul-codec.js';
 import type { Soul } from '../src/kernel/soul-types.js';
 import {
@@ -19,13 +19,14 @@ import {
   PersonaGenerator,
   type PersonaGenerateInput,
 } from '../src/agents/persona-generator.js';
+import { PERSONA_SOUL_CODEC } from '../src/agents/persona-soul-codec.js';
 import { makeEnvelope } from '../src/comm/protocol.js';
 import { DefaultMessageHandler } from '../src/comm/handler.js';
 import type { PanelPersonaConfig } from '../src/panel/types.js';
 import type { PersonaWritePort } from '../src/kernel/persona-ports.js';
 
-/** 与组合根注入的是同一组 api 实现 —— 用例仍在验真实 codec，不是桩。 */
-const SOUL_CODEC: SoulCodec = { parseValue: loadSoulFromValue, serialize: serializeSoul, parseYaml: loadSoulFromYaml };
+/** 与组合根注入的是同一组 content 实现；输出仍用 API loader 做交叉验证。 */
+const SOUL_CODEC: SoulCodec = PERSONA_SOUL_CODEC;
 
 const VALID_SOUL_JSON = JSON.stringify({
   identity: {

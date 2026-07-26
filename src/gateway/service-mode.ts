@@ -107,6 +107,15 @@ export function ownsPublishApprovalAuthorityForMode(mode: ServiceMode): boolean 
   return mode === 'api' || mode === 'core' || mode === 'monolith';
 }
 
+/**
+ * Feishu inbound/outbound is API-owned. Content reaches its publish-card exit
+ * through the existing API HTTP port; automation only emits structured
+ * notification commands and therefore must not load the SDK or API card stack.
+ */
+export function ownsApiFeishuForMode(mode: ServiceMode): boolean {
+  return mode === 'api' || mode === 'core' || mode === 'monolith';
+}
+
 /** content 进程内部 HTTP 读 API 的默认监听端口（可由 `AIDCP_CONTENT_PORT` 覆盖）。 */
 export const DEFAULT_CONTENT_READ_API_PORT = 8092;
 

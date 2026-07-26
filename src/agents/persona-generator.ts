@@ -56,7 +56,7 @@ export function extractLikeAffinitySelection(keywordSelections: string[]): {
 
 export interface PersonaGeneratorOptions {
   llm: TextCompletionPort;
-  /** Soul 编解码端口（实现由组合根注入，api 属主）。 */
+  /** Soul 编解码端口（实现由 content 组合根注入，不回连 API owner）。 */
   soulCodec: SoulCodec;
   /** 单次生成失败后的最大重试次数（默认 2；含首次共尝试 3 次）。 */
   maxRetries?: number;

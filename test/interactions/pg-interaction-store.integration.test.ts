@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import pg from 'pg';
 import type { Envelope } from '../../src/comm/protocol.js';
 import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
+import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
 import { PgInteractionAuthGate } from '../../src/interactions/interaction-auth-gate.js';
 import {
   INTERACTION_TEST_EXECUTION_TARGET,
@@ -39,7 +39,7 @@ const attemptGate = {
 test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recovery and confirmed result',
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
-    const store = new InteractionStore({ pool, clock: () => 1784044802100, apiPurge: new InteractionApiWrites(),
+    const store = new InteractionStore({ pool, clock: () => 1784044802100, apiPurge: new PgInteractionApiWrites(pool),
       authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET,
       accountPlatform: interactionAccountPlatform() });
     try {

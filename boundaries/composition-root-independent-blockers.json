@@ -1,0 +1,547 @@
+{
+  "schemaVersion": 2,
+  "change": "split-cloud-api-composition-root-4a",
+  "claimBlocked": true,
+  "claim": "api, automation, and content are independently bootable without foreign owner pools, stores, or synchronous in-process dependencies",
+  "summary": {
+    "total": 51,
+    "byCategory": {
+      "4b-mirror": 14,
+      "operator-command": 4,
+      "content-owner": 7,
+      "composition-root": 26
+    }
+  },
+  "blockers": [
+    {
+      "id": "4b-a1-week-mask-mirror",
+      "category": "4b-mirror",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:call:sessionConfigStore.weekActiveMask"
+      ]
+    },
+    {
+      "id": "4b-a2-automation-catalog-shared-kernel",
+      "category": "4b-mirror",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:identifier:SCHEDULED_AUTOMATION_CATALOG_READER"
+      ]
+    },
+    {
+      "id": "4b-a3-edge-presence-mirror",
+      "category": "4b-mirror",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/panel/panel-server.ts#call:deps.edgeServer.onlineEdgeCount",
+        "src/server.ts#segDApiServing:text:requireSegment(server, 'server', 'automation').resolveEdgeIdForAccount"
+      ]
+    },
+    {
+      "id": "4b-a4-publish-in-flight-mirror",
+      "category": "4b-mirror",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segDApiServing:call:requireSegment().getInFlightRecordIds"
+      ]
+    },
+    {
+      "id": "4b-a5-captcha-availability-mirror",
+      "category": "4b-mirror",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segDApiServing:call:captchaAssist.isAvailable"
+      ]
+    },
+    {
+      "id": "4b-a6-automation-mirror-health",
+      "category": "4b-mirror",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segDApiServing:text:requireSegment(configMirrorRefresher, 'configMirrorRefresher', 'automation').health()"
+      ]
+    },
+    {
+      "id": "4b-b1-persona-binding-soul-mirror",
+      "category": "4b-mirror",
+      "owner": "api",
+      "consumer": "automation",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segCAutomation:call:resolvePersona",
+        "src/server.ts#segCAutomation:call:personaStore.bindingFor",
+        "src/server.ts#segCAutomation:call:getSoul"
+      ]
+    },
+    {
+      "id": "4b-b2-environment-gate-mirror",
+      "category": "4b-mirror",
+      "owner": "api",
+      "consumer": "automation",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segCAutomation:call:clientUserStore.automationGateForEdgeId",
+        "src/server.ts#segCAutomation:call:clientUserStore.slowStartSinceFor"
+      ]
+    },
+    {
+      "id": "4b-b3-config-freshness-runtime",
+      "category": "4b-mirror",
+      "owner": "shared-kernel",
+      "consumer": "api and automation",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segCAutomation:new:ConfigMirrorRefresher",
+        "src/server.ts#segCAutomation:identifier:mirrorVersionStore"
+      ]
+    },
+    {
+      "id": "4b-b4-account-identity-status-mirror",
+      "category": "4b-mirror",
+      "owner": "api",
+      "consumer": "automation",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segCAutomation:call:accountDisplayName",
+        "src/server.ts#segCAutomation:identifier:accountStore"
+      ]
+    },
+    {
+      "id": "4b-b5-content-schedule-mirror",
+      "category": "4b-mirror",
+      "owner": "api",
+      "consumer": "automation",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segCAutomation:call:contentScheduleStore.effectiveScheduleFor"
+      ]
+    },
+    {
+      "id": "4b-b5-hot-lead-config-mirror",
+      "category": "4b-mirror",
+      "owner": "api",
+      "consumer": "automation",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segCAutomation:call:hotLeadConfigStore.getGateConfig"
+      ]
+    },
+    {
+      "id": "4b-b5-facebook-comment-config-mirror",
+      "category": "4b-mirror",
+      "owner": "api",
+      "consumer": "automation",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segCAutomation:call:facebookCommentConfigStore.effectiveConfigFor"
+      ]
+    },
+    {
+      "id": "4b-b5-facebook-join-config-mirror",
+      "category": "4b-mirror",
+      "owner": "api",
+      "consumer": "automation",
+      "closingChange": "split-cloud-api-composition-root-4b",
+      "evidence": [
+        "src/server.ts#segCAutomation:call:facebookGroupJoinAutomationStore.getForAccount"
+      ]
+    },
+    {
+      "id": "feishu-operator-natural-language-delegate",
+      "category": "operator-command",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segDApiServing:text:automation_operator_command_unavailable:delegate"
+      ]
+    },
+    {
+      "id": "feishu-operator-publish-comment",
+      "category": "operator-command",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segDApiServing:text:automation_operator_command_unavailable:publish",
+        "src/server.ts#segDApiServing:text:automation_operator_command_unavailable:comment"
+      ]
+    },
+    {
+      "id": "feishu-operator-delegated-card-actions",
+      "category": "operator-command",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "future",
+      "evidence": [
+        "src/feishu/api-owner-composition.ts#call:handleDelegatedTaskCardAction",
+        "src/feishu/api-owner-composition.ts#text:automation_operator_command_unavailable"
+      ]
+    },
+    {
+      "id": "feishu-operator-dispatch-start-stop",
+      "category": "operator-command",
+      "owner": "automation",
+      "consumer": "api",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segDApiServing:text:automation_operator_command_unavailable:dispatch",
+        "src/panel/panel-server.ts#call:deps.commandActions.dispatch"
+      ]
+    },
+    {
+      "id": "content-draft-refinement-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation and api",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:DraftRefinementStore",
+        "src/server.ts#segCAutomation:new:DraftRefinementWorker",
+        "src/server.ts#segDApiServing:identifier:draftRefinementStore"
+      ]
+    },
+    {
+      "id": "content-facebook-publish-media-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation and api",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:FacebookPublishMediaStore",
+        "src/server.ts#segCAutomation:identifier:facebookPublishMediaStore",
+        "src/server.ts#segDApiServing:identifier:facebookPublishMediaStore"
+      ]
+    },
+    {
+      "id": "content-concept-write-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:ConceptStore",
+        "src/server.ts#segCAutomation:identifier:conceptStore"
+      ]
+    },
+    {
+      "id": "content-curated-write-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation and api",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:CuratedContentStore",
+        "src/server.ts#segCAutomation:identifier:curatedContentStore",
+        "src/server.ts#segDApiServing:identifier:curatedContentStore"
+      ]
+    },
+    {
+      "id": "content-role-factories",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segCAutomation:identifier:CONTENT_ROLE_FACTORIES"
+      ]
+    },
+    {
+      "id": "content-generic-llm-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation and api",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:QwenClient",
+        "src/server.ts#segCAutomation:identifier:llm",
+        "src/server.ts#segDApiServing:identifier:llm"
+      ]
+    },
+    {
+      "id": "content-token-usage-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation and api",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:TokenUsageStore",
+        "src/server.ts#segCAutomation:identifier:tokenUsageStore",
+        "src/server.ts#segDApiServing:identifier:tokenUsageStore"
+      ]
+    },
+    {
+      "id": "seg-a-foreign-pool-api-pool",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "shared segA composition root",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:pool:apiPool:api"
+      ]
+    },
+    {
+      "id": "seg-a-foreign-pool-automation-pool",
+      "category": "composition-root",
+      "owner": "automation",
+      "consumer": "shared segA composition root",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:pool:automationPool:automation"
+      ]
+    },
+    {
+      "id": "seg-a-foreign-pool-content-pool",
+      "category": "composition-root",
+      "owner": "content",
+      "consumer": "shared segA composition root",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:pool:contentPool:content"
+      ]
+    },
+    {
+      "id": "seg-a-foreign-pool-token-usage-pool",
+      "category": "composition-root",
+      "owner": "content",
+      "consumer": "shared segA composition root",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:pool:tokenUsagePool:content"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-approval-policy-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:ApprovalPolicyStore:api:src/config/approval-policy-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-category-config-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:CategoryConfigStore:api:src/config/category-config-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-client-user-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:ClientUserStore:api:src/client-auth/index.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-content-schedule-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:ContentScheduleStore:api:src/config/content-schedule-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-credential-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:CredentialStore:api:src/config/credential-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-facebook-comment-config-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:FacebookCommentConfigStore:api:src/config/facebook-comment-config-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-facebook-group-join-automation-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:FacebookGroupJoinAutomationStore:api:src/config/facebook-group-join-automation-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-first-post-onboarding-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:FirstPostOnboardingStore:api:src/onboarding/first-post-onboarding-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-hot-lead-config-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:HotLeadConfigStore:api:src/config/hot-lead-config-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-mirror-version-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:MirrorVersionStore:api:src/config/mirror-version-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-model-config-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:ModelConfigStore:api:src/config/model-config-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-notification-contact-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:NotificationContactStore:api:src/cache/notification-contact-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-persona-auto-fill-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PersonaAutoFillStore:api:src/config/persona-auto-fill-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-persona-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PersonaStore:api:src/config/persona-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-pg-account-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PgAccountStore:api:src/account-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-pg-config-mirror-bump-sink",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PgConfigMirrorBumpSink:api:src/config/mirror-bump-sink.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-pg-interaction-api-writes",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PgInteractionApiWrites:api:src/interactions/interaction-api-writes.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-pg-interaction-auth-gate",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PgInteractionAuthGate:api:src/interactions/interaction-auth-gate.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-pg-offboard-admission-ledger",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PgOffboardAdmissionLedger:api:src/client-auth/offboard-admission-ledger.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-publish-log-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PublishLogStore:api:src/publish-agent/publish-log-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-publish-pipeline-log-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:PublishPipelineLogStore:api:src/publish-agent/publish-pipeline-log-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-role-config-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:RoleConfigStore:api:src/config/role-config-store.ts"
+      ]
+    }
+  ]
+}

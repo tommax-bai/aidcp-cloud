@@ -77,6 +77,11 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 旧 signal/quota 读写形状不变，
  * 迁移缺失时 recovery owner 写会显式失败并由 outbox 保持重放，故同样只抬 KNOWN_MAX、不抬 REQUIRED。
  *
+ * 注：`0081_offboard_admission_claims`（change split-cloud-api-composition-root-4a）只给 api
+ * admission ledger 增加 claim/CAS 列与 command receipt inbox。独立 automation 的 offboard
+ * reconcile 依赖该能力；迁移缺失时 API owner route 显式报 schema/SQL 错且 automation 保持
+ * admission pending，不会伪造物化完成。故只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
  * 注：`0082_api_sync_read_consumer_checkpoint` /
  * `0083_automation_sync_read_consumer_checkpoint`（change split-cloud-api-composition-root-4b）
  * 分别建立 api 与 automation consumer 自己的 target-scoped cursor/readiness/health 恢复表。

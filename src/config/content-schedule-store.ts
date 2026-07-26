@@ -38,6 +38,10 @@ import {
   type ContentScheduleActionMode,
   type ContentScheduleApprovalMode,
 } from '../kernel/content-schedule-mode.js';
+import type {
+  AutomationConfigCommandsPort,
+  ContactCommentAttemptAudit,
+} from '../kernel/api-direct-port.js';
 
 const { Pool } = pg;
 
@@ -939,4 +943,30 @@ export class ContentScheduleStore {
   async close(): Promise<void> {
     await this.pool.end();
   }
+}
+
+/**
+ * Narrow 4a command face over two API-owned configuration stores. The
+ * automation caller gets only the three admitted methods and no synchronous
+ * schedule/config mirror.
+ */
+export function createAutomationConfigCommands(
+  schedules: Pick<
+    ContentScheduleStore,
+    'countContactAttemptsToday' | 'recordContactCommentAttempt'
+  >,
+  facebook: {
+    resolveContainerName(accountId: string, url: string, name: string): Promise<void>;
+  },
+): AutomationConfigCommandsPort {
+  return {
+    countContactAttemptsToday: (accountId) =>
+      schedules.countContactAttemptsToday(accountId),
+    recordContactCommentAttempt: (
+      accountId: string,
+      audit?: ContactCommentAttemptAudit,
+    ) => schedules.recordContactCommentAttempt(accountId, audit),
+    resolveFacebookContainerName: (accountId, url, name) =>
+      facebook.resolveContainerName(accountId, url, name),
+  };
 }

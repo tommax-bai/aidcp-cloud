@@ -16,6 +16,8 @@
     { "table": "automation_account_projection_state", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change automation-accounts-projection 新增（migrations/0077）。§5.1 未具名；上表的单行新鲜期状态表，是守卫 fail-closed 的落点（fresh_until 过期即全部账号守卫拒绝），唯一 SQL 写入方 src/transport/account-projection-store.ts 属 automation。MUST 回写 §5.1" },
     { "table": "bot_chats", "owner": "api", "basis": "§5.1 未具名；飞书群花名册，写入方 src/cache/bot-chat-store.ts 属 api（§4.7 cache 逐文件表）" },
     { "table": "category_config", "owner": "api", "basis": "§5.1 未具名；配置面，写入方属 api（§4.6.8）" },
+    { "table": "client_env_admission_command_receipts", "owner": "api", "basis": "change split-cloud-api-composition-root-4a；offboard admission ledger 的 target-bound 幂等命令回执，与 client_env_revocation_holds 同属「客户、环境归属和账号绑定」→ aidcp-api 单写" },
+    { "table": "client_env_admission_snapshot_state", "owner": "api", "basis": "change split-cloud-api-composition-root-4a；offboard complete snapshot 的 target/capability 单调游标和摘要 CAS，保护 api-owned admission hold 不被旧快照释放" },
     { "table": "client_env_provisioning_intents", "owner": "api", "basis": "§5.1「客户、环境归属和账号绑定」→ aidcp-api" },
     { "table": "client_env_revocation_holds", "owner": "api", "basis": "§5.1「客户、环境归属和账号绑定」→ aidcp-api" },
     { "table": "client_env_scope", "owner": "api", "basis": "§5.1 具名 client_env_scope → aidcp-api" },
