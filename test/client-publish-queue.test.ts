@@ -166,8 +166,8 @@ test('客户队列透传不可用证据，并从确定汇总排除不确定稿�
     stages: [
       stage('source', 'completed'),
       stage('content', 'completed'),
-      stage('approval', 'completed'),
-      stage('dispatch', 'running'),
+      stage('approval', 'evidence_unavailable'),
+      stage('dispatch', 'evidence_unavailable'),
     ],
   });
   const view = projectClientPublishQueue({
@@ -182,7 +182,7 @@ test('客户队列透传不可用证据，并从确定汇总排除不确定稿�
   });
 
   assert.deepEqual(view.inFlightEvidence, { state: 'stale', asOf: 2_900 });
-  assert.deepEqual(view.summary, { inProgress: 1, waitingForYou: 0, cancellable: 0 });
+  assert.deepEqual(view.summary, { inProgress: 2, waitingForYou: 0, cancellable: 0 });
   assert.deepEqual(
     view.active[0].stages.slice(2).map((item) => [item.key, item.state, item.summary]),
     [
@@ -191,6 +191,14 @@ test('客户队列透传不可用证据，并从确定汇总排除不确定稿�
     ],
   );
   assert.equal(view.active[1].dispatchState, 'dispatching', 'durable dispatch proof remains authoritative');
+  assert.deepEqual(
+    view.active[1].stages.slice(2).map((item) => [item.key, item.state, item.summary]),
+    [
+      ['approval', 'completed', '发布确认：已确认'],
+      ['dispatch', 'running', '发布结果：正在发布'],
+    ],
+    'durable proof must normalize contradictory unavailable stages before crossing the client boundary',
+  );
 });
 
 test('取消回执诚实区分立即终态与规划中的安全停止', () => {

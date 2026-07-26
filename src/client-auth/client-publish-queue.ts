@@ -71,6 +71,7 @@ const TERMINAL_TASK_STATUSES = new Set<DelegatedTaskStatus>([
   'cancelled',
   'failed',
 ]);
+const DURABLE_DISPATCH_STATES = new Set(['pending_dispatch', 'dispatching', 'consumed', 'void']);
 
 const STAGE_GROUPS: ReadonlyArray<{
   key: ClientPublishQueueStage['key'];
@@ -201,6 +202,39 @@ function projectStageGroup(
 function projectJourney(
   journey: PublishLifecycleProjection['active'][number],
 ): ClientPublishQueueJourney {
+  const projectedStages = STAGE_GROUPS.map((group) => projectStageGroup(journey.stages, group));
+  const dispatchState = journey.dispatchState && DURABLE_DISPATCH_STATES.has(journey.dispatchState)
+    ? journey.dispatchState
+    : null;
+  const stages = dispatchState
+    ? projectedStages.map((stage) => {
+        if (stage.state !== 'evidence_unavailable') return stage;
+        if (stage.key === 'approval') {
+          return { ...stage, state: 'completed' as const, summary: '发布确认：已确认' };
+        }
+        if (stage.key !== 'dispatch') return stage;
+        if (dispatchState === 'pending_dispatch') {
+          return { ...stage, state: 'pending' as const, summary: '发布结果：等待发布' };
+        }
+        if (dispatchState === 'dispatching') {
+          return { ...stage, state: 'running' as const, summary: '发布结果：正在发布' };
+        }
+        if (dispatchState === 'void') {
+          return { ...stage, state: 'skipped' as const, summary: '发布结果：无需发布' };
+        }
+        if (journey.status === 'published') {
+          return { ...stage, state: 'completed' as const, summary: '发布结果：已发布' };
+        }
+        if (journey.status === 'failed') {
+          return { ...stage, state: 'failed' as const, summary: '发布结果：未完成' };
+        }
+        return {
+          ...stage,
+          state: 'partial' as const,
+          summary: '发布结果：平台已受理，等待最终结果',
+        };
+      })
+    : projectedStages;
   return {
     id: journey.journeyId,
     recordId: journey.recordId,
@@ -210,8 +244,8 @@ function projectJourney(
     startedAt: journey.startedAt,
     status: journey.status,
     statusLabel: JOURNEY_STATUS_LABELS[journey.status],
-    stages: STAGE_GROUPS.map((group) => projectStageGroup(journey.stages, group)),
-    ...(journey.dispatchState ? { dispatchState: journey.dispatchState } : {}),
+    stages,
+    ...(dispatchState ? { dispatchState } : {}),
   };
 }
 
@@ -238,7 +272,7 @@ export function projectClientPublishQueue(input: {
 
   return {
     summary: {
-      inProgress: tasks.length + definiteActive.length,
+      inProgress: tasks.length + active.length,
       waitingForYou: definiteActive.filter((journey) => journey.status === 'waiting_approval').length,
       cancellable: tasks.filter((task) => !task.cancelRequested).length,
     },

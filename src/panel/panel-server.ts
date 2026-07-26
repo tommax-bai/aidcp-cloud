@@ -82,6 +82,64 @@ function evidenceAsOf(value: number | null): number | null {
   return value === null || (Number.isFinite(value) && value >= 0) ? value : null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isNullableNonNegativeNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+}
+
+const CONFIG_MIRROR_ENTRY_KEYS = [
+  'mirrorKey',
+  'tier',
+  'version',
+  'lastComparedAt',
+  'lastReloadedAt',
+  'reloadFailingSince',
+  'state',
+  'staleMs',
+  'observeStaleMs',
+  'haltsOnStale',
+  'staleForMs',
+] as const;
+
+function isConfigMirrorHealthEntry(value: unknown): boolean {
+  if (!isRecord(value) || !hasExactlyKeys(value, CONFIG_MIRROR_ENTRY_KEYS)) return false;
+  return typeof value.mirrorKey === 'string'
+    && value.mirrorKey.trim().length > 0
+    && (value.tier === 'gate' || value.tier === 'parameter')
+    && (value.version === null
+      || (typeof value.version === 'number' && Number.isInteger(value.version) && value.version >= 0))
+    && isNullableNonNegativeNumber(value.lastComparedAt)
+    && isNullableNonNegativeNumber(value.lastReloadedAt)
+    && isNullableNonNegativeNumber(value.reloadFailingSince)
+    && (value.state === 'fresh' || value.state === 'stale')
+    && isNullableNonNegativeNumber(value.staleMs)
+    && typeof value.observeStaleMs === 'number'
+    && Number.isFinite(value.observeStaleMs)
+    && value.observeStaleMs >= 0
+    && typeof value.haltsOnStale === 'boolean'
+    && typeof value.staleForMs === 'number'
+    && Number.isFinite(value.staleForMs)
+    && value.staleForMs >= 0;
+}
+
+function invalidConfigMirrorServices(): PanelConfigMirrorHealthResponse {
+  return {
+    services: [
+      { sourceService: 'api', asOf: null, deliveryState: 'invalid', entries: [] },
+      { sourceService: 'automation', asOf: null, deliveryState: 'invalid', entries: [] },
+    ],
+  };
+}
+
 function readEdgePresenceEvidence(deps: PanelDeps, now: number): {
   state: PanelEvidenceState;
   asOf: number | null;
@@ -144,38 +202,79 @@ function readPublishInFlightEvidence(deps: PanelDeps, now: number): PanelPublish
 
 function configMirrorHealthResponse(deps: PanelDeps): PanelConfigMirrorHealthResponse {
   if (deps.configMirrorServicesHealth) {
-    const response = deps.configMirrorServicesHealth();
+    const response: unknown = deps.configMirrorServicesHealth();
+    if (
+      !isRecord(response)
+      || !hasExactlyKeys(response, ['services'])
+      || !Array.isArray(response.services)
+      || response.services.some((service) =>
+        !isRecord(service)
+        || (service.sourceService !== 'api' && service.sourceService !== 'automation'))
+    ) {
+      return invalidConfigMirrorServices();
+    }
+    const services = response.services as Record<string, unknown>[];
     return {
       services: (['api', 'automation'] as const).map((sourceService) => {
-        const service = Array.isArray(response.services)
-          ? response.services.find((candidate) => candidate.sourceService === sourceService)
-          : undefined;
-        if (!service) {
+        const matching = services.filter((candidate) =>
+          candidate.sourceService === sourceService);
+        if (matching.length !== 1) {
           return { sourceService, asOf: null, deliveryState: 'unknown', entries: [] };
         }
-        const deliveryState = EVIDENCE_STATES.has(service.deliveryState)
-          ? service.deliveryState
+        const service = matching[0] as Record<string, unknown>;
+        if (
+          !hasExactlyKeys(service, ['sourceService', 'asOf', 'deliveryState', 'entries'])
+          || !EVIDENCE_STATES.has(service.deliveryState as PanelEvidenceState)
+          || !Array.isArray(service.entries)
+        ) {
+          return { sourceService, asOf: null, deliveryState: 'invalid', entries: [] };
+        }
+        const deliveryState = EVIDENCE_STATES.has(service.deliveryState as PanelEvidenceState)
+          ? service.deliveryState as PanelEvidenceState
           : 'invalid';
+        const validFresh = deliveryState !== 'fresh'
+          || (
+            typeof service.asOf === 'number'
+            && Number.isFinite(service.asOf)
+            && service.asOf >= 0
+            && (service.entries as unknown[]).every(isConfigMirrorHealthEntry)
+          );
         return {
           sourceService,
-          asOf: evidenceAsOf(service.asOf),
-          deliveryState,
-          entries: deliveryState === 'fresh' && Array.isArray(service.entries)
-            ? service.entries
+          asOf: evidenceAsOf(service.asOf as number | null),
+          deliveryState: validFresh ? deliveryState : 'invalid',
+          entries: deliveryState === 'fresh' && validFresh
+            ? service.entries as PanelConfigMirrorHealthResponse['services'][number]['entries']
             : [],
         };
       }),
     };
   }
-  const legacy = deps.configMirrorHealth!();
+  const legacy: unknown = deps.configMirrorHealth!();
+  const legacyValid = isRecord(legacy)
+    && hasExactlyKeys(legacy, ['asOf', 'enabled', 'pollMs', 'entries'])
+    && typeof legacy.asOf === 'number'
+    && Number.isFinite(legacy.asOf)
+    && legacy.asOf >= 0
+    && typeof legacy.enabled === 'boolean'
+    && typeof legacy.pollMs === 'number'
+    && Number.isFinite(legacy.pollMs)
+    && legacy.pollMs >= 0
+    && Array.isArray(legacy.entries)
+    && legacy.entries.every(isConfigMirrorHealthEntry);
   return {
     services: [
       { sourceService: 'api', asOf: null, deliveryState: 'unknown', entries: [] },
-      {
+      legacyValid ? {
         sourceService: 'automation',
-        asOf: evidenceAsOf(legacy.asOf),
+        asOf: legacy.asOf as number,
         deliveryState: 'fresh',
-        entries: Array.isArray(legacy.entries) ? legacy.entries : [],
+        entries: legacy.entries as PanelConfigMirrorHealthResponse['services'][number]['entries'],
+      } : {
+        sourceService: 'automation',
+        asOf: null,
+        deliveryState: 'invalid',
+        entries: [],
       },
     ],
   };

@@ -398,6 +398,35 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
 });
 
 test('HTTP 4b DTO：presence 不可用不报零，镜像按服务分段，queue 不用空集合补造结论', async () => {
+  const validHealthEntry = {
+    mirrorKey: 'content_schedule',
+    tier: 'gate' as const,
+    version: 2,
+    lastComparedAt: 1,
+    lastReloadedAt: 1,
+    reloadFailingSince: null,
+    state: 'fresh' as const,
+    staleMs: 1_000,
+    observeStaleMs: 1_000,
+    haltsOnStale: true,
+    staleForMs: 0,
+  };
+  let serviceHealth: unknown = {
+    services: [
+      {
+        sourceService: 'api',
+        asOf: 1_700_000_000_200,
+        deliveryState: 'fresh',
+        entries: [],
+      },
+      {
+        sourceService: 'automation',
+        asOf: 1_700_000_000_000,
+        deliveryState: 'stale',
+        entries: [validHealthEntry],
+      },
+    ],
+  };
   const pending = {
     ...(await mockPanelStore.publishedHistory(1))[0],
     id: 81,
@@ -424,34 +453,7 @@ test('HTTP 4b DTO：presence 不可用不报零，镜像按服务分段，queue 
       asOf: 1_700_000_000_100,
       recordIds: null,
     }),
-    configMirrorServicesHealth: () => ({
-      services: [
-        {
-          sourceService: 'api',
-          asOf: 1_700_000_000_200,
-          deliveryState: 'fresh' as const,
-          entries: [],
-        },
-        {
-          sourceService: 'automation',
-          asOf: 1_700_000_000_000,
-          deliveryState: 'stale' as const,
-          entries: [{
-            mirrorKey: 'content_schedule',
-            tier: 'gate' as const,
-            version: 2,
-            lastComparedAt: 1,
-            lastReloadedAt: 1,
-            reloadFailingSince: null,
-            state: 'fresh' as const,
-            staleMs: 1_000,
-            observeStaleMs: 1_000,
-            haltsOnStale: true,
-            staleForMs: 0,
-          }],
-        },
-      ],
-    }),
+    configMirrorServicesHealth: () => serviceHealth,
   } as unknown as PanelDeps;
   const h = await startPanelApi(dtoDeps, makeConfig());
   try {
@@ -478,6 +480,60 @@ test('HTTP 4b DTO：presence 不可用不报零，镜像按服务分段，queue 
       ['automation', 'stale', 0],
     ]);
 
+    serviceHealth = {
+      services: [
+        {
+          sourceService: 'api',
+          asOf: null,
+          deliveryState: 'fresh',
+          entries: [],
+        },
+        {
+          sourceService: 'automation',
+          asOf: 1_700_000_000_000,
+          deliveryState: 'fresh',
+          entries: [{ ...validHealthEntry, futureState: 'must_be_rejected' }],
+        },
+      ],
+    };
+    const invalidFresh = (await (await fetch(`${base}/api/config-mirrors`, { headers: auth })).json()) as {
+      services: Array<{ sourceService: string; deliveryState: string; entries: unknown[] }>;
+    };
+    assert.deepEqual(invalidFresh.services.map((service) => [
+      service.sourceService,
+      service.deliveryState,
+      service.entries,
+    ]), [
+      ['api', 'invalid', []],
+      ['automation', 'invalid', []],
+    ]);
+
+    serviceHealth = {
+      services: [
+        {
+          sourceService: 'api',
+          asOf: 1_700_000_000_200,
+          deliveryState: 'fresh',
+          entries: [],
+          unknownField: true,
+        },
+        {
+          sourceService: 'automation',
+          asOf: null,
+          deliveryState: 'unknown',
+          entries: [],
+        },
+      ],
+    };
+    const closedService = (await (await fetch(`${base}/api/config-mirrors`, { headers: auth })).json()) as {
+      services: Array<{ deliveryState: string; entries: unknown[] }>;
+    };
+    assert.deepEqual(
+      closedService.services.map((service) => [service.deliveryState, service.entries]),
+      [['invalid', []], ['unknown', []]],
+      'the malformed service is invalidated without fabricating or collapsing the other service state',
+    );
+
     const queue = (await (await fetch(`${base}/api/content/queue`, { headers: auth })).json()) as {
       inFlightEvidence: { state: string; asOf: number | null };
       lifecycle: { active: Array<{ statusSummary: string; stages: Array<{ key: string; state: string }> }> };
@@ -491,6 +547,32 @@ test('HTTP 4b DTO：presence 不可用不报零，镜像按服务分段，queue 
         ['dispatch', 'evidence_unavailable'],
       ],
     );
+  } finally {
+    await h.close();
+  }
+});
+
+test('HTTP 4b DTO：legacy config mirror 非法 fresh 数据 fail closed 为 invalid + []', async () => {
+  const legacyDeps = {
+    ...(deps as object),
+    configMirrorHealth: () => ({
+      asOf: null,
+      enabled: true,
+      pollMs: 1_000,
+      entries: null,
+    }),
+  } as unknown as PanelDeps;
+  const h = await startPanelApi(legacyDeps, makeConfig());
+  try {
+    const base = `http://127.0.0.1:${h.port}`;
+    const auth = { authorization: `Bearer ${await loginToken(base)}` };
+    const mirrors = (await (await fetch(`${base}/api/config-mirrors`, { headers: auth })).json()) as {
+      services: Array<{ sourceService: string; deliveryState: string; entries: unknown[] }>;
+    };
+    assert.deepEqual(mirrors.services, [
+      { sourceService: 'api', asOf: null, deliveryState: 'unknown', entries: [] },
+      { sourceService: 'automation', asOf: null, deliveryState: 'invalid', entries: [] },
+    ]);
   } finally {
     await h.close();
   }
