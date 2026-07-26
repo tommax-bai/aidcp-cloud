@@ -1,5 +1,6 @@
 /**
  * 编号治理的机械断言（change cloud-schema-migration-executor 任务 2.3）。零数据库依赖。
+ * aidcp:test-owner=cloud
  */
 
 import assert from 'node:assert/strict';

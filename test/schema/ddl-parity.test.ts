@@ -1,5 +1,6 @@
 /**
  * 补齐迁移与存储 DDL 的一致性（change cloud-schema-migration-executor 任务 3.3）。零数据库依赖。
+ * aidcp:test-owner=cloud
  *
  * 背景：24 张表今天只由存储在启动期自建，迁移目录从未创建过它们。第 3 节把这些 DDL 原样抽进
  * migrations/0065–0068。**抽漏一条自愈加列，新库建出的表就会缺列**，而缺列在旧库上完全看不出来

@@ -1,5 +1,6 @@
 /**
  * 迁移目录按执行器自己的复合序、从空库跑得完（change cloud-schema-migration-executor 任务 3.1）。
+ * aidcp:test-owner=cloud
  * 零数据库依赖。
  *
  * 为什么单独一条：`ddl-parity.test.ts` 比的是**对象集合**，对顺序完全无感，所以「补齐迁移的编号
