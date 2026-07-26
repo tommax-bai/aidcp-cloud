@@ -38,6 +38,7 @@
       "src/kernel/image-model-selection-port.ts",
       "src/kernel/role-model-selection-port.ts",
       "src/kernel/provider-secret-port.ts",
+      "src/kernel/model-config-defaults.ts",
       "src/kernel/facebook-group-types.ts",
       "src/kernel/schedule-policy.ts",
       "src/kernel/reference-image-guidance.ts",

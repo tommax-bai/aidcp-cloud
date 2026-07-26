@@ -1230,6 +1230,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/orchestrator/role-dispatcher.ts 析出 MandatoryCommentOutcome 结局 union + MandatoryCommentOutcomeNoticeInput 纯输入数据模型（全为原语与 union）。零 import、零 SQL、无进程内活状态。RoleDispatcher 实现留 role-dispatcher.ts（automation）并从 kernel 导入等值再导出（未触碰 RoleName / 角色注册）。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/model-config-defaults.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change cloud-batch2-content-main 从 src/config/model-config-store.ts（api 属主）析出**纯值**：ModelConfigValue 形状 + MODEL_CONFIG_DEFAULTS 缺省默认。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。析出理由是拆进程后出现了第二个读者——内容进程的图片模型选择镜像与角色模型解析镜像都要「从未取到过时的保守默认」，而它们在另一个仓、够不着那个存储；两边各写一份字面量会得到「各自编译通过、各自测试通过，只在属主侧改了默认模型名后才现形，且现形方式是配图悄悄用了另一个（可能已下架的）模型」的静默漂移。建表 SQL / 内存缓存 / 镜像版本推送仍留属主存储（残壳原位具名再导出，既有导入面逐字不变）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-batch2"
+  },
+  {
     "path": "src/kernel/note-detail.ts",
     "layer": "kernel",
     "note": "【待定稿裁决·扩员】P5-B 抬入 NoteDetailData + NoteDetailImage（原 src/event-bus/types.ts，automation）。抬入理由不是共导多，而是**拆仓后 content 仓的 src 里没有 event-bus/types.ts**：concept-extractor-role / curated-note-evaluator 两个 content 角色以 NoteDetailData 为事件载荷类型（后者还用 NonNullable<NoteDetailData['images']>），留 automation 会让 content 仓模块解析失败、直接编译不过——豁免管得住门禁，管不住模块解析。NoteDetailImage 与协议 NoteImagePayload 逐字同形但**刻意不 import 它**（协议归 automation，kernel MUST NOT 反向依赖业务层），漂移由 automation 侧的赋值点 typecheck 兜住。原 NoteData 段不变。零 import、四条准入正则实跑零命中。消除 import 豁免 2 条。请求回写 §4.7 见 docpatch RK-P5-B"

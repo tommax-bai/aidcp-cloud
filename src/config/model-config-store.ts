@@ -15,31 +15,16 @@ import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 const { Pool } = pg;
 
 /**
- * 缺行 / PG 不可用时的回退默认。
- * textModel 必须指向现役在售模型：qwen-turbo 百炼 2026-07-13 下架，兜底指向已下架模型 = 兜底即坏
- * （change llm-role-review-remediation）。qwen.ts 构造默认仍为 qwen-turbo，仅存于无解析器注入的单测路径。
- * imageModel 与 wanxiang-client.ts 构造默认一致。
+ * 值形状与缺省默认已析出到 kernel（change cloud-batch2-content-main）：拆进程后内容进程的两个本地镜像
+ * 也要用同一份默认，而它们够不着本存储。这里**具名再导出**，本文件既有的导入面逐字不变。
+ * 建表 SQL / 缓存 / 镜像版本推送仍留在本文件 —— 析出的只有纯值。
  */
-export const MODEL_CONFIG_DEFAULTS: ModelConfigValue = {
-  textModel: 'qwen3.7-plus',
-  // 全局文本厂商默认 dashscope（零回归基准）。change model-config-volcengine-provider。
-  textProvider: 'dashscope',
-  imageModel: 'wan2.7-image-pro',
-  // 全局图片厂商默认 dashscope（万相；零回归基准）。change image-provider-volcengine-seedream。
-  imageProvider: 'dashscope',
-};
-
-export interface ModelConfigValue {
-  textModel: string;
-  /** 全局文本厂商（change model-config-volcengine-provider）；缺/空回落 dashscope。 */
-  textProvider: string;
-  imageModel: string;
-  /**
-   * 全局图片厂商（change image-provider-volcengine-seedream）；缺/空回落 dashscope（万相）。
-   * dashscope→通义万相（异步）、volcengine→即梦 Seedream（火山方舟 Ark 同步）。独立于 textProvider。
-   */
-  imageProvider: string;
-}
+import {
+  MODEL_CONFIG_DEFAULTS,
+  type ModelConfigValue,
+} from '../kernel/model-config-defaults.js';
+export { MODEL_CONFIG_DEFAULTS };
+export type { ModelConfigValue };
 
 export const MODEL_CONFIG_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS model_config (
