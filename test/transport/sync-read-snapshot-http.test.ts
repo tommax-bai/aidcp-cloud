@@ -223,6 +223,51 @@ test('server rejects provider target/scope drift before writing a success respon
   }
 });
 
+test('owner route rejects a typed-looking payload with unknown or malformed fields', async () => {
+  for (const value of [
+    { weekActiveMask: '1111100', secret: 'must-not-cross-owner-boundary' },
+    { weekActiveMask: 123 },
+  ]) {
+    await withServer(
+      (server) =>
+        registerSyncReadSnapshotRoute(
+          server,
+          {
+            snapshotFor: async () => ({
+              contractVersion: 1,
+              executionTarget: 'dev',
+              factScope: 'shared',
+              stream: 'session_config_global',
+              cursor: '1',
+              asOf: 1_000,
+              freshUntil: 2_000,
+              complete: true,
+              value,
+            }),
+          },
+          {
+            owner: 'automation',
+            executionTarget: 'dev',
+            bearerToken: 'snapshot-token',
+            streams: ['session_config_global'],
+          },
+        ),
+      async (port) => {
+        const client = new SyncReadSnapshotHttpClient(
+          new InternalHttpClient(`http://127.0.0.1:${port}`),
+          { executionTarget: 'dev', bearerToken: 'snapshot-token' },
+        );
+        await assert.rejects(
+          () => client.fetch('session_config_global'),
+          (error: unknown) =>
+            error instanceof InternalHttpError &&
+            error.code === 'sync_read_snapshot_invalid',
+        );
+      },
+    );
+  }
+});
+
 test('client independently rejects a response targeted at another process instance', async () => {
   await withServer(
     (server) =>

@@ -460,6 +460,21 @@ export function parseSyncReadSnapshotEnvelope<T extends SyncReadJson>(
   expectation: SyncReadEnvelopeExpectation<T>,
 ): SyncReadSnapshotEnvelope<T> {
   if (!isRecord(input)) invalid('envelope_type', 'snapshot envelope must be an object');
+  if (
+    !hasExactKeys(input, [
+      'contractVersion',
+      'executionTarget',
+      'factScope',
+      'stream',
+      'cursor',
+      'asOf',
+      'freshUntil',
+      'complete',
+      'value',
+    ])
+  ) {
+    invalid('envelope_keys', 'snapshot envelope contains missing or unknown keys');
+  }
   if (input.contractVersion !== SYNC_READ_CONTRACT_VERSION) {
     invalid('contract_version', 'snapshot contractVersion is unsupported');
   }
@@ -1103,6 +1118,18 @@ function invalid(reason: string, message: string): never {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  );
 }
 
 function isSyncReadJson(value: unknown): value is SyncReadJson {

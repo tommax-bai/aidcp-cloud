@@ -118,6 +118,19 @@ function parseSignal(
     throw new Error('sync_read_changed_payload_invalid');
   }
   const signal = event.payload as Partial<SyncReadChangedSignal>;
+  const keys = Object.keys(signal).sort();
+  if (
+    keys.length !== 4 ||
+    keys[0] !== 'contractVersion' ||
+    keys[1] !== 'executionTarget' ||
+    keys[2] !== 'generation' ||
+    keys[3] !== 'stream' ||
+    signal.contractVersion !== 1 ||
+    typeof signal.generation !== 'string' ||
+    !/^(?:0|[1-9][0-9]*)$/.test(signal.generation)
+  ) {
+    throw new Error('sync_read_changed_payload_invalid');
+  }
   if (signal.executionTarget !== executionTarget) {
     throw new Error('sync_read_changed_target_mismatch');
   }
@@ -127,7 +140,7 @@ function parseSignal(
   return syncReadChangedSignal({
     executionTarget,
     stream: signal.stream,
-    generation: String(signal.generation),
+    generation: signal.generation,
   }) as SyncReadChangedSignal & { stream: RuntimeStream };
 }
 

@@ -106,11 +106,13 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
             ORDER BY account_id`,
         );
         const value: AccountPersonaSnapshot = {
-          accounts: rows.map((row) => ({
-            accountId: row.account_id,
-            personaText: row.persona,
-            soul: this.parseSoul(row.persona),
-          })),
+          accounts: rows
+            .filter((row) => row.persona.trim().length > 0)
+            .map((row) => ({
+              accountId: row.account_id,
+              personaText: row.persona,
+              soul: this.parseSoul(row.persona),
+            })),
         };
         return { cursor, value } as {
           cursor: string;

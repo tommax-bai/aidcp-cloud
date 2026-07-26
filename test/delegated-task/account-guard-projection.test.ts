@@ -31,9 +31,10 @@ test('claimNext 的账号守卫读本域投影，且陈旧即选不出候选', a
   );
   assert.match(
     sql,
-    /SELECT 1 FROM automation_account_projection_state apj_state\s*\n\s*WHERE apj_state\.fresh_until > now\(\)/,
-    '投影陈旧时 MUST 选不出候选（fail-closed）',
+    /FROM automation_sync_read_consumer_checkpoint apj_checkpoint[\s\S]*apj_checkpoint\.execution_target = \$4[\s\S]*apj_checkpoint\.state = 'ready'[\s\S]*apj_checkpoint\.fresh_until_ms >/,
+    '当前 target 的 B4 delivery 陈旧时 MUST 选不出候选（fail-closed）',
   );
+  assert.equal(calls[0].args[3], 'dev');
   // 行锁仍只锁 automation 自己的表——去规范化之后更不可能出现跨属主行锁。
   assert.match(sql, /FOR UPDATE SKIP LOCKED/);
   assert.doesNotMatch(sql, /FOR SHARE/);

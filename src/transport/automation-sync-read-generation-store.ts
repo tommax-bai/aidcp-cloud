@@ -61,4 +61,31 @@ export class PgAutomationSyncReadGenerationStore
     }
     return generation;
   }
+
+  async current(
+    stream: AutomationRuntimeSyncReadStream,
+  ): Promise<{ generation: string; payloadDigest: string } | null> {
+    const { rows } = await this.pool.query<{
+      generation: string | number;
+      payload_digest: string;
+    }>(
+      `SELECT generation, payload_digest
+         FROM automation_sync_read_owner_generation
+        WHERE execution_target = $1
+          AND stream = $2`,
+      [this.executionTarget, stream],
+    );
+    const row = rows[0];
+    if (!row) return null;
+    const generation = String(row.generation);
+    if (
+      !/^(?:0|[1-9][0-9]*)$/.test(generation) ||
+      !/^sha256:[0-9a-f]{64}$/.test(row.payload_digest)
+    ) {
+      throw new Error(
+        `automation_sync_read_generation_invalid stream=${stream} generation=${generation}`,
+      );
+    }
+    return { generation, payloadDigest: row.payload_digest };
+  }
 }

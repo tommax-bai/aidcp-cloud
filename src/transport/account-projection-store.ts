@@ -48,10 +48,21 @@
  */
 
 import type pg from 'pg';
+import type { DeploymentTarget } from '../deployment-target.js';
 import type {
   AccountIdentityProjectionRow,
   AccountRosterSourcePort,
 } from '../kernel/account-projection-types.js';
+import {
+  isSyncReadFactPayload,
+  type AutomationAccountProjectionSnapshot,
+} from '../kernel/sync-read-facts.js';
+import {
+  compareUnsignedSyncReadCursor,
+  parseSyncReadSnapshotEnvelope,
+  syncReadPayloadDigest,
+  type SyncReadApplyResult,
+} from '../kernel/sync-read-snapshot.js';
 import {
   SchemaCapabilityError,
   classifySchemaCapability,
@@ -65,6 +76,8 @@ export const ACCOUNT_PROJECTION_STATE_TABLE = 'automation_account_projection_sta
 
 /** 提供这两张表的迁移版本 id（探不到时要能回答「补跑哪一条」）。 */
 export const ACCOUNT_PROJECTION_SINCE_VERSION = '0084_automation_account_projection_sync_read';
+export const ACCOUNT_PROJECTION_SYNC_READ_SINCE_VERSION =
+  '0087_automation_account_projection_shared_cursor';
 
 /** 默认刷新周期：正常态的实际陈旧度。 */
 export const DEFAULT_ACCOUNT_PROJECTION_REFRESH_MS = 30_000;
@@ -79,6 +92,8 @@ export interface AccountProjectionStoreOptions {
   pool: pg.Pool;
   /** 账号花名册来源（api 属主域实现）。MUST NOT 换成把 api 的连接池递进来。 */
   source: AccountRosterSourcePort;
+  /** 独立 automation 进程应用 B4 snapshot 时必填；monolith legacy refresh 不读取它。 */
+  executionTarget?: DeploymentTarget;
   refreshIntervalMs?: number;
   maxStalenessMs?: number;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -94,9 +109,27 @@ export interface AccountProjectionStoreOptions {
 export const ACCOUNT_PROJECTION_FRESH_SQL =
   `EXISTS (SELECT 1 FROM automation_account_projection_state apj_state WHERE apj_state.fresh_until > now())`;
 
+export function accountProjectionTargetFreshSql(
+  executionTargetParameter: string,
+): string {
+  if (!/^\$[1-9][0-9]*$/.test(executionTargetParameter)) {
+    throw new Error('account_projection_target_parameter_invalid');
+  }
+  return `EXISTS (
+    SELECT 1
+      FROM automation_sync_read_consumer_checkpoint apj_checkpoint
+     WHERE apj_checkpoint.execution_target = ${executionTargetParameter}
+       AND apj_checkpoint.consumer = 'automation'
+       AND apj_checkpoint.stream = 'automation_account_projection'
+       AND apj_checkpoint.state = 'ready'
+       AND apj_checkpoint.fresh_until_ms > floor(extract(epoch FROM now()) * 1000)
+  )`;
+}
+
 export class PgAccountProjectionStore {
   private readonly pool: pg.Pool;
   private readonly source: AccountRosterSourcePort;
+  private readonly executionTarget: DeploymentTarget | null;
   private readonly refreshIntervalMs: number;
   private readonly maxStalenessMs: number;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
@@ -110,6 +143,7 @@ export class PgAccountProjectionStore {
   constructor(options: AccountProjectionStoreOptions) {
     this.pool = options.pool;
     this.source = options.source;
+    this.executionTarget = options.executionTarget ?? null;
     this.refreshIntervalMs = Math.max(1_000, Math.trunc(options.refreshIntervalMs ?? DEFAULT_ACCOUNT_PROJECTION_REFRESH_MS));
     this.maxStalenessMs = Math.max(
       this.refreshIntervalMs,
@@ -126,10 +160,27 @@ export class PgAccountProjectionStore {
    * 这正是我们要的方向。
    */
   async init(): Promise<void> {
-    const shape = await probeSchemaShape(this.pool, [
+    const tables = [
       ACCOUNT_PROJECTION_TABLE,
       ACCOUNT_PROJECTION_STATE_TABLE,
-    ]);
+      ...(this.executionTarget
+        ? ['automation_sync_read_consumer_checkpoint']
+        : []),
+    ];
+    const shape = await probeSchemaShape(this.pool, tables);
+    const stateColumns = [
+      'singleton',
+      'refreshed_at',
+      'fresh_until',
+      'source_rows',
+      ...(this.executionTarget
+        ? [
+            'sync_read_cursor',
+            'sync_read_payload_digest',
+            'sync_read_source_as_of_ms',
+          ]
+        : []),
+    ];
     const verdict = classifySchemaCapability(
       {
         tables: new Map([
@@ -141,7 +192,26 @@ export class PgAccountProjectionStore {
             'status',
             'projected_at',
           ])],
-          [ACCOUNT_PROJECTION_STATE_TABLE, new Set(['singleton', 'refreshed_at', 'fresh_until', 'source_rows'])],
+          [ACCOUNT_PROJECTION_STATE_TABLE, new Set(stateColumns)],
+          ...(this.executionTarget
+            ? [[
+                'automation_sync_read_consumer_checkpoint',
+                new Set([
+                  'execution_target',
+                  'consumer',
+                  'stream',
+                  'applied_cursor',
+                  'payload_digest',
+                  'source_as_of_ms',
+                  'last_observed_at_ms',
+                  'fresh_until_ms',
+                  'last_applied_at_ms',
+                  'state',
+                  'last_error',
+                  'updated_at',
+                ]),
+              ] as const]
+            : []),
         ]),
         indexes: new Map([
           ['idx_automation_account_projection_platform_label', ACCOUNT_PROJECTION_TABLE],
@@ -153,7 +223,9 @@ export class PgAccountProjectionStore {
       throw new SchemaCapabilityError(
         {
           capability: 'automation_account_projection',
-          sinceVersion: ACCOUNT_PROJECTION_SINCE_VERSION,
+          sinceVersion: this.executionTarget
+            ? ACCOUNT_PROJECTION_SYNC_READ_SINCE_VERSION
+            : ACCOUNT_PROJECTION_SINCE_VERSION,
           // 建表语句的唯一所有者是 migrations/；本存储只探测，故这里刻意为空。
           ddl: [],
         },
@@ -165,6 +237,13 @@ export class PgAccountProjectionStore {
   /** 当前投影是否仍在新鲜期内。任何读失败一律按「不新鲜」处理（fail-closed）。 */
   async isFresh(): Promise<boolean> {
     try {
+      if (this.executionTarget) {
+        const { rows } = await this.pool.query<{ fresh: boolean }>(
+          `SELECT ${accountProjectionTargetFreshSql('$1')} AS fresh`,
+          [this.executionTarget],
+        );
+        return rows[0]?.fresh === true;
+      }
       const { rows } = await this.pool.query<{ fresh: boolean }>(
         `SELECT (fresh_until > now()) AS fresh FROM automation_account_projection_state`,
       );
@@ -250,6 +329,221 @@ export class PgAccountProjectionStore {
     }
   }
 
+  /**
+   * Apply the B4 owner snapshot and its automation consumer checkpoint in one
+   * automation-DB transaction. Independent mode uses this path exclusively;
+   * it MUST NOT also start the legacy AccountRosterSourcePort refresher.
+   */
+  async applyOwnerSnapshot(
+    input: unknown,
+    observedAt = Date.now(),
+  ): Promise<SyncReadApplyResult> {
+    if (!this.executionTarget) {
+      return {
+        outcome: 'rejected',
+        reason: 'invalid_envelope',
+        currentCursor: null,
+        message: 'account_projection_execution_target_not_configured',
+      };
+    }
+    let envelope;
+    try {
+      envelope = parseSyncReadSnapshotEnvelope<AutomationAccountProjectionSnapshot>(
+        input,
+        {
+          executionTarget: this.executionTarget,
+          stream: 'automation_account_projection',
+          factScope: 'shared',
+          validateValue: (value): value is AutomationAccountProjectionSnapshot =>
+            isSyncReadFactPayload('automation_account_projection', value),
+        },
+      );
+    } catch (error) {
+      return {
+        outcome: 'rejected',
+        reason: 'invalid_envelope',
+        currentCursor: null,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const digest = syncReadPayloadDigest(envelope.value);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // The projection payload is shared by dev/ol even though delivery
+      // checkpoints are target-scoped. Materialize and row-lock the existing
+      // shared projection-state singleton before consulting the global maximum
+      // cursor; otherwise ol cursor 4 could overwrite dev cursor 5.
+      await client.query(
+        `INSERT INTO automation_account_projection_state (
+           singleton, refreshed_at, fresh_until, source_rows
+         )
+         VALUES (true, to_timestamp(0), to_timestamp(0), 0)
+         ON CONFLICT (singleton) DO NOTHING`,
+      );
+      const shared = await client.query<{
+        sync_read_cursor: string | number | null;
+        sync_read_payload_digest: string | null;
+        sync_read_source_as_of_ms: string | number | null;
+      }>(
+        `SELECT singleton
+                , sync_read_cursor
+                , sync_read_payload_digest
+                , sync_read_source_as_of_ms
+           FROM automation_account_projection_state
+          WHERE singleton = true
+          FOR UPDATE`,
+      );
+      // Locking a missing checkpoint row locks nothing. Materialize this
+      // target's delivery row before locking all B4 checkpoints.
+      await client.query(
+        `INSERT INTO automation_sync_read_consumer_checkpoint (
+           execution_target, consumer, stream, state
+         )
+         VALUES (
+           $1, 'automation', 'automation_account_projection', 'uninitialized'
+         )
+         ON CONFLICT (execution_target, consumer, stream) DO NOTHING`,
+        [this.executionTarget],
+      );
+      const { rows } = await client.query<{
+        applied_cursor: string | number | null;
+        payload_digest: string | null;
+        source_as_of_ms: string | number | null;
+        last_applied_at_ms: string | number | null;
+      }>(
+        `SELECT applied_cursor, payload_digest, source_as_of_ms,
+                last_applied_at_ms
+           FROM automation_sync_read_consumer_checkpoint
+          WHERE execution_target = $1
+            AND consumer = 'automation'
+            AND stream = 'automation_account_projection'
+          FOR UPDATE`,
+        [this.executionTarget],
+      );
+      const globalCurrent = shared.rows[0];
+      const targetCurrent = rows[0];
+      const globalCursor =
+        globalCurrent?.sync_read_cursor === null ||
+        globalCurrent?.sync_read_cursor === undefined
+          ? null
+          : String(globalCurrent.sync_read_cursor);
+      const targetCursor =
+        targetCurrent?.applied_cursor === null ||
+        targetCurrent?.applied_cursor === undefined
+          ? null
+          : String(targetCurrent.applied_cursor);
+      let outcome: 'applied' | 'freshness_renewed' = 'applied';
+      if (globalCursor !== null) {
+        const comparison = compareUnsignedSyncReadCursor(
+          envelope.cursor,
+          globalCursor,
+        );
+        if (comparison < 0) {
+          await client.query('ROLLBACK');
+          return {
+            outcome: 'rejected',
+            reason: 'old_cursor',
+            currentCursor: globalCursor,
+            message: `out_of_order cursor=${envelope.cursor} current=${globalCursor}`,
+          };
+        }
+        if (
+          comparison === 0 &&
+          globalCurrent?.sync_read_payload_digest !== digest
+        ) {
+          await client.query('ROLLBACK');
+          return {
+            outcome: 'rejected',
+            reason: 'same_cursor_payload_drift',
+            currentCursor: globalCursor,
+            message: `same cursor ${envelope.cursor} carried a different payload digest`,
+          };
+        }
+      }
+      if (targetCursor !== null) {
+        const targetComparison = compareUnsignedSyncReadCursor(
+          envelope.cursor,
+          targetCursor,
+        );
+        if (
+          targetComparison === 0 &&
+          envelope.asOf <= Number(targetCurrent?.source_as_of_ms)
+        ) {
+          await client.query('ROLLBACK');
+          return {
+            outcome: 'already_applied',
+            cursor: envelope.cursor,
+            payloadDigest: digest,
+          };
+        }
+        if (targetComparison === 0) outcome = 'freshness_renewed';
+      }
+
+      await replaceProjectionRows(
+        client,
+        envelope.value.accounts,
+      );
+      await client.query(
+        `UPDATE automation_account_projection_state
+            SET sync_read_cursor = $1::numeric,
+                sync_read_payload_digest = $2,
+                sync_read_source_as_of_ms = GREATEST(
+                  COALESCE(sync_read_source_as_of_ms, 0),
+                  $3::bigint
+                )
+          WHERE singleton = true`,
+        [envelope.cursor, digest, envelope.asOf],
+      );
+      const priorAppliedAt = Number(targetCurrent?.last_applied_at_ms);
+      const lastAppliedAt =
+        outcome === 'freshness_renewed' &&
+        Number.isSafeInteger(priorAppliedAt) &&
+        priorAppliedAt >= 0
+          ? priorAppliedAt
+          : observedAt;
+      const checkpointWrite = await client.query(
+        `UPDATE automation_sync_read_consumer_checkpoint
+            SET applied_cursor = $2::numeric,
+                payload_digest = $3,
+                source_as_of_ms = $4,
+                last_observed_at_ms = $5,
+                fresh_until_ms = $6,
+                last_applied_at_ms = $7,
+                state = $8,
+                last_error = NULL,
+                updated_at = now()
+          WHERE execution_target = $1
+            AND consumer = 'automation'
+            AND stream = 'automation_account_projection'`,
+        [
+          this.executionTarget,
+          envelope.cursor,
+          digest,
+          envelope.asOf,
+          observedAt,
+          envelope.freshUntil,
+          lastAppliedAt,
+          envelope.freshUntil > observedAt ? 'ready' : 'stale',
+        ],
+      );
+      if (
+        checkpointWrite.rowCount !== undefined &&
+        checkpointWrite.rowCount !== null &&
+        checkpointWrite.rowCount !== 1
+      ) {
+        throw new Error('automation_account_projection_checkpoint_update_failed');
+      }
+      await client.query('COMMIT');
+      return { outcome, cursor: envelope.cursor, payloadDigest: digest };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   /** 启动周期刷新。幂等；`start()` 自身不 await 首刷，首刷由调用方在 init 之后显式 await。 */
   start(): void {
     if (this.running) return;
@@ -286,4 +580,40 @@ export class PgAccountProjectionStore {
     }
     this.scheduleNext();
   }
+}
+
+async function replaceProjectionRows(
+  client: pg.PoolClient,
+  roster: readonly AccountIdentityProjectionRow[],
+): Promise<void> {
+  await client.query(
+    `INSERT INTO automation_account_projection
+       (account_id, platform, group_label, created_at, status, projected_at)
+     SELECT t.account_id, t.platform, t.group_label, t.created_at, t.status, now()
+       FROM unnest(
+         $1::text[], $2::text[], $3::text[], $4::timestamptz[], $5::text[]
+       ) AS t(account_id, platform, group_label, created_at, status)
+     ON CONFLICT (account_id) DO UPDATE
+       SET platform = EXCLUDED.platform,
+           group_label = EXCLUDED.group_label,
+           created_at = EXCLUDED.created_at,
+           status = EXCLUDED.status,
+           projected_at = EXCLUDED.projected_at`,
+    [
+      roster.map((row) => row.accountId),
+      roster.map((row) => row.platform),
+      roster.map((row) => row.groupLabel),
+      roster.map((row) =>
+        row.createdAt === null ? null : new Date(row.createdAt)),
+      roster.map((row) => row.status),
+    ],
+  );
+  // B4 is a validated complete snapshot. Unlike the legacy defensive poller,
+  // absence is authoritative here: remove projection rows that no longer
+  // exist at the API owner. Empty is valid and clears the projection.
+  await client.query(
+    `DELETE FROM automation_account_projection
+      WHERE NOT (account_id = ANY($1::text[]))`,
+    [roster.map((row) => row.accountId)],
+  );
 }

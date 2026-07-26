@@ -1,4 +1,5 @@
 import pg from 'pg';
+import type { DeploymentTarget } from '../deployment-target.js';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { ensureCapabilitySchema } from '../schema/schema-capability.js';
 
@@ -57,6 +58,7 @@ export interface FacebookGroupStoreOptions {
   user?: string;
   password?: string;
   pool?: pg.Pool;
+  executionTarget?: DeploymentTarget;
   /**
    * 强制刷一次账号守卫投影（change automation-accounts-projection）。只在 `assertFacebookAccountGroupLabels`
    * 这一处「运营会被当场挡住」的写路径上用，用来把投影的常规滞后压到 0。
@@ -150,6 +152,14 @@ function poolFrom(options: FacebookGroupStoreOptions): pg.Pool {
       password: options.password ?? DEFAULT_PG_CONFIG.password,
     })
   );
+}
+
+function projectionExecutionTarget(
+  configured: DeploymentTarget | undefined,
+): DeploymentTarget | '__invalid__' {
+  if (configured) return configured;
+  const value = process.env.AIDCP_DEPLOY_ENV;
+  return value === 'dev' || value === 'ol' ? value : '__invalid__';
 }
 
 export function canonicalFacebookGroupUrl(input: string): string | null {
@@ -360,10 +370,12 @@ CREATE INDEX IF NOT EXISTS idx_fb_group_join_audit_group
 export class FacebookGroupTargetStore {
   private readonly pool: pg.Pool;
   private readonly refreshAccountProjection?: () => Promise<unknown>;
+  private readonly executionTarget: DeploymentTarget | '__invalid__';
 
   constructor(options: FacebookGroupStoreOptions = {}) {
     this.pool = poolFrom(options);
     this.refreshAccountProjection = options.refreshAccountProjection;
+    this.executionTarget = projectionExecutionTarget(options.executionTarget);
   }
 
   async init(): Promise<void> {
@@ -483,10 +495,15 @@ export class FacebookGroupTargetStore {
        WHERE lower(btrim(p.platform)) IN ('facebook','fb')
          AND p.group_label = ANY($1::text[])
          AND EXISTS (
-           SELECT 1 FROM automation_account_projection_state apj_state
-           WHERE apj_state.fresh_until > now()
+           SELECT 1 FROM automation_sync_read_consumer_checkpoint apj_checkpoint
+           WHERE apj_checkpoint.execution_target = $2
+             AND apj_checkpoint.consumer = 'automation'
+             AND apj_checkpoint.stream = 'automation_account_projection'
+             AND apj_checkpoint.state = 'ready'
+             AND apj_checkpoint.fresh_until_ms >
+                 floor(extract(epoch FROM now()) * 1000)
          )`,
-      [labels],
+      [labels, this.executionTarget],
     );
     return new Set(rows.map((row) => row.group_label));
   }
@@ -826,8 +843,13 @@ export class FacebookGroupTargetStore {
        JOIN facebook_group_target t ON t.group_url = s.group_url
        WHERE a.account_id = $1
          AND EXISTS (
-           SELECT 1 FROM automation_account_projection_state apj_state
-           WHERE apj_state.fresh_until > now()
+           SELECT 1 FROM automation_sync_read_consumer_checkpoint apj_checkpoint
+           WHERE apj_checkpoint.execution_target = $2
+             AND apj_checkpoint.consumer = 'automation'
+             AND apj_checkpoint.stream = 'automation_account_projection'
+             AND apj_checkpoint.state = 'ready'
+             AND apj_checkpoint.fresh_until_ms >
+                 floor(extract(epoch FROM now()) * 1000)
          )
          AND lower(btrim(a.platform)) IN ('facebook','fb')
          AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
@@ -838,7 +860,7 @@ export class FacebookGroupTargetStore {
          )
        ORDER BY t.priority DESC, t.created_at ASC, t.group_url ASC
        LIMIT 1`,
-      [accountId],
+      [accountId, this.executionTarget],
     );
     return rows[0] ? toTargetRow(rows[0]) : null;
   }
@@ -895,9 +917,11 @@ export class FacebookGroupTargetStore {
 
 export class FacebookGroupMembershipStore {
   private readonly pool: pg.Pool;
+  private readonly executionTarget: DeploymentTarget | '__invalid__';
 
   constructor(options: FacebookGroupStoreOptions = {}) {
     this.pool = poolFrom(options);
+    this.executionTarget = projectionExecutionTarget(options.executionTarget);
   }
 
   async init(): Promise<void> {
@@ -922,8 +946,13 @@ export class FacebookGroupMembershipStore {
          JOIN facebook_group_target t ON t.group_url = s.group_url
          WHERE a.account_id = $1
            AND EXISTS (
-             SELECT 1 FROM automation_account_projection_state apj_state
-             WHERE apj_state.fresh_until > now()
+             SELECT 1 FROM automation_sync_read_consumer_checkpoint apj_checkpoint
+             WHERE apj_checkpoint.execution_target = $2
+               AND apj_checkpoint.consumer = 'automation'
+               AND apj_checkpoint.stream = 'automation_account_projection'
+               AND apj_checkpoint.state = 'ready'
+               AND apj_checkpoint.fresh_until_ms >
+                   floor(extract(epoch FROM now()) * 1000)
            )
            AND lower(btrim(a.platform)) IN ('facebook','fb')
            AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
@@ -946,7 +975,7 @@ export class FacebookGroupMembershipStore {
        ON CONFLICT (group_url) DO NOTHING
        RETURNING account_id, group_url, status, assigned_at, joined_at, last_attempt_at, attempts,
                  last_reason, last_commented_at, cooldown_until, comments_total, left_confirmations, updated_at`,
-      [accountId],
+      [accountId, this.executionTarget],
     );
     return rows[0] ? toMembershipRow(rows[0]) : null;
   }
@@ -958,7 +987,17 @@ export class FacebookGroupMembershipStore {
   private async accountProjectionFresh(): Promise<boolean> {
     try {
       const { rows } = await this.pool.query<{ fresh: boolean }>(
-        `SELECT (fresh_until > now()) AS fresh FROM automation_account_projection_state`,
+        `SELECT EXISTS (
+           SELECT 1
+             FROM automation_sync_read_consumer_checkpoint apj_checkpoint
+            WHERE apj_checkpoint.execution_target = $1
+              AND apj_checkpoint.consumer = 'automation'
+              AND apj_checkpoint.stream = 'automation_account_projection'
+              AND apj_checkpoint.state = 'ready'
+              AND apj_checkpoint.fresh_until_ms >
+                  floor(extract(epoch FROM now()) * 1000)
+         ) AS fresh`,
+        [this.executionTarget],
       );
       return rows[0]?.fresh === true;
     } catch {
@@ -1148,14 +1187,19 @@ export class FacebookGroupMembershipStore {
            -- （不作为覆盖候选、不替一个我们已经说不准还在不在的账号去评论）。
            AND EXISTS (SELECT 1 FROM automation_account_projection a WHERE a.account_id = $1)
            AND EXISTS (
-             SELECT 1 FROM automation_account_projection_state apj_state
-             WHERE apj_state.fresh_until > now()
+             SELECT 1 FROM automation_sync_read_consumer_checkpoint apj_checkpoint
+             WHERE apj_checkpoint.execution_target = $3
+               AND apj_checkpoint.consumer = 'automation'
+               AND apj_checkpoint.stream = 'automation_account_projection'
+               AND apj_checkpoint.state = 'ready'
+               AND apj_checkpoint.fresh_until_ms >
+                   floor(extract(epoch FROM now()) * 1000)
            )
            AND status = 'joined'
            AND joined_at IS NOT NULL
          ORDER BY last_commented_at ASC NULLS FIRST, joined_at ASC, group_url ASC
          LIMIT $2`,
-        [accountId, limit],
+        [accountId, limit, this.executionTarget],
       );
       return rows.map(toMembershipRow);
     }
@@ -1168,8 +1212,13 @@ export class FacebookGroupMembershipStore {
          -- 见 relaxed 分支同一说明：守卫读改读本域投影，缺行 / 陈旧一律判否。
          AND EXISTS (SELECT 1 FROM automation_account_projection a WHERE a.account_id = $1)
          AND EXISTS (
-           SELECT 1 FROM automation_account_projection_state apj_state
-           WHERE apj_state.fresh_until > now()
+           SELECT 1 FROM automation_sync_read_consumer_checkpoint apj_checkpoint
+           WHERE apj_checkpoint.execution_target = $5
+             AND apj_checkpoint.consumer = 'automation'
+             AND apj_checkpoint.stream = 'automation_account_projection'
+             AND apj_checkpoint.state = 'ready'
+             AND apj_checkpoint.fresh_until_ms >
+                 floor(extract(epoch FROM now()) * 1000)
          )
          AND status = 'joined'
          AND joined_at IS NOT NULL
@@ -1178,7 +1227,7 @@ export class FacebookGroupMembershipStore {
          AND (last_commented_at IS NULL OR last_commented_at <= now() - ($2::double precision * interval '1 second'))
        ORDER BY last_commented_at ASC NULLS FIRST, joined_at ASC, group_url ASC
        LIMIT $4`,
-      [accountId, cooldownSeconds, warmupSeconds, limit],
+      [accountId, cooldownSeconds, warmupSeconds, limit, this.executionTarget],
     );
     return rows.map(toMembershipRow);
   }

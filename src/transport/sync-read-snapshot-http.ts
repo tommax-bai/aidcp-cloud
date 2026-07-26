@@ -1,5 +1,8 @@
 import type { DeploymentTarget } from '../deployment-target.js';
 import {
+  isSyncReadFactPayload,
+} from '../kernel/sync-read-facts.js';
+import {
   isSyncReadStream,
   parseSyncReadSnapshotEnvelope,
   SYNC_READ_STREAM_DEFINITIONS,
@@ -67,6 +70,8 @@ export function registerSyncReadSnapshotRoute(
         executionTarget: options.executionTarget,
         stream,
         factScope: SYNC_READ_STREAM_DEFINITIONS[stream].factScope,
+        validateValue: (value): value is SyncReadJson =>
+          isSyncReadFactPayload(stream, value),
       });
     },
   );

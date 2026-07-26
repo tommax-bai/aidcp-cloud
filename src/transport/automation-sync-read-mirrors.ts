@@ -32,6 +32,26 @@ export type AutomationMirrorLookup<T> =
       asOf: number | null;
     };
 
+export type AutomationSlowStartLookup =
+  | {
+      state: 'fresh';
+      resolution: 'known';
+      slowStartSince: number | null;
+      asOf: number;
+    }
+  | {
+      state: 'fresh';
+      resolution: 'missing' | 'ambiguous';
+      slowStartSince: null;
+      asOf: number;
+    }
+  | {
+      state: Exclude<SyncReadDeliveryState, 'fresh'>;
+      resolution: 'unknown';
+      slowStartSince: null;
+      asOf: number | null;
+    };
+
 export class AutomationSyncReadMirrors {
   readonly persona: AtomicSyncReadMirror<AccountPersonaSnapshot>;
   readonly environment: AtomicSyncReadMirror<ClientEnvironmentAutomationSnapshot>;
@@ -149,22 +169,40 @@ export class AutomationSyncReadMirrors {
   slowStartForAccount(
     accountId: string,
     now = this.clock(),
-  ): AutomationMirrorLookup<number | null> {
+  ): AutomationSlowStartLookup {
     const view = this.environment.view(now);
     const state = deliveryState(view.state);
     if (state !== 'fresh' || !view.value) {
       return {
         state: state as Exclude<SyncReadDeliveryState, 'fresh'>,
-        value: null,
+        resolution: 'unknown',
+        slowStartSince: null,
         asOf: view.metadata?.sourceAsOf ?? null,
       };
     }
     const row = view.value.slowStartAnchors.find(
       (candidate) => candidate.accountId === accountId,
     );
+    if (!row) {
+      return {
+        state: 'fresh',
+        resolution: 'missing',
+        slowStartSince: null,
+        asOf: view.metadata!.sourceAsOf,
+      };
+    }
+    if (row.ambiguous) {
+      return {
+        state: 'fresh',
+        resolution: 'ambiguous',
+        slowStartSince: null,
+        asOf: view.metadata!.sourceAsOf,
+      };
+    }
     return {
       state: 'fresh',
-      value: !row || row.ambiguous ? null : row.slowStartSince,
+      resolution: 'known',
+      slowStartSince: row.slowStartSince,
       asOf: view.metadata!.sourceAsOf,
     };
   }

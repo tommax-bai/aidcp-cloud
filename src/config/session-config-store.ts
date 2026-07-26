@@ -36,7 +36,10 @@
 
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
-import { writeWithMirrorBump, type MirrorVersionBumper } from '../kernel/config-mirror-bump-types.js';
+import {
+  writeWithMirrorBump,
+  type MirrorVersionBumper,
+} from '../kernel/config-mirror-bump-types.js';
 import {
   DEFAULT_COLLECT_SAVE_LIKE_DENOM,
   DEFAULT_FOLLOW_FANS_DENOM,
@@ -96,6 +99,7 @@ CREATE TABLE IF NOT EXISTS session_config_global (
   collect_save_like_denom INTEGER,
   follow_fans_denom       INTEGER,
   active_week_mask        TEXT,
+  sync_read_revision      NUMERIC NOT NULL DEFAULT 0,
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by           TEXT
 );
@@ -136,6 +140,7 @@ interface SessionDbRow {
   collect_save_like_denom: number | string | null;
   follow_fans_denom: number | string | null;
   active_week_mask: string | null;
+  sync_read_revision?: number | string;
   updated_at: Date | string | null;
   updated_by: string | null;
 }
@@ -265,6 +270,49 @@ export class SessionConfigStore implements SessionLimitProvider {
     return isValidWeekActiveMask(raw) ? raw : null;
   }
 
+  /**
+   * A1 owner observation. Value and durable cursor come from the same owner
+   * singleton row: a mask-changing UPSERT advances sync_read_revision in that
+   * SQL statement. The separate outbox bump only invalidates older config
+   * mirrors and is not an A1 cursor authority.
+   */
+  async syncReadObservation(): Promise<{
+    cursor: string;
+    weekActiveMask: string | null;
+  }> {
+      const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const config = await client.query<{
+        active_week_mask: string | null;
+        sync_read_revision: string | number;
+      }>(
+        `SELECT active_week_mask, sync_read_revision
+           FROM session_config_global
+          WHERE id = 1`,
+      );
+      const row = config.rows[0];
+      if (
+        row &&
+        row.active_week_mask !== null &&
+        !isValidWeekActiveMask(row.active_week_mask)
+      ) {
+        throw new Error('session_config_global_week_active_mask_invalid');
+      }
+      const cursor = String(row?.sync_read_revision ?? '0');
+      if (!/^(?:0|[1-9][0-9]*)$/.test(cursor)) {
+        throw new Error(`session_config_global_owner_cursor_invalid:${cursor}`);
+      }
+      await client.query('COMMIT');
+      return { cursor, weekActiveMask: row?.active_week_mask ?? null };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   /** 取全局覆盖行（无行 undefined，面板审计 / overridden 判定用）。 */
   getRow(): SessionConfigRow | undefined {
     return this.cache ?? undefined;
@@ -297,8 +345,13 @@ export class SessionConfigStore implements SessionLimitProvider {
         q.query<SessionDbRow>(
       `INSERT INTO session_config_global (id, max_duration_min, budget_likes, budget_collects,
               budget_follows, budget_searches, budget_comments, budget_comment_likes, budget_join_groups,
-              collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by)
-       VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), $12)
+              collect_save_like_denom, follow_fans_denom, active_week_mask,
+              sync_read_revision, updated_at, updated_by)
+       VALUES (
+         1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+         CASE WHEN $11::text IS NULL THEN 0 ELSE 1 END,
+         now(), $12
+       )
        ON CONFLICT (id)
        DO UPDATE SET max_duration_min = EXCLUDED.max_duration_min,
                      budget_likes = EXCLUDED.budget_likes, budget_collects = EXCLUDED.budget_collects,
@@ -308,10 +361,19 @@ export class SessionConfigStore implements SessionLimitProvider {
                      collect_save_like_denom = EXCLUDED.collect_save_like_denom,
                      follow_fans_denom = EXCLUDED.follow_fans_denom,
                      active_week_mask = EXCLUDED.active_week_mask,
+                     sync_read_revision =
+                       session_config_global.sync_read_revision
+                       + CASE
+                           WHEN session_config_global.active_week_mask
+                                  IS DISTINCT FROM EXCLUDED.active_week_mask
+                             THEN 1
+                           ELSE 0
+                         END,
                      updated_at = now(), updated_by = EXCLUDED.updated_by
        RETURNING max_duration_min, budget_likes, budget_collects, budget_follows,
                  budget_searches, budget_comments, budget_comment_likes, budget_join_groups,
-                 collect_save_like_denom, follow_fans_denom, active_week_mask, updated_at, updated_by`,
+                 collect_save_like_denom, follow_fans_denom, active_week_mask,
+                 sync_read_revision, updated_at, updated_by`,
       [
         nextDuration,
         nextBudget.likes,

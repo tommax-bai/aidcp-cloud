@@ -37,6 +37,12 @@ test('gate payload validators reject malformed nested fields instead of acceptin
 
 test('runtime and shared payload validators enforce semantic count and identity invariants', () => {
   assert.equal(
+    isSyncReadFactPayload('captcha_availability', {
+      state: ['available'],
+    }),
+    false,
+  );
+  assert.equal(
     isSyncReadFactPayload('edge_presence', {
       edgeCount: 1,
       onlineEdgeCount: 2,
@@ -58,6 +64,36 @@ test('runtime and shared payload validators enforce semantic count and identity 
     false,
   );
   assert.equal(
+    isSyncReadFactPayload('account_persona', {
+      accounts: [{ accountId: 'a', personaText: '   ', soul: null }],
+    }),
+    false,
+  );
+  assert.equal(
+    isSyncReadFactPayload('automation_config_mirror_health', {
+      sourceService: 'automation',
+      asOf: 1,
+      enabled: true,
+      pollMs: 1_000,
+      entries: [
+        {
+          mirrorKey: 'not_a_config_mirror',
+          tier: 'gate',
+          version: 1,
+          lastComparedAt: 1,
+          lastReloadedAt: 1,
+          reloadFailingSince: null,
+          state: 'fresh',
+          staleMs: 1,
+          observeStaleMs: 1,
+          haltsOnStale: true,
+          staleForMs: 0,
+        },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
     isSyncReadFactPayload('automation_account_projection', {
       accounts: [
         {
@@ -66,6 +102,51 @@ test('runtime and shared payload validators enforce semantic count and identity 
           groupLabel: null,
           createdAt: null,
           status: 'active',
+        },
+      ],
+    }),
+    false,
+  );
+});
+
+test('B1/B2/B4 closed shapes reject removed display and sensitive fields', () => {
+  assert.equal(
+    isSyncReadFactPayload('account_persona', {
+      accounts: [
+        {
+          accountId: 'a',
+          personaText: 'persona',
+          soul: null,
+          displayName: 'must-not-cross',
+        },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isSyncReadFactPayload('client_environment_automation', {
+      blockedEnvironmentKeys: [],
+      slowStartAnchors: [
+        {
+          accountId: 'a',
+          slowStartSince: null,
+          ambiguous: false,
+          proxyPassword: 'must-not-cross',
+        },
+      ],
+    }),
+    false,
+  );
+  assert.equal(
+    isSyncReadFactPayload('automation_account_projection', {
+      accounts: [
+        {
+          accountId: 'a',
+          platform: 'facebook',
+          groupLabel: null,
+          createdAt: null,
+          status: 'active',
+          nickname: 'removed-by-post-4a-census',
         },
       ],
     }),
@@ -82,7 +163,7 @@ test('complete well-formed gate payloads remain accepted', () => {
       pollMs: 1_000,
       entries: [
         {
-          mirrorKey: 'risk_limits',
+          mirrorKey: 'quota_config',
           tier: 'gate',
           version: 2,
           lastComparedAt: 9,

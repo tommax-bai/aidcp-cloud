@@ -74,6 +74,38 @@ test('setNickname: 拒空白 → no-op（绝不用空覆盖已有真名）', asy
   assert.equal(calls.length, 0);
 });
 
+test('setNickname self-heal insert and account_status bump share one transaction', async () => {
+  const statements: string[] = [];
+  const client = {
+    async query(text: string) {
+      statements.push(text);
+      return { rows: [], rowCount: 1 };
+    },
+    release() {
+      statements.push('RELEASE');
+    },
+  };
+  const store = new PgAccountStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: { connect: async () => client } as unknown as pg.Pool,
+    mirrorVersionBumper: {
+      bumpDomain: 'api',
+      async bumpInTx(_client, mirrorKey) {
+        assert.equal(mirrorKey, 'account_status');
+        statements.push('BUMP account_status');
+        throw new Error('bump_failed');
+      },
+    },
+  });
+
+  await assert.rejects(store.setNickname('new-account', 'nickname'), /bump_failed/);
+  assert.equal(statements[0], 'BEGIN');
+  assert.ok(statements[1]!.includes('INSERT INTO accounts'));
+  assert.equal(statements[2], 'BUMP account_status');
+  assert.equal(statements[3], 'ROLLBACK');
+  assert.equal(statements.includes('COMMIT'), false);
+});
+
 function nicknameTransactionPool(
   row: { nickname: string | null; label: string | null; operator_alias: string | null } | null,
 ): { statements: Array<{ text: string; params: unknown[] }>; pool: pg.Pool } {

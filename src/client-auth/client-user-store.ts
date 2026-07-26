@@ -1725,8 +1725,21 @@ export class ClientUserStore {
       }))
       .filter((i) => i.envKey && !seen.has(i.envKey) && (seen.add(i.envKey), true));
     if (!clean.length) return 0;
-    const client = await this.pool.connect();
     const hasBindingObservation = clean.some((item) => item.accountId !== null);
+    if (!hasBindingObservation) {
+      for (const item of clean) {
+        await this.upsertEnvironment(
+          this.pool,
+          item.envKey,
+          item.label,
+          item.platform,
+          source,
+          null,
+        );
+      }
+      return clean.length;
+    }
+    const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       for (const i of clean) {

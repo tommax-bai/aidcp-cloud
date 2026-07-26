@@ -93,10 +93,18 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 不进入投影。独立 automation 的相关闸门缺列即能力级 fail-closed，故只抬 KNOWN_MAX。
  *
  * 注：`0085_automation_sync_read_owner_generation`（change split-cloud-api-composition-root-4b）
- * 只持久化 automation A3-A6 的 target-scoped digest/generation/outbox-coalesce 水位，不保存 runtime
+ * 只持久化 automation A3-A6 的 target-scoped digest/generation/emit-dedup 水位，不保存 runtime
  * 业务 payload。缺表时独立 runtime snapshot 响亮失败，绝不把进程内重置 cursor 当作恢复。
+ *
+ * 注：`0086_session_config_global_sync_read_revision`（change split-cloud-api-composition-root-4b）
+ * 在 A1 owner 单例行内持久化 shared revision；mask mutation 与 revision 同一 UPSERT，outbox
+ * 清理不影响 snapshot cursor，且不引入平行 revision authority。
+ *
+ * 注：`0087_automation_account_projection_shared_cursor`（change split-cloud-api-composition-root-4b）
+ * 在既有 B4 shared projection-state 行记录 applied cursor/digest，跨 dev/ol 串行防旧快照回退；
+ * target checkpoint 只保留 delivery/readiness。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0085_automation_sync_read_owner_generation';
+export const KNOWN_MAX_SCHEMA_VERSION = '0087_automation_account_projection_shared_cursor';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

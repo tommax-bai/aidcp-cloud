@@ -200,6 +200,22 @@ test('invalid target, scope, cursor and incomplete envelopes cannot apply or ren
   }
 });
 
+test('snapshot envelope is closed and rejects unknown top-level keys', () => {
+  const mirror = new AtomicSyncReadMirror<{ value: string }>({
+    executionTarget: 'dev',
+    stream: 'session_config_global',
+    clock: () => 1_100,
+  });
+  const result = mirror.apply(
+    { ...envelope(), unexpected: true },
+    'owner_fetch',
+  );
+  assert.equal(result.outcome, 'rejected');
+  if (result.outcome !== 'rejected') return;
+  assert.equal(result.reason, 'invalid_envelope');
+  assert.match(result.message, /unknown keys/);
+});
+
 test('recovering preserves last good value but is not ready', () => {
   const mirror = new AtomicSyncReadMirror<{ value: string }>({
     executionTarget: 'dev',

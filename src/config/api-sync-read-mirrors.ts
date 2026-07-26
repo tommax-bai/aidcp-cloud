@@ -25,7 +25,10 @@ export class ApiSyncReadMirrors {
   readonly captchaAvailability: AtomicSyncReadMirror<CaptchaAvailabilitySnapshot>;
   readonly automationHealth: AtomicSyncReadMirror<AutomationConfigMirrorHealthSnapshot>;
 
-  constructor(executionTarget: DeploymentTarget, clock: () => number = Date.now) {
+  constructor(
+    executionTarget: DeploymentTarget,
+    private readonly clock: () => number = Date.now,
+  ) {
     this.sessionConfig = mirror(
       executionTarget,
       'session_config_global',
@@ -74,7 +77,7 @@ export class ApiSyncReadMirrors {
     }
   }
 
-  weekActiveMask(now = Date.now()): {
+  weekActiveMask(now = this.clock()): {
     state: EvidenceState;
     value: string | null;
     asOf: number | null;
@@ -87,7 +90,7 @@ export class ApiSyncReadMirrors {
     };
   }
 
-  presence(now = Date.now()): {
+  presence(now = this.clock()): {
     state: EvidenceState;
     asOf: number | null;
     edgeCount: number | null;
@@ -109,7 +112,7 @@ export class ApiSyncReadMirrors {
     };
   }
 
-  inFlightEvidence(now = Date.now()): {
+  inFlightEvidence(now = this.clock()): {
     state: EvidenceState;
     asOf: number | null;
     recordIds: ReadonlySet<number> | null;
@@ -126,7 +129,7 @@ export class ApiSyncReadMirrors {
     };
   }
 
-  captcha(now = Date.now()): {
+  captcha(now = this.clock()): {
     state: EvidenceState;
     asOf: number | null;
     capability:
@@ -144,7 +147,7 @@ export class ApiSyncReadMirrors {
     };
   }
 
-  automationConfigMirrorHealth(now = Date.now()): {
+  automationConfigMirrorHealth(now = this.clock()): {
     sourceService: 'automation';
     asOf: number | null;
     deliveryState: EvidenceState;
@@ -160,13 +163,25 @@ export class ApiSyncReadMirrors {
     };
   }
 
-  readiness(now = Date.now()) {
+  readiness(now = this.clock()) {
+    const captchaHealth = this.captchaAvailability.health(now);
+    const captchaValue = this.captchaAvailability.view(now).value?.state;
+    const startupCaptchaHealth =
+      captchaHealth.state === 'ready' &&
+      (captchaValue === 'unknown' || captchaValue === 'unavailable')
+        ? {
+            ...captchaHealth,
+            state: 'invalid' as const,
+            deliveryState: 'invalid' as const,
+            lastError: `captcha_capability_${captchaValue}`,
+          }
+        : captchaHealth;
     return syncReadProcessReadiness(
       [
         this.sessionConfig.health(now),
         this.edgePresence.health(now),
         this.publishInFlight.health(now),
-        this.captchaAvailability.health(now),
+        startupCaptchaHealth,
         this.automationHealth.health(now),
       ],
       now,

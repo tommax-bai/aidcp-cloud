@@ -24,56 +24,69 @@ interface SeedRow {
 
 /** 内存假 pool（全局单行）：路由 session_config_global 的建表 / SELECT(id=1) / upsert(RETURNING)；可注入写失败 + 脏行。 */
 function fakePool(seed?: SeedRow) {
-  let row: (SeedRow & { updated_at: string; updated_by: string }) | null = seed
-    ? { budget_join_groups: DEFAULT_SESSION_BUDGET.join_groups, ...seed, updated_at: '2026-06-25T00:00:00.000Z', updated_by: 'seed' }
+  let row: (SeedRow & { sync_read_revision: number; updated_at: string; updated_by: string }) | null = seed
+    ? { budget_join_groups: DEFAULT_SESSION_BUDGET.join_groups, ...seed, sync_read_revision: 0, updated_at: '2026-06-25T00:00:00.000Z', updated_by: 'seed' }
     : null;
   let failWrite = false;
-  const pool = {
-    query: async (sql: string, params?: unknown[]) => {
-      const __probe = schemaProbe(sql);
-      if (__probe) return __probe;
-      if (sql.includes('CREATE TABLE') || sql.includes('ALTER TABLE')) return { rows: [] };
-      if (sql.includes('INSERT INTO session_config_global')) {
-        if (failWrite) throw new Error('db down');
-        // 入参顺序须与 store.set() 的 INSERT 占位符严格一致：
-        // [时长, 7 项预算, 收藏分母, 关注分母, 周历掩码, updated_by]（共 12 个）。
-        const [
-          max_duration_min,
-          budget_likes,
-          budget_collects,
-          budget_follows,
-          budget_searches,
-          budget_comments,
-          budget_comment_likes,
-          budget_join_groups,
-          collect_save_like_denom,
-          follow_fans_denom,
-          active_week_mask,
-          updated_by,
-        ] = params as [
-          number, number, number, number, number, number, number, number,
-          number | null, number | null, string | null, string,
-        ];
-        row = {
-          max_duration_min,
-          budget_likes,
-          budget_collects,
-          budget_follows,
-          budget_searches,
-          budget_comments,
-          budget_comment_likes,
-          budget_join_groups,
-          collect_save_like_denom,
-          follow_fans_denom,
-          active_week_mask,
-          updated_at: '2026-06-25T01:00:00.000Z',
-          updated_by,
-        };
-        return { rows: [row] };
-      }
-      if (sql.includes('FROM session_config_global')) return { rows: row ? [row] : [] };
+  const query = async (sql: string, params?: unknown[]) => {
+    if (
+      sql === 'BEGIN' ||
+      sql === 'COMMIT' ||
+      sql === 'ROLLBACK'
+    ) {
       return { rows: [] };
-    },
+    }
+    const __probe = schemaProbe(sql);
+    if (__probe) return __probe;
+    if (sql.includes('CREATE TABLE') || sql.includes('ALTER TABLE')) return { rows: [] };
+    if (sql.includes('INSERT INTO session_config_global')) {
+      if (failWrite) throw new Error('db down');
+      const priorMask = row?.active_week_mask ?? null;
+      const priorRevision = row?.sync_read_revision ?? 0;
+      // 入参顺序须与 store.set() 的 INSERT 占位符严格一致：
+      // [时长, 7 项预算, 收藏分母, 关注分母, 周历掩码, updated_by]（共 12 个）。
+      const [
+        max_duration_min,
+        budget_likes,
+        budget_collects,
+        budget_follows,
+        budget_searches,
+        budget_comments,
+        budget_comment_likes,
+        budget_join_groups,
+        collect_save_like_denom,
+        follow_fans_denom,
+        active_week_mask,
+        updated_by,
+      ] = params as [
+        number, number, number, number, number, number, number, number,
+        number | null, number | null, string | null, string,
+      ];
+      row = {
+        max_duration_min,
+        budget_likes,
+        budget_collects,
+        budget_follows,
+        budget_searches,
+        budget_comments,
+        budget_comment_likes,
+        budget_join_groups,
+        collect_save_like_denom,
+        follow_fans_denom,
+        active_week_mask,
+        sync_read_revision:
+          priorRevision + (priorMask === active_week_mask ? 0 : 1),
+        updated_at: '2026-06-25T01:00:00.000Z',
+        updated_by,
+      };
+      return { rows: [row] };
+    }
+    if (sql.includes('FROM session_config_global')) return { rows: row ? [row] : [] };
+    return { rows: [] };
+  };
+  const pool = {
+    query,
+    connect: async () => ({ query, release() {} }),
   };
   return { pool: pool as unknown as pg.Pool, setFailWrite: (v: boolean) => { failWrite = v; } };
 }
@@ -227,4 +240,149 @@ test('部分写：只改 likes 不动既存掩码 → 掩码保持原值', async
   await store.set({ likes: 7 }, 'a');
   assert.equal(store.sessionBudget().likes, 7);
   assert.equal(store.weekActiveMask(), mask, '未传掩码保持原值');
+});
+
+test('A1 owner observation reads value and cursor from one repeatable-read transaction', async () => {
+  const calls: string[] = [];
+  const mask = '1'.repeat(168);
+  const client = {
+    async query(sql: string) {
+      calls.push(sql);
+      if (sql.includes('FROM session_config_global')) {
+        return {
+          rows: [{ active_week_mask: mask, sync_read_revision: '42' }],
+        };
+      }
+      return { rows: [] };
+    },
+    release() {
+      calls.push('RELEASE');
+    },
+  };
+  const store = new SessionConfigStore({
+    pool: { connect: async () => client } as unknown as pg.Pool,
+  });
+  assert.deepEqual(await store.syncReadObservation(), {
+    cursor: '42',
+    weekActiveMask: mask,
+  });
+  assert.equal(calls[0], 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  assert.equal(calls.at(-2), 'COMMIT');
+  assert.equal(calls.at(-1), 'RELEASE');
+});
+
+test('A1 missing owner row publishes the legal default null at the durable revision', async () => {
+  const calls: string[] = [];
+  const client = {
+    async query(sql: string) {
+      calls.push(sql);
+      if (sql.includes('FROM session_config_global')) return { rows: [] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const store = new SessionConfigStore({
+    pool: { connect: async () => client } as unknown as pg.Pool,
+  });
+  assert.deepEqual(await store.syncReadObservation(), {
+    cursor: '0',
+    weekActiveMask: null,
+  });
+  assert.ok(calls.includes('COMMIT'));
+});
+
+test('A1 invalid owner value rolls back before returning a cursor', async () => {
+  for (const activeWeekMask of ['bad']) {
+    const calls: string[] = [];
+    const client = {
+      async query(sql: string) {
+        calls.push(sql);
+        if (sql.includes('FROM session_config_global')) {
+          return {
+            rows: [
+              {
+                active_week_mask: activeWeekMask,
+                sync_read_revision: '9',
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      },
+      release() {},
+    };
+    const store = new SessionConfigStore({
+      pool: { connect: async () => client } as unknown as pg.Pool,
+    });
+    await assert.rejects(store.syncReadObservation(), /week_active_mask_invalid/);
+    assert.ok(calls.includes('ROLLBACK'));
+    assert.equal(calls.includes('COMMIT'), false);
+  }
+});
+
+test('A1 mutation advances durable owner revision independently of outbox retention', async () => {
+  const { pool } = fakePool();
+  const store = new SessionConfigStore({ pool });
+  assert.deepEqual(await store.syncReadObservation(), {
+    cursor: '0',
+    weekActiveMask: null,
+  });
+  await store.set({ activeWeekMask: '1'.repeat(168) }, 'owner');
+  assert.deepEqual(await store.syncReadObservation(), {
+    cursor: '1',
+    weekActiveMask: '1'.repeat(168),
+  });
+});
+
+test('A1 mask mutation and revision roll back together when the outbox bump fails', async () => {
+  const calls: string[] = [];
+  const client = {
+    async query(sql: string) {
+      calls.push(sql);
+      if (sql.includes('INSERT INTO session_config_global')) {
+        return {
+          rows: [
+            {
+              max_duration_min: 10,
+              budget_likes: 1,
+              budget_collects: 1,
+              budget_follows: 1,
+              budget_searches: 1,
+              budget_comments: 1,
+              budget_comment_likes: 1,
+              budget_join_groups: 1,
+              collect_save_like_denom: null,
+              follow_fans_denom: null,
+              active_week_mask: '1'.repeat(168),
+              sync_read_revision: 1,
+              updated_at: null,
+              updated_by: 'owner',
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const store = new SessionConfigStore({
+    pool: { connect: async () => client } as unknown as pg.Pool,
+    mirrorVersionBumper: {
+      bumpDomain: 'automation',
+      async bumpInTx() {
+        throw new Error('outbox_bump_failed');
+      },
+    },
+  });
+
+  await assert.rejects(
+    store.set({ activeWeekMask: '1'.repeat(168) }, 'owner'),
+    /outbox_bump_failed/,
+  );
+  const write = calls.find((sql) => sql.includes('INSERT INTO session_config_global'));
+  assert.match(write ?? '', /sync_read_revision/);
+  assert.match(write ?? '', /IS DISTINCT FROM EXCLUDED\.active_week_mask/);
+  assert.ok(calls.includes('ROLLBACK'));
+  assert.equal(calls.includes('COMMIT'), false);
+  assert.equal(store.weekActiveMask(), null, 'failed transaction must not refresh the local cache');
 });

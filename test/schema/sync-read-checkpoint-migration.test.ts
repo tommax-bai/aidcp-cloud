@@ -91,7 +91,7 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!automation.includes('0082_api_sync_read_consumer_checkpoint'));
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0085_automation_sync_read_owner_generation',
+    '0087_automation_account_projection_shared_cursor',
   );
 });
 
@@ -117,4 +117,41 @@ test('0085 keeps runtime owner generations durable, target-scoped and payload-fr
     /\b(?:payload|value|account_id|record_ids|edge_id)\b/i,
   );
   assert.doesNotMatch(sql.replace(/^--.*$/gm, ''), /\b(?:DROP|ALTER)\b/i);
+});
+
+test('0086 keeps A1 owner revision on session_config_global rather than a parallel authority', async () => {
+  const sql = await readFile(
+    new URL(
+      '../../migrations/0086_session_config_global_sync_read_revision.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  assert.match(sql, /-- aidcp:kind=expand/);
+  assert.match(sql, /ALTER TABLE session_config_global/);
+  assert.match(sql, /sync_read_revision NUMERIC NOT NULL DEFAULT 0/);
+  assert.doesNotMatch(sql, /\bCREATE TABLE\b/);
+  assert.doesNotMatch(sql.replace(/^--.*$/gm, ''), /\bevent_outbox\b/);
+  assert.doesNotMatch(sql.replace(/^--.*$/gm, ''), /\bDROP\b/i);
+});
+
+test('0087 stores the B4 shared cursor on the shared projection state row', async () => {
+  const sql = await readFile(
+    new URL(
+      '../../migrations/0087_automation_account_projection_shared_cursor.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  assert.match(sql, /-- aidcp:kind=expand/);
+  assert.match(sql, /ALTER TABLE automation_account_projection_state/);
+  assert.match(sql, /sync_read_cursor NUMERIC/);
+  assert.match(sql, /sync_read_payload_digest TEXT/);
+  assert.match(sql, /sync_read_source_as_of_ms BIGINT/);
+  assert.match(sql, /automation_account_projection_state_sync_read_check/);
+  assert.match(sql, /sync_read_cursor IS NOT NULL/);
+  assert.match(sql, /sync_read_payload_digest IS NOT NULL/);
+  assert.match(sql, /sync_read_source_as_of_ms IS NOT NULL/);
+  assert.doesNotMatch(sql.replace(/^--.*$/gm, ''), /\bCREATE TABLE\b/);
+  assert.doesNotMatch(sql.replace(/^--.*$/gm, ''), /\bDROP\b/i);
 });

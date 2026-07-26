@@ -1,4 +1,5 @@
 import type { DeploymentTarget } from '../deployment-target.js';
+import type { ConfigMirrorKey } from './config-mirror-bump-types.js';
 import {
   SYNC_READ_CONTRACT_VERSION,
   SYNC_READ_STREAM_DEFINITIONS,
@@ -22,6 +23,24 @@ export type EdgePresenceSnapshot = {
 
 export type PublishInFlightSnapshot = {
   readonly recordIds: readonly number[];
+};
+
+const CONFIG_MIRROR_KEYS: Readonly<Record<ConfigMirrorKey, true>> = {
+  quota_config: true,
+  pacing_floor_config: true,
+  session_config_global: true,
+  resume_config_global: true,
+  persona_config: true,
+  content_schedule: true,
+  model_config: true,
+  role_config: true,
+  category_config: true,
+  hot_lead_config: true,
+  facebook_comment_config: true,
+  facebook_group_join_automation_config: true,
+  account_status: true,
+  client_environment_slow_start: true,
+  client_environment_automation_gate: true,
 };
 
 export type CaptchaAvailabilitySnapshot = {
@@ -177,10 +196,19 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
 ): value is SyncReadPayloadByStream[S] {
   switch (stream) {
     case 'session_config_global':
-      return isRecord(value) && isNullableString(value.weekActiveMask);
+      return (
+        isRecord(value) &&
+        hasExactKeys(value, ['weekActiveMask']) &&
+        isNullableString(value.weekActiveMask)
+      );
     case 'edge_presence':
       return (
         isRecord(value) &&
+        hasExactKeys(value, [
+          'edgeCount',
+          'onlineEdgeCount',
+          'accountEdges',
+        ]) &&
         isNonNegativeInteger(value.edgeCount) &&
         isNonNegativeInteger(value.onlineEdgeCount) &&
         value.onlineEdgeCount <= value.edgeCount &&
@@ -189,6 +217,7 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
         value.accountEdges.every(
           (row) =>
             isRecord(row) &&
+            hasExactKeys(row, ['accountId', 'edgeId']) &&
             isNonEmptyString(row.accountId) &&
             isNonEmptyString(row.edgeId),
         )
@@ -196,6 +225,7 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'publish_in_flight':
       return (
         isRecord(value) &&
+        hasExactKeys(value, ['recordIds']) &&
         Array.isArray(value.recordIds) &&
         value.recordIds.every(isNonNegativeInteger) &&
         new Set(value.recordIds).size === value.recordIds.length
@@ -203,13 +233,22 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'captcha_availability':
       return (
         isRecord(value) &&
-        ['disabled', 'available', 'unavailable', 'unknown'].includes(
-          String(value.state),
-        )
+        hasExactKeys(value, ['state']) &&
+        (value.state === 'disabled' ||
+          value.state === 'available' ||
+          value.state === 'unavailable' ||
+          value.state === 'unknown')
       );
     case 'automation_config_mirror_health':
       return (
         isRecord(value) &&
+        hasExactKeys(value, [
+          'sourceService',
+          'asOf',
+          'enabled',
+          'pollMs',
+          'entries',
+        ]) &&
         value.sourceService === 'automation' &&
         isNonNegativeInteger(value.asOf) &&
         typeof value.enabled === 'boolean' &&
@@ -221,19 +260,22 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'account_persona':
       return (
         isRecord(value) &&
+        hasExactKeys(value, ['accounts']) &&
         Array.isArray(value.accounts) &&
         hasUniqueStrings(value.accounts, 'accountId') &&
         value.accounts.every(
           (row) =>
             isRecord(row) &&
+            hasExactKeys(row, ['accountId', 'personaText', 'soul']) &&
             isNonEmptyString(row.accountId) &&
-            typeof row.personaText === 'string' &&
+            isNonBlankString(row.personaText) &&
             (row.soul === null || isJson(row.soul)),
         )
       );
     case 'client_environment_automation':
       return (
         isRecord(value) &&
+        hasExactKeys(value, ['blockedEnvironmentKeys', 'slowStartAnchors']) &&
         Array.isArray(value.blockedEnvironmentKeys) &&
         value.blockedEnvironmentKeys.every(isNonEmptyString) &&
         new Set(value.blockedEnvironmentKeys).size ===
@@ -243,6 +285,11 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
         value.slowStartAnchors.every(
           (row) =>
             isRecord(row) &&
+            hasExactKeys(row, [
+              'accountId',
+              'slowStartSince',
+              'ambiguous',
+            ]) &&
             isNonEmptyString(row.accountId) &&
             (row.slowStartSince === null ||
               isNonNegativeInteger(row.slowStartSince)) &&
@@ -252,11 +299,19 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'automation_account_projection':
       return (
         isRecord(value) &&
+        hasExactKeys(value, ['accounts']) &&
         Array.isArray(value.accounts) &&
         hasUniqueStrings(value.accounts, 'accountId') &&
         value.accounts.every(
           (row) =>
             isRecord(row) &&
+            hasExactKeys(row, [
+              'accountId',
+              'platform',
+              'groupLabel',
+              'createdAt',
+              'status',
+            ]) &&
             isNonEmptyString(row.accountId) &&
             isNonEmptyString(row.platform) &&
             isNullableString(row.groupLabel) &&
@@ -267,8 +322,10 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'content_schedule':
       return (
         isRecord(value) &&
+        hasExactKeys(value, ['global', 'accounts']) &&
         (value.global === null ||
           (isRecord(value.global) &&
+            hasExactKeys(value.global, ['contentActiveMask']) &&
             isNullableString(value.global.contentActiveMask))) &&
         Array.isArray(value.accounts) &&
         hasUniqueStrings(value.accounts, 'accountId') &&
@@ -277,6 +334,12 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'hot_lead_config':
       return (
         isRecord(value) &&
+        hasExactKeys(value, [
+          'maxAgeHours',
+          'velocityMin',
+          'minLikeFloor',
+          'floorHours',
+        ]) &&
         isFiniteNumber(value.maxAgeHours) &&
         isFiniteNumber(value.velocityMin) &&
         isFiniteNumber(value.minLikeFloor) &&
@@ -285,6 +348,7 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'facebook_comment_config':
       return (
         isRecord(value) &&
+        hasExactKeys(value, ['accounts']) &&
         Array.isArray(value.accounts) &&
         hasUniqueStrings(value.accounts, 'accountId') &&
         value.accounts.every(isFacebookCommentAccount)
@@ -292,6 +356,7 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'facebook_group_join_automation_config':
       return (
         isRecord(value) &&
+        hasExactKeys(value, ['accounts']) &&
         Array.isArray(value.accounts) &&
         hasUniqueStrings(value.accounts, 'accountId') &&
         value.accounts.every(isFacebookGroupJoinAccount)
@@ -305,6 +370,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -338,7 +407,21 @@ function hasUniqueStrings(rows: readonly unknown[], key: string): boolean {
 function isAutomationHealthEntry(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
-    isNonEmptyString(value.mirrorKey) &&
+    hasExactKeys(value, [
+      'mirrorKey',
+      'tier',
+      'version',
+      'lastComparedAt',
+      'lastReloadedAt',
+      'reloadFailingSince',
+      'state',
+      'staleMs',
+      'observeStaleMs',
+      'haltsOnStale',
+      'staleForMs',
+    ]) &&
+    typeof value.mirrorKey === 'string' &&
+    Object.prototype.hasOwnProperty.call(CONFIG_MIRROR_KEYS, value.mirrorKey) &&
     (value.tier === 'gate' || value.tier === 'parameter') &&
     isNullableNonNegativeInteger(value.version) &&
     isNullableNonNegativeInteger(value.lastComparedAt) &&
@@ -355,6 +438,18 @@ function isAutomationHealthEntry(value: unknown): boolean {
 function isContentScheduleAccount(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
+    hasExactKeys(value, [
+      'accountId',
+      'autoEnabled',
+      'postMode',
+      'postDailyCap',
+      'commentMode',
+      'commentDailyCap',
+      'contactCommentMode',
+      'contactCommentDailyCap',
+      'activeWeekMask',
+      'contentActiveMask',
+    ]) &&
     isNonEmptyString(value.accountId) &&
     typeof value.autoEnabled === 'boolean' &&
     isActionMode(value.postMode) &&
@@ -377,6 +472,13 @@ function isActionMode(
 function isFacebookCommentAccount(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
+    hasExactKeys(value, [
+      'accountId',
+      'keywords',
+      'containers',
+      'commentMode',
+      'commentTemplates',
+    ]) &&
     isNonEmptyString(value.accountId) &&
     Array.isArray(value.keywords) &&
     value.keywords.every(isNonEmptyString) &&
@@ -384,6 +486,7 @@ function isFacebookCommentAccount(value: unknown): boolean {
     value.containers.every(
       (container) =>
         isRecord(container) &&
+        hasOnlyKeys(container, ['url', 'name']) &&
         isNonEmptyString(container.url) &&
         (container.name === undefined ||
           typeof container.name === 'string'),
@@ -398,11 +501,30 @@ function isFacebookCommentAccount(value: unknown): boolean {
 function isFacebookGroupJoinAccount(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
+    hasExactKeys(value, ['accountId', 'enabled', 'dailyCap', 'weekMask']) &&
     isNonEmptyString(value.accountId) &&
     typeof value.enabled === 'boolean' &&
     isNonNegativeInteger(value.dailyCap) &&
     isNullableString(value.weekMask)
   );
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === [...expected].sort()[index])
+  );
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
 }
 
 function isJson(value: unknown): value is SyncReadJson {

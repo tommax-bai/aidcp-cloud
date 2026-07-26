@@ -543,8 +543,13 @@ export class PgDelegatedTaskStore implements DelegatedTaskStore {
              WHERE a.account_id = delegated_tasks.account_id
            )
            AND EXISTS (
-             SELECT 1 FROM automation_account_projection_state apj_state
-             WHERE apj_state.fresh_until > now()
+             SELECT 1 FROM automation_sync_read_consumer_checkpoint apj_checkpoint
+             WHERE apj_checkpoint.execution_target = $4
+               AND apj_checkpoint.consumer = 'automation'
+               AND apj_checkpoint.stream = 'automation_account_projection'
+               AND apj_checkpoint.state = 'ready'
+               AND apj_checkpoint.fresh_until_ms >
+                   floor(extract(epoch FROM now()) * 1000)
            )
          ORDER BY CASE priority WHEN 'high' THEN 0 ELSE 1 END, deadline_at ASC, created_at ASC
          FOR UPDATE SKIP LOCKED LIMIT 1

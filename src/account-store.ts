@@ -439,10 +439,15 @@ export class PgAccountStore implements AccountStore {
     const clean = nickname.trim();
     if (!clean) return;
     const value = clean.length > 64 ? clean.slice(0, 64) : clean;
-    await this.pool.query(
-      `INSERT INTO accounts (account_id, label, nickname) VALUES ($1, $1, $2)
-       ON CONFLICT (account_id) DO UPDATE SET nickname = EXCLUDED.nickname`,
-      [accountId, value],
+    await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'account_status',
+      (q) => q.query(
+        `INSERT INTO accounts (account_id, label, nickname) VALUES ($1, $1, $2)
+         ON CONFLICT (account_id) DO UPDATE SET nickname = EXCLUDED.nickname`,
+        [accountId, value],
+      ),
     );
     // 更新同步缓存：后续握手 / UI 立即读到最新展示名；XHS 启动仍会继续检测平台昵称变化。
     const previous = this.displayNameCache.get(accountId);
