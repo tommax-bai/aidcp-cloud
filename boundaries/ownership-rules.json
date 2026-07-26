@@ -126,7 +126,7 @@
 
     { "path": "src/publish-agent/publish-log-store.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
     { "path": "src/publish-agent/publish-pipeline-log-store.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
-    { "path": "src/publish-agent/publish-scheduler.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
+    { "path": "src/publish-agent/publish-scheduler.ts", "layer": "automation", "basis": "【待定稿裁决 · 用户 2026-07-26 拍板】原判 api（§4.6.3「台账与审批段 7 文件之一」）。改判 automation 的**唯一理由是一条结构约束，不是就近原则**：委托任务的执行器（server.ts:5894 的守卫）**同时**需要评论调度器与本调度器，前者是 automation 属主；两者一旦分处两进程，那条 if 恒不成立，表现为 /delegate 收得下、存得住、永远不执行（启动期只有一条 warn，之后每条任务静默堆积）。它读的三类数据本来就跨三个域（点赞记录 automation / 精选库与概念池 content / 发布台账 api），所以留在哪一侧都要跨——改判只是换跨的方向，却省掉了委托执行链的跨进程重构。**改判零代价的机械依据**：本文件的 import 全部指向 kernel（15-27 行逐条核过），依赖一律靠构造注入的接口，故换层不产生任何新的跨层边；入边只有组装根（composition→任意层恒允许）。同段其余 6 个文件（publish-log-store / publish-pipeline-log-store / client-publish-approval 等）**维持 api 不动**——它们是真的台账与审批。请求回写 §4.6.3 见 docpatch R-batch3-scheduler" },
     { "path": "src/publish-agent/client-publish-approval.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
     { "path": "src/publish-agent/draft-image-remove.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
     { "path": "src/publish-agent/schedule-policy.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
