@@ -9,6 +9,12 @@ import type { DeploymentTarget } from '../deployment-target.js';
 
 export const SYNC_READ_CONTRACT_VERSION = 1 as const;
 export const SYNC_READ_CHANGED_TOPIC = 'sync_read.changed' as const;
+export const SYNC_READ_CHANGED_STREAMS = [
+  'edge_presence',
+  'publish_in_flight',
+  'captcha_availability',
+  'automation_config_mirror_health',
+] as const;
 
 export type SyncReadFactScope = 'shared' | 'target';
 
@@ -96,6 +102,8 @@ export const SYNC_READ_STREAM_DEFINITIONS = {
 >;
 
 export type SyncReadStream = keyof typeof SYNC_READ_STREAM_DEFINITIONS;
+export type SyncReadChangedStream =
+  (typeof SYNC_READ_CHANGED_STREAMS)[number];
 export type SyncReadConsumer =
   (typeof SYNC_READ_STREAM_DEFINITIONS)[SyncReadStream]['consumer'];
 
@@ -122,7 +130,7 @@ export interface SyncReadSnapshotEnvelope<T extends SyncReadJson = SyncReadJson>
 export interface SyncReadChangedSignal {
   contractVersion: typeof SYNC_READ_CONTRACT_VERSION;
   executionTarget: DeploymentTarget;
-  stream: SyncReadStream;
+  stream: SyncReadChangedStream;
   generation: string;
 }
 
@@ -423,6 +431,15 @@ export function isSyncReadStream(value: unknown): value is SyncReadStream {
   );
 }
 
+export function isSyncReadChangedStream(
+  value: unknown,
+): value is SyncReadChangedStream {
+  return (
+    typeof value === 'string' &&
+    (SYNC_READ_CHANGED_STREAMS as readonly string[]).includes(value)
+  );
+}
+
 export function compareUnsignedSyncReadCursor(left: string, right: string): -1 | 0 | 1 {
   assertUnsignedCursor(left);
   assertUnsignedCursor(right);
@@ -436,7 +453,7 @@ export function syncReadChangedSignal(input: {
   stream: SyncReadStream;
   generation: string;
 }): SyncReadChangedSignal {
-  if (SYNC_READ_STREAM_DEFINITIONS[input.stream].factScope !== 'target') {
+  if (!isSyncReadChangedStream(input.stream)) {
     throw new SyncReadSnapshotValidationError(
       'changed_signal_shared_fact',
       `sync_read.changed is reserved for target-scoped runtime facts: ${input.stream}`,
@@ -449,6 +466,69 @@ export function syncReadChangedSignal(input: {
     stream: input.stream,
     generation: input.generation,
   };
+}
+
+export function parseSyncReadChangedSignal(
+  input: unknown,
+  expectation?: { executionTarget?: DeploymentTarget },
+): SyncReadChangedSignal {
+  if (!isRecord(input)) {
+    invalid('changed_signal_type', 'sync_read.changed signal must be an object');
+  }
+  if (
+    !hasExactKeys(input, [
+      'contractVersion',
+      'executionTarget',
+      'stream',
+      'generation',
+    ])
+  ) {
+    invalid(
+      'changed_signal_keys',
+      'sync_read.changed signal contains missing or unknown keys',
+    );
+  }
+  if (input.contractVersion !== SYNC_READ_CONTRACT_VERSION) {
+    invalid(
+      'changed_signal_contract_version',
+      'sync_read.changed contractVersion is unsupported',
+    );
+  }
+  if (input.executionTarget !== 'dev' && input.executionTarget !== 'ol') {
+    invalid(
+      'changed_signal_target',
+      'sync_read.changed executionTarget must be dev or ol',
+    );
+  }
+  if (
+    expectation?.executionTarget !== undefined &&
+    input.executionTarget !== expectation.executionTarget
+  ) {
+    invalid(
+      'changed_signal_target_mismatch',
+      `sync_read.changed target ${String(input.executionTarget)} does not match ${expectation.executionTarget}`,
+    );
+  }
+  if (!isSyncReadChangedStream(input.stream)) {
+    invalid(
+      'changed_signal_stream',
+      `sync_read.changed stream is not an automation runtime stream: ${String(input.stream)}`,
+    );
+  }
+  if (
+    typeof input.generation !== 'string' ||
+    !/^(?:0|[1-9][0-9]*)$/.test(input.generation)
+  ) {
+    invalid(
+      'changed_signal_generation',
+      'sync_read.changed generation must be a canonical unsigned decimal string',
+    );
+  }
+  return syncReadChangedSignal({
+    executionTarget: input.executionTarget,
+    stream: input.stream,
+    generation: input.generation,
+  });
 }
 
 export function syncReadPayloadDigest(value: SyncReadJson): string {

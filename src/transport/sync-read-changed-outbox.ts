@@ -2,23 +2,21 @@ import type { DeploymentTarget } from '../deployment-target.js';
 import {
   SYNC_READ_CHANGED_TOPIC,
   compareUnsignedSyncReadCursor,
+  parseSyncReadChangedSignal,
   syncReadChangedSignal,
   type SyncReadApplyResult,
   type SyncReadChangedSignal,
+  type SyncReadChangedStream,
   type SyncReadSnapshotEnvelope,
-  type SyncReadStream,
 } from '../kernel/sync-read-snapshot.js';
 import {
   EVENT_OUTBOX_NOTIFY_CHANNEL,
   type OutboxEvent,
+  type OutboxHandler,
   type OutboxQueryable,
 } from './event-outbox.js';
-
-type RuntimeStream =
-  | 'edge_presence'
-  | 'publish_in_flight'
-  | 'captcha_availability'
-  | 'automation_config_mirror_health';
+import { InternalHttpError } from './internal-http.js';
+import type { SyncReadChangedDeliveryPort } from './sync-read-changed-http.js';
 
 export class SyncReadChangedOutbox {
   constructor(
@@ -28,7 +26,7 @@ export class SyncReadChangedOutbox {
   ) {}
 
   async emit(
-    stream: RuntimeStream,
+    stream: SyncReadChangedStream,
     generation: string,
     client: OutboxQueryable = this.pool,
   ): Promise<{ emitted: boolean; generation: string }> {
@@ -78,7 +76,7 @@ export class SyncReadChangedOutbox {
 
 export function createSyncReadChangedHandler(options: {
   executionTarget: DeploymentTarget;
-  fetchSnapshot(stream: RuntimeStream): Promise<SyncReadSnapshotEnvelope>;
+  fetchSnapshot(stream: SyncReadChangedStream): Promise<SyncReadSnapshotEnvelope>;
   apply(
     envelope: SyncReadSnapshotEnvelope,
     source: 'owner_fetch' | 'replay',
@@ -103,52 +101,45 @@ export function createSyncReadChangedHandler(options: {
   };
 }
 
+export function createSyncReadChangedHttpRelay(options: {
+  executionTarget: DeploymentTarget;
+  delivery: SyncReadChangedDeliveryPort;
+}): OutboxHandler {
+  return async (event: OutboxEvent): Promise<void> => {
+    if (event.topic !== SYNC_READ_CHANGED_TOPIC) {
+      throw new InternalHttpError(
+        'sync_read_changed_topic_mismatch',
+        `expected ${SYNC_READ_CHANGED_TOPIC}, got ${event.topic}`,
+      );
+    }
+    if (event.executionTarget !== options.executionTarget) {
+      throw new InternalHttpError(
+        'sync_read_changed_event_target_mismatch',
+        `outbox event target ${event.executionTarget} does not match relay target ${options.executionTarget}`,
+      );
+    }
+    const signal = parseSignal(event, options.executionTarget);
+    await options.delivery.deliver({
+      stream: signal.stream,
+      generation: signal.generation,
+    });
+  };
+}
+
 function parseSignal(
   event: OutboxEvent,
   executionTarget: DeploymentTarget,
-): SyncReadChangedSignal & { stream: RuntimeStream } {
+): SyncReadChangedSignal {
   if (event.topic !== SYNC_READ_CHANGED_TOPIC) {
     throw new Error(`sync_read_topic_mismatch:${event.topic}`);
   }
-  if (
-    typeof event.payload !== 'object' ||
-    event.payload === null ||
-    Array.isArray(event.payload)
-  ) {
-    throw new Error('sync_read_changed_payload_invalid');
+  try {
+    return parseSyncReadChangedSignal(event.payload, { executionTarget });
+  } catch (error) {
+    throw new Error(
+      `sync_read_changed_payload_invalid:${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
-  const signal = event.payload as Partial<SyncReadChangedSignal>;
-  const keys = Object.keys(signal).sort();
-  if (
-    keys.length !== 4 ||
-    keys[0] !== 'contractVersion' ||
-    keys[1] !== 'executionTarget' ||
-    keys[2] !== 'generation' ||
-    keys[3] !== 'stream' ||
-    signal.contractVersion !== 1 ||
-    typeof signal.generation !== 'string' ||
-    !/^(?:0|[1-9][0-9]*)$/.test(signal.generation)
-  ) {
-    throw new Error('sync_read_changed_payload_invalid');
-  }
-  if (signal.executionTarget !== executionTarget) {
-    throw new Error('sync_read_changed_target_mismatch');
-  }
-  if (!isRuntimeStream(signal.stream)) {
-    throw new Error('sync_read_changed_stream_invalid');
-  }
-  return syncReadChangedSignal({
-    executionTarget,
-    stream: signal.stream,
-    generation: signal.generation,
-  }) as SyncReadChangedSignal & { stream: RuntimeStream };
-}
-
-function isRuntimeStream(stream: SyncReadStream | undefined): stream is RuntimeStream {
-  return (
-    stream === 'edge_presence' ||
-    stream === 'publish_in_flight' ||
-    stream === 'captcha_availability' ||
-    stream === 'automation_config_mirror_health'
-  );
 }
