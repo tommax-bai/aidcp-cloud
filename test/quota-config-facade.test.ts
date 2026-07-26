@@ -38,10 +38,10 @@ function fakeStore() {
   return { store, rows, setCalls };
 }
 
-test('getCatalog：3 档 × 7 动作 全覆盖 + 空库显示派生默认 + overridden=false', () => {
+test('getCatalog：3 档 × 7 动作 全覆盖 + 空库显示派生默认 + overridden=false', async () => {
   const { store } = fakeStore();
   const panel = createQuotaConfigPanel({ store });
-  const view = panel.getCatalog();
+  const view = await panel.getCatalog();
   assert.equal(view.quotas.length, RISK_QUOTA_LEVELS.length * RISK_ACTIONS.length);
   const cl = view.quotas.find((q) => q.tier === 'conservative' && q.action === 'like')!;
   assert.equal(cl.daily, deriveWindowQuotas('conservative').day.like);

@@ -2015,7 +2015,7 @@ function createRequestHandler(
         sendJson(res, 503, { error: 'quota_config_unavailable' });
         return;
       }
-      sendJson(res, 200, deps.quotaConfig.getCatalog());
+      sendJson(res, 200, await deps.quotaConfig.getCatalog());
       return;
     }
     // ── 配置镜像健康只读投影（change config-mirror-cross-process-invalidation task 6.4）──────
@@ -2085,7 +2085,7 @@ function createRequestHandler(
         sendJson(res, 503, { error: 'pacing_unavailable' });
         return;
       }
-      sendJson(res, 200, deps.pacingConfig.getCatalog());
+      sendJson(res, 200, await deps.pacingConfig.getCatalog());
       return;
     }
     if (method === 'PUT' && url === '/api/pacing') {
@@ -2307,7 +2307,7 @@ function createRequestHandler(
         sendJson(res, 503, { error: 'session_limits_unavailable' });
         return;
       }
-      sendJson(res, 200, deps.sessionLimits.getView());
+      sendJson(res, 200, await deps.sessionLimits.getView());
       return;
     }
     if (method === 'PUT' && url === '/api/session-limits') {
@@ -2418,7 +2418,7 @@ function createRequestHandler(
         sendJson(res, 503, { error: 'resume_config_unavailable' });
         return;
       }
-      sendJson(res, 200, deps.resumeConfig.getView());
+      sendJson(res, 200, await deps.resumeConfig.getView());
       return;
     }
     if (method === 'PUT' && url === '/api/resume-config') {

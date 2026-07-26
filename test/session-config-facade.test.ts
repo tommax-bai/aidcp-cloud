@@ -69,10 +69,10 @@ function fakeStore() {
   return { store, setCalls };
 }
 
-test('getView：空库显示写死默认 + overridden=false', () => {
+test('getView：空库显示写死默认 + overridden=false', async () => {
   const { store } = fakeStore();
   const panel = createSessionLimitPanel({ store });
-  const view = panel.getView();
+  const view = await panel.getView();
   assert.equal(view.overridden, false);
   assert.equal(view.maxDurationMin, DEFAULT_SESSION_DURATION_MIN);
   assert.deepEqual(view.budget, { ...DEFAULT_SESSION_BUDGET });
@@ -140,9 +140,9 @@ test('预算 0 是合法值（= 该项禁止）', async () => {
   assert.equal(r.ok, true);
 });
 
-test('互动质量比例：空库显示写死默认 1:3 / 1:8', () => {
+test('互动质量比例：空库显示写死默认 1:3 / 1:8', async () => {
   const { store } = fakeStore();
-  const view = createSessionLimitPanel({ store }).getView();
+  const view = await createSessionLimitPanel({ store }).getView();
   assert.equal(view.collectSaveLikeDenom, DEFAULT_COLLECT_SAVE_LIKE_DENOM);
   assert.equal(view.followFansDenom, DEFAULT_FOLLOW_FANS_DENOM);
 });
@@ -171,9 +171,9 @@ test('互动质量比例：分母 0 / 负 / 非整 → invalid_value，整块拒
 
 // ── 「可活跃时间」周历掩码（change weekly-active-window）──────────────────────────
 
-test('「可活跃时间」掩码：getView 空库 → activeWeekMask=null（不限）', () => {
+test('「可活跃时间」掩码：getView 空库 → activeWeekMask=null（不限）', async () => {
   const { store } = fakeStore();
-  const view = createSessionLimitPanel({ store }).getView();
+  const view = await createSessionLimitPanel({ store }).getView();
   assert.equal(view.activeWeekMask, null);
 });
 

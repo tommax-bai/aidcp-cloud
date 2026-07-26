@@ -31,7 +31,7 @@ test('catalog：四类操作全列出、生效值 = 读出口夹逼后、overrid
   const { store, rows } = fakeStore();
   rows.set('action', { operation: 'action', minMs: 2000, maxMs: 5000, updatedAt: 't', updatedBy: 'alice' });
   const panel = createPacingConfigPanel({ store });
-  const view = panel.getCatalog();
+  const view = await panel.getCatalog();
   assert.equal(view.pacing.length, PACING_OPS.length);
   const action = view.pacing.find((p) => p.operation === 'action')!;
   assert.deepEqual({ minMs: action.minMs, maxMs: action.maxMs }, { minMs: 2000, maxMs: 5000 });

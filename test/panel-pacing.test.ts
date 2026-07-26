@@ -32,7 +32,8 @@ function makePacing(): { panel: PanelPacingConfig; setCalls: PacingConfigPatchIn
     }),
   });
   const panel: PanelPacingConfig = {
-    getCatalog: build,
+    // Remote owner clients resolve this method asynchronously; the panel route MUST await it.
+    getCatalog: async () => build(),
     setPacing: async (patch): Promise<PacingConfigSetResult> => {
       if (!(PACING_OPS as readonly string[]).includes(patch.operation)) return { ok: false, reason: 'unknown_operation' };
       const { minMs, maxMs } = patch;

@@ -1145,6 +1145,11 @@
     "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/agents/facebook-group-join-judge.ts（automation）析出纯 prompt 构建段：FacebookGroupJoinObservation 观测数据模型 + FacebookGroupJoinPhase 枚举 + buildFacebookGroupJoinJudgePrompt 纯函数（入参→prompt 字符串）。零 import、零 SQL、零 LLM、无进程内活状态。判定类 FacebookGroupJoinJudge（确定性短路 / LLM 调用 / 审计回写）留 facebook-group-join-judge.ts（automation）并从 kernel 等值再导出。供 api 侧静态 prompt 预览跨边界共导，消 1 条 api->automation 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
   },
   {
+    "path": "src/kernel/facebook-group-ops-types.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】split-cloud-api-composition-root-3a 从 Facebook 群面板依赖中收窄出 automation→api 的十方法单向 operation port。只含接口与纯载荷类型，唯一 import 指向同层 facebook-group-types.ts；不含 SQL、HTTP、LLM 或模块级活状态。刻意排除 importTargets / replaceTargetScopes：两者在新团队标签上会反向刷新 api 属主账号花名册，须留到 4a 双向配对。请求回写 §4.7 见控制仓该 change 的 §10 交付记录。"
+  },
+  {
     "path": "src/kernel/facebook-group-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/comment-agent/facebook-group-store.ts 析出纯数据模型类型闭包（FacebookGroupTargetRow / *ListRow / *ListOptions / *ListResult / *Facets / MembershipRow / *ScopeWriteRow / ReplaceFacebookGroupTargetScopesResult / JoinAuditOutcome / JoinRecentScheduledResult / ScopedTargetCount / ImportResult / AccountProgress + JoinGating/MembershipStatus 枚举）+ FacebookGroupScopeError（纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg。FacebookGroupStore 类 + SCHEMA_SQL + pg 读写 + DbRow 内部映射留 facebook-group-store.ts（automation）。供 api 侧面板/配置视图跨边界共导，消 3 条 api->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
@@ -2245,6 +2250,11 @@
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
+    "path": "src/transport/alert-resolution-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/transport/config-mirror-bump-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
@@ -2270,6 +2280,16 @@
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
+    "path": "src/transport/facebook-group-ops-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/group-route-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/transport/image-model-selection-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
@@ -2291,6 +2311,16 @@
   },
   {
     "path": "src/transport/outbox-notify-listener.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/panel-automation-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/panel-config-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },

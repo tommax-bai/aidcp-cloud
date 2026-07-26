@@ -61,7 +61,7 @@ export type QuotaConfigSetResult =
 // 拆进程时把此接口的实现换成内部客户端、调用点不改、行为零变更。
 export interface PanelQuotaConfig {
   /** 三档 × 全动作 × 三窗口生效值 + 审计（库缺行以写死默认合成回显）。 */
-  getCatalog(): QuotaConfigCatalogView;
+  getCatalog(): Promise<QuotaConfigCatalogView>;
   /** 写某 (tier,action) 限额。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
   setQuota(patch: QuotaConfigPatchInput, updatedBy: string): Promise<QuotaConfigSetResult>;
 }
@@ -108,7 +108,7 @@ export type PacingConfigSetResult =
 // 后台编辑 MUST 走 console → 取数侧 → 自动化侧；**取数侧 MUST NOT 直写 pacing_floor_config**。
 export interface PanelPacingConfig {
   /** 各类操作生效兜底区间 + 审计（库缺行以内置默认合成、含 clamp 护栏回显）。 */
-  getCatalog(): PacingConfigCatalogView;
+  getCatalog(): Promise<PacingConfigCatalogView>;
   /** 写某 op 兜底区间。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态目录。 */
   setPacing(patch: PacingConfigPatchInput, updatedBy: string): Promise<PacingConfigSetResult>;
 }
@@ -176,7 +176,7 @@ export type SessionLimitSetResult =
 // 后台编辑 MUST 走 console → 取数侧 → 自动化侧；**取数侧 MUST NOT 直写 session_config_global**。
 export interface PanelSessionLimits {
   /** 全局单场时长 + 互动预算生效值 + 审计（库无行以写死默认合成回显）。 */
-  getView(): SessionLimitView;
+  getView(): Promise<SessionLimitView>;
   /** 写全局单场上限。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态。 */
   set(patch: SessionLimitPatchInput, updatedBy: string): Promise<SessionLimitSetResult>;
 }
@@ -222,7 +222,7 @@ export type ResumeConfigSetResult =
 // 后台编辑 MUST 走 console → 取数侧 → 自动化侧；**取数侧 MUST NOT 直写 resume_config_global**。
 export interface PanelResumeConfig {
   /** 全局续场护栏 + 看门狗阈值生效值 + 审计（库无行以写死默认合成回显）。 */
-  getView(): ResumeConfigView;
+  getView(): Promise<ResumeConfigView>;
   /** 写全局续场配置。校验不过整块拒（绝不部分落库 / 假成功）。写后回真态。 */
   set(patch: ResumeConfigPatchInput, updatedBy: string): Promise<ResumeConfigSetResult>;
 }

@@ -474,7 +474,7 @@ test('5.2 面板回显的限额数字与同一时刻生效的数字逐格相等�
   await store.set('normal', 'like', { daily: 33, perMinute: 2, perHour: 9 }, 'panel');
 
   const panel = createQuotaConfigPanel({ store });
-  const catalog = panel.getCatalog();
+  const catalog = await panel.getCatalog();
   for (const tier of RISK_QUOTA_LEVELS) {
     // 生效值：RiskController 的 QuotaProvider 取值口（canDo 每次现读的那一个）。
     const effective = store.windowQuotasFor(tier);

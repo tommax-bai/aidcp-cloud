@@ -34,6 +34,31 @@ test('delegated worker startup recovery finishes before its execution pump is an
   assert.ok(workerStart < readyLog, 'interrupted claims must recover before worker readiness is announced');
 });
 
+test('automation internal API keeps non-risk owner routes when risk registry is unavailable', async () => {
+  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('async function startAutomationInternalApi(');
+  const end = source.indexOf('\nasync function startContentReadApi(', start);
+  assert.ok(start >= 0 && end > start, 'automation internal API composition must exist');
+  const body = source.slice(start, end);
+  assert.doesNotMatch(body, /if\s*\(\s*!registry\s*\)\s*(?:\{[^}]*\}\s*)?return\b/);
+  for (const registration of [
+    'registerPanelAutomationRoutes(',
+    'registerPanelConfigRoutes(',
+    'registerFacebookGroupOpsRoutes(',
+    'registerGroupRouteRoutes(',
+    'registerAlertResolutionRoutes(',
+  ]) {
+    assert.ok(
+      body.includes(registration),
+      `${registration} must stay in the automation internal API composition`,
+    );
+  }
+  assert.ok(
+    body.indexOf('registerPanelAutomationRoutes(') > body.indexOf("console.warn('[aidcp-cloud] automation 内部 API：risk-read"),
+    'non-risk owner routes must be registered after the optional risk-read branch, not nested inside it',
+  );
+});
+
 test('every Feishu receiver production composition injects the durable approval write authority', async () => {
   const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
   const compositions = [...source.matchAll(/new FeishuWsReceiver\(\{([\s\S]*?)\n  \}\);/g)].map((match) => match[1] ?? '');

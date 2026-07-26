@@ -362,8 +362,8 @@ import type { PipelineLogSink } from './kernel/pipeline-log-contract.js';
 import type { PublishLogWriter } from './kernel/publish-log-writer-port.js';
 import { PublishStatusHttpClient, registerPublishStatusRoutes } from './transport/publish-status-http.js';
 import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './transport/publish-generation-http.js';
-// Block② 2e：拆进程后 api ↔ automation 的三条跨段传输接缝。默认 monolith 全不启用（红线：monolith 不起任何新东西）。
-//   - 风控只读投影：api 经 HTTP 客户端读 automation 的内部只读 API（server 侧 registerRiskReadRoutes）。
+// Block② 2e：拆进程后 api ↔ automation 的跨段传输接缝。默认 monolith 全不启用（红线：monolith 不起任何新东西）。
+//   - 风控只读投影：api 经 HTTP 客户端读 automation 的内部 API（server 侧 registerRiskReadRoutes）。
 //   - 风控写：api 只 emit 命令落 outbox；automation 唯一消费者经真 RiskController 应用（单写不变量物理成立）。
 //   - 事件观测：automation 把 EventBus tee 到 outbox；api 回放进本进程 EventBus → panel-ws。
 import { RiskReadHttpClient, registerRiskReadRoutes } from './transport/risk-read-http.js';
@@ -376,6 +376,27 @@ import type { AccountRosterSourcePort } from './kernel/account-projection-types.
 import type { RiskReadPort } from './kernel/risk-read-types.js';
 import type { PanelAutomationReader } from './kernel/panel-automation-types.js';
 import { PgPanelAutomationRead } from './risk/panel-automation-read.js';
+import {
+  PanelAutomationHttpClient,
+  registerPanelAutomationRoutes,
+} from './transport/panel-automation-http.js';
+import {
+  PanelPacingConfigHttpClient,
+  PanelQuotaConfigHttpClient,
+  PanelResumeConfigHttpClient,
+  PanelSessionLimitsHttpClient,
+  registerPanelConfigRoutes,
+} from './transport/panel-config-http.js';
+import type { FacebookGroupOpsPort } from './kernel/facebook-group-ops-types.js';
+import { registerFacebookGroupOpsRoutes } from './transport/facebook-group-ops-http.js';
+import {
+  GroupRouteHttpClient,
+  registerGroupRouteRoutes,
+} from './transport/group-route-http.js';
+import {
+  AlertResolutionHttpClient,
+  registerAlertResolutionRoutes,
+} from './transport/alert-resolution-http.js';
 import {
   emitRiskCommand,
   startRiskCommandConsumer,
@@ -409,8 +430,8 @@ import {
   INTERACTION_AUDIT_RELAY_CONSUMER,
   decodeInteractionAuditEvent,
 } from './kernel/interaction-audit-outbox.js';
-/** automation 内部只读 API 的默认监听端口（可由 AIDCP_AUTOMATION_PORT 覆盖）；api 侧 base URL 由 AIDCP_AUTOMATION_URL 指定。 */
-const DEFAULT_AUTOMATION_READ_API_PORT = 8093;
+/** automation 内部 API 的默认监听端口（可由 AIDCP_AUTOMATION_PORT 覆盖）；api 侧 base URL 由 AIDCP_AUTOMATION_URL 指定。 */
+const DEFAULT_AUTOMATION_INTERNAL_API_PORT = 8093;
 /** api 进程内部 API 的默认监听端口（可由 `AIDCP_API_PORT` 覆盖）。 */
 const DEFAULT_API_INTERNAL_API_PORT = 8094;
 import { PgAlertStore } from './alerts/index.js';
@@ -862,9 +883,9 @@ async function main(): Promise<void> {
   if (segments.segC) await segCAutomation(ctx);
   if (segments.segD) await segDApiServing(ctx);
   if (listeners.contentReadApi) await startContentReadApi(ctx);
-  // Block② 2e：automation 独立进程起内部只读 API（供 api 进程经 RiskReadHttpClient 读风控投影）。
+  // Block② 2e：automation 独立进程起内部 API（供 api/content 进程访问 automation-owned 能力）。
   // 仅 automation 模式起：monolith/core 的 segD 与 registry 同进程、走本地适配（不需 HTTP）；content/api 无 registry。
-  if (mode === 'automation') await startAutomationReadApi(ctx);
+  if (mode === 'automation') await startAutomationInternalApi(ctx);
   // Block③ L3：api 独立进程起内部写 API（供 automation 进程的失效信号中继把 bump 推过来）。
   // 仅 api 模式起：monolith/core/content 的 api 池就在本进程、中继走本地 sink、零 HTTP。
   if (mode === 'api') await startApiInternalApi(ctx);
@@ -922,30 +943,57 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
 }
 
 /**
- * automation 进程独占的内部 API：把本进程 RiskControllerRegistry 的账号维只读投影
- * （getState / effectiveQuotas / slowStartView）暴露为内部 HTTP route，供 api 进程经 RiskReadHttpClient 远程取。
- * 仅 automation 模式调用（monolith/core 的 segD 走本地适配、不需 HTTP；content/api 无 registry）。
- * registry 缺失（segC 未构造）时不静默假成功：如实告警、不注册路由。
+ * automation 进程独占的内部 API：按能力注册 automation-owned 读写端口，供 api/content 进程消费。
+ * 仅 automation 模式调用（monolith/core 同进程直调；content/api 不拥有这些事实）。
  *
- * **这里注册的写端点只有「提交命令 + 回读结局」两类**（change cloud-coupling-phase5 P5-1）：
- * 提交只落 outbox 行、回读只查结果账本，二者都不碰 `RiskController`。真正改状态的三个方法
- * 仍只在本进程 outbox 消费者的那一处回调里被调用——风控单写不变量在进程边界上物理成立。
- * 风控命令服务缺失（target 非法）时同样不注册：宁可 api 侧调用报 404，也绝不受理一条没人应用的命令。
+ * 配置、Facebook 群运营、群路由与告警的写端点只转调各自 automation owner；风控命令端点
+ * 只提交 outbox 并回读结果账本，不直接碰 `RiskController`。真正改风控状态的三个方法仍只在
+ * 本进程 outbox 消费者的那一处回调里被调用，风控单写不变量在进程边界上物理成立。
+ * 可选 owner 缺失时不注册对应能力：宁可调用报 404，也不返回伪造成功。
  */
-async function startAutomationReadApi(ctx: CompositionContext): Promise<void> {
-  const registry = ctx.riskRegistry;
-  if (!registry) {
-    console.warn('[aidcp-cloud] automation 内部只读 API 未起：RiskControllerRegistry 不可用（segC 未构造）');
-    return;
-  }
-  const local: RiskReadPort = {
-    getState: (accountId) => registry.getController(accountId).then((c) => c.getState()),
-    effectiveQuotas: (accountId) => registry.getController(accountId).then((c) => c.effectiveQuotas()),
-    slowStartView: (accountId) => registry.getController(accountId).then((c) => c.slowStartView()),
-  };
-  const port = readEnvPort('AIDCP_AUTOMATION_PORT') ?? DEFAULT_AUTOMATION_READ_API_PORT;
+async function startAutomationInternalApi(ctx: CompositionContext): Promise<void> {
+  const port = readEnvPort('AIDCP_AUTOMATION_PORT') ?? DEFAULT_AUTOMATION_INTERNAL_API_PORT;
   const httpServer = new InternalHttpServer();
-  registerRiskReadRoutes(httpServer, local);
+  const registry = ctx.riskRegistry;
+  if (registry) {
+    const local: RiskReadPort = {
+      getState: (accountId) => registry.getController(accountId).then((c) => c.getState()),
+      effectiveQuotas: (accountId) => registry.getController(accountId).then((c) => c.effectiveQuotas()),
+      slowStartView: (accountId) => registry.getController(accountId).then((c) => c.slowStartView()),
+    };
+    registerRiskReadRoutes(httpServer, local);
+  } else {
+    console.warn('[aidcp-cloud] automation 内部 API：risk-read 路由未注册（RiskControllerRegistry 不可用）');
+  }
+  registerPanelAutomationRoutes(httpServer, new PgPanelAutomationRead({ pool: ctx.automationPool }));
+  registerPanelConfigRoutes(httpServer, {
+    quota: createQuotaConfigPanel({ store: ctx.quotaConfigStore }),
+    pacing: createPacingConfigPanel({ store: ctx.pacingConfigStore }),
+    session: createSessionLimitPanel({ store: ctx.sessionConfigStore }),
+    resume: createResumeConfigPanel({ store: ctx.resumeConfigStore }),
+  });
+  const facebookGroupOps: FacebookGroupOpsPort = {
+    listTargets: (options) => ctx.facebookGroupTargetStore.listTargets(options),
+    listFacets: () => ctx.facebookGroupTargetStore.listFacets(),
+    setEnabled: (groupUrl, enabled) => ctx.facebookGroupTargetStore.setEnabled(groupUrl, enabled),
+    accountProgress: () => ctx.facebookGroupTargetStore.accountProgress(),
+    listAssignments: (limit) => ctx.facebookGroupMembershipStore.listAssignments(limit),
+    reclaimStaleAssignments: (ttlMs) =>
+      ctx.facebookGroupMembershipStore.reclaimStaleAssignments(ttlMs),
+    scopedTargetCountForAccount: (accountId) =>
+      ctx.facebookGroupTargetStore.scopedTargetCountForAccount(accountId),
+    scopedTargetCountsForAccounts: (accountIds) =>
+      ctx.facebookGroupTargetStore.scopedTargetCountsForAccounts(accountIds),
+    latestScheduledResult: (accountId) =>
+      ctx.facebookGroupJoinAuditStore.latestScheduledResult(accountId),
+    latestScheduledResults: (accountIds) =>
+      ctx.facebookGroupJoinAuditStore.latestScheduledResults(accountIds),
+  };
+  registerFacebookGroupOpsRoutes(httpServer, facebookGroupOps);
+  if (ctx.groupRouteStore) registerGroupRouteRoutes(httpServer, ctx.groupRouteStore);
+  else console.warn('[aidcp-cloud] automation 内部 API：群路由未注册（GroupRouteStore 不可用）');
+  if (ctx.alertStore) registerAlertResolutionRoutes(httpServer, ctx.alertStore);
+  else console.warn('[aidcp-cloud] automation 内部 API：告警勾销未注册（PgAlertStore 不可用）');
   // 参照稿触发去重读（change cloud-batch2-content-main）：委托任务台账是本域属主表，
   // content 侧精选库经这条 route 取。缺则如实告警、不注册。
   if (ctx.triggeredPublishRefs) registerTriggeredPublishRefsRoutes(httpServer, ctx.triggeredPublishRefs);
@@ -955,7 +1003,12 @@ async function startAutomationReadApi(ctx: CompositionContext): Promise<void> {
   else console.warn('[aidcp-cloud] risk-command 端点未注册：AIDCP_DEPLOY_ENV 缺失/非法，命令无人应用故不受理');
   const actual = await httpServer.listen(port);
   console.log(
-    `[aidcp-cloud] automation 内部 API 已监听 127.0.0.1:${actual}（risk-read${commandService ? ' + risk-command' : ''} 端点）`,
+    `[aidcp-cloud] automation 内部 API 已监听 127.0.0.1:${actual}` +
+      `（panel-automation + panel-config + facebook-group-ops` +
+      `${ctx.groupRouteStore ? ' + group-route' : ''}` +
+      `${ctx.alertStore ? ' + alert-resolution' : ''}` +
+      `${registry ? ' + risk-read' : ''}` +
+      `${commandService ? ' + risk-command' : ''} 端点）`,
   );
 }
 
@@ -6303,19 +6356,34 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     thinkingOnAvailable,
     probeModel: probeModelResult,
   });
-  // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
-  const quotaConfigPanel = createQuotaConfigPanel({ store: quotaConfigStore });
-  // 操作兜底 floor 面板外观（change pacing-floor-config-min-interval）：四类操作生效兜底区间 + 写校验（展宽/CAP，非法整块拒）+ 非乐观回真态。
-  const pacingConfigPanel = createPacingConfigPanel({ store: pacingConfigStore });
-  // 单场上限面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局时长 + 七项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
-  const sessionLimitPanel = createSessionLimitPanel({ store: sessionConfigStore });
-  // 引流线索热度过滤阈值面板外观（全局单例，change feed-hot-lead-group-comment）：三阈值回显 + 写校验（非法整块拒）+ 热加载。
-  const hotLeadConfigPanel = createHotLeadConfigPanel({ store: hotLeadConfigStore });
-  // 续场配置面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局续场护栏 + 看门狗阈值回显 + 写校验 + 非乐观回真态。
-  const resumeConfigPanel = createResumeConfigPanel({ store: resumeConfigStore });
   // ── Block② 2e：运行模式（纯选择器，与 main() 同源）。segD 只在 monolith / api / core 跑。─────
   const mode = serviceModeFromEnv();
   const { deploymentTarget } = ctx; // 'dev'|'ol'|null（segA 设）；outbox emit / 消费的 executionTarget。
+  const automationBaseUrl =
+    readEnvString('AIDCP_AUTOMATION_URL') ?? `http://127.0.0.1:${DEFAULT_AUTOMATION_INTERNAL_API_PORT}`;
+  const automationHttp = new InternalHttpClient(automationBaseUrl);
+  const groupRoutes =
+    mode === 'api' ? new GroupRouteHttpClient(automationHttp) : groupRouteStore;
+  const alertResolution =
+    mode === 'api' ? new AlertResolutionHttpClient(automationHttp) : alertStore;
+  // 安全限额面板外观（change safety-quota-config）：三档×动作×三窗口生效值 + 写校验（非法整块拒）+ 非乐观回真态。
+  const quotaConfigPanel = mode === 'api'
+    ? new PanelQuotaConfigHttpClient(automationHttp)
+    : createQuotaConfigPanel({ store: quotaConfigStore });
+  // 操作兜底 floor 面板外观（change pacing-floor-config-min-interval）：四类操作生效兜底区间 + 写校验（展宽/CAP，非法整块拒）+ 非乐观回真态。
+  const pacingConfigPanel = mode === 'api'
+    ? new PanelPacingConfigHttpClient(automationHttp)
+    : createPacingConfigPanel({ store: pacingConfigStore });
+  // 单场上限面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局时长 + 七项预算回显 + 写校验（非法整块拒）+ 非乐观回真态。
+  const sessionLimitPanel = mode === 'api'
+    ? new PanelSessionLimitsHttpClient(automationHttp)
+    : createSessionLimitPanel({ store: sessionConfigStore });
+  // 引流线索热度过滤阈值面板外观（全局单例，change feed-hot-lead-group-comment）：三阈值回显 + 写校验（非法整块拒）+ 热加载。
+  const hotLeadConfigPanel = createHotLeadConfigPanel({ store: hotLeadConfigStore });
+  // 续场配置面板外观（全局单例，change restore-auto-resume-and-global-safety-config）：全局续场护栏 + 看门狗阈值回显 + 写校验 + 非乐观回真态。
+  const resumeConfigPanel = mode === 'api'
+    ? new PanelResumeConfigHttpClient(automationHttp)
+    : createResumeConfigPanel({ store: resumeConfigStore });
   // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
   // 判据三条全中才搬：① segA 赋值 ② 只有本段读 ③ **segA 自己不再引用它**。
   // segA 仍引用的一律留在 segA（含声明前就被惰性回调捕获的**前向引用**，那类最阴）。
@@ -6355,15 +6423,13 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   const panelUsers = ctx.panelUsers ?? parsePanelUsers(readEnvString('AIDCP_PANEL_USERS'));
   // 风控只读投影端口（seam①·风控读）。
   //   - monolith / core：本地适配（就是本进程 riskRegistry，逐字节等价、零 HTTP）。
-  //   - api：HTTP 客户端（指向 automation 的内部只读 API）。segC 未跑 ⇒ 本进程无 riskRegistry。
+  //   - api：HTTP 客户端（指向 automation 的内部 API）。segC 未跑 ⇒ 本进程无 riskRegistry。
   //     base URL 走 AIDCP_AUTOMATION_URL；缺省回落 127.0.0.1:<默认端口>（仅解析 URL、不发网络，构造不抛）。
-  const automationBaseUrl =
-    readEnvString('AIDCP_AUTOMATION_URL') ?? `http://127.0.0.1:${DEFAULT_AUTOMATION_READ_API_PORT}`;
   // 批次 0e：本地分支依赖 riskRegistry（自动化段构造）。monolith / core 跑了那一段 ⇒ 必有，逐字节等价；
   // 若某个未来模式既不是 api、又没跑自动化段，这里给 reject 具名错误的端口 —— 绝不让 undefined 落穿。
   const riskRead: RiskReadPort =
     mode === 'api'
-      ? new RiskReadHttpClient(new InternalHttpClient(automationBaseUrl))
+      ? new RiskReadHttpClient(automationHttp)
       : riskRegistry
         ? {
             getState: (accountId) => riskRegistry.getController(accountId).then((c) => c.getState()),
@@ -6382,7 +6448,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   //     那会让操作员提交完看到 202、命令却从未存在（红线：静默假成功）。
   const riskCommands: RiskCommandPort =
     mode === 'api'
-      ? new RiskCommandHttpClient(new InternalHttpClient(automationBaseUrl))
+      ? new RiskCommandHttpClient(automationHttp)
       : (ctx.riskCommandService ?? {
           submitSignal: unavailableInMode('risk_command'),
           submitQuotaLevel: unavailableInMode('risk_command'),
@@ -6390,19 +6456,11 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
         });
   // 面板对 automation 域的只读投影端口（Block③ L3：面板不直连 automation 的库）。
   //   - monolith / core：跑在本进程 automation 池上的本地实现（PgPanelAutomationRead），逐字节等价、零 HTTP。
-  //   - api：segC 未跑 ⇒ 本进程无 automation 属主表；HTTP 客户端待 Block② 补（automation 内部读 API 增面板端点）。
-  //     暂 fail-closed（各方法 reject 具名错误），镜像同段 publishStatusLocal 的 api 模式 reject 先例；
-  //     api 模式当前未部署，此路不改现网行为。面板的 api 属主读（accounts/publish_log/persona_config）不受影响。
+  //   - api：segC 未跑 ⇒ 本进程无 automation 属主表，经同一个 automation internal HTTP client 取投影。
+  //     owner/transport 失败原样抛，绝不回零或空数组冒充「今天没干活」。
   const panelAutomationRead: PanelAutomationReader =
     mode === 'api'
-      ? {
-          todayActionTotals: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
-          todayActionTotalsByAccount: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
-          todayLikeViewTotal: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
-          riskStateProjection: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
-          listAlerts: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
-          listInteractions: () => Promise.reject(new Error('panel_automation_read_unavailable_in_api_mode')),
-        }
+      ? new PanelAutomationHttpClient(automationHttp)
       : new PgPanelAutomationRead({ pool: automationPool });
   // ── Block② 数据网关（决定①：api/panel 收口取数）─────────────────────────────
   // 聚合三个 kernel 读端口（精选库 / 委托任务 / 收件箱），api 消费者从这里取端口注入。
@@ -6680,7 +6738,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           notificationContact: notificationContactStore,
           // 团队 → 群路由配置面（change feishu-per-team-notification-routing）。同一 group_route store 实例：读=全部映射、写=按团队键 upsert/清除。
           // init 失败留 undefined 时面板自然 503，绝不崩闭环。botChatStore 已注入（GET /api/bot-chats 复用其 listActive）。
-          notificationRoutes: groupRouteStore,
+          notificationRoutes: groupRoutes,
           approvalPolicies: approvalPolicyStore
             ? {
                 list: async () => {
@@ -6795,7 +6853,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           },
           // 告警手动解决（change alert-resolution-by-id）：复用同一告警存储单例（上方 L811 构造，init 失败为 undefined）。
           // 面板按 alert_id 勾销单条告警；未注入时路由自然 503。只闭合日志行，绝不碰风控单写 / edge 恢复。
-          alertStore,
+          alertStore: alertResolution,
           // 对外客户管理（change edge-client-customer-auth）：内部 JWT 保护的 /api/client-users*。同一 store 实例
           // 亦供客户鉴权服务做 auth/scope 读（单实例共享池）。绝不回传 key/hash。
           clientUsers: clientUserStore,

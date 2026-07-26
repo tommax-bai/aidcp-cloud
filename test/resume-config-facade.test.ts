@@ -59,10 +59,10 @@ function fakeStore() {
   return { store, setCalls };
 }
 
-test('getView：空库显示写死默认 + overridden=false', () => {
+test('getView：空库显示写死默认 + overridden=false', async () => {
   const { store } = fakeStore();
   const panel = createResumeConfigPanel({ store });
-  const v = panel.getView();
+  const v = await panel.getView();
   assert.equal(v.overridden, false);
   assert.equal(v.restRatioPct, 10);
   assert.equal(v.activeWindowStartMin, 0);
