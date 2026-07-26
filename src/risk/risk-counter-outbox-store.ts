@@ -163,7 +163,8 @@ export class PgRiskCounterOutboxStore implements RiskCounterOutbox {
   /**
    * 单事务内完成两件事：写 risk_counters（带 outbox_id）+ 标 outbox 行 applied。
    *
-   * `ON CONFLICT (outbox_id) DO NOTHING` 让重复 apply 不产生第二行计数；
+   * conflict target 显式带 `outbox_id IS NOT NULL`，与部署的部分唯一索引谓词一致，
+   * 让 PostgreSQL 能推断该索引且重复 apply 不产生第二行计数；
    * `UPDATE ... AND claim_token = $` 让**租约已被别人回收**的行不会被我们误标已应用
    * （那一行会被真正的持有者再 apply 一次，而唯一索引保证计数仍只有一行）。
    */
@@ -176,7 +177,7 @@ export class PgRiskCounterOutboxStore implements RiskCounterOutbox {
         await client.query(
           `INSERT INTO risk_counters (account_id, action, count, occurred_at, outbox_id)
            VALUES ($1, $2, 1, to_timestamp($3 / 1000.0), $4)
-           ON CONFLICT (outbox_id) DO NOTHING`,
+           ON CONFLICT (outbox_id) WHERE outbox_id IS NOT NULL DO NOTHING`,
           [row.accountId, row.action, row.occurredAt, row.id],
         );
         const marked = await client.query(
