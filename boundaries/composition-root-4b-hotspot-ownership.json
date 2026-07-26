@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "change": "split-cloud-api-composition-root-4b",
+  "baseCloudSha": "67941e495ad52c22b08e4a85ef530245b2fac517",
+  "blockingChange": "split-cloud-api-composition-root-4a",
+  "parallelBefore4aLands": [
+    {
+      "surface": "kernel sync-read contracts and scheduled catalog",
+      "allowed": true
+    },
+    {
+      "surface": "versioned snapshot route and client primitives",
+      "allowed": true
+    },
+    {
+      "surface": "atomic cursor, digest, freshness and readiness runtime",
+      "allowed": true
+    },
+    {
+      "surface": "machine-readable inventory and source guards",
+      "allowed": true
+    }
+  ],
+  "blockedUntilPost4aCensus": [
+    {
+      "surface": "src/server.ts",
+      "reason": "4a is the only writer while authority ports and command routes are landing"
+    },
+    {
+      "surface": "AccountRosterSourcePort",
+      "reason": "B4 must extend the exact post-4a minimal roster instead of racing its contract"
+    },
+    {
+      "surface": "automation_account_projection",
+      "reason": "B4 fields and write paths depend on the post-4a consumer census"
+    },
+    {
+      "surface": "persona, client-environment and account owner mutations",
+      "reason": "B1, B2 and B4 version bumps must be audited after 4a moves notification and card consumers"
+    }
+  ],
+  "postBarrierOwner": "split-cloud-api-composition-root-4b",
+  "barrierReleaseEvidence": [
+    "4a exact Cloud default-branch SHA",
+    "4b rebased onto that SHA",
+    "post-4a call-site and write-path census",
+    "minimal B1/B2/B4 field inventory"
+  ]
+}

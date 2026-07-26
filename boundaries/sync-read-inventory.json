@@ -1,0 +1,560 @@
+{
+  "schemaVersion": 1,
+  "baseline": {
+    "cloudSha": "67941e495ad52c22b08e4a85ef530245b2fac517",
+    "controlChange": "split-cloud-api-composition-root-4b",
+    "note": "Pre-4a census. B1/B2/B4 fields must be recounted after 4a lands before owner/projection/root edits."
+  },
+  "censusPolicies": [
+    {
+      "id": "A1-content-schedule-injection",
+      "inventoryIds": ["A1"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "const contentScheduleStore = new ContentScheduleStore({",
+      "endMarker": "const facebookGroupJoinAutomationStore",
+      "receiverPattern": "sessionConfigStore",
+      "symbolPrefix": "SessionConfigStore",
+      "sourceFile": "src/config/session-config-store.ts"
+    },
+    {
+      "id": "A2-catalog-consumer",
+      "inventoryIds": ["A2"],
+      "mode": "receiver_methods",
+      "file": "src/config/content-schedule-store.ts",
+      "receiverPattern": "this\\.scheduledAutomationCatalog",
+      "symbolPrefix": "ScheduledAutomationCatalogReader",
+      "sourceFile": "src/kernel/platform-types.ts"
+    },
+    {
+      "id": "A3-panel-edge-contract",
+      "inventoryIds": ["A3"],
+      "mode": "method_declarations",
+      "file": "src/panel/types.ts",
+      "startMarker": "edgeServer: {",
+      "endMarker": "};",
+      "symbolPrefix": "EdgeCloudServer",
+      "sourceFile": "src/comm/ws-server.ts"
+    },
+    {
+      "id": "A3-api-edge-resolution",
+      "inventoryIds": ["A3"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segDApiServing(",
+      "endMarker": "main().catch(",
+      "receiverPattern": "requireSegment\\(server,\\s*'server',\\s*'automation'\\)",
+      "symbolPrefix": "EdgeCloudServer",
+      "sourceFile": "src/comm/ws-server.ts"
+    },
+    {
+      "id": "A4-api-in-flight",
+      "inventoryIds": ["A4"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segDApiServing(",
+      "endMarker": "main().catch(",
+      "receiverPattern": "requireSegment\\(publishDispatcher,\\s*'publishDispatcher',\\s*'automation'\\)",
+      "symbolPrefix": "PublishDispatcher",
+      "sourceFile": "src/publish-agent/publish-dispatcher.ts"
+    },
+    {
+      "id": "A5-api-captcha",
+      "inventoryIds": ["A5"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segDApiServing(",
+      "endMarker": "main().catch(",
+      "receiverPattern": "captchaAssist",
+      "symbolPrefix": "CaptchaAssist",
+      "sourceFile": "src/comm/captcha-assist.ts"
+    },
+    {
+      "id": "A6-api-automation-health",
+      "inventoryIds": ["A6"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segDApiServing(",
+      "endMarker": "main().catch(",
+      "receiverPattern": "requireSegment\\(configMirrorRefresher,\\s*'configMirrorRefresher',\\s*'automation'\\)",
+      "symbolPrefix": "ConfigMirrorRefresher",
+      "sourceFile": "src/config/mirror-refresher.ts"
+    },
+    {
+      "id": "B1-automation-persona",
+      "inventoryIds": ["B1"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segCAutomation(",
+      "endMarker": "async function segDApiServing(",
+      "receiverPattern": "personaStore",
+      "symbolPrefix": "PersonaStore",
+      "sourceFile": "src/config/persona-store.ts"
+    },
+    {
+      "id": "B2-automation-client-environment",
+      "inventoryIds": ["B2"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segCAutomation(",
+      "endMarker": "async function segDApiServing(",
+      "receiverPattern": "clientUserStore",
+      "symbolPrefix": "ClientUserStore",
+      "sourceFile": "src/client-auth/client-user-store.ts"
+    },
+    {
+      "id": "B3-local-freshness-imports",
+      "inventoryIds": ["B3"],
+      "mode": "named_imports",
+      "file": "src/server.ts",
+      "modulePatterns": [
+        "./config/mirror-stop-work.js",
+        "./config-mirror-freshness.js"
+      ]
+    },
+    {
+      "id": "B4-automation-account-store",
+      "inventoryIds": ["B4"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segCAutomation(",
+      "endMarker": "async function segDApiServing(",
+      "receiverPattern": "accountStore",
+      "symbolPrefix": "PgAccountStore",
+      "sourceFile": "src/account-store.ts"
+    },
+    {
+      "id": "B4-automation-account-state",
+      "inventoryIds": ["B4"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segCAutomation(",
+      "endMarker": "async function segDApiServing(",
+      "receiverPattern": "accountState",
+      "symbolPrefix": "AccountStateManager",
+      "sourceFile": "src/account-state.ts"
+    },
+    {
+      "id": "B5-content-schedule",
+      "inventoryIds": ["B5"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segCAutomation(",
+      "endMarker": "async function segDApiServing(",
+      "receiverPattern": "contentScheduleStore",
+      "symbolPrefix": "ContentScheduleStore",
+      "sourceFile": "src/config/content-schedule-store.ts"
+    },
+    {
+      "id": "B5-hot-lead",
+      "inventoryIds": ["B5"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segCAutomation(",
+      "endMarker": "async function segDApiServing(",
+      "receiverPattern": "hotLeadConfigStore",
+      "symbolPrefix": "HotLeadConfigStore",
+      "sourceFile": "src/config/hot-lead-config-store.ts"
+    },
+    {
+      "id": "B5-facebook-comment",
+      "inventoryIds": ["B5"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segCAutomation(",
+      "endMarker": "async function segDApiServing(",
+      "receiverPattern": "facebookCommentConfigStore",
+      "symbolPrefix": "FacebookCommentConfigStore",
+      "sourceFile": "src/config/facebook-comment-config-store.ts"
+    },
+    {
+      "id": "B5-facebook-group-join",
+      "inventoryIds": ["B5"],
+      "mode": "receiver_methods",
+      "file": "src/server.ts",
+      "startMarker": "async function segCAutomation(",
+      "endMarker": "async function segDApiServing(",
+      "receiverPattern": "facebookGroupJoinAutomationStore",
+      "symbolPrefix": "FacebookGroupJoinAutomationStore",
+      "sourceFile": "src/config/facebook-group-join-automation-store.ts"
+    }
+  ],
+  "items": [
+    {
+      "id": "A1",
+      "owner": "automation",
+      "consumer": "api",
+      "factScope": "shared",
+      "transport": "owner_snapshot",
+      "streams": ["session_config_global"],
+      "localShape": "single weekActiveMask value",
+      "freshnessTier": "required_parameter",
+      "members": [
+        {
+          "symbol": "SessionConfigStore.weekActiveMask",
+          "method": "weekActiveMask",
+          "sourceFile": "src/config/session-config-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "A2",
+      "owner": "automation",
+      "consumer": "api",
+      "factScope": "static",
+      "transport": "kernel_static",
+      "streams": [],
+      "localShape": "shared scheduled automation catalog reader",
+      "freshnessTier": "compile_time",
+      "members": [
+        {
+          "symbol": "ScheduledAutomationCatalogReader.normalizeForCatalog",
+          "method": "normalizeForCatalog",
+          "sourceFile": "src/kernel/platform-types.ts",
+          "callSiteFiles": ["src/config/content-schedule-store.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "ScheduledAutomationCatalogReader.availableActions",
+          "method": "availableActions",
+          "sourceFile": "src/kernel/platform-types.ts",
+          "callSiteFiles": ["src/config/content-schedule-store.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "ScheduledAutomationCatalogReader.declarationsFor",
+          "method": "declarationsFor",
+          "sourceFile": "src/kernel/platform-types.ts",
+          "callSiteFiles": ["src/config/content-schedule-store.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "A3",
+      "owner": "automation",
+      "consumer": "api",
+      "factScope": "target",
+      "transport": "owner_snapshot",
+      "streams": ["edge_presence"],
+      "localShape": "edge counts and account-to-edge index",
+      "freshnessTier": "gate",
+      "members": [
+        {
+          "symbol": "EdgeCloudServer.edgeCount",
+          "method": "edgeCount",
+          "sourceFile": "src/comm/ws-server.ts",
+          "callSiteFiles": ["src/panel/types.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "EdgeCloudServer.onlineEdgeCount",
+          "method": "onlineEdgeCount",
+          "sourceFile": "src/comm/ws-server.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "EdgeCloudServer.resolveEdgeIdForAccount",
+          "method": "resolveEdgeIdForAccount",
+          "sourceFile": "src/comm/ws-server.ts",
+          "callSiteFiles": ["src/server.ts", "src/publish-agent/publish-dispatcher.ts"],
+          "kind": "sync_read"
+        }
+      ],
+      "excludedSideEffects": [
+        {
+          "symbol": "EdgeCloudServer.resumeEdgesForAccount",
+          "method": "resumeEdgesForAccount",
+          "ownerChange": "split-cloud-api-composition-root-4a",
+          "mechanism": "authenticated_target_bound_idempotent_command_with_result_unknown"
+        }
+      ]
+    },
+    {
+      "id": "A4",
+      "owner": "automation",
+      "consumer": "api",
+      "factScope": "target",
+      "transport": "owner_snapshot",
+      "streams": ["publish_in_flight"],
+      "localShape": "recordId set",
+      "freshnessTier": "gate",
+      "members": [
+        {
+          "symbol": "PublishDispatcher.getInFlightRecordIds",
+          "method": "getInFlightRecordIds",
+          "sourceFile": "src/publish-agent/publish-dispatcher.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "A5",
+      "owner": "automation",
+      "consumer": "api",
+      "factScope": "target",
+      "transport": "owner_snapshot",
+      "streams": ["captcha_availability"],
+      "localShape": "disabled, available, unavailable or unknown capability state",
+      "freshnessTier": "required_gate",
+      "members": [
+        {
+          "symbol": "CaptchaAssist.isAvailable",
+          "method": "isAvailable",
+          "sourceFile": "src/comm/captcha-assist.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "A6",
+      "owner": "automation",
+      "consumer": "api",
+      "factScope": "target",
+      "transport": "owner_snapshot",
+      "streams": ["automation_config_mirror_health"],
+      "localShape": "automation-local mirror health section plus delivery state",
+      "freshnessTier": "required_parameter",
+      "members": [
+        {
+          "symbol": "ConfigMirrorRefresher.health",
+          "method": "health",
+          "sourceFile": "src/config/mirror-refresher.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "B1",
+      "owner": "api",
+      "consumer": "automation",
+      "factScope": "shared",
+      "transport": "owner_snapshot",
+      "streams": ["account_persona"],
+      "localShape": "account-to-binding, persona and soul lookup",
+      "freshnessTier": "gate",
+      "members": [
+        {
+          "symbol": "PersonaResolver.getSoul",
+          "method": "getSoul",
+          "sourceFile": "src/server.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "PersonaResolver.resolvePersona",
+          "method": "resolvePersona",
+          "sourceFile": "src/server.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "PersonaStore.bindingFor",
+          "method": "bindingFor",
+          "sourceFile": "src/config/persona-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "PersonaStore.getForAccount",
+          "method": "getForAccount",
+          "sourceFile": "src/config/persona-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "B2",
+      "owner": "api",
+      "consumer": "automation",
+      "factScope": "shared",
+      "transport": "owner_snapshot",
+      "streams": ["client_environment_automation"],
+      "localShape": "environment automation gate and slow-start projection",
+      "freshnessTier": "gate",
+      "members": [
+        {
+          "symbol": "ClientUserStore.automationGateForEdgeId",
+          "method": "automationGateForEdgeId",
+          "sourceFile": "src/client-auth/client-user-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "ClientUserStore.slowStartSinceFor",
+          "method": "slowStartSinceFor",
+          "sourceFile": "src/client-auth/client-user-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "B3",
+      "owner": "local",
+      "consumer": "api_and_automation",
+      "factScope": "local",
+      "transport": "per_process_runtime",
+      "streams": [],
+      "localShape": "instantiable config freshness and stop-work runtime",
+      "freshnessTier": "gate",
+      "members": [
+        {
+          "symbol": "isMirrorStale",
+          "method": "isMirrorStale",
+          "sourceFile": "src/config-mirror-freshness.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "hasStaleGateMirror",
+          "method": "hasStaleGateMirror",
+          "sourceFile": "src/config/mirror-stop-work.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "platformActionHalt",
+          "method": "platformActionHalt",
+          "sourceFile": "src/config/mirror-stop-work.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "noteMirrorStaleRefusal",
+          "method": "noteMirrorStaleRefusal",
+          "sourceFile": "src/config-mirror-freshness.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "allowsTransportWhenGateUnknown",
+          "method": "allowsTransportWhenGateUnknown",
+          "sourceFile": "src/config/mirror-stop-work.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "B4",
+      "owner": "api",
+      "consumer": "automation",
+      "factScope": "shared",
+      "transport": "owner_snapshot",
+      "streams": ["automation_account_projection"],
+      "localShape": "account identity, platform, createdAt and status projection",
+      "freshnessTier": "mixed_gate_parameter",
+      "members": [
+        {
+          "symbol": "accountDisplayName",
+          "method": "accountDisplayName",
+          "sourceFile": "src/server.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "accountDisplayNameCandidates",
+          "method": "accountDisplayNameCandidates",
+          "sourceFile": "src/server.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "PgAccountStore.getNickname",
+          "method": "getNickname",
+          "sourceFile": "src/account-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "PgAccountStore.platformFor",
+          "method": "platformFor",
+          "sourceFile": "src/account-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "PgAccountStore.createdAtFor",
+          "method": "createdAtFor",
+          "sourceFile": "src/account-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "AccountStateManager.getStatus",
+          "method": "getStatus",
+          "sourceFile": "src/account-state.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    },
+    {
+      "id": "B5",
+      "owner": "api",
+      "consumer": "automation",
+      "factScope": "shared",
+      "transport": "owner_snapshot",
+      "streams": [
+        "content_schedule",
+        "hot_lead_config",
+        "facebook_comment_config",
+        "facebook_group_join_automation_config"
+      ],
+      "localShape": "four independent local business-config mirrors",
+      "freshnessTier": "mixed_gate_parameter",
+      "members": [
+        {
+          "symbol": "ContentScheduleStore.effectiveScheduleFor",
+          "method": "effectiveScheduleFor",
+          "sourceFile": "src/config/content-schedule-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "ContentScheduleStore.effectiveActiveWeekMaskFor",
+          "method": "effectiveActiveWeekMaskFor",
+          "sourceFile": "src/config/content-schedule-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "HotLeadConfigStore.getGateConfig",
+          "method": "getGateConfig",
+          "sourceFile": "src/config/hot-lead-config-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "FacebookCommentConfigStore.effectiveConfigFor",
+          "method": "effectiveConfigFor",
+          "sourceFile": "src/config/facebook-comment-config-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "FacebookCommentConfigStore.getForAccount",
+          "method": "getForAccount",
+          "sourceFile": "src/config/facebook-comment-config-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "FacebookGroupJoinAutomationStore.getForAccount",
+          "method": "getForAccount",
+          "sourceFile": "src/config/facebook-group-join-automation-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        }
+      ]
+    }
+  ]
+}

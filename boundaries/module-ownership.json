@@ -1410,6 +1410,11 @@
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/soul/types.ts（纯人设文档类型/接口/枚举，零 import、零 SQL、零模块级可变单例），被 api/content/automation 三层共 16 处跨边界 type-only 导入。满足 §4.7 kernel 准入（无 SQL / 无 HTTP / 无 LLM / 无进程内活状态 / 不反向依赖业务层）。kernel 花名册是封闭 4 文件名单，本条为新增成员的请求回写，见 docpatch RK1"
   },
   {
+    "path": "src/kernel/sync-read-snapshot.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change split-cloud-api-composition-root-4b 新写：api/automation 同步读镜像共用的纯合同与实例状态机（闭集合 stream、shared/target scope、版本化 envelope、无符号 cursor、payload digest、atomic apply、freshness/readiness/health union，以及每进程可实例化的 config freshness runtime）。仅 import node:crypto、deployment-target 与同层 config-mirror 类型；无 SQL、HTTP 路由、LLM、模块级 Map/Set/定时器/连接池，不反向依赖业务层。HTTP adapter 留 src/transport/sync-read-snapshot-http.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-4b-sync-read。"
+  },
+  {
     "path": "src/kernel/text-card-style.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/render/palettes.ts + src/render/text-card.ts 析出纯设计令牌类型（PaletteKey / LayoutVariant / Decoration / TextCardBackgroundTreatment / TextCardBackgroundPattern / TextCardBulletPresentation / TextCardSourceStyle），零 import、零 SQL、零活状态。色板 hex 数据 PALETTES + selectTheme/fnv1a 渲染逻辑留 render/（content），并以 satisfies 让 PALETTES/LAYOUT_VARIANTS/DECORATIONS 逐字对齐本联合。为发布管线闭包（publish-pipeline-types）能进 kernel 而析出。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
@@ -2416,6 +2421,11 @@
   },
   {
     "path": "src/transport/role-model-selection-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/sync-read-snapshot-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
