@@ -225,6 +225,11 @@
     "note": "§7.2 判据三首批迁移名单"
   },
   {
+    "path": "src/agents/persona-soul-codec.ts",
+    "layer": "content",
+    "note": "change split-cloud-api-composition-root-4a: content-local pure validation/serialization for the exact PersonaGenerator output subset; prevents the independent content root from importing the API-owned general Soul loader"
+  },
+  {
     "path": "src/agents/profile-browser.ts",
     "layer": "automation",
     "note": "§4.7 src/agents/ 50 文件：43 automation 为 content 5 + api 2 的补集"

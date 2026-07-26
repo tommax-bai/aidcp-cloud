@@ -80,6 +80,7 @@
     { "path": "src/agents/concept-extractor-role.ts", "layer": "content", "basis": "§7.2 判据三首批迁移名单" },
     { "path": "src/agents/valuable-comment-archivist.ts", "layer": "content", "basis": "§7.2 判据三首批迁移名单" },
     { "path": "src/agents/persona-generator.ts", "layer": "content", "basis": "§7.2 判据三首批迁移名单" },
+    { "path": "src/agents/persona-soul-codec.ts", "layer": "content", "basis": "change split-cloud-api-composition-root-4a: content-local pure validation/serialization for the exact PersonaGenerator output subset; prevents the independent content root from importing the API-owned general Soul loader" },
     { "path": "src/agents/persona-auto-fill.ts", "layer": "api", "basis": "§17 第 7 项待回写：§4.7 记 src/agents/ 有 api 2 文件 152 行但未点名，本文件（136 行）是其一，人设按 §5.1 归 aidcp-api。原配对文件 persona-format.ts 已由 change lift-shared-contracts-to-kernel 抬入 kernel（src/kernel/persona-format.ts），§4.7 的『api 2 文件 152 行』行数配对需一并回写，见 docpatch RK1。待控制仓回写 §4.7 后本行 basis 改为直接引用 §4.7" },
 
     { "path": "src/cache/curated-content-store.ts", "layer": "content", "basis": "§4.7 src/cache/ 逐文件表" },

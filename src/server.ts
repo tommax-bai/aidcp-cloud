@@ -126,6 +126,7 @@ import type { CommentApprovalNoticeInput, CommentApprovalPort } from './agents/c
 import type { BaseRole } from './agents/base-role.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from './agents/comment-search-term-generator.js';
 import { PersonaGenerator } from './agents/persona-generator.js';
+import { PERSONA_SOUL_CODEC } from './agents/persona-soul-codec.js';
 import { PersonaAutoFillService } from './agents/persona-auto-fill.js';
 import { PersonaGeneratorCommandReceiver } from './llm/persona-generator-command-receiver.js';
 import { EdgeResumeCommandReceiver } from './comm/edge-resume-command-receiver.js';
@@ -138,9 +139,6 @@ import { buildFacebookCommentComposerPrompt } from './comment-agent/facebook-com
 import {
   checkWritingLanguage,
   loadSoul,
-  loadSoulFromValue,
-  loadSoulFromYaml,
-  serializeSoul,
   type Soul,
 } from './soul/index.js';
 
@@ -3036,11 +3034,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   } = ctx;
   const personaGenerator = new PersonaGenerator({
     llm,
-    soulCodec: {
-      parseValue: loadSoulFromValue,
-      serialize: serializeSoul,
-      parseYaml: loadSoulFromYaml,
-    },
+    soulCodec: PERSONA_SOUL_CODEC,
   });
   ctx.contentPersonaGeneratorAuthority =
     new PersonaGeneratorCommandReceiver(personaGenerator);
@@ -4683,11 +4677,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   if (seamMode === 'monolith') {
     personaGenerator = new PersonaGenerator({
       llm,
-      soulCodec: {
-        parseValue: loadSoulFromValue,
-        serialize: serializeSoul,
-        parseYaml: loadSoulFromYaml,
-      },
+      soulCodec: PERSONA_SOUL_CODEC,
     });
   } else if (seamMode === 'core') {
     const contentUrl = readEnvString('AIDCP_CONTENT_URL');
