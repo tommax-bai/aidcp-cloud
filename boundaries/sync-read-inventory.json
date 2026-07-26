@@ -1,9 +1,10 @@
 {
   "schemaVersion": 1,
   "baseline": {
-    "cloudSha": "67941e495ad52c22b08e4a85ef530245b2fac517",
+    "cloudSha": "b94f6ad7d8ac935562e88feafefeeafd5c4e2941",
+    "barrierMergeCommit": "2fcbdda",
     "controlChange": "split-cloud-api-composition-root-4b",
-    "note": "Pre-4a census. B1/B2/B4 fields must be recounted after 4a lands before owner/projection/root edits."
+    "note": "Post-4a census after the landed Cloud authority-port composition root. src/server.ts replacement remains reserved for the serial 4b root integration."
   },
   "censusPolicies": [
     {
@@ -337,7 +338,9 @@
       "factScope": "shared",
       "transport": "owner_snapshot",
       "streams": ["account_persona"],
-      "localShape": "account-to-binding, persona and soul lookup",
+      "localShape": "complete account-to-persona and soul lookup; absence means unbound",
+      "survivingFields": ["accountId", "personaText", "soul"],
+      "excludedFields": ["displayName", "nickname", "operatorAlias", "cardLabel"],
       "freshnessTier": "gate",
       "members": [
         {
@@ -378,6 +381,13 @@
       "transport": "owner_snapshot",
       "streams": ["client_environment_automation"],
       "localShape": "environment automation gate and slow-start projection",
+      "survivingFields": [
+        "blockedEnvironmentKeys",
+        "slowStartAnchors.accountId",
+        "slowStartAnchors.slowStartSince",
+        "slowStartAnchors.ambiguous"
+      ],
+      "excludedFields": ["label", "platform", "displayName", "accountCard"],
       "freshnessTier": "gate",
       "members": [
         {
@@ -450,7 +460,14 @@
       "factScope": "shared",
       "transport": "owner_snapshot",
       "streams": ["automation_account_projection"],
-      "localShape": "account identity, platform, createdAt and status projection",
+      "localShape": "minimal post-4a account identity projection",
+      "survivingFields": ["accountId", "platform", "groupLabel", "createdAt", "status"],
+      "excludedFields": ["displayName", "nickname", "operatorAlias", "label", "card"],
+      "pendingCompositionRootRemovals": [
+        "accountDisplayName",
+        "accountDisplayNameCandidates",
+        "PgAccountStore.getNickname"
+      ],
       "freshnessTier": "mixed_gate_parameter",
       "members": [
         {

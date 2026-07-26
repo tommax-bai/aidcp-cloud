@@ -24,6 +24,9 @@ interface InventoryItem {
   transport: 'owner_snapshot' | 'kernel_static' | 'per_process_runtime';
   streams: SyncReadStream[];
   localShape: string;
+  survivingFields?: string[];
+  excludedFields?: string[];
+  pendingCompositionRootRemovals?: string[];
   freshnessTier: string;
   members: InventoryMember[];
   excludedSideEffects?: Array<{
@@ -38,6 +41,7 @@ interface Inventory {
   schemaVersion: number;
   baseline: {
     cloudSha: string;
+    barrierMergeCommit: string;
     controlChange: string;
     note: string;
   };
@@ -65,7 +69,8 @@ const READ_SHAPED_METHOD =
 
 test('4b census has exactly A1-A6/B1-B5 with machine-readable owner, scope, shape and freshness', () => {
   assert.equal(inventory.schemaVersion, 1);
-  assert.match(inventory.baseline.cloudSha, /^[0-9a-f]{40}$/);
+  assert.equal(inventory.baseline.cloudSha, 'b94f6ad7d8ac935562e88feafefeeafd5c4e2941');
+  assert.equal(inventory.baseline.barrierMergeCommit, '2fcbdda');
   assert.equal(inventory.baseline.controlChange, 'split-cloud-api-composition-root-4b');
   assert.deepEqual(
     inventory.items.map((item) => item.id),
@@ -80,6 +85,35 @@ test('4b census has exactly A1-A6/B1-B5 with machine-readable owner, scope, shap
     assert.ok(item.freshnessTier);
     assert.ok(item.members.length > 0, `${item.id} must name its current synchronous members`);
   }
+});
+
+test('post-4a B1/B2/B4 owner snapshots expose only the surviving split-service fields', () => {
+  const byId = new Map(inventory.items.map((item) => [item.id, item]));
+  assert.deepEqual(byId.get('B1')?.survivingFields, ['accountId', 'personaText', 'soul']);
+  assert.deepEqual(byId.get('B2')?.survivingFields, [
+    'blockedEnvironmentKeys',
+    'slowStartAnchors.accountId',
+    'slowStartAnchors.slowStartSince',
+    'slowStartAnchors.ambiguous',
+  ]);
+  assert.deepEqual(byId.get('B4')?.survivingFields, [
+    'accountId',
+    'platform',
+    'groupLabel',
+    'createdAt',
+    'status',
+  ]);
+
+  for (const id of ['B1', 'B2', 'B4']) {
+    const item = byId.get(id);
+    assert.ok(item?.excludedFields?.length, `${id} must name intentionally excluded fields`);
+    assert.equal(item.excludedFields?.some((field) => item.survivingFields?.includes(field)), false);
+  }
+  assert.deepEqual(byId.get('B4')?.pendingCompositionRootRemovals, [
+    'accountDisplayName',
+    'accountDisplayNameCandidates',
+    'PgAccountStore.getNickname',
+  ]);
 });
 
 test('all remote snapshot streams are registered exactly once with matching owner/consumer/scope', () => {

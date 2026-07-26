@@ -8,24 +8,30 @@ import {
   type ScheduledAutomationSupport,
 } from './platform-types.js';
 
-export const SCHEDULED_AUTOMATION_ACTIONS = [
-  'post',
-  'comment',
-  'contact_comment',
-  'join_group',
-] as const satisfies readonly ScheduledAutomationAction[];
+export const SCHEDULED_AUTOMATION_ACTIONS = Object.freeze(
+  ['post', 'comment', 'contact_comment', 'join_group'] as const satisfies readonly ScheduledAutomationAction[],
+);
 
-export const SCHEDULED_AUTOMATION_CATALOG = {
-  xiaohongshu: {
+type MissingScheduledAutomationAction = Exclude<
+  ScheduledAutomationAction,
+  (typeof SCHEDULED_AUTOMATION_ACTIONS)[number]
+>;
+const scheduledAutomationActionUnionIsExhaustive: MissingScheduledAutomationAction extends never
+  ? true
+  : never = true;
+void scheduledAutomationActionUnionIsExhaustive;
+
+export const SCHEDULED_AUTOMATION_CATALOG = Object.freeze({
+  xiaohongshu: Object.freeze({
     post: supported(['review', 'auto_approve'], SCHEDULED_CONTENT_DAILY_CAP_MAX),
     comment: supported(['review', 'auto_approve'], SCHEDULED_CONTENT_DAILY_CAP_MAX),
     contact_comment: supported(
       ['review', 'auto_approve'],
       SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
     ),
-    join_group: { supported: false, reason: 'no_group_concept' },
-  },
-  facebook: {
+    join_group: unsupported('no_group_concept'),
+  }),
+  facebook: Object.freeze({
     post: supported(['review'], SCHEDULED_CONTENT_DAILY_CAP_MAX),
     comment: supported(['review', 'auto_approve'], SCHEDULED_CONTENT_DAILY_CAP_MAX),
     contact_comment: supported(
@@ -33,27 +39,27 @@ export const SCHEDULED_AUTOMATION_CATALOG = {
       SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
     ),
     join_group: supported([], SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX),
-  },
-  wechat_channels: {
-    post: { supported: false, reason: 'interaction_inbox_only' },
-    comment: { supported: false, reason: 'interaction_inbox_only' },
-    contact_comment: { supported: false, reason: 'interaction_inbox_only' },
-    join_group: { supported: false, reason: 'interaction_inbox_only' },
-  },
+  }),
+  wechat_channels: Object.freeze({
+    post: unsupported('interaction_inbox_only'),
+    comment: unsupported('interaction_inbox_only'),
+    contact_comment: unsupported('interaction_inbox_only'),
+    join_group: unsupported('interaction_inbox_only'),
+  }),
 } as const satisfies Record<
   'xiaohongshu' | 'facebook' | 'wechat_channels',
   Record<ScheduledAutomationAction, ScheduledAutomationSupport>
->;
+>);
 
-export const SCHEDULED_AUTOMATION_CATALOG_READER: ScheduledAutomationCatalogReader = {
-  normalizeForCatalog: (platform) => {
+export const SCHEDULED_AUTOMATION_CATALOG_READER: ScheduledAutomationCatalogReader = Object.freeze({
+  normalizeForCatalog: (platform: string | null | undefined) => {
     try {
       return normalizePlatformId(platform);
     } catch {
       return platform?.trim().toLowerCase() || 'unknown';
     }
   },
-  availableActions: (platform) => {
+  availableActions: (platform: string | null | undefined) => {
     const declaration = declarationsFor(platform);
     if (!declaration) return [];
     return SCHEDULED_AUTOMATION_ACTIONS.flatMap((action) => {
@@ -70,7 +76,7 @@ export const SCHEDULED_AUTOMATION_CATALOG_READER: ScheduledAutomationCatalogRead
     });
   },
   declarationsFor,
-};
+});
 
 function declarationsFor(
   platform: string | null | undefined,
@@ -86,5 +92,13 @@ function supported(
   allowedModes: readonly ('review' | 'auto_approve')[],
   maxDailyCap: number,
 ): ScheduledAutomationSupport {
-  return { supported: true, allowedModes, maxDailyCap };
+  return Object.freeze({
+    supported: true,
+    allowedModes: Object.freeze([...allowedModes]),
+    maxDailyCap,
+  });
+}
+
+function unsupported(reason: string): ScheduledAutomationSupport {
+  return Object.freeze({ supported: false, reason });
 }

@@ -18,8 +18,8 @@ export type PlatformId = 'xiaohongshu' | 'facebook' | 'wechat_channels';
 
 /**
  * 账号排期动作全集：Cloud 目录投影与写入校验共同消费，不能从其它能力词推导。
- * 运行时数组 SCHEDULED_AUTOMATION_ACTIONS 留在 registry.ts，并 `satisfies readonly ScheduledAutomationAction[]`
- * 与本联合逐字对齐（增删动作时两处同改，编译期兜底）。
+ * 运行时 tuple 与静态 catalog 位于 scheduled-automation-catalog.ts；`satisfies` 拒绝 tuple
+ * 多余成员，`Exclude<ScheduledAutomationAction, tuple[number]>` 拒绝联合遗漏成员。
  */
 export type ScheduledAutomationAction = 'post' | 'comment' | 'contact_comment' | 'join_group';
 export type ScheduledAutomationMode = 'review' | 'auto_approve';

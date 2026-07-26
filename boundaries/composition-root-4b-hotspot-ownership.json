@@ -1,8 +1,14 @@
 {
   "schemaVersion": 1,
   "change": "split-cloud-api-composition-root-4b",
-  "baseCloudSha": "67941e495ad52c22b08e4a85ef530245b2fac517",
+  "baseCloudSha": "b94f6ad7d8ac935562e88feafefeeafd5c4e2941",
   "blockingChange": "split-cloud-api-composition-root-4a",
+  "barrier": {
+    "status": "released",
+    "landedCloudSha": "b94f6ad7d8ac935562e88feafefeeafd5c4e2941",
+    "mergeCommit": "2fcbdda",
+    "post4aCensus": "boundaries/sync-read-inventory.json"
+  },
   "parallelBefore4aLands": [
     {
       "surface": "kernel sync-read contracts and scheduled catalog",
@@ -21,22 +27,25 @@
       "allowed": true
     }
   ],
-  "blockedUntilPost4aCensus": [
-    {
-      "surface": "src/server.ts",
-      "reason": "4a is the only writer while authority ports and command routes are landing"
-    },
+  "releasedTo4bOwner": [
     {
       "surface": "AccountRosterSourcePort",
-      "reason": "B4 must extend the exact post-4a minimal roster instead of racing its contract"
+      "survivingFields": ["accountId", "platform", "groupLabel", "createdAt", "status"]
     },
     {
       "surface": "automation_account_projection",
-      "reason": "B4 fields and write paths depend on the post-4a consumer census"
+      "survivingFields": ["accountId", "platform", "groupLabel", "createdAt", "status"]
     },
     {
       "surface": "persona, client-environment and account owner mutations",
-      "reason": "B1, B2 and B4 version bumps must be audited after 4a moves notification and card consumers"
+      "reason": "4b is the single writer for post-4a version-bump and projection changes"
+    }
+  ],
+  "serialRootReservation": [
+    {
+      "surface": "src/server.ts",
+      "owner": "root serial integration",
+      "reason": "source providers and mirrors land in parallel, but final process assembly remains a single-writer hotspot"
     }
   ],
   "postBarrierOwner": "split-cloud-api-composition-root-4b",

@@ -575,6 +575,16 @@
     "note": "change split-cloud-api-composition-root-4b task 2.6：api consumer 自己的 target-scoped sync-read cursor/readiness/health PG adapter，只写 api_sync_read_consumer_checkpoint；owner payload 与共享业务 version 不落表。公共校验/恢复状态机在 kernel，automation 使用独立 owner-local adapter，避免拆库后跨池写。"
   },
   {
+    "path": "src/config/api-sync-read-mirrors.ts",
+    "layer": "api",
+    "note": "change split-cloud-api-composition-root-4b：API consumer 的 A1/A3/A4/A5/A6 进程内 last-good 镜像与 readiness adapter；只消费 kernel contract，不持 owner 权威。"
+  },
+  {
+    "path": "src/config/api-sync-read-source.ts",
+    "layer": "api",
+    "note": "change split-cloud-api-composition-root-4b：API owner 的 B1/B2/B4/B5 repeatable-read snapshot provider，读取 API owner 数据库并与 config_mirror_version 同事务；含 SQL，明确不进 kernel。"
+  },
+  {
     "path": "src/config/approval-policy-store.ts",
     "layer": "api",
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
@@ -1440,6 +1450,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/schedule-policy.ts 整体 git mv：纯发布排期策略（XHS_SCHEDULE_MIN/MAX_AHEAD_MS 常量 + ScheduleValidationError 联合 + validatePublishSchedule 纯校验函数），仅 import kernel（platform-types / publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/schedule-policy.ts 保留为 re-export 桩，同层消费方无感。消 2 条跨边界入边（automation command-sequencer / content publish-mode-decider）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/scheduled-automation-catalog.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-api-composition-root-4b 从 automation registry 析出的静态 scheduled-automation catalog 与纯 reader。只 import 同层 platform types；零 SQL、HTTP、LLM、模块级可变活状态。automation registry 保留等值再导出以维持现有调用。"
+  },
+  {
     "path": "src/kernel/schema-capability-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change extract-schema-capability-contract 从 src/schema/schema-capability.ts 析出的纯契约段（SchemaCapabilityStatus/SchemaShape/SchemaCapabilityVerdict/SchemaCapabilitySpec 类型 + classifySchemaCapability 纯函数 + SchemaCapabilityError 类 + isSchemaCapabilityError 守卫 + schemaSelfCreateEnabled 读 env），零 import、无 SQL 字面量、无 HTTP/LLM、无进程内活状态（selfCreateWarned 一次性告警单例留在 automation）。满足 §4.7 kernel 准入。连库探测执行段 probeSchemaShape/ensureCapabilitySchema 留 src/schema/schema-capability.ts（automation）。请求回写 §4.7 见 docpatch RK1"
@@ -1458,6 +1473,11 @@
     "path": "src/kernel/soul-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/soul/types.ts（纯人设文档类型/接口/枚举，零 import、零 SQL、零模块级可变单例），被 api/content/automation 三层共 16 处跨边界 type-only 导入。满足 §4.7 kernel 准入（无 SQL / 无 HTTP / 无 LLM / 无进程内活状态 / 不反向依赖业务层）。kernel 花名册是封闭 4 文件名单，本条为新增成员的请求回写，见 docpatch RK1"
+  },
+  {
+    "path": "src/kernel/sync-read-facts.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-api-composition-root-4b 新写：A1-A6/B1-B5 闭集合 owner snapshot payload、source port 与 envelope 构造/校验。只 import 同层 sync-read contract、deployment target、platform/persona/config DTO；零 SQL、HTTP、LLM、模块级活状态，不反向依赖业务层。B1/B2/B4 只暴露 post-4a surviving fields。"
   },
   {
     "path": "src/kernel/sync-read-snapshot.ts",
@@ -2370,6 +2390,16 @@
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
+    "path": "src/transport/automation-sync-read-mirrors.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/automation-sync-read-source.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/transport/config-mirror-bump-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
@@ -2516,6 +2546,11 @@
   },
   {
     "path": "src/transport/role-model-selection-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/sync-read-changed-outbox.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },

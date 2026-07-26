@@ -23,6 +23,8 @@
       "src/kernel/panel-frame-limits.ts",
       "src/kernel/panel-event-delivery-port.ts",
       "src/kernel/sync-read-snapshot.ts",
+      "src/kernel/sync-read-facts.ts",
+      "src/kernel/scheduled-automation-catalog.ts",
       "src/kernel/content-schedule-mode.ts",
       "src/kernel/llm-contract.ts",
       "src/kernel/writing-language.ts",

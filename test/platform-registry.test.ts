@@ -163,3 +163,22 @@ test('platform registry: catalog projection is ordered, honest, and detached fro
     maxDailyCap: 50,
   });
 });
+
+test('platform registry: exported scheduled catalog is recursively immutable at runtime', () => {
+  const catalog = PLATFORM_REGISTRY.xiaohongshu.scheduledAutomation;
+  const post = catalog.post;
+  assert.equal(Object.isFrozen(catalog), true);
+  assert.equal(Object.isFrozen(post), true);
+  assert.equal(post.supported && Object.isFrozen(post.allowedModes), true);
+  assert.throws(() => {
+    (catalog as Record<string, unknown>).post = { supported: false, reason: 'mutated' };
+  }, TypeError);
+  assert.throws(() => {
+    if (post.supported) (post.allowedModes as string[]).splice(0);
+  }, TypeError);
+  assert.deepEqual(availableScheduledAutomationActionsForPlatform('xiaohongshu')[0], {
+    action: 'post',
+    allowedModes: ['review', 'auto_approve'],
+    maxDailyCap: 50,
+  });
+});
