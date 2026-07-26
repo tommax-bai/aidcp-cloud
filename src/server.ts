@@ -342,6 +342,22 @@ import {
   type ServiceMode,
 } from './gateway/service-mode.js';
 import { InternalHttpClient, InternalHttpServer, INTERNAL_HTTP_TIMEOUT_CEILING_MS } from './transport/internal-http.js';
+import { ApiSyncReadSnapshotSource } from './config/api-sync-read-source.js';
+import { ApiSyncReadMirrors } from './config/api-sync-read-mirrors.js';
+import { createApiSyncReadConsumerCheckpointStore } from './config/api-sync-read-checkpoint-store.js';
+import { AutomationSyncReadMirrors } from './transport/automation-sync-read-mirrors.js';
+import {
+  AutomationSyncReadSnapshotSource,
+  type AutomationRuntimeSyncReadStream,
+} from './transport/automation-sync-read-source.js';
+import { PgAutomationSyncReadGenerationStore } from './transport/automation-sync-read-generation-store.js';
+import { SyncReadChangedOutbox } from './transport/sync-read-changed-outbox.js';
+import { createAutomationSyncReadConsumerCheckpointStore } from './transport/automation-sync-read-checkpoint-store.js';
+import { registerSyncReadSnapshotRoute } from './transport/sync-read-snapshot-http.js';
+import type {
+  SyncReadConsumerCheckpoint,
+  SyncReadStream,
+} from './kernel/sync-read-snapshot.js';
 import type {
   AccountOwnershipAuthorityPort,
   AccountPersonaAuthorityPort,
@@ -436,8 +452,6 @@ import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './
 //   - 事件观测：automation 把 EventBus tee 到 outbox；api 回放进本进程 EventBus → panel-ws。
 import { RiskReadHttpClient, registerRiskReadRoutes } from './transport/risk-read-http.js';
 import {
-  DEFAULT_ACCOUNT_PROJECTION_MAX_STALE_MS,
-  DEFAULT_ACCOUNT_PROJECTION_REFRESH_MS,
   PgAccountProjectionStore,
 } from './transport/account-projection-store.js';
 import type { AccountRosterSourcePort } from './kernel/account-projection-types.js';
@@ -938,6 +952,10 @@ interface CompositionContext {
   accountDisplayNameCandidates: (accountId: string) => string[];
   accountPersonaService?: AccountPersonaService;
   accountProjectionStore?: PgAccountProjectionStore;
+  apiSyncReadMirrors?: ApiSyncReadMirrors;
+  apiSyncReadSource?: ApiSyncReadSnapshotSource;
+  automationSyncReadMirrors?: AutomationSyncReadMirrors;
+  automationSyncReadSource?: AutomationSyncReadSnapshotSource;
   accountState: AccountStateManager;
   accountStore: AccountStore | undefined;
   alertStore?: PgAlertStore | undefined;
@@ -1122,6 +1140,7 @@ async function main(): Promise<void> {
   if (segments.segA) await segAApiFoundation(ctx);
   if (segments.segB) await segBContent(ctx);
   if (segments.segC) await segCAutomation(ctx);
+  if (mode === 'monolith') await startMonolithSyncReads(ctx);
   if (segments.segD) await segDApiServing(ctx);
   if (listeners.contentReadApi) await startContentReadApi(ctx);
   // Block② 2e：automation 独立进程起内部 API（供 api/content 进程访问 automation-owned 能力）。
@@ -1130,6 +1149,372 @@ async function main(): Promise<void> {
   // Block③ L3：api 独立进程起内部写 API（供 automation 进程的失效信号中继把 bump 推过来）。
   // 仅 api 模式起：monolith/core/content 的 api 池就在本进程、中继走本地 sink、零 HTTP。
   if (mode === 'api') await startApiInternalApi(ctx);
+}
+
+const API_SYNC_READ_OWNER_STREAMS = [
+  'account_persona',
+  'client_environment_automation',
+  'automation_account_projection',
+  'content_schedule',
+  'hot_lead_config',
+  'facebook_comment_config',
+  'facebook_group_join_automation_config',
+] as const satisfies readonly SyncReadStream[];
+
+const AUTOMATION_SYNC_READ_OWNER_STREAMS = [
+  'session_config_global',
+  'edge_presence',
+  'publish_in_flight',
+  'captcha_availability',
+  'automation_config_mirror_health',
+] as const satisfies readonly SyncReadStream[];
+
+const AUTOMATION_RUNTIME_SYNC_READ_STREAMS = [
+  'edge_presence',
+  'publish_in_flight',
+  'captcha_availability',
+  'automation_config_mirror_health',
+] as const satisfies readonly AutomationRuntimeSyncReadStream[];
+
+/**
+ * The monolith deliberately exercises the same 4b owner-snapshot contracts as
+ * split services. Local authority only removes the HTTP hop; it does not permit
+ * direct cross-owner reads or bypass consumer checkpoints.
+ */
+async function startMonolithSyncReads(ctx: CompositionContext): Promise<void> {
+  const executionTarget = ctx.deploymentTarget;
+  if (!executionTarget) {
+    throw new Error('AIDCP_DEPLOY_ENV is required for monolith sync-read mirrors');
+  }
+  const projection = requireSegment(
+    ctx.accountProjectionStore,
+    'accountProjectionStore',
+    'automation',
+  );
+
+  const apiSource = createApiSyncReadSource(ctx, executionTarget);
+  const automationSource = createAutomationSyncReadSource(
+    ctx,
+    executionTarget,
+  );
+  const apiMirrors = new ApiSyncReadMirrors(executionTarget);
+  const automationMirrors = new AutomationSyncReadMirrors(executionTarget);
+  const apiCheckpoints = createApiSyncReadConsumerCheckpointStore(
+    ctx.apiPool,
+    executionTarget,
+  );
+  const automationCheckpoints =
+    createAutomationSyncReadConsumerCheckpointStore(
+      ctx.automationPool,
+      executionTarget,
+    );
+
+  ctx.apiSyncReadSource = apiSource;
+  ctx.automationSyncReadSource = automationSource;
+  ctx.apiSyncReadMirrors = apiMirrors;
+  ctx.automationSyncReadMirrors = automationMirrors;
+
+  await Promise.all([
+    ...AUTOMATION_SYNC_READ_OWNER_STREAMS.map(async (stream) => {
+      const loaded = await apiCheckpoints.load(stream);
+      if (loaded.outcome === 'unknown') {
+        throw new Error(
+          `api_sync_read_checkpoint_invalid stream=${stream}: ${loaded.message}`,
+        );
+      }
+      if (loaded.outcome === 'loaded') {
+        const restored = restoreApiSyncReadCheckpoint(
+          apiMirrors,
+          stream,
+          loaded.checkpoint,
+        );
+        if (restored.outcome !== 'loaded') {
+          throw new Error(
+            `api_sync_read_checkpoint_restore_failed stream=${stream}`,
+          );
+        }
+      }
+    }),
+    ...API_SYNC_READ_OWNER_STREAMS.map(async (stream) => {
+      const loaded = await automationCheckpoints.load(stream);
+      if (loaded.outcome === 'unknown') {
+        throw new Error(
+          `automation_sync_read_checkpoint_invalid stream=${stream}: ${loaded.message}`,
+        );
+      }
+      if (loaded.outcome === 'loaded') {
+        const restored = restoreAutomationSyncReadCheckpoint(
+          automationMirrors,
+          stream,
+          loaded.checkpoint,
+        );
+        if (restored.outcome !== 'loaded') {
+          throw new Error(
+            `automation_sync_read_checkpoint_restore_failed stream=${stream}`,
+          );
+        }
+      }
+    }),
+  ]);
+
+  const refreshAutomationOwned = async (): Promise<void> => {
+    await Promise.all(
+      AUTOMATION_RUNTIME_SYNC_READ_STREAMS.map((stream) =>
+        automationSource.publishChanged(stream),
+      ),
+    );
+    await Promise.all(
+      AUTOMATION_SYNC_READ_OWNER_STREAMS.map(async (stream) => {
+        const envelope = await automationSource.snapshot(stream);
+        const applied = apiMirrors.apply(envelope, 'owner_fetch');
+        if (applied.outcome === 'rejected') {
+          throw new Error(
+            `api_sync_read_apply_failed stream=${stream} reason=${applied.reason}`,
+          );
+        }
+        const saved = await apiCheckpoints.save(
+          apiSyncReadCheckpoint(apiMirrors, stream),
+        );
+        if (saved.outcome !== 'stored') {
+          throw new Error(
+            `api_sync_read_checkpoint_save_failed stream=${stream} reason=${saved.reason}`,
+          );
+        }
+      }),
+    );
+  };
+
+  const refreshApiOwned = async (): Promise<void> => {
+    await Promise.all(
+      API_SYNC_READ_OWNER_STREAMS.map(async (stream) => {
+        const envelope = await apiSource.snapshot(stream);
+        if (stream === 'automation_account_projection') {
+          const projected = await projection.applyOwnerSnapshot(envelope);
+          if (projected.outcome === 'rejected') {
+            throw new Error(
+              `automation_account_projection_apply_failed reason=${projected.reason}`,
+            );
+          }
+        }
+        const applied = automationMirrors.apply(envelope, 'owner_fetch');
+        if (applied.outcome === 'rejected') {
+          throw new Error(
+            `automation_sync_read_apply_failed stream=${stream} reason=${applied.reason}`,
+          );
+        }
+        if (stream !== 'automation_account_projection') {
+          const saved = await automationCheckpoints.save(
+            automationSyncReadCheckpoint(automationMirrors, stream),
+          );
+          if (saved.outcome !== 'stored') {
+            throw new Error(
+              `automation_sync_read_checkpoint_save_failed stream=${stream} reason=${saved.reason}`,
+            );
+          }
+        }
+      }),
+    );
+  };
+
+  await refreshAutomationOwned();
+  await refreshApiOwned();
+  const apiReadiness = apiMirrors.readiness();
+  const automationReadiness = automationMirrors.readiness();
+  if (
+    apiReadiness.state !== 'ready' ||
+    automationReadiness.state !== 'ready'
+  ) {
+    throw new Error(
+      `monolith_sync_read_not_ready api=${JSON.stringify(apiReadiness)} automation=${JSON.stringify(automationReadiness)}`,
+    );
+  }
+
+  scheduleSyncReadRefresh(
+    'automation-owner',
+    10_000,
+    refreshAutomationOwned,
+  );
+  scheduleSyncReadRefresh('api-owner', 30_000, refreshApiOwned);
+  console.log(
+    `[aidcp-cloud] 4b 单体权威镜像已就绪（target=${executionTarget}，API consumer=5，automation consumer=7）`,
+  );
+}
+
+function scheduleSyncReadRefresh(
+  owner: string,
+  delayMs: number,
+  refresh: () => Promise<void>,
+): void {
+  const schedule = (): void => {
+    const timer = setTimeout(() => {
+      void refresh()
+        .catch((error) => {
+          console.warn(
+            `[sync-read] ${owner} periodic owner snapshot failed; freshness will fail closed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        })
+        .finally(schedule);
+    }, delayMs);
+    timer.unref();
+  };
+  schedule();
+}
+
+function createApiSyncReadSource(
+  ctx: CompositionContext,
+  executionTarget: 'dev' | 'ol',
+): ApiSyncReadSnapshotSource {
+  return new ApiSyncReadSnapshotSource({
+    executionTarget,
+    pool: ctx.apiPool,
+    parseSoul: (personaText) => {
+      try {
+        return JSON.parse(
+          JSON.stringify(PERSONA_SOUL_CODEC.parseYaml(personaText)),
+        );
+      } catch {
+        return null;
+      }
+    },
+  });
+}
+
+function createAutomationSyncReadSource(
+  ctx: CompositionContext,
+  executionTarget: 'dev' | 'ol',
+): AutomationSyncReadSnapshotSource {
+  const configMirrorRefresher = requireSegment(
+    ctx.configMirrorRefresher,
+    'configMirrorRefresher',
+    'automation',
+  );
+  const edgeServer = requireSegment(ctx.server, 'server', 'automation');
+  const publishDispatcher = requireSegment(
+    ctx.publishDispatcher,
+    'publishDispatcher',
+    'automation',
+  );
+  return new AutomationSyncReadSnapshotSource(
+    executionTarget,
+    {
+      sessionConfigGlobal: () => ctx.sessionConfigStore.syncReadObservation(),
+      edgePresence: () => edgeServer.edgePresenceSnapshot(),
+      publishInFlight: () => ({
+        recordIds: publishDispatcher.getInFlightRecordIds(),
+      }),
+      captchaAvailability: () => ({
+        state:
+          readEnvString('AIDCP_CAPTCHA_ASSIST_ENABLED') !== 'true'
+            ? 'disabled'
+            : ctx.captchaAssist?.isAvailable()
+              ? 'available'
+              : 'unavailable',
+      }),
+      configMirrorHealth: () => {
+        const health = configMirrorRefresher.health();
+        return {
+          sourceService: 'automation',
+          ...health,
+          entries: health.entries.filter(
+            (entry) =>
+              CONFIG_MIRRORS[
+                entry.mirrorKey as keyof typeof CONFIG_MIRRORS
+              ]?.owner === 'automation',
+          ),
+        };
+      },
+    },
+    new PgAutomationSyncReadGenerationStore(
+      executionTarget,
+      ctx.automationPool,
+    ),
+    new SyncReadChangedOutbox(executionTarget, ctx.automationPool),
+  );
+}
+
+function restoreApiSyncReadCheckpoint(
+  mirrors: ApiSyncReadMirrors,
+  stream: (typeof AUTOMATION_SYNC_READ_OWNER_STREAMS)[number],
+  checkpoint: SyncReadConsumerCheckpoint,
+) {
+  switch (stream) {
+    case 'session_config_global':
+      return mirrors.sessionConfig.restoreCheckpoint(checkpoint);
+    case 'edge_presence':
+      return mirrors.edgePresence.restoreCheckpoint(checkpoint);
+    case 'publish_in_flight':
+      return mirrors.publishInFlight.restoreCheckpoint(checkpoint);
+    case 'captcha_availability':
+      return mirrors.captchaAvailability.restoreCheckpoint(checkpoint);
+    case 'automation_config_mirror_health':
+      return mirrors.automationHealth.restoreCheckpoint(checkpoint);
+  }
+}
+
+function apiSyncReadCheckpoint(
+  mirrors: ApiSyncReadMirrors,
+  stream: (typeof AUTOMATION_SYNC_READ_OWNER_STREAMS)[number],
+): SyncReadConsumerCheckpoint {
+  switch (stream) {
+    case 'session_config_global':
+      return mirrors.sessionConfig.checkpoint();
+    case 'edge_presence':
+      return mirrors.edgePresence.checkpoint();
+    case 'publish_in_flight':
+      return mirrors.publishInFlight.checkpoint();
+    case 'captcha_availability':
+      return mirrors.captchaAvailability.checkpoint();
+    case 'automation_config_mirror_health':
+      return mirrors.automationHealth.checkpoint();
+  }
+}
+
+function restoreAutomationSyncReadCheckpoint(
+  mirrors: AutomationSyncReadMirrors,
+  stream: (typeof API_SYNC_READ_OWNER_STREAMS)[number],
+  checkpoint: SyncReadConsumerCheckpoint,
+) {
+  switch (stream) {
+    case 'account_persona':
+      return mirrors.persona.restoreCheckpoint(checkpoint);
+    case 'client_environment_automation':
+      return mirrors.environment.restoreCheckpoint(checkpoint);
+    case 'automation_account_projection':
+      return mirrors.accounts.restoreCheckpoint(checkpoint);
+    case 'content_schedule':
+      return mirrors.contentSchedule.restoreCheckpoint(checkpoint);
+    case 'hot_lead_config':
+      return mirrors.hotLead.restoreCheckpoint(checkpoint);
+    case 'facebook_comment_config':
+      return mirrors.facebookComment.restoreCheckpoint(checkpoint);
+    case 'facebook_group_join_automation_config':
+      return mirrors.facebookGroupJoin.restoreCheckpoint(checkpoint);
+  }
+}
+
+function automationSyncReadCheckpoint(
+  mirrors: AutomationSyncReadMirrors,
+  stream: Exclude<
+    (typeof API_SYNC_READ_OWNER_STREAMS)[number],
+    'automation_account_projection'
+  >,
+): SyncReadConsumerCheckpoint {
+  switch (stream) {
+    case 'account_persona':
+      return mirrors.persona.checkpoint();
+    case 'client_environment_automation':
+      return mirrors.environment.checkpoint();
+    case 'content_schedule':
+      return mirrors.contentSchedule.checkpoint();
+    case 'hot_lead_config':
+      return mirrors.hotLead.checkpoint();
+    case 'facebook_comment_config':
+      return mirrors.facebookComment.checkpoint();
+    case 'facebook_group_join_automation_config':
+      return mirrors.facebookGroupJoin.checkpoint();
+  }
 }
 
 /**
@@ -1148,6 +1533,10 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
     throw new Error('AIDCP_DEPLOY_ENV is required for API direct-authority routes');
   }
   const directToken = requireDirectInternalToken('AIDCP_API_INTERNAL_TOKEN');
+  ctx.apiSyncReadSource ??= createApiSyncReadSource(
+    ctx,
+    ctx.deploymentTarget,
+  );
   const direct = ctx.apiDirectAuthorities ?? {};
   const registerDirect = (
     name: keyof ApiDirectAuthorities,
@@ -1203,6 +1592,24 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
       directToken,
       ctx.deploymentTarget!,
     ));
+  if (ctx.apiSyncReadSource) {
+    registerSyncReadSnapshotRoute(
+      httpServer,
+      {
+        snapshotFor: ({ stream }) => ctx.apiSyncReadSource!.snapshot(stream),
+      },
+      {
+        owner: 'api',
+        executionTarget: ctx.deploymentTarget,
+        bearerToken: directToken,
+        streams: API_SYNC_READ_OWNER_STREAMS,
+      },
+    );
+  } else {
+    console.warn(
+      '[aidcp-cloud] api 内部 API：4b owner snapshot route 未注册（source 不可用）',
+    );
+  }
   if (sink) registerConfigMirrorBumpRoutes(httpServer, sink);
   else console.warn('[aidcp-cloud] api 内部 API：配置镜像失效信号路由未注册（segA 未构造）');
   if (ctx.panelEventFanout && ctx.deploymentTarget) {
@@ -1284,6 +1691,42 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
     throw new Error('AIDCP_DEPLOY_ENV is required for automation command routes');
   }
   const directToken = requireDirectInternalToken('AIDCP_AUTOMATION_INTERNAL_TOKEN');
+  ctx.automationSyncReadSource ??= createAutomationSyncReadSource(
+    ctx,
+    ctx.deploymentTarget,
+  );
+  const observeRuntimeSyncReads = async (): Promise<void> => {
+    await Promise.all(
+      AUTOMATION_RUNTIME_SYNC_READ_STREAMS.map((stream) =>
+        ctx.automationSyncReadSource!.publishChanged(stream),
+      ),
+    );
+  };
+  await observeRuntimeSyncReads();
+  scheduleSyncReadRefresh(
+    'automation-owner-observation',
+    10_000,
+    observeRuntimeSyncReads,
+  );
+  if (ctx.automationSyncReadSource) {
+    registerSyncReadSnapshotRoute(
+      httpServer,
+      {
+        snapshotFor: ({ stream }) =>
+          ctx.automationSyncReadSource!.snapshot(stream),
+      },
+      {
+        owner: 'automation',
+        executionTarget: ctx.deploymentTarget,
+        bearerToken: directToken,
+        streams: AUTOMATION_SYNC_READ_OWNER_STREAMS,
+      },
+    );
+  } else {
+    console.warn(
+      '[aidcp-cloud] automation 内部 API：4b owner snapshot route 未注册（source 不可用）',
+    );
+  }
   if (ctx.automationEdgeResumeAuthority) {
     registerEdgeResumeCommandRoutes(
       httpServer,
@@ -2328,27 +2771,23 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
             },
           };
     try {
-      const projection = new PgAccountProjectionStore({
-        pool: automationPool,
-        source: accountRosterSource,
-        refreshIntervalMs: readEnvNumber(
-          'AIDCP_ACCOUNT_PROJECTION_REFRESH_MS',
-          DEFAULT_ACCOUNT_PROJECTION_REFRESH_MS,
-        ),
-        maxStalenessMs: readEnvNumber(
-          'AIDCP_ACCOUNT_PROJECTION_MAX_STALE_MS',
-          DEFAULT_ACCOUNT_PROJECTION_MAX_STALE_MS,
-        ),
-      });
-      await projection.init();
-      const first = await projection.refresh();
-      projection.start();
-      accountProjectionStore = projection;
-      console.log(
-        first.ok
-          ? `[aidcp-cloud] 账号守卫投影已就绪（首刷 ${first.rows} 个账号；加群 / 委托任务认领的账号守卫读本域投影）`
-          : `[aidcp-cloud] 账号守卫投影已启动但首刷未成功（${first.reason}）：新鲜期未推进，相关守卫暂时一律拒绝，下一轮重试`,
-      );
+      if (segmentsForMode(rosterMode).segC) {
+        if (!deploymentTarget) {
+          throw new Error(
+            'AIDCP_DEPLOY_ENV is required for target-scoped account projection',
+          );
+        }
+        const projection = new PgAccountProjectionStore({
+          pool: automationPool,
+          source: accountRosterSource,
+          executionTarget: deploymentTarget,
+        });
+        await projection.init();
+        accountProjectionStore = projection;
+        console.log(
+          `[aidcp-cloud] 账号守卫投影结构已就绪（target=${deploymentTarget}；等待 4b API owner 全量快照，legacy refresher 未启动）`,
+        );
+      }
     } catch (projectionError) {
       // 投影不可用 = 加群 / 委托任务认领这批守卫全部 fail-closed（响亮停摆），其余功能不受影响。
       // 这正是要的方向：宁可停手，也不要因为守卫读不到就放行。
@@ -7770,6 +8209,20 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           botChatStore: feishuOwner.botChatStore,
           eventBus: panelEventFanout ?? eventBus,
           edgeServer: requireSegment(server, 'server', 'automation'),
+          ...(ctx.apiSyncReadMirrors
+            ? {
+                edgePresenceEvidence: () => {
+                  const evidence = ctx.apiSyncReadMirrors!.presence();
+                  return {
+                    state: evidence.state,
+                    asOf: evidence.asOf,
+                    onlineEdgeCount: evidence.onlineEdgeCount,
+                  };
+                },
+                publishInFlightEvidence: () =>
+                  ctx.apiSyncReadMirrors!.inFlightEvidence(),
+              }
+            : {}),
           // Block③ L3：面板自己的读走 api 属主池（accounts/persona_config/publish_log）；
           // automation 属主表（风控/告警/互动）经注入的只读端口取，面板不直连别域的库。
           panelStore: new PgPanelStore({ pool: apiPool, automation: panelAutomationRead }),
@@ -8055,6 +8508,38 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           quotaConfig: quotaConfigPanel,
           // 配置镜像健康只读投影（task 6.4）：每次请求现取，asOf 是数据时刻而非响应时刻。
           configMirrorHealth: () => requireSegment(configMirrorRefresher, 'configMirrorRefresher', 'automation').health(),
+          ...(ctx.apiSyncReadMirrors
+            ? {
+                configMirrorServicesHealth: () => {
+                  const local = requireSegment(
+                    configMirrorRefresher,
+                    'configMirrorRefresher',
+                    'automation',
+                  ).health();
+                  const automation =
+                    ctx.apiSyncReadMirrors!.automationConfigMirrorHealth();
+                  return {
+                    services: [
+                      {
+                        sourceService: 'api' as const,
+                        asOf: local.asOf,
+                        deliveryState: 'fresh' as const,
+                        entries: local.entries.filter(
+                          (entry) =>
+                            CONFIG_MIRRORS[
+                              entry.mirrorKey as keyof typeof CONFIG_MIRRORS
+                            ]?.owner === 'api',
+                        ),
+                      },
+                      {
+                        ...automation,
+                        entries: [...automation.entries],
+                      },
+                    ],
+                  };
+                },
+              }
+            : {}),
           // 操作兜底 floor 配置（change pacing-floor-config-min-interval）。四类操作最小间隔兜底区间可改 + 热加载 + 非乐观回真态。
           pacingConfig: pacingConfigPanel,
           // 单场会话上限配置（change session-limits-to-quota-layer）。按账号时长 + 互动预算可改 + 热加载 + 非乐观回真态。
@@ -8339,7 +8824,18 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                   },
                   pending,
                   recent,
-                  inFlightRecordIds: requireSegment(publishDispatcher, 'publishDispatcher', 'automation').getInFlightRecordIds(),
+                  ...(ctx.apiSyncReadMirrors
+                    ? {
+                        inFlightEvidence:
+                          ctx.apiSyncReadMirrors.inFlightEvidence(),
+                      }
+                    : {
+                        inFlightRecordIds: requireSegment(
+                          publishDispatcher,
+                          'publishDispatcher',
+                          'automation',
+                        ).getInFlightRecordIds(),
+                      }),
                   recentLimit: 5,
                   ...(publishApprovalStore
                     ? { approvalDispatch: await readApprovalDispatchProjection([...pending, ...recent]) }

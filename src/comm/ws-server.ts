@@ -346,6 +346,42 @@ export class EdgeCloudServer implements EdgePusher {
     return n;
   }
 
+  /**
+   * A3 owner observation. Counts and account routing are captured against one
+   * clock reading so the sync-read snapshot cannot combine different presence
+   * moments. Multiple live connections for one account keep the same
+   * deterministic earliest-registration rule as resolveEdgeIdForAccount().
+   */
+  edgePresenceSnapshot(): {
+    edgeCount: number;
+    onlineEdgeCount: number;
+    accountEdges: Array<{ accountId: string; edgeId: string }>;
+  } {
+    const now = this.clock();
+    let onlineEdgeCount = 0;
+    const accountEdges = new Map<string, string>();
+    for (const conn of this.edges.values()) {
+      if (
+        conn.ws.readyState !== WebSocket.OPEN ||
+        now - conn.lastSeen >= this.staleAfterMs
+      ) {
+        continue;
+      }
+      onlineEdgeCount += 1;
+      const accountId = conn.session.accountId?.trim();
+      const edgeId = conn.session.edgeId?.trim();
+      if (!accountId || !edgeId || accountEdges.has(accountId)) continue;
+      accountEdges.set(accountId, edgeId);
+    }
+    return {
+      edgeCount: this.edges.size,
+      onlineEdgeCount,
+      accountEdges: [...accountEdges]
+        .map(([accountId, edgeId]) => ({ accountId, edgeId }))
+        .sort((left, right) => left.accountId.localeCompare(right.accountId)),
+    };
+  }
+
   /** 已绑定端口（构造时 port:0 由系统分配，测试用）；未启动返回 null。 */
   address(): number | null {
     const a = this.wss?.address();

@@ -60,7 +60,7 @@ test('4a composition: automation roster projection is sourced from the API HTTP 
   const rosterWiring = between(
     source,
     'const rosterMode = serviceModeFromEnv();',
-    'try {\n      const projection = new PgAccountProjectionStore({',
+    'try {\n      if (segmentsForMode(rosterMode).segC) {',
   );
   const automationBranch = between(
     rosterWiring,
