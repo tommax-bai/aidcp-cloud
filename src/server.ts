@@ -291,7 +291,7 @@ import { ApprovalGatekeeperRole } from './publish-agent/roles/approval-gatekeepe
 import { PublishExecutorRole } from './publish-agent/roles/publish-executor.js';
 import { buildDeAiRewritePrompt } from './publish-agent/prompts.js';
 import { PostProcessor } from './publish-agent/post-processor.js';
-import { PublishLogStore } from './publish-agent/publish-log-store.js';
+import { PublishLogStore, type PendingPublishPreview } from './publish-agent/publish-log-store.js';
 import { DraftRefinementStore } from './publish-agent/draft-refinement.js';
 import { DraftRefinementWorker } from './publish-agent/draft-refinement-worker.js';
 import { hasUserRejectionEvidence } from './publish-agent/types.js';
@@ -344,6 +344,8 @@ import { InternalHttpClient, InternalHttpServer, INTERNAL_HTTP_TIMEOUT_CEILING_M
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
 import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
+import { registerPublishLogRoutes } from './transport/publish-log-http.js';
+import type { PublishLogWriter } from './kernel/publish-log-writer-port.js';
 import { PublishStatusHttpClient, registerPublishStatusRoutes } from './transport/publish-status-http.js';
 import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './transport/publish-generation-http.js';
 // Block② 2e：拆进程后 api ↔ automation 的三条跨段传输接缝。默认 monolith 全不启用（红线：monolith 不起任何新东西）。
@@ -752,6 +754,19 @@ interface CompositionContext {
   publishApprovalStore: PublishApprovalStore | undefined;
   publishDispatcher?: PublishDispatcher;
   publishLogStore: PublishLogStore;
+  /**
+   * 发布台账的**窄写入口**（change cloud-batch2-content-main）：内容域只经这四个方法写。
+   * 单体里就是上面那个存储本身（结构上满足），拆进程后 content 侧换成 `PublishLogHttpClient`。
+   * 上面那个整存储另有二十余个方法（排期 / 下发 / 编辑 / 对账），**都不属于内容域**。
+   */
+  publishLogWriter: PublishLogWriter;
+  /**
+   * 候审预览读（change cloud-batch2-content-main）。内容段只在**界面推送口在场时**才调它 ——
+   * 那个推送口由自动化段赋值，content 进程里恒缺席，故这条读在 content 里恒不可达。
+   * content 的 `main()` MUST 注入 `unavailableInMode(...)`：不可达就该是不可达，
+   * 万一哪天可达性假设被改坏，要当场响亮失败，而不是悄悄发一次跨进程读。
+   */
+  pendingPublishPreviewForAccount: (accountId: string) => Promise<PendingPublishPreview | null>;
   publishOrchestrator?: PublishOrchestrator;
   quotaConfigStore: QuotaConfigStore;
   readLiveContentVersion?: (recordId: number) => Promise<number | null>;
@@ -829,9 +844,14 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   registerReviewCardDeliveryRoutes(httpServer, {
     resolveReviewCardDelivery: (accountId) => ctx.resolveReviewCardDelivery(accountId),
   });
+  // 发布台账窄写入口（change cloud-batch2-content-main）：`publish_log` 是本域属主表，
+  // 内容域经这四条 route 写。**只暴露这四个**——那个存储另有二十余个方法不属于内容域，
+  // 端口有多宽，拆进程后要守的跨进程契约就有多宽。
+  registerPublishLogRoutes(httpServer, ctx.publishLogWriter);
   const actual = await httpServer.listen(port);
   console.log(
-    `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}（config-mirror bump + review-card-delivery 落地端点）`,
+    `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}` +
+      `（config-mirror bump + review-card-delivery + publish-log 落地端点）`,
   );
 }
 
@@ -1434,6 +1454,16 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
+  // change cloud-batch2-content-main：init 从**内容段**上移到属主段。
+  // 它只探测自己的 schema、不建表，而 `publish_log` 是本域（api）的表——
+  // 让内容域去初始化别人的表本就没有立场，拆进程后更是连库都够不着。
+  // 单体等价：内容段紧跟基础段跑，同一进程同一次调用，只是提前了几行。
+  try {
+    await publishLogStore.init();
+    console.log('[aidcp-cloud] PublishLogStore 已就绪');
+  } catch (err) {
+    console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
+  }
 
   // ── 人审授权的持久权威（change publish-approval-signal-to-database）────────────────────────
   // 授权这一位过去躺在本机文件 /tmp/aidcp-publish-approve-<requestId>.json 上：写方（飞书/后台/客户端/
@@ -2086,6 +2116,8 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.publishApprovalClient = publishApprovalClient;
   ctx.publishApprovalStore = publishApprovalStore;
   ctx.publishLogStore = publishLogStore;
+  ctx.publishLogWriter = publishLogStore;
+  ctx.pendingPublishPreviewForAccount = (accountId) => publishLogStore.pendingPublishPreviewForAccount(accountId);
   ctx.quotaConfigStore = quotaConfigStore;
   ctx.resumeConfigStore = resumeConfigStore;
   ctx.roleConfigStore = roleConfigStore;
@@ -2135,7 +2167,10 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     modelConfigStore,
     ossUploader,
     providerRuntime,
-    publishLogStore,
+    // change cloud-batch2-content-main：只取窄写入口（四个方法）+ 一条候审预览读，不再拿整个存储。
+    // 那个存储绑 api 池、另有二十余个不属于本域的方法；拆进程后本段换成 HTTP 客户端，调用点不变。
+    publishLogWriter,
+    pendingPublishPreviewForAccount,
     resolveCardChatId,
     // change cloud-batch2-content-main：候审卡投递判定改由基础段（属主侧）给成品。
     // 本段原先自己读 approvalPolicyStore + clientUserStore 现算——两者都绑 api 池，
@@ -2166,12 +2201,6 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     user: readEnvString('PGUSER'),
     password: readEnvString('PGPASSWORD'),
   });
-  try {
-    await publishLogStore.init();
-    console.log('[aidcp-cloud] PublishLogStore 已就绪');
-  } catch (err) {
-    console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
-  }
   // 去 AI 味后处理器
   const postProcessor = new PostProcessor({
     rewrite: async (content, flagged, accountId) => {
@@ -2406,7 +2435,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   publishOrchestrator.registerRole(new PublishExecutorRole({
     store: {
       async insert(record) {
-        return publishLogStore.insert({
+        return publishLogWriter.insert({
           title: record.title,
           content: record.content,
           // 真血缘：用 executor 计算的真概念/真点赞 id（无则空数组），不再用 tags / [] 充数（修 stage-4 适配器漏接）。
@@ -2425,15 +2454,15 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
         });
       },
       async updateStatus(id, status) {
-        await publishLogStore.updateStatus(id, status as 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review');
+        await publishLogWriter.updateStatus!(id, status as 'draft' | 'pending_approval' | 'scheduled' | 'submitted' | 'published' | 'failed' | 'needs_review');
       },
       // stage-4 元数据落库 + 防篡改审计（供下发段重建发布输入 + 审计）。
       async recordMetadata(id, metadata, aiEnforced) {
-        await publishLogStore.recordMetadata(id, metadata, aiEnforced);
+        await publishLogWriter.recordMetadata!(id, metadata, aiEnforced);
       },
       // 配图收口：如实标记真实附着张数 K（生成段无图诚实 failed 时传 0），杜绝纯文字帖留「有图」假信号。
       async markImagesAttached(id, count) {
-        await publishLogStore.markImagesAttached(id, count);
+        await publishLogWriter.markImagesAttached!(id, count);
       },
     },
     // change feishu-contract-seam（§4.6.2）：automation 侧发布出口只交出结构化数据，组合根在此侧构飞书卡 + 发送。
@@ -2474,7 +2503,12 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
           '客户端不会自动展开到「等你确认」，须由自动化进程侧承接推送',
         );
         uiSnapshot?.pushPublishState(accountId, recordId, 'pending', title);
-        void publishLogStore.pendingPublishPreviewForAccount(accountId).then((preview) => {
+        // change cloud-batch2-content-main：取用不到就到此为止，**不再去读那次预览**。
+        // 预览的唯一消费者就是上面这个界面推送口；它缺席时读回来的东西没有任何去处，
+        // 而那是一次 api 属主表的查询 —— content 拆成独立进程后会变成一次跨进程读，
+        // 为一个恒缺席的消费者开一条跨进程契约是纯亏。单体下 uiSnapshot 恒在，行为逐字不变。
+        if (!uiSnapshot) return;
+        void pendingPublishPreviewForAccount(accountId).then((preview) => {
           if (!preview) return;
           uiSnapshot?.pushPublishPreview(accountId, {
             recordId: preview.id,

@@ -1300,6 +1300,11 @@
     "note": "【待定稿裁决】change block2-content-process-split（2e batch1）新增：内容生成触发窄面端口契约（PublishGenerationPort），仅 import kernel 的 publish-pipeline-types（TriggerInput / PublishResult）。零 SQL / HTTP / LLM / 无模块级 Set-Map。默认 local 时组合根注入 PublishOrchestrator 本体、http 时注入 PublishGenerationHttpClient，两者结构兼容本接口。为拆进程后 automation 经端口远程触发 content 生成而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split"
   },
   {
+    "path": "src/kernel/publish-log-writer-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change cloud-batch2-content-main 新写：发布台账的窄写入口（PublishLogWriter，四个方法 insert/updateStatus/recordMetadata/markImagesAttached）。零 SQL / HTTP / LLM / 模块级 Set-Map，仅 import kernel（publish-pipeline-types 的 PublishRecord / PublishStatus）。publish_log 是 api 属主表而写它的是内容域发布出口 ⇒ 拆进程后这条边走内部 HTTP，两端 MUST 共用同一份定义。形状照抄属主存储真实签名、不另造更宽松入参类型；init() 有意不在口上（属主探测自己 schema，内容域无立场）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-batch2"
+  },
+  {
     "path": "src/kernel/publish-pipeline-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/publish-agent/types.ts 整体 git mv：发布管线纯类型契约（TriggerInput / PublishRecord / PublishMetadata / PipelineFields / ImagePlan / CoverCardPlan 等 + IMAGE_CATEGORIES as-const 枚举 + METADATA_DEFAULT_VALUES 保守默认 + hasUserRejectionEvidence 纯守卫），仅 import kernel（soul-types / curated-content-types / content-schedule-mode / platform-types / text-card-style / visual-reference-types / pipeline-log-contract / deployment-target）。零 SQL / HTTP / LLM / 模块级 Set/Map。原路径 publish-agent/types.ts 保留为 re-export 桩，content 层内部消费方无感。消 8 条跨边界入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
@@ -2256,6 +2261,11 @@
   },
   {
     "path": "src/transport/publish-generation-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/publish-log-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },

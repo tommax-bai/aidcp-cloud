@@ -35,7 +35,16 @@ import type { DefaultChatProvider } from '../../kernel/default-chat-provider.js'
  * - 不在生成候审段让位浏览（让位推迟到下发段）；本角色不碰边缘、不阻塞、不超时等审。
  */
 
-/** PublishLogStore 接口（生成候审段所需子集）。 */
+/**
+ * PublishLogStore 接口（生成候审段所需子集）。
+ *
+ * **注意这不是那条跨进程端口**（那条是 `src/kernel/publish-log-writer-port.ts` 的 `PublishLogWriter`）。
+ * 两者描述的是两条不同的缝，各自该有自己的形状，不是重复定义：
+ *   - 本接口 = 本角色与**组合根注入的适配器**之间的进程内契约（宽松、可选方法、`status: string`）；
+ *   - `PublishLogWriter` = 那个适配器与 **api 属主存储**之间的跨进程契约（照抄属主真实签名）。
+ * 把两者合成一个，会让「角色能接受的桩」与「跨进程真能调通的调用」被迫同形，
+ * 结果不是更安全，而是把宽松度传染给跨进程那一侧。
+ */
 export interface PublishLogStore {
   insert(record: {
     title: string;
