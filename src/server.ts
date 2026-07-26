@@ -345,6 +345,8 @@ import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transp
 import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
 import { registerPublishLogRoutes } from './transport/publish-log-http.js';
+import { registerPipelineLogRoutes } from './transport/pipeline-log-http.js';
+import type { PipelineLogSink } from './kernel/pipeline-log-contract.js';
 import type { PublishLogWriter } from './kernel/publish-log-writer-port.js';
 import { PublishStatusHttpClient, registerPublishStatusRoutes } from './transport/publish-status-http.js';
 import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './transport/publish-generation-http.js';
@@ -761,6 +763,11 @@ interface CompositionContext {
    */
   publishLogWriter: PublishLogWriter;
   /**
+   * 发布管线角色执行日志 sink（change cloud-batch2-content-main）。`publish_pipeline_logs` 属 api，
+   * 内容段只写。拆进程后 content 侧换成 `PipelineLogHttpClient`（写不成吵闹放过，绝不阻塞发布）。
+   */
+  pipelineLogSink: PipelineLogSink;
+  /**
    * 候审预览读（change cloud-batch2-content-main）。内容段只在**界面推送口在场时**才调它 ——
    * 那个推送口由自动化段赋值，content 进程里恒缺席，故这条读在 content 里恒不可达。
    * content 的 `main()` MUST 注入 `unavailableInMode(...)`：不可达就该是不可达，
@@ -848,10 +855,12 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   // 内容域经这四条 route 写。**只暴露这四个**——那个存储另有二十余个方法不属于内容域，
   // 端口有多宽，拆进程后要守的跨进程契约就有多宽。
   registerPublishLogRoutes(httpServer, ctx.publishLogWriter);
+  // 发布管线角色执行日志（change cloud-batch2-content-main）：`publish_pipeline_logs` 是本域属主表。
+  registerPipelineLogRoutes(httpServer, ctx.pipelineLogSink);
   const actual = await httpServer.listen(port);
   console.log(
     `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}` +
-      `（config-mirror bump + review-card-delivery + publish-log 落地端点）`,
+      `（config-mirror bump + review-card-delivery + publish-log + pipeline-log 落地端点）`,
   );
 }
 
@@ -1464,6 +1473,19 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   } catch (err) {
     console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
   }
+
+  // 发布角色执行日志（publish_pipeline_logs 表，change publish-pipeline-observability）。
+  // change cloud-batch2-content-main：构造从**内容段**上移到属主段。这张表属 api，
+  // 而它原先就在内容段里绑 apiPool 建 —— §4.1 登记的「属主反转」之一，正是拆仓要消的形态。
+  // 表由 migration 0004 已建、无需 init；写入 best-effort、不阻塞发布，注入给 PublishOrchestrator。
+  const publishPipelineLogStore = new PublishPipelineLogStore({
+    pool: apiPool,
+    host: readEnvString('PGHOST'),
+    port: readEnvPort('PGPORT'),
+    database: readEnvString('PGDATABASE'),
+    user: readEnvString('PGUSER'),
+    password: readEnvString('PGPASSWORD'),
+  });
 
   // ── 人审授权的持久权威（change publish-approval-signal-to-database）────────────────────────
   // 授权这一位过去躺在本机文件 /tmp/aidcp-publish-approve-<requestId>.json 上：写方（飞书/后台/客户端/
@@ -2117,6 +2139,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.publishApprovalStore = publishApprovalStore;
   ctx.publishLogStore = publishLogStore;
   ctx.publishLogWriter = publishLogStore;
+  ctx.pipelineLogSink = publishPipelineLogStore;
   ctx.pendingPublishPreviewForAccount = (accountId) => publishLogStore.pendingPublishPreviewForAccount(accountId);
   ctx.quotaConfigStore = quotaConfigStore;
   ctx.resumeConfigStore = resumeConfigStore;
@@ -2171,6 +2194,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     // 那个存储绑 api 池、另有二十余个不属于本域的方法；拆进程后本段换成 HTTP 客户端，调用点不变。
     publishLogWriter,
     pendingPublishPreviewForAccount,
+    pipelineLogSink,
     resolveCardChatId,
     // change cloud-batch2-content-main：候审卡投递判定改由基础段（属主侧）给成品。
     // 本段原先自己读 approvalPolicyStore + clientUserStore 现算——两者都绑 api 池，
@@ -2178,7 +2202,9 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     resolveReviewCardDelivery,
     tokenUsageStore,
     writeApprovalDecision,
-    apiPool,
+    // change cloud-batch2-content-main：**apiPool 已从本段彻底消失**。
+    // 内容段曾直接拿 api 池建两个 api 属主表的存储（发布台账 / 管线日志），两者都已上移到属主段，
+    // 跨边界只剩窄端口。这一行的消失就是「内容域不再连另一个域的库」这条铁律在本段成立的机械证据。
   } = ctx;
   // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
   // 判据三条全中才搬：① segA 赋值 ② 只有本段读 ③ **segA 自己不再引用它**。
@@ -2190,16 +2216,6 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   const roleLlm = (roleId: string): ChatLlmClient => ({
     complete: (prompt, opts) => llm.complete(prompt, { ...opts, role: opts?.role ?? roleId }),
     chat: (messages, opts) => llm.chat(messages, { ...opts, role: opts?.role ?? roleId }),
-  });
-  // 发布角色执行日志（publish_pipeline_logs 表，change publish-pipeline-observability）：复用同库连接配置。
-  // 表由 migration 0004 已建,无需 init;写入 best-effort、不阻塞发布。注入给 PublishOrchestrator 当 pipelineLogSink。
-  const publishPipelineLogStore = new PublishPipelineLogStore({
-    pool: apiPool,
-    host: readEnvString('PGHOST'),
-    port: readEnvPort('PGPORT'),
-    database: readEnvString('PGDATABASE'),
-    user: readEnvString('PGUSER'),
-    password: readEnvString('PGPASSWORD'),
   });
   // 去 AI 味后处理器
   const postProcessor = new PostProcessor({
@@ -2252,7 +2268,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     logger: console,
     pipelineTimeoutMs: normalizeTimeoutMs(process.env.AIDCP_PUBLISH_PIPELINE_TIMEOUT_MS, 600_000),
     // 角色执行日志写入口（死表 publish_pipeline_logs 激活）：每角色每次执行 best-effort 落一行。
-    pipelineLogSink: publishPipelineLogStore,
+    pipelineLogSink,
   });
 
   ctx.imageProvider = imageProvider;
