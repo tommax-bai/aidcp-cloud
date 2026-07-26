@@ -347,6 +347,8 @@ import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kerne
 import { registerPublishLogRoutes } from './transport/publish-log-http.js';
 import { registerPipelineLogRoutes } from './transport/pipeline-log-http.js';
 import { registerPublishCardExitRoutes } from './transport/publish-card-exit-http.js';
+import { registerImageModelSelectionRoutes } from './transport/image-model-selection-http.js';
+import type { ImageModelSelectionReader } from './kernel/image-model-selection-port.js';
 import type { PublishCardExitPort } from './kernel/publish-card-exit-port.js';
 import type { PipelineLogSink } from './kernel/pipeline-log-contract.js';
 import type { PublishLogWriter } from './kernel/publish-log-writer-port.js';
@@ -776,6 +778,12 @@ interface CompositionContext {
    */
   publishCardExit: PublishCardExitPort;
   /**
+   * 图片模型选择的**同步**读（change cloud-batch2-content-main）。单体 = 配置存储的进程内缓存；
+   * content 拆进程后注入 `PollingImageModelSelectionMirror`（异步取源 + 本地镜像），
+   * 调用点签名不变、热路径不加网络跳。
+   */
+  imageModelSelection: ImageModelSelectionReader;
+  /**
    * 候审预览读（change cloud-batch2-content-main）。内容段只在**界面推送口在场时**才调它 ——
    * 那个推送口由自动化段赋值，content 进程里恒缺席，故这条读在 content 里恒不可达。
    * content 的 `main()` MUST 注入 `unavailableInMode(...)`：不可达就该是不可达，
@@ -867,10 +875,14 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   registerPipelineLogRoutes(httpServer, ctx.pipelineLogSink);
   // 发布候审卡片出口（change cloud-batch2-content-main）：飞书客户端 / 机器人会话表 / 授权台账都在本域。
   registerPublishCardExitRoutes(httpServer, ctx.publishCardExit);
+  // 图片模型选择的异步取源（change cloud-batch2-content-main）：content 侧镜像刷新器调它。
+  registerImageModelSelectionRoutes(httpServer, {
+    fetchImageModelSelection: async () => ctx.imageModelSelection.current(),
+  });
   const actual = await httpServer.listen(port);
   console.log(
     `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}` +
-      `（config-mirror bump + review-card-delivery + publish-log + pipeline-log + publish-card-exit 落地端点）`,
+      `（config-mirror bump + review-card-delivery + publish-log + pipeline-log + publish-card-exit + image-model-selection 落地端点）`,
   );
 }
 
@@ -2164,9 +2176,27 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 正解是后者。卡片长什么样、发到哪个会话由属主侧决定，内容域只交结构化数据。
   //
   // `decidedVia` 在这里固定成排期免审那一档 —— 原本就写死在内容段里，只是挪了位置，逐字等价。
+  // 账号展示名由**属主侧就地补**（change cloud-batch2-content-main）：它是 api 的事实，
+  // 读它的那个函数是**同步**的、且底下是进程内缓存 —— 跨进程包不成一次调用（会改掉每个调用点的签名，
+  // 还给每张卡加一跳网络），做本地镜像又要为一个渲染字段养一张投影表。
+  // 而这个字段在卡片契约里本就是**可选**的，卡片构造器缺它时回落账号 id。
+  // 于是正解是第三条：调用方不再传，属主侧构卡前自己解析。单体下取到的是同一个值、同一份缓存，
+  // 逐字等价；拆进程后它比任何镜像都新鲜，因为解析发生在渲染那一刻。
+  // 图片模型选择（change cloud-batch2-content-main）：调用点是**同步**的、在热闭包里，
+  // 所以跨进程形态是「异步取源 + 同步读本地镜像」两件事，而不是一个 HTTP 客户端。
+  // 单体里镜像就是配置存储自己的进程内缓存 —— 两口指向同一份事实，逐字等价。
+  const imageModelSelection: ImageModelSelectionReader = {
+    current: () => {
+      const cfg = modelConfigStore.getCached();
+      return { imageProvider: cfg.imageProvider, imageModel: cfg.imageModel };
+    },
+  };
+
+  const withAccountName = <T extends { accountId?: string; accountName?: string }>(data: T): T =>
+    data.accountName || !data.accountId ? data : { ...data, accountName: accountDisplayName(data.accountId) };
   const publishCardExit: PublishCardExitPort = {
-    sendApprovalCard: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(data)),
-    sendCommandResult: (chatId, data) => messenger.sendCard(chatId, buildCommandResultCard(data)),
+    sendApprovalCard: (chatId, data) => messenger.sendApprovalCard(chatId, buildPublishApprovalCard(withAccountName(data))),
+    sendCommandResult: (chatId, data) => messenger.sendCard(chatId, buildCommandResultCard(withAccountName(data))),
     uploadImageFromUrl: (url) => messenger.uploadImageFromUrl(url),
     getDefaultChat: () => botChatStore.getDefaultChat(),
     resolveCardChatId: (originChatId, accountId) => resolveCardChatId(originChatId, accountId),
@@ -2202,6 +2232,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.resolveCardChatId = resolveCardChatId;
   ctx.resolveReviewCardDelivery = resolveReviewCardDelivery;
   ctx.publishCardExit = publishCardExit;
+  ctx.imageModelSelection = imageModelSelection;
   ctx.resolvePersona = resolvePersona;
 }
 
@@ -2210,13 +2241,14 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   //   并回挂 ctx（postProcessor / imageProvider / publishOrchestrator）。automation（segA+segC，无本段）不构造这些对象即可开机；
   //   monolith 下本段在 segC/segD 之前跑、同一实例、逐字节等价。视觉链路用量上报闭包本段自持一份（segC textcard-OCR 另有同源实现）。
   const {
-    accountDisplayName,
     anyImageKeyPresent,
     curatedContentStore,
     dashscopeApiKey,
     facebookPublishMediaStore,
     llm,
-    modelConfigStore,
+    // change cloud-batch2-content-main：只取图片模型选择那两个值的**同步**读口，不再拿整个配置存储。
+    // 它绑 api 池；拆进程后本段换成本地镜像（异步取源 + 同步读），调用点签名一行不改。
+    imageModelSelection,
     ossUploader,
     providerRuntime,
     // change cloud-batch2-content-main：只取窄写入口（四个方法）+ 一条候审预览读，不再拿整个存储。
@@ -2269,7 +2301,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   // 未单设 WANXIANG_API_KEY 时回退 DASHSCOPE_API_KEY（已实测该 key 可提交万相 wanx-v1 任务并产出 OSS 图）。
   const wanxiangClient = new WanxiangClient({
     apiKey: readEnvString('WANXIANG_API_KEY') ?? dashscopeApiKey,
-    getModel: () => modelConfigStore.getCached().imageModel,
+    getModel: () => imageModelSelection.current().imageModel,
     // 慢图容忍：轮询次数 env 可调（默认 34×5s=170s；须 < ImageGenerator 角色闸 200s）。change publish-image-required-or-fail。
     maxPollAttempts: Number(process.env.AIDCP_WANXIANG_MAX_POLL ?? 34),
   });
@@ -2280,13 +2312,13 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   const seedreamClient = new SeedreamClient({
     apiKey: arkRuntime?.apiKey || undefined,
     baseUrl: arkRuntime?.baseUrl || undefined,
-    getModel: () => modelConfigStore.getCached().imageModel,
+    getModel: () => imageModelSelection.current().imageModel,
     timeoutMs: Number(process.env.AIDCP_SEEDREAM_TIMEOUT_MS ?? 60_000),
   });
 
   // 图片出口：按全局 image_provider 路由（dashscope→万相、volcengine→即梦 Seedream），热加载、缺密钥诚实失败不跨厂商兜底。
   const imageProvider = new RoutingImageProvider({
-    getProvider: () => modelConfigStore.getCached().imageProvider,
+    getProvider: () => imageModelSelection.current().imageProvider,
     providers: { dashscope: wanxiangClient, volcengine: seedreamClient },
   });
 
@@ -2422,8 +2454,8 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   }
   publishOrchestrator.registerRole(new ImageGeneratorRole({
     imageProvider,
-    getProvider: () => modelConfigStore.getCached().imageProvider,
-    getModel: () => modelConfigStore.getCached().imageModel,
+    getProvider: () => imageModelSelection.current().imageProvider,
+    getModel: () => imageModelSelection.current().imageModel,
     // 用量上报接线点③（图片生成出口）：经 TokenUsageStore 单一接口写归 aidcp-content 的 llm_token_usage，MUST NOT 直写（方案 §4.6.6）。
     usageRecorder: (info) => {
       console.log(
@@ -2519,7 +2551,8 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     botChatStore: publishCardExit,
     resolveCardChatId: publishCardExit.resolveCardChatId,
     resolveReviewCardDelivery,
-    getAccountName: accountDisplayName,
+    // change cloud-batch2-content-main：**不再由本段传账号展示名**。它是 api 的事实、读它是同步调用，
+    // 而卡片契约里这个字段本就可选、缺它回落账号 id ⇒ 由属主侧构卡前自己解析（见 publishCardExit）。
     // 排期免审预授权（content-schedule）：与人工审批**同一个**授权写出口，决策主体 = 触发该免审的排期规则。
     writeApprovalSignal: publishCardExit.writeApprovalSignal,
     // 批次 0b：下发触发由**自动化段**赋值。丢了它 = 稿件已记「已批准」却永远不会被发出去 ——

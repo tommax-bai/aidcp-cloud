@@ -1175,6 +1175,11 @@
     "note": "【待定稿裁决】P3-3 从 src/hot-lead/heat-velocity.ts 析出过滤闸的**旋钮形状 + 未配置回落值**（HotLeadGateConfig / DEFAULT_HOT_LEAD_GATE_CONFIG）。「什么算热帖」的判定（parsePublishedHoursAgo / heatVelocity / evaluateHotLead）留 automation——整文件搬会与 session-limits 同理被拒。请求回写 §4.7 见 docpatch RK-P3-3"
   },
   {
+    "path": "src/kernel/image-model-selection-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change cloud-batch2-content-main 新写：图片出口的模型选择端口（ImageModelSelection 纯结果类型 + ImageModelSelectionSource 异步取源口 + ImageModelSelectionReader 同步读口）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。形状与本批其余端口不同的原因写在文件头：调用点是**同步**的且在热闭包里（每次配图取一次厂商 / 模型），改成 await 一次 HTTP 会改掉每个调用点签名并给热路径加一跳网络 ⇒ 跨进程形态是「异步取源 + 同步读本地镜像」两件事。单体下镜像即配置存储进程内缓存，两口同源逐字等价。镜像的诚实要求（从未取到过回保守默认、刷新失败保留上一份好值）写在接口文档里。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-batch2"
+  },
+  {
     "path": "src/kernel/image-provider-registry.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/image-providers.ts 析出图片厂商注册表纯数据段 + 无状态归一（ImageProviderId / ImageProviderMeta / DEFAULT_IMAGE_PROVIDER / IMAGE_PROVIDERS 字面数据 / isKnownImageProvider / normImageProvider）。零 import、零 SQL / HTTP / LLM、零模块级 Set-Map（IMAGE_PROVIDERS 为字面 Record，归一用 Object.hasOwnProperty）。路由客户端类 RoutingImageProvider（依赖 image-provider.js 的 ImageProvider 客户端接口）留 image-providers.ts（content）并从 kernel 导入等值再导出。供 api 侧面板版本视图 / 配置外观跨边界共导，消 2 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
@@ -2241,6 +2246,11 @@
   },
   {
     "path": "src/transport/eventbus-outbox-bridge.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/image-model-selection-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
