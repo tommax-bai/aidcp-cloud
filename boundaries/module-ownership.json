@@ -1320,6 +1320,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/reference-image-guidance.ts 整体 git mv：纯参考图引导（REFERENCE_IMAGE_MAX_COUNT 常量 + referenceImages* / referenceImageUrl / buildReferenceImageGuidance 纯字符串/过滤函数），仅 import kernel（publish-pipeline-types）。零 SQL / HTTP / LLM / 模块级 Set-Map。原路径 publish-agent/reference-image-guidance.ts 保留为 re-export 桩，同层消费方无感。消 1 条 api 侧 publish-scheduler 入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/review-card-delivery-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change cloud-batch2-content-main 新写：候审卡是否发飞书的跨属主判定口（ReviewCardDeliveryPort 接口 + ReviewCardDeliveryDecision 纯结果类型）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。判定要读两张 api 属主表（账号分组稿件投递策略 + 客户审批归属可证性），整段留 api 侧实现，content 侧只依赖本接口 ⇒ content 因此不再需要 approvalPolicyStore 与 clientUserStore 两个 apiPool 绑定的存储。语义含 fail-open 契约（判不出来一律保留飞书卡），写在接口文档里、两端共守。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-batch2"
+  },
+  {
     "path": "src/kernel/risk-command-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P5-1 新写（用户 2026-07-25 拍板：面板写风控走异步）：风控写命令的跨属主契约——受理回执 RiskCommandAccepted（**只有 commandId、无任何写后状态字段**）、四态结局 RiskCommandOutcome（processing / applied / failed / unknown）、两个提交入参型、以及只含「提交 + 回读」三方法的 RiskCommandPort。§4.6.4 明写 risk/status 与 risk/quota 两条端点 MUST 在拆分前迁走，否则 §14 红线 9「RiskController 单写」在拆分后即刻不成立；面板同步直调 RiskController 物理上跨不了进程。契约里刻意不含任何同步写方法：applySignal / setQuotaLevel / recoverRestricted 只活在 automation 的 RiskController 上。unknown 独立成态是硬要求——把「查无此命令」当成 processing，界面会永远转圈且永不报错（红线：静默假成功的另一形态）。零 import，四条准入正则实跑零命中。消除 import 豁免 1 条（src/panel/types.ts -> src/risk/index.ts，api -> automation，本 change 前该方向唯一一条边）。请求回写 §4.6.4 见 docpatch RK-P5-1"
@@ -2256,6 +2261,11 @@
   },
   {
     "path": "src/transport/publish-status-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/review-card-delivery-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },

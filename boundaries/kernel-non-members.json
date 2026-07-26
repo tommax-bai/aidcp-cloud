@@ -32,6 +32,7 @@
       "src/kernel/delegated-task-types.ts",
       "src/kernel/publish-pipeline-types.ts",
       "src/kernel/valuable-comment-types.ts",
+      "src/kernel/review-card-delivery-port.ts",
       "src/kernel/facebook-group-types.ts",
       "src/kernel/schedule-policy.ts",
       "src/kernel/reference-image-guidance.ts",

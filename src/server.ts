@@ -342,6 +342,8 @@ import {
 } from './gateway/service-mode.js';
 import { InternalHttpClient, InternalHttpServer, INTERNAL_HTTP_TIMEOUT_CEILING_MS } from './transport/internal-http.js';
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
+import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
+import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
 import { PublishStatusHttpClient, registerPublishStatusRoutes } from './transport/publish-status-http.js';
 import { PublishGenerationHttpClient, registerPublishGenerationRoutes } from './transport/publish-generation-http.js';
 // Block② 2e：拆进程后 api ↔ automation 的三条跨段传输接缝。默认 monolith 全不启用（红线：monolith 不起任何新东西）。
@@ -757,6 +759,11 @@ interface CompositionContext {
   refreshPublishPreview?: (recordId: number) => void;
   resolveAccountChatId: (accountId: string | undefined) => Promise<string>;
   resolveCardChatId: (originChatId: string | undefined | null, accountId: string | undefined) => Promise<string>;
+  /**
+   * 候审卡投递判定（change cloud-batch2-content-main）：基础段构造（判定要的两张表都是 api 属主），
+   * 内容段只调。拆进程后 content 侧换成 `ReviewCardDeliveryHttpClient`，调用点一行不改。
+   */
+  resolveReviewCardDelivery: ReviewCardDeliveryPort['resolveReviewCardDelivery'];
   resolveController?: (accountId: string) => Promise<RiskController>;
   resolvePersona: ReturnType<typeof createPersonaResolver>;
   resumeConfigStore: ResumeConfigStore;
@@ -815,8 +822,17 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   const port = readEnvPort('AIDCP_API_PORT') ?? DEFAULT_API_INTERNAL_API_PORT;
   const httpServer = new InternalHttpServer();
   registerConfigMirrorBumpRoutes(httpServer, sink);
+  // 候审卡投递判定（change cloud-batch2-content-main）：判定要的两张表是 api 属主，实现留本进程；
+  // content 进程经 ReviewCardDeliveryHttpClient 调这条 route。
+  // **无缺席分支是有意的**：基础段在所有模式下都跑、且无条件赋值它（与 resolveCardChatId 同待遇），
+  // 加一个恒为真的守卫只会把「这里可能缺」这个错误印象写进代码。
+  registerReviewCardDeliveryRoutes(httpServer, {
+    resolveReviewCardDelivery: (accountId) => ctx.resolveReviewCardDelivery(accountId),
+  });
   const actual = await httpServer.listen(port);
-  console.log(`[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}（config-mirror bump 落地端点）`);
+  console.log(
+    `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}（config-mirror bump + review-card-delivery 落地端点）`,
+  );
 }
 
 /**
@@ -1726,6 +1742,38 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
       (err as Error).message,
     );
   }
+  // ── 候审卡投递判定（change cloud-batch2-content-main）──────────────────────────────────
+  // 原先这段闭包住在**内容段**里，就地读 approvalPolicyStore 与 clientUserStore ——
+  // 两者都绑 api 池。content 拆成独立进程后它连不上那个库，整段判定无从执行。
+  // 判定要的两张表都是 api 属主，故整段留在这里（属主侧），跨边界只暴露一个方法（kernel 端口）。
+  // 内容段因此**同时**摘掉了对这两个存储的依赖 —— 拆仓要消的两条边，一次消完。
+  //
+  // fail-open 是这条口的语义、不是容错兜底：判不出来一律保留飞书卡（见 kernel 接口文档）。
+  // 下面每个 catch 都如实带上走到了哪一支的 reason，MUST NOT 归一成一个笼统值。
+  const resolveReviewCardDelivery = async (accountId: string): Promise<ReviewCardDeliveryDecision> => {
+    if (!approvalPolicyStore) return { send: true, reason: 'policy_store_unavailable' };
+    let policy: Awaited<ReturnType<ApprovalPolicyStore['getGroupPublishPolicyForAccount']>>;
+    try {
+      policy = await approvalPolicyStore.getGroupPublishPolicyForAccount(accountId);
+    } catch (error) {
+      console.warn(`[approval-policy] 分组稿件策略读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
+      return { send: true, reason: 'policy_read_failed' };
+    }
+    if (policy.delivery !== 'client_only') return { send: true, reason: 'client_and_feishu' };
+    if (!policy.groupLabel) return { send: true, reason: 'account_group_missing' };
+    try {
+      const reachability = await clientUserStore.hasEnabledClientApprovalReachability(accountId);
+      if (reachability.reachable) return { send: false, reason: 'suppressed_by_client_only_policy' };
+      console.warn(
+        `[approval-policy] client_only 账号客户审批归属不可证，保留飞书卡 account=${accountId} group=${policy.groupLabel} reason=${reachability.reason}`,
+      );
+      return { send: true, reason: `client_reachability_${reachability.reason}` };
+    } catch (error) {
+      console.warn(`[approval-policy] 客户审批归属读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
+      return { send: true, reason: 'client_reachability_read_failed' };
+    }
+  };
+
   // 启动加载持久化暂停态进内存缓存：被暂停账号重启后仍为 paused，不静默复活。
   const accountState = new AccountStateManager(accountStore);
 
@@ -2067,6 +2115,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.personaStore = personaStore;
   ctx.resolveAccountChatId = resolveAccountChatId;
   ctx.resolveCardChatId = resolveCardChatId;
+  ctx.resolveReviewCardDelivery = resolveReviewCardDelivery;
   ctx.resolvePersona = resolvePersona;
 }
 
@@ -2088,10 +2137,12 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     providerRuntime,
     publishLogStore,
     resolveCardChatId,
+    // change cloud-batch2-content-main：候审卡投递判定改由基础段（属主侧）给成品。
+    // 本段原先自己读 approvalPolicyStore + clientUserStore 现算——两者都绑 api 池，
+    // content 拆成独立进程后连不上那个库。判定整段留属主侧，这里只调。
+    resolveReviewCardDelivery,
     tokenUsageStore,
     writeApprovalDecision,
-    approvalPolicyStore,
-    clientUserStore,
     apiPool,
   } = ctx;
   // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
@@ -2121,30 +2172,6 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   } catch (err) {
     console.warn('[aidcp-cloud] PublishLogStore 初始化失败:', (err as Error).message);
   }
-  const resolveReviewCardDelivery = async (accountId: string): Promise<{ send: boolean; reason: string }> => {
-    if (!approvalPolicyStore) return { send: true, reason: 'policy_store_unavailable' };
-    let policy: Awaited<ReturnType<ApprovalPolicyStore['getGroupPublishPolicyForAccount']>>;
-    try {
-      policy = await approvalPolicyStore.getGroupPublishPolicyForAccount(accountId);
-    } catch (error) {
-      console.warn(`[approval-policy] 分组稿件策略读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
-      return { send: true, reason: 'policy_read_failed' };
-    }
-    if (policy.delivery !== 'client_only') return { send: true, reason: 'client_and_feishu' };
-    if (!policy.groupLabel) return { send: true, reason: 'account_group_missing' };
-    try {
-      const reachability = await clientUserStore.hasEnabledClientApprovalReachability(accountId);
-      if (reachability.reachable) return { send: false, reason: 'suppressed_by_client_only_policy' };
-      console.warn(
-        `[approval-policy] client_only 账号客户审批归属不可证，保留飞书卡 account=${accountId} group=${policy.groupLabel} reason=${reachability.reason}`,
-      );
-      return { send: true, reason: `client_reachability_${reachability.reason}` };
-    } catch (error) {
-      console.warn(`[approval-policy] 客户审批归属读取失败，保留飞书卡 account=${accountId}: ${(error as Error).message}`);
-      return { send: true, reason: 'client_reachability_read_failed' };
-    }
-  };
-
   // 去 AI 味后处理器
   const postProcessor = new PostProcessor({
     rewrite: async (content, flagged, accountId) => {
