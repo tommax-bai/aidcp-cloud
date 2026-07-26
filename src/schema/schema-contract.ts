@@ -71,8 +71,13 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 结果账本。迁移没跑 ⇒ 提交时的占位行 INSERT 抛错（已 catch 成 warn，命令仍入队）、`outcomeOf` 直接
  * 报 `relation ... does not exist`——响亮，绝不退化成「查不到 = 处理中」。命令本身走 event_outbox、
  * 单写者照常应用，故不是承重前置。与上面几条同口径：只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
+ * 注：`0080_restricted_recovery_outcome`（change split-cloud-api-composition-root-3b）只给上述账本增加
+ * nullable recovery 结果列、环境作用域与 resume 阶段，并把 state check 扩为允许 `applying/refused`。
+ * 旧 signal/quota 读写形状不变，
+ * 迁移缺失时 recovery owner 写会显式失败并由 outbox 保持重放，故同样只抬 KNOWN_MAX、不抬 REQUIRED。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0079_risk_command_outcome';
+export const KNOWN_MAX_SCHEMA_VERSION = '0080_restricted_recovery_outcome';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

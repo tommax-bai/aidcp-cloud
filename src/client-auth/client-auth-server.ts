@@ -137,8 +137,17 @@ export interface ClientAuthDeps {
   environmentRisk?: {
     platformForAccount(accountId: string): string | undefined;
     viewForAccount(accountId: string): Promise<ClientEnvironmentRiskState | null>;
-    recoverRestrictedForAccount(accountId: string, reason: string): Promise<ClientEnvironmentRiskRecovery | null>;
-    resumeEdgesForAccount(accountId: string): number;
+    submitRestrictedRecovery(
+      envKey: string,
+      accountId: string,
+      reason: string,
+      requestedBy: string,
+    ): Promise<{ commandId: string } | null>;
+    restrictedRecoveryOutcomeOf(
+      commandId: string,
+      envKey: string,
+      accountId: string,
+    ): Promise<ClientEnvironmentRiskRecoveryOutcome | null>;
   };
   onOffboardCreated?: (offboard: ClientOffboardView) => Promise<void>;
   /** 客户只提交已确认人设；环境/账号/人设缺失状态均由 Cloud 自行解析。 */
@@ -166,13 +175,26 @@ export interface ClientEnvironmentRiskState {
   updatedAt: number;
 }
 
-export interface ClientEnvironmentRiskRecovery {
-  accepted: boolean;
-  refusal?: 'state_not_restricted';
-  statusBefore: RiskStatus;
-  state: ClientEnvironmentRiskState;
-  changed: boolean;
-}
+export type ClientEnvironmentRiskRecoveryOutcome =
+  | { commandId: string; state: 'processing' }
+  | {
+      commandId: string;
+      state: 'applied';
+      risk: ClientEnvironmentRiskState;
+      changed: boolean;
+      resumedEdges: number;
+      resumeError?: string;
+    }
+  | {
+      commandId: string;
+      state: 'refused';
+      reason: 'state_not_restricted';
+      risk: ClientEnvironmentRiskState;
+    }
+  | { commandId: string; state: 'failed'; reason: string }
+  | { commandId: string; state: 'unknown' };
+
+const RECOVERY_QUICK_POLL_DELAYS_MS = [0, 50, 100] as const;
 
 export interface ClientAuthConfig {
   port: number;
@@ -477,6 +499,98 @@ async function resolveOwnedFacebookRiskAccount(
     return null;
   }
   return bound.accountId;
+}
+
+function sendEnvironmentRiskRecoveryOutcome(
+  res: http.ServerResponse,
+  envKey: string,
+  outcome: ClientEnvironmentRiskRecoveryOutcome,
+  logger: Pick<Console, 'warn'>,
+): void {
+  if (
+    (outcome.state === 'applied' || outcome.state === 'refused') &&
+    outcome.risk.status !== 'normal' &&
+    outcome.risk.status !== 'warned' &&
+    outcome.risk.status !== 'restricted' &&
+    outcome.risk.status !== 'frozen'
+  ) {
+    logger.warn('[client-auth] restricted recovery returned invalid risk status', {
+      envKey,
+      commandId: outcome.commandId,
+      rawStatus: String(outcome.risk.status),
+    });
+    sendJson(res, 503, {
+      error: 'risk_recovery_failed',
+      data: {
+        envKey,
+        commandId: outcome.commandId,
+        state: 'failed',
+        reason: 'recovery_outcome_incomplete',
+      },
+    });
+    return;
+  }
+  if (outcome.state === 'processing') {
+    sendJson(res, 202, {
+      data: { envKey, commandId: outcome.commandId, state: outcome.state },
+      meta: { requestId: randomUUID(), asOf: Date.now() },
+    });
+    return;
+  }
+  if (outcome.state === 'applied') {
+    sendJson(res, 200, {
+      data: {
+        envKey,
+        commandId: outcome.commandId,
+        state: outcome.state,
+        ...outcome.risk,
+        changed: outcome.changed,
+        resumedEdges: outcome.resumedEdges,
+        ...(outcome.resumeError ? { resumeError: outcome.resumeError } : {}),
+      },
+      meta: { requestId: randomUUID(), asOf: Date.now() },
+    });
+    return;
+  }
+  if (outcome.state === 'refused') {
+    sendJson(res, 409, {
+      error: 'risk_recovery_refused',
+      data: {
+        envKey,
+        commandId: outcome.commandId,
+        state: outcome.state,
+        status: outcome.risk.status,
+        reason: outcome.reason,
+      },
+    });
+    return;
+  }
+  if (outcome.state === 'failed') {
+    sendJson(res, 503, {
+      error: 'risk_recovery_failed',
+      data: { envKey, commandId: outcome.commandId, state: outcome.state, reason: outcome.reason },
+    });
+    return;
+  }
+  sendJson(res, 404, {
+    error: 'risk_recovery_unknown',
+    data: { envKey, commandId: outcome.commandId, state: outcome.state },
+  });
+}
+
+async function quickRecoveryOutcome(
+  deps: NonNullable<ClientAuthDeps['environmentRisk']>,
+  commandId: string,
+  envKey: string,
+  accountId: string,
+): Promise<ClientEnvironmentRiskRecoveryOutcome | null> {
+  let latest: ClientEnvironmentRiskRecoveryOutcome | null = null;
+  for (const delayMs of RECOVERY_QUICK_POLL_DELAYS_MS) {
+    if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    latest = await deps.restrictedRecoveryOutcomeOf(commandId, envKey, accountId);
+    if (!latest || latest.state !== 'processing') return latest;
+  }
+  return latest;
 }
 
 /**
@@ -1176,6 +1290,28 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       return;
     }
 
+    if (method === 'GET' && /^\/environments\/[^/]+\/risk-state\/recovery-commands\/[^/]+$/.test(url)) {
+      const envKey = decodeURIComponent(url.split('/')[2] ?? '').trim();
+      const commandId = decodeURIComponent(url.split('/')[5] ?? '').trim();
+      if (!deps.environmentRisk) {
+        sendJson(res, 503, { error: 'environment_risk_unavailable' });
+        return;
+      }
+      if (!commandId || commandId.length > 256 || /[\u0000-\u001f\u007f]/.test(commandId)) {
+        sendJson(res, 404, { error: 'risk_recovery_unknown' });
+        return;
+      }
+      const accountId = await resolveOwnedFacebookRiskAccount(deps, res, userId, envKey);
+      if (!accountId) return;
+      const outcome = await deps.environmentRisk.restrictedRecoveryOutcomeOf(commandId, envKey, accountId);
+      if (!outcome) {
+        sendJson(res, 503, { error: 'environment_risk_unavailable' });
+        return;
+      }
+      sendEnvironmentRiskRecoveryOutcome(res, envKey, outcome, logger);
+      return;
+    }
+
     // 客户自助「解除受限」：只接受空对象。kind/status/accountId/reason 全由 Cloud 固定或解析，客户端无选择权。
     if (method === 'POST' && /^\/environments\/[^/]+\/risk-state\/recover$/.test(url)) {
       const envKey = decodeURIComponent(url.split('/')[2] ?? '').trim();
@@ -1196,32 +1332,48 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       }
       const accountId = await resolveOwnedFacebookRiskAccount(deps, res, userId, envKey);
       if (!accountId) return;
-      const auditReason = `client_environment_recovery:user=${userId}:env=${envKey}`;
-      const recovery = await deps.environmentRisk.recoverRestrictedForAccount(accountId, auditReason);
-      if (!recovery) {
+      const current = await deps.environmentRisk.viewForAccount(accountId);
+      if (!current) {
         sendJson(res, 503, { error: 'environment_risk_unavailable' });
         return;
       }
-      if (!recovery.accepted) {
-        sendJson(res, 409, {
-          error: 'risk_state_not_restricted',
-          data: { envKey, status: recovery.state.status },
+      if (current.status === 'normal') {
+        sendJson(res, 200, {
+          data: { envKey, ...current, changed: false, resumedEdges: 0 },
+          meta: { requestId: randomUUID(), asOf: Date.now() },
         });
         return;
       }
-      const resumedEdges = deps.environmentRisk.resumeEdgesForAccount(accountId);
-      logger.log('[client-auth] Facebook 环境解除受限', {
+      if (current.status !== 'restricted') {
+        sendJson(res, 409, {
+          error: 'risk_state_not_restricted',
+          data: { envKey, status: current.status },
+        });
+        return;
+      }
+      const auditReason = `client_environment_recovery:user=${userId}:env=${envKey}`;
+      const accepted = await deps.environmentRisk.submitRestrictedRecovery(
+        envKey,
+        accountId,
+        auditReason,
+        `client-auth:${userId}:${envKey}`,
+      );
+      if (!accepted) {
+        sendJson(res, 503, { error: 'environment_risk_unavailable' });
+        return;
+      }
+      const outcome = await quickRecoveryOutcome(deps.environmentRisk, accepted.commandId, envKey, accountId);
+      if (!outcome) {
+        sendJson(res, 503, { error: 'environment_risk_unavailable' });
+        return;
+      }
+      logger.log('[client-auth] Facebook 环境解除受限命令', {
         userId,
         envKey,
-        statusBefore: recovery.statusBefore,
-        statusAfter: recovery.state.status,
-        changed: recovery.changed,
-        resumedEdges,
+        commandId: accepted.commandId,
+        outcome: outcome.state,
       });
-      sendJson(res, 200, {
-        data: { envKey, ...recovery.state, changed: recovery.changed, resumedEdges },
-        meta: { requestId: randomUUID(), asOf: Date.now() },
-      });
+      sendEnvironmentRiskRecoveryOutcome(res, envKey, outcome, logger);
       return;
     }
 

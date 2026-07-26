@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startClientAuthApi } from '../src/client-auth/client-auth-server.js';
-import type { ClientAuthConfig, ClientAuthDeps } from '../src/client-auth/client-auth-server.js';
+import type {
+  ClientAuthConfig,
+  ClientAuthDeps,
+  ClientEnvironmentRiskRecoveryOutcome,
+} from '../src/client-auth/client-auth-server.js';
 import type { ClientUserStore, ClientEnvScopeRow, ClientOffboardView } from '../src/client-auth/client-user-store.js';
 import { LoginRateLimiter } from '../src/client-auth/rate-limiter.js';
 import { TokenRevocationStore } from '../src/panel/revocation.js';
@@ -1434,7 +1438,8 @@ function makeEnvironmentRiskDep(options: {
   status?: 'normal' | 'warned' | 'restricted' | 'frozen';
   platform?: string;
   resumedEdges?: number;
-  accept?: boolean;
+  outcome?: 'processing' | 'applied' | 'refused' | 'failed' | 'unknown';
+  rawOutcomeRiskStatus?: string;
 } = {}) {
   const status = options.status ?? 'restricted';
   const calls: Array<Record<string, unknown>> = [];
@@ -1448,25 +1453,39 @@ function makeEnvironmentRiskDep(options: {
       calls.push({ action: 'view', accountId });
       return { status, statusSince: 1000, updatedAt: 2000 };
     },
-    async recoverRestrictedForAccount(accountId, reason) {
-      calls.push({ action: 'recover', accountId, reason });
-      const accepted = options.accept ?? (status === 'restricted' || status === 'normal');
+    async submitRestrictedRecovery(envKey, accountId, reason, requestedBy) {
+      calls.push({ action: 'submit', envKey, accountId, reason, requestedBy });
+      return { commandId: '41' };
+    },
+    async restrictedRecoveryOutcomeOf(
+      commandId,
+      envKey,
+      accountId,
+    ): Promise<ClientEnvironmentRiskRecoveryOutcome> {
+      calls.push({ action: 'outcome', commandId, envKey, accountId });
+      const outcome = options.outcome ?? 'applied';
+      if (outcome === 'processing' || outcome === 'unknown') return { commandId, state: outcome };
+      if (outcome === 'failed') return { commandId, state: outcome, reason: 'owner_failed' };
+      if (outcome === 'refused') {
+        return {
+          commandId,
+          state: outcome,
+          reason: 'state_not_restricted',
+          risk: { status: 'frozen', statusSince: 2500, updatedAt: 3000 },
+        };
+      }
+      resumed += 1;
       return {
-        accepted,
-        ...(accepted ? {} : { refusal: 'state_not_restricted' as const }),
-        statusBefore: status,
-        state: {
-          status: status === 'restricted' && accepted ? 'normal' : status,
-          statusSince: status === 'restricted' && accepted ? 3000 : 1000,
+        commandId,
+        state: 'applied',
+        risk: {
+          status: (options.rawOutcomeRiskStatus ?? 'normal') as 'normal',
+          statusSince: 3000,
           updatedAt: 3000,
         },
-        changed: status === 'restricted' && accepted,
+        changed: true,
+        resumedEdges: options.resumedEdges ?? 2,
       };
-    },
-    resumeEdgesForAccount(accountId) {
-      calls.push({ action: 'resume', accountId });
-      resumed += 1;
-      return options.resumedEdges ?? 2;
     },
   };
   return { dep, calls, resumedCount: () => resumed };
@@ -1529,14 +1548,120 @@ test('环境风险恢复：restricted 写后 normal、Cloud 生成理由并回�
       const text = await res.text();
       assert.doesNotMatch(text, new RegExp(ACCT_P1));
       const body = JSON.parse(text) as { data: Record<string, unknown> };
-      assert.deepEqual(Object.keys(body.data).sort(), ['changed', 'envKey', 'resumedEdges', 'status', 'statusSince', 'updatedAt']);
+      assert.deepEqual(
+        Object.keys(body.data).sort(),
+        ['changed', 'commandId', 'envKey', 'resumedEdges', 'state', 'status', 'statusSince', 'updatedAt'],
+      );
+      assert.equal(body.data.commandId, '41');
+      assert.equal(body.data.state, 'applied');
       assert.equal(body.data.status, 'normal');
       assert.equal(body.data.changed, true);
       assert.equal(body.data.resumedEdges, 3);
-      const recover = risk.calls.find((c) => c.action === 'recover');
-      assert.equal(recover?.accountId, ACCT_P1);
-      assert.match(String(recover?.reason), /user=u1:env=p1/);
+      const submit = risk.calls.find((c) => c.action === 'submit');
+      assert.equal(submit?.envKey, 'p1');
+      assert.equal(submit?.accountId, ACCT_P1);
+      assert.match(String(submit?.reason), /user=u1:env=p1/);
+      assert.equal(submit?.requestedBy, 'client-auth:u1:p1');
       assert.equal(risk.resumedCount(), 1);
+    },
+  );
+});
+
+test('环境风险恢复：异步受理返回 202，并按同环境同账号续查同一 command', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const risk = makeEnvironmentRiskDep({ outcome: 'processing' });
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), environmentRisk: risk.dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const submitted = await fetch(`${base}/environments/p1/risk-state/recover`, {
+        method: 'POST', headers, body: JSON.stringify({}),
+      });
+      assert.equal(submitted.status, 202);
+      const submittedBody = (await submitted.json()) as { data: Record<string, unknown> };
+      assert.equal(submittedBody.data.status, undefined, '受理回包不得伪造写后 normal');
+      assert.deepEqual(submittedBody.data, { envKey: 'p1', commandId: '41', state: 'processing' });
+
+      const polled = await fetch(`${base}/environments/p1/risk-state/recovery-commands/41`, { headers });
+      assert.equal(polled.status, 202);
+      assert.deepEqual((await polled.json() as { data: Record<string, unknown> }).data, {
+        envKey: 'p1',
+        commandId: '41',
+        state: 'processing',
+      });
+      assert.ok(risk.calls.some((call) =>
+        call.action === 'outcome' &&
+        call.commandId === '41' &&
+        call.envKey === 'p1' &&
+        call.accountId === ACCT_P1));
+    },
+  );
+});
+
+test('环境风险恢复：refused、failed 与 unknown 保持不同 HTTP 结局', async () => {
+  for (const [outcome, expectedStatus, expectedError] of [
+    ['refused', 409, 'risk_recovery_refused'],
+    ['failed', 503, 'risk_recovery_failed'],
+    ['unknown', 404, 'risk_recovery_unknown'],
+  ] as const) {
+    const fx = ownerOfP1();
+    fx.bindings.set('p1', ACCT_P1);
+    const risk = makeEnvironmentRiskDep({ outcome });
+    await withServer(
+      { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), environmentRisk: risk.dep },
+      baseConfig(0),
+      async (base) => {
+        const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+        const res = await fetch(`${base}/environments/p1/risk-state/recover`, {
+          method: 'POST', headers, body: JSON.stringify({}),
+        });
+        assert.equal(res.status, expectedStatus, outcome);
+        const body = (await res.json()) as { error: string; data: Record<string, unknown> };
+        assert.equal(body.error, expectedError, outcome);
+        assert.equal(body.data.state, outcome, outcome);
+        assert.equal(risk.resumedCount(), 0, outcome);
+      },
+    );
+  }
+});
+
+test('环境风险恢复：非法 owner risk status 只公开稳定 incomplete reason，raw 仅写服务端日志', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const rawStatus = 'owner_internal_status';
+  const warnings: unknown[][] = [];
+  const risk = makeEnvironmentRiskDep({ rawOutcomeRiskStatus: rawStatus });
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), environmentRisk: risk.dep },
+    baseConfig(0, {
+      logger: {
+        log() {},
+        error() {},
+        warn(...args: unknown[]) {
+          warnings.push(args);
+        },
+      },
+    }),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/risk-state/recover`, {
+        method: 'POST', headers, body: JSON.stringify({}),
+      });
+      assert.equal(res.status, 503);
+      const text = await res.text();
+      assert.doesNotMatch(text, new RegExp(rawStatus));
+      assert.deepEqual(JSON.parse(text), {
+        error: 'risk_recovery_failed',
+        data: {
+          envKey: 'p1',
+          commandId: '41',
+          state: 'failed',
+          reason: 'recovery_outcome_incomplete',
+        },
+      });
+      assert.match(JSON.stringify(warnings), new RegExp(rawStatus));
     },
   );
 });
@@ -1715,7 +1840,8 @@ test('环境风险恢复：normal 幂等；warned/frozen 拒绝且不恢复 edge
           method: 'POST', headers, body: JSON.stringify({}),
         });
         assert.equal(res.status, status === 'normal' ? 200 : 409, status);
-        assert.equal(risk.resumedCount(), status === 'normal' ? 1 : 0, status);
+        assert.equal(risk.resumedCount(), 0, status);
+        assert.equal(risk.calls.some((call) => call.action === 'submit'), false, status);
       },
     );
   }

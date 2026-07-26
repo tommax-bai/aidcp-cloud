@@ -143,6 +143,51 @@ test('register 重复路由即抛 route_conflict', () => {
   );
 });
 
+test('Bearer route 在 handler 前拒绝缺失/错误 token，显式匹配后才调用', async () => {
+  let calls = 0;
+  await withServer(
+    (s) =>
+      s.registerBearer('protected', 'expected-token', async () => {
+        calls += 1;
+        return { accepted: true };
+      }),
+    async (base) => {
+      const client = new InternalHttpClient(base);
+      for (const invoke of [
+        () => client.call('protected', {}),
+        () => client.callBearer('protected', {}, 'wrong-token'),
+      ]) {
+        await assert.rejects(
+          invoke,
+          (err: unknown) =>
+            err instanceof InternalHttpError && err.code === 'internal_http_unauthorized',
+        );
+      }
+      assert.equal(calls, 0);
+      assert.deepEqual(
+        await client.callBearer('protected', {}, 'expected-token'),
+        { accepted: true },
+      );
+      assert.equal(calls, 1);
+    },
+  );
+});
+
+test('Bearer route/client 的空白 token 在配置期 fail-fast，不回落裸调用', () => {
+  const server = new InternalHttpServer();
+  assert.throws(
+    () => server.registerBearer('protected', '', async () => true),
+    (err: unknown) =>
+      err instanceof InternalHttpError && err.code === 'internal_http_auth_config_invalid',
+  );
+  const client = new InternalHttpClient('http://127.0.0.1:1');
+  assert.throws(
+    () => client.callBearer('protected', {}, 'contains whitespace'),
+    (err: unknown) =>
+      err instanceof InternalHttpError && err.code === 'internal_http_auth_config_invalid',
+  );
+});
+
 test("makeReadPort 'local' 模式完全不碰 HTTP（remote thunk 不被调用）", () => {
   const local = { value: 'local-instance' };
   let remoteCalled = false;

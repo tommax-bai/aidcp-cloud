@@ -75,6 +75,7 @@ export interface SetQuotaLevelCommand {
 /** 人工解除受限 → 转调 `RiskController.recoverRestricted(reason)`（reason 必填，用于审计）。 */
 export interface RecoverRestrictedCommand {
   kind: 'recoverRestricted';
+  envKey: string;
   accountId: string;
   reason: string;
 }
@@ -127,11 +128,14 @@ export function decodeRiskCommand(value: unknown): RiskCommand {
       return { kind, accountId: cmd.accountId, level: cmd.level as RiskQuotaLevel };
     }
     case 'recoverRestricted': {
-      if (!isNonEmptyString(cmd.reason)) {
+      if (!isNonEmptyString(cmd.envKey) || cmd.envKey.trim().length === 0) {
+        throw new Error('decodeRiskCommand: recoverRestricted 缺少 envKey');
+      }
+      if (!isNonEmptyString(cmd.reason) || cmd.reason.trim().length === 0) {
         // recoverRestricted 本身也要求非空 reason（审计）；这里前置拦住，避免把注定被风控层拒的命令入队。
         throw new Error('decodeRiskCommand: recoverRestricted 缺少 reason');
       }
-      return { kind, accountId: cmd.accountId, reason: cmd.reason };
+      return { kind, envKey: cmd.envKey, accountId: cmd.accountId, reason: cmd.reason };
     }
     default: {
       // 穷举兜底（RISK_COMMAND_KINDS 与联合类型同源，正常到不了这里）。

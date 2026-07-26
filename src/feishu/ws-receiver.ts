@@ -26,6 +26,7 @@ import {
   buildSupersededPublishApprovalCard,
 } from './cards.js';
 import type { PublishApprovalPayload } from './types.js';
+import type { PublishHumanReconfirmTrigger } from '../kernel/publish-approval-contract.js';
 
 /** im.message.receive_v1 事件中 message 字段的最小形状（与 SDK 类型对齐的子集） */
 export interface FeishuWsMessage {
@@ -54,11 +55,10 @@ export interface FeishuWsReceiverOptions {
    */
   fsImpl?: Pick<typeof fs, 'writeFile' | 'rm'>;
   /**
-   * 人审授权后回调（change decouple-publish-generation-from-dispatch）：仅当本次为「授权」且首写成功
-   * （written && approved）时调用，带 requestId，由 server 解析 recordId 触发下发段（通过即切）。
-   * 取消则不调。缺省（测试/旧装配）不触发，零回归。
+   * 已决授权上的人工重批回调。仅 `approved && !written && alreadyDecided===true` 时调用；
+   * 首写批准由同事务 `PublishApproved` outbox relay 发送 `decision_recorded`，不得在这里重复直触发。
    */
-  onApproved?: (requestId: string) => void;
+  onApproved?: (trigger: PublishHumanReconfirmTrigger) => void;
   /**
    * 取消（拒绝发布）首写成功时调用（change edge-companion-ui 8.1）：带 requestId，供快照层把
    * rejected 状态推给该账号在线边缘（发布卡收起为「暂不发布」）。缺省不触发，零回归。
@@ -150,6 +150,8 @@ export interface ApprovalWriteResult {
   written: boolean;
   /** 若已被先前决定，返回其 approved 值（first-writer-wins）。 */
   alreadyDecided?: boolean;
+  /** 当前活跃授权轮次；真实持久 writer 必须返回。 */
+  revision?: number;
 }
 
 export type PublishApprovalPreflightReason = 'account_offline' | 'publish_target_unavailable';
@@ -219,7 +221,7 @@ export class FeishuWsReceiver {
   private readonly commandRouter: CommandRouter;
   private readonly messenger?: FeishuMessenger;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
-  private readonly onApproved?: (requestId: string) => void;
+  private readonly onApproved?: (trigger: PublishHumanReconfirmTrigger) => void;
   private readonly onRejected?: (requestId: string) => void;
   private readonly readLiveContentVersion?: (recordId: number) => Promise<number | null>;
   private readonly preflightApprovePublish?: (
@@ -367,10 +369,20 @@ export class FeishuWsReceiver {
       // already-decided 的重复「授权」也走人工批准入口（change parallel-rewrite-drafts）：
       // 熔断中即确认清除、恢复 drain 该账号已批队列；非熔断时由下发段幂等闸自然吸收，绝不二次发布。
       if (approved && alreadyApproved) {
-        try {
-          this.onApproved?.(parsed.requestId);
-        } catch (err) {
-          this.logger.warn('[feishu] onApproved（already-decided 重批确认）触发失败:', (err as Error).message);
+        if (!Number.isInteger(result.revision) || Number(result.revision) < 1) {
+          this.logger.warn(
+            `[feishu] already-decided 重批缺少有效 revision，未发送 human_reconfirm requestId=${parsed.requestId}`,
+          );
+        } else {
+          try {
+            this.onApproved?.({
+              requestId: parsed.requestId,
+              revision: Number(result.revision),
+              kind: 'human_reconfirm',
+            });
+          } catch (err) {
+            this.logger.warn('[feishu] onApproved（already-decided 重批确认）触发失败:', (err as Error).message);
+          }
         }
       }
       return {
@@ -388,12 +400,7 @@ export class FeishuWsReceiver {
       };
     }
     if (approved) {
-      // 通过即切：首写成功的「授权」即触发下发段（server 解析 recordId）。取消不触发。
-      try {
-        this.onApproved?.(parsed.requestId);
-      } catch (err) {
-        this.logger.warn('[feishu] onApproved 触发下发失败:', (err as Error).message);
-      }
+      // 首写批准的低延迟触发由 API owner 踢同事务 outbox relay；这里不授予 human_reconfirm 权力。
       return {
         toast: { type: 'success', content: '已授权发布' },
         card: {

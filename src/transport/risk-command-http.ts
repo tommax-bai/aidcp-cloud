@@ -12,24 +12,77 @@
  *
  * 允许引 kernel：`to === kernel` 恒 allowed。
  */
-import type { InternalHttpClient, InternalHttpServer } from './internal-http.js';
+import { InternalHttpError, type InternalHttpClient, type InternalHttpServer } from './internal-http.js';
 import type {
+  RestrictedRecoveryOutcome,
   RiskCommandAccepted,
+  RiskCommandExecutionTarget,
   RiskCommandOutcome,
   RiskCommandPort,
+  SubmitRestrictedRecoveryInput,
   SubmitRiskQuotaLevelInput,
   SubmitRiskSignalInput,
 } from '../kernel/risk-command-types.js';
+import { RISK_COMMAND_CONTRACT_VERSION } from '../kernel/risk-command-types.js';
 
 /** 每个端口方法对应的内部 HTTP 路由名。server / client 两侧共用，防漂移。 */
 export const RISK_COMMAND_ROUTES = {
   submitSignal: 'risk-command/submit-signal',
   submitQuotaLevel: 'risk-command/submit-quota-level',
   outcomeOf: 'risk-command/outcome-of',
+  submitRestrictedRecovery: 'risk-command/v1/submit-restricted-recovery',
+  restrictedRecoveryOutcomeOf: 'risk-command/v1/restricted-recovery-outcome-of',
 } as const;
 
+export interface RiskCommandHttpServerOptions {
+  /** automation 进程本地 target；缺失/非法时 recovery route fail-closed。 */
+  executionTarget?: string;
+}
+
+export interface RiskCommandHttpClientOptions {
+  /** api 进程本地 target；只能来自运行配置，不能来自客户请求。 */
+  executionTarget?: string;
+}
+
+function isExecutionTarget(value: unknown): value is RiskCommandExecutionTarget {
+  return value === 'dev' || value === 'ol';
+}
+
+function recoveryArgs(
+  args: unknown,
+  localExecutionTarget: string | undefined,
+): Record<string, unknown> {
+  if (!isExecutionTarget(localExecutionTarget)) {
+    throw new InternalHttpError(
+      'risk_command_target_unavailable',
+      'risk-command recovery owner has no valid local execution target',
+    );
+  }
+  if (args === null || typeof args !== 'object') {
+    throw new InternalHttpError('risk_command_bad_request', 'risk-command recovery request must be an object');
+  }
+  const request = args as Record<string, unknown>;
+  if (request.contractVersion !== RISK_COMMAND_CONTRACT_VERSION) {
+    throw new InternalHttpError(
+      'risk_command_contract_version_unsupported',
+      `unsupported risk-command contract version: ${String(request.contractVersion)}`,
+    );
+  }
+  if (!isExecutionTarget(request.executionTarget) || request.executionTarget !== localExecutionTarget) {
+    throw new InternalHttpError(
+      'risk_command_target_mismatch',
+      `risk-command target ${String(request.executionTarget)} does not match local target`,
+    );
+  }
+  return request;
+}
+
 /** 把一个本地 `RiskCommandPort` 的方法逐一注册为内部 HTTP route。只做解包 → 转调 → 原样回传。 */
-export function registerRiskCommandRoutes(server: InternalHttpServer, local: RiskCommandPort): void {
+export function registerRiskCommandRoutes(
+  server: InternalHttpServer,
+  local: RiskCommandPort,
+  options: RiskCommandHttpServerOptions = {},
+): void {
   server.register(RISK_COMMAND_ROUTES.submitSignal, (args) => local.submitSignal(args as SubmitRiskSignalInput));
   server.register(RISK_COMMAND_ROUTES.submitQuotaLevel, (args) =>
     local.submitQuotaLevel(args as SubmitRiskQuotaLevelInput),
@@ -38,11 +91,30 @@ export function registerRiskCommandRoutes(server: InternalHttpServer, local: Ris
     const a = args as { commandId: string };
     return local.outcomeOf(a.commandId);
   });
+  server.register(RISK_COMMAND_ROUTES.submitRestrictedRecovery, (args) => {
+    const request = recoveryArgs(args, options.executionTarget);
+    return local.submitRestrictedRecovery(request.input as SubmitRestrictedRecoveryInput);
+  });
+  server.register(RISK_COMMAND_ROUTES.restrictedRecoveryOutcomeOf, (args) => {
+    const request = recoveryArgs(args, options.executionTarget);
+    return local.restrictedRecoveryOutcomeOf(
+      String(request.commandId ?? ''),
+      String(request.envKey ?? ''),
+      String(request.accountId ?? ''),
+    );
+  });
 }
 
 /** `RiskCommandPort` 的 HTTP 实现：满足同一个 kernel 接口，每个方法一次内部调用。 */
 export class RiskCommandHttpClient implements RiskCommandPort {
-  constructor(private readonly http: InternalHttpClient) {}
+  private readonly executionTarget?: RiskCommandExecutionTarget;
+
+  constructor(
+    private readonly http: InternalHttpClient,
+    options: RiskCommandHttpClientOptions = {},
+  ) {
+    if (isExecutionTarget(options.executionTarget)) this.executionTarget = options.executionTarget;
+  }
 
   submitSignal(input: SubmitRiskSignalInput): Promise<RiskCommandAccepted> {
     return this.http.call<RiskCommandAccepted>(RISK_COMMAND_ROUTES.submitSignal, input);
@@ -54,5 +126,33 @@ export class RiskCommandHttpClient implements RiskCommandPort {
 
   outcomeOf(commandId: string): Promise<RiskCommandOutcome> {
     return this.http.call<RiskCommandOutcome>(RISK_COMMAND_ROUTES.outcomeOf, { commandId });
+  }
+
+  submitRestrictedRecovery(input: SubmitRestrictedRecoveryInput): Promise<RiskCommandAccepted> {
+    const wire = this.recoveryWire({ input });
+    return this.http.call<RiskCommandAccepted>(RISK_COMMAND_ROUTES.submitRestrictedRecovery, wire);
+  }
+
+  restrictedRecoveryOutcomeOf(
+    commandId: string,
+    envKey: string,
+    accountId: string,
+  ): Promise<RestrictedRecoveryOutcome> {
+    const wire = this.recoveryWire({ commandId, envKey, accountId });
+    return this.http.call<RestrictedRecoveryOutcome>(RISK_COMMAND_ROUTES.restrictedRecoveryOutcomeOf, wire);
+  }
+
+  private recoveryWire(body: Record<string, unknown>): Record<string, unknown> {
+    if (!this.executionTarget) {
+      throw new InternalHttpError(
+        'risk_command_target_unavailable',
+        'risk-command recovery client has no valid local execution target',
+      );
+    }
+    return {
+      contractVersion: RISK_COMMAND_CONTRACT_VERSION,
+      executionTarget: this.executionTarget,
+      ...body,
+    };
   }
 }

@@ -47,7 +47,7 @@ function harness(overrides: Partial<ClientPublishApprovalDeps> = {}) {
     order: [] as string[],
     edits: [] as unknown[],
     approvals: [] as unknown[],
-    triggered: [] as string[],
+    triggered: [] as unknown[],
     rejected: [] as string[],
   };
   const deps: ClientPublishApprovalDeps = {
@@ -72,9 +72,9 @@ function harness(overrides: Partial<ClientPublishApprovalDeps> = {}) {
     writeApproval: async (requestId, approved, payload) => {
       calls.order.push('approval');
       calls.approvals.push({ requestId, approved, payload });
-      return { written: true };
+      return { written: true, revision: 1 };
     },
-    triggerApproved: (requestId) => calls.triggered.push(requestId),
+    triggerApproved: (trigger) => calls.triggered.push(trigger),
     notifyRejected: (requestId) => calls.rejected.push(requestId),
     clock: () => NOW,
     ...overrides,
@@ -116,7 +116,7 @@ describe('客户端审批定时发布', () => {
         contentVersion: 4,
       },
     }]);
-    assert.deepEqual(calls.triggered, ['publish-42']);
+    assert.deepEqual(calls.triggered, [], '首写批准只交 durable outbox 产生 decision_recorded');
   });
 
   it('计划未改变时不写草稿版本，仍批准当前版本', async () => {
@@ -135,6 +135,47 @@ describe('客户端审批定时发布', () => {
     assert.equal(result.currentVersion, 3);
     assert.equal(calls.edits.length, 0);
     assert.deepEqual(calls.order, ['preflight', 'approval']);
+  });
+
+  it('已读到同 revision 既有批准时只发精确 human_reconfirm', async () => {
+    const { handle, calls } = harness({
+      readApproval: async () => ({ approved: true, contentVersion: 3, revision: 9 }),
+    });
+
+    const result = await handle({
+      requestId: 'publish-42',
+      approved: true,
+      contentVersion: 3,
+    }, 'account-1');
+
+    assert.equal(result.ok, true);
+    assert.equal(result.alreadyDecided, true);
+    assert.deepEqual(calls.approvals, []);
+    assert.deepEqual(calls.triggered, [{
+      requestId: 'publish-42',
+      revision: 9,
+      kind: 'human_reconfirm',
+    }]);
+  });
+
+  it('并发写撞到既有批准时使用 writer 回传 revision 发 human_reconfirm', async () => {
+    const { handle, calls } = harness({
+      writeApproval: async () => ({ written: false, alreadyDecided: true, revision: 11 }),
+    });
+
+    const result = await handle({
+      requestId: 'publish-42',
+      approved: true,
+      contentVersion: 3,
+    }, 'account-1');
+
+    assert.equal(result.ok, true);
+    assert.equal(result.alreadyDecided, true);
+    assert.deepEqual(calls.triggered, [{
+      requestId: 'publish-42',
+      revision: 11,
+      kind: 'human_reconfirm',
+    }]);
   });
 
   it('可把已有定时计划改回立即发布，并让审批绑定新版本', async () => {

@@ -33,6 +33,19 @@ export interface RiskCommandAccepted {
   commandId: string;
 }
 
+/** 3b 内部 risk-command HTTP 契约版本。未知或缺失版本由 owner 在任何副作用前拒绝。 */
+export const RISK_COMMAND_CONTRACT_VERSION = 1 as const;
+export type RiskCommandContractVersion = typeof RISK_COMMAND_CONTRACT_VERSION;
+
+/** 由服务端运行配置注入的部署目标；不得从客户、面板或 Edge 请求中读取。 */
+export type RiskCommandExecutionTarget = 'dev' | 'ol';
+
+/** 版本化内部请求的公共线头。 */
+export interface RiskCommandRequestContext {
+  contractVersion: RiskCommandContractVersion;
+  executionTarget: RiskCommandExecutionTarget;
+}
+
 /** 风控写命令的终局/中间态。 */
 export type RiskCommandOutcome =
   /** 已受理、单写者尚未应用。界面 MUST 显式渲染「处理中」，MUST NOT 伪装成已生效。 */
@@ -60,6 +73,63 @@ export interface SubmitRiskQuotaLevelInput {
   requestedBy: string;
 }
 
+/** 客户 restricted-only 恢复的提交参数。与特权 operator signal 刻意分开。 */
+export interface SubmitRestrictedRecoveryInput {
+  /** Cloud 在完成客户归属解析后注入的环境键；不得由 Edge/客户请求体提供。 */
+  envKey: string;
+  accountId: string;
+  reason: string;
+  requestedBy: string;
+}
+
+/** automation 单写者写完后回读的完整账号风控真态。 */
+export interface RestrictedRecoveryRiskState {
+  accountId: string;
+  status: string;
+  quotaLevel: string;
+  signalCount: number;
+  lastSignalAt: number | null;
+  statusSince: number;
+  updatedAt: number;
+}
+
+export type RestrictedRecoveryFailureReason =
+  | 'recovery_application_failed'
+  | 'recovery_application_indeterminate'
+  | 'recovery_result_recording_failed'
+  | 'recovery_write_after_invalid'
+  | 'recovery_outcome_incomplete';
+
+export type RestrictedRecoveryResumeFailure =
+  | 'edge_resume_failed'
+  | 'edge_resume_result_unknown';
+
+/**
+ * restricted recovery 专用结局。
+ *
+ * 与面板 signal/quota 的四态结果分开：客户恢复还需要稳定业务拒绝、账号绑定以及 Edge 恢复事实。
+ */
+export type RestrictedRecoveryOutcome =
+  | { commandId: string; state: 'processing' }
+  | {
+      commandId: string;
+      state: 'applied';
+      risk: RestrictedRecoveryRiskState;
+      changed: boolean;
+      /** `resumeError` 存在时，0 表示本次调用没有取得成功恢复数，不冒充真实恢复数量。 */
+      resumedEdges: number;
+      /** 风控状态已恢复为 normal，但 Edge 恢复调用失败；不得倒写成领域恢复失败。 */
+      resumeError?: RestrictedRecoveryResumeFailure;
+    }
+  | {
+      commandId: string;
+      state: 'refused';
+      reason: 'state_not_restricted';
+      risk: RestrictedRecoveryRiskState;
+    }
+  | { commandId: string; state: 'failed'; reason: RestrictedRecoveryFailureReason }
+  | { commandId: string; state: 'unknown' };
+
 /**
  * 面板侧唯一的风控写出口。
  *
@@ -70,4 +140,10 @@ export interface RiskCommandPort {
   submitSignal(input: SubmitRiskSignalInput): Promise<RiskCommandAccepted>;
   submitQuotaLevel(input: SubmitRiskQuotaLevelInput): Promise<RiskCommandAccepted>;
   outcomeOf(commandId: string): Promise<RiskCommandOutcome>;
+  submitRestrictedRecovery(input: SubmitRestrictedRecoveryInput): Promise<RiskCommandAccepted>;
+  restrictedRecoveryOutcomeOf(
+    commandId: string,
+    envKey: string,
+    accountId: string,
+  ): Promise<RestrictedRecoveryOutcome>;
 }

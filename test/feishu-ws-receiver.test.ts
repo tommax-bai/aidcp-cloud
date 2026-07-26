@@ -294,9 +294,9 @@ function makeApprovalOutlet() {
     context: { decidedBy: string; decidedVia: 'feishu' },
   ) => {
     calls.push({ requestId, approved, decidedBy: context.decidedBy, decidedVia: context.decidedVia, contentVersion: payload.contentVersion });
-    if (decided.has(requestId)) return { written: false, alreadyDecided: decided.get(requestId)! };
+    if (decided.has(requestId)) return { written: false, alreadyDecided: decided.get(requestId)!, revision: 1 };
     decided.set(requestId, approved);
-    return { written: true };
+    return { written: true, revision: 1 };
   };
   return { writeApproval, calls, decided };
 }
@@ -326,13 +326,13 @@ test('ws-receiver: approve 经唯一授权出口写入持久授权（不落任�
 });
 
 test('ws-receiver: 授权出口未接线 → fail-closed 报错，绝不退回文件互斥、绝不静默放行', async () => {
-  const approved: string[] = [];
+  const approved: unknown[] = [];
   const receiver = new FeishuWsReceiver({
     appId: 'a',
     appSecret: 's',
     commandRouter: makeRouter(),
     logger: { log: () => {}, warn: () => {}, error: () => {} },
-    onApproved: (id) => approved.push(id),
+    onApproved: (trigger) => approved.push(trigger),
   });
   const res = await receiver.handleCardAction({
     action: 'approve',
@@ -369,7 +369,7 @@ function receiverWithVersion(live: number | null, writes: Array<{ path: string; 
     commandRouter: makeRouter(),
     writeApproval: async (requestId, approved, payload) => {
       writes.push({ path: requestId, content: JSON.stringify({ approved, ...payload }) });
-      return { written: true };
+      return { written: true, revision: 1 };
     },
     readLiveContentVersion: async () => live,
   });
@@ -422,7 +422,7 @@ test('ws-receiver: 版本预检 fail-safe — 读版本失败(null) → 拒到�
 
 test('ws-receiver: 授权发布前账号离线 → 提醒且不写签名、不替换审批卡', async () => {
   const writes: Array<{ path: string; content: string }> = [];
-  const approved: string[] = [];
+  const approved: unknown[] = [];
   const receiver = new FeishuWsReceiver({
     appId: 'a',
     appSecret: 's',
@@ -433,7 +433,7 @@ test('ws-receiver: 授权发布前账号离线 → 提醒且不写签名、不�
       },
       rm: async () => {},
     },
-    onApproved: (id) => approved.push(id),
+    onApproved: (trigger) => approved.push(trigger),
     preflightApprovePublish: async () => ({ ok: false, reason: 'account_offline', accountId: 'acc-offline' }),
   });
   const res = await receiver.handleCardAction({
@@ -449,15 +449,15 @@ test('ws-receiver: 授权发布前账号离线 → 提醒且不写签名、不�
 });
 
 // ── 陪伴界面 rejected 通知（change edge-companion-ui 8.1）──────────────────────
-test('ws-receiver: cancel 首写成功 → 触发 onRejected；approve 不触发', async () => {
+test('ws-receiver: cancel 首写成功 → 触发 onRejected；approve 首写只交 durable outbox', async () => {
   const rejected: string[] = [];
-  const approved: string[] = [];
+  const approved: unknown[] = [];
   const receiver = new FeishuWsReceiver({
     appId: 'a',
     appSecret: 's',
     commandRouter: makeRouter(),
     writeApproval: makeApprovalOutlet().writeApproval,
-    onApproved: (id) => approved.push(id),
+    onApproved: (trigger) => approved.push(trigger),
     onRejected: (id) => rejected.push(id),
   });
   const cancelRes = await receiver.handleCardAction({
@@ -475,8 +475,32 @@ test('ws-receiver: cancel 首写成功 → 触发 onRejected；approve 不触发
     payload: { title: '标题', content: '正文', tags: [] },
   });
   assert.equal(approveRes.toast.type, 'success');
-  assert.deepEqual(approved, ['publish-87']);
+  assert.deepEqual(approved, [], '首写批准由 PublishApproved outbox relay 产生 decision_recorded');
   assert.deepEqual(rejected, ['publish-86'], 'approve 不触发 onRejected');
+});
+
+test('ws-receiver: 已决批准上的人工重批携 revision 发送 human_reconfirm', async () => {
+  const triggers: unknown[] = [];
+  const receiver = new FeishuWsReceiver({
+    appId: 'a',
+    appSecret: 's',
+    commandRouter: makeRouter(),
+    writeApproval: async () => ({ written: false, alreadyDecided: true, revision: 7 }),
+    onApproved: (trigger) => triggers.push(trigger),
+  });
+
+  const res = await receiver.handleCardAction({
+    action: 'approve',
+    requestId: 'publish-87',
+    payload: { title: '标题', content: '正文', tags: [] },
+  });
+
+  assert.equal(res.toast.type, 'info');
+  assert.deepEqual(triggers, [{
+    requestId: 'publish-87',
+    revision: 7,
+    kind: 'human_reconfirm',
+  }]);
 });
 
 test('ws-receiver: cancel 撞先到的决定（first-writer-wins 未写入）→ 不触发 onRejected', async () => {
@@ -487,7 +511,7 @@ test('ws-receiver: cancel 撞先到的决定（first-writer-wins 未写入）→
     appSecret: 's',
     commandRouter: makeRouter(),
     // 活跃授权行已存在（他人先决定为「取消」）→ 后到者得 alreadyDecided，不覆盖。
-    writeApproval: async () => ({ written: false, alreadyDecided: false }),
+    writeApproval: async () => ({ written: false, alreadyDecided: false, revision: 1 }),
     onRejected: (id) => rejected.push(id),
   });
   const res = await receiver.handleCardAction({

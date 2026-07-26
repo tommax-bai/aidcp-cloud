@@ -8,13 +8,19 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import {
+  InternalHttpClient,
+  InternalHttpError,
+  InternalHttpServer,
+} from '../../src/transport/internal-http.js';
 import {
   PUBLISH_CARD_EXIT_ROUTES,
   PublishCardExitHttpClient,
   registerPublishCardExitRoutes,
 } from '../../src/transport/publish-card-exit-http.js';
 import type { PublishCardExitPort } from '../../src/kernel/publish-card-exit-port.js';
+
+const APPROVAL_CALLER_TOKEN = 'publish-card-exit-approval-test-token';
 
 function stub(seen: unknown[], failing = false): PublishCardExitPort {
   const boom = () => {
@@ -54,17 +60,61 @@ function stub(seen: unknown[], failing = false): PublishCardExitPort {
 
 async function withServer(
   local: PublishCardExitPort,
-  run: (client: PublishCardExitPort) => Promise<void>,
+  run: (client: PublishCardExitPort, rawClient: InternalHttpClient) => Promise<void>,
 ): Promise<void> {
   const server = new InternalHttpServer();
-  registerPublishCardExitRoutes(server, local);
+  registerPublishCardExitRoutes(server, local, APPROVAL_CALLER_TOKEN);
   const port = await server.listen(0);
   try {
-    await run(new PublishCardExitHttpClient(new InternalHttpClient(`http://127.0.0.1:${port}`)));
+    const rawClient = new InternalHttpClient(`http://127.0.0.1:${port}`);
+    await run(
+      new PublishCardExitHttpClient(rawClient, APPROVAL_CALLER_TOKEN),
+      rawClient,
+    );
   } finally {
     await server.close();
   }
 }
+
+test('writeApprovalSignal 缺失或错误 caller token 时在属主写入前拒绝', async () => {
+  const seen: unknown[] = [];
+  await withServer(stub(seen), async (client, rawClient) => {
+    const args = {
+      requestId: 'publish-7',
+      approved: true,
+      payload: {},
+      decidedBy: 'schedule:rule-3',
+    };
+    for (const invoke of [
+      () => rawClient.call(PUBLISH_CARD_EXIT_ROUTES.writeApprovalSignal, args),
+      () =>
+        rawClient.callBearer(
+          PUBLISH_CARD_EXIT_ROUTES.writeApprovalSignal,
+          args,
+          'wrong-token',
+        ),
+    ]) {
+      await assert.rejects(
+        invoke,
+        (err: unknown) =>
+          err instanceof InternalHttpError && err.code === 'internal_http_unauthorized',
+      );
+    }
+    assert.equal(seen.length, 0);
+    assert.deepEqual(
+      await client.writeApprovalSignal('publish-7', true, {} as never, 'schedule:rule-3'),
+      { written: true },
+    );
+    assert.deepEqual(seen, [
+      {
+        m: 'writeApprovalSignal',
+        requestId: 'publish-7',
+        approved: true,
+        decidedBy: 'schedule:rule-3',
+      },
+    ]);
+  });
+});
 
 test('六个方法往返：入参原样送达属主侧，返回值原样回来', async () => {
   const seen: unknown[] = [];
@@ -101,7 +151,10 @@ test('属主侧任一方法抛错 → 客户端原样抛，六个方法一个都
 });
 
 test('对端没起：授权写 MUST 抛 —— 「以为已授权其实没写」是红线', async () => {
-  const client = new PublishCardExitHttpClient(new InternalHttpClient('http://127.0.0.1:1'));
+  const client = new PublishCardExitHttpClient(
+    new InternalHttpClient('http://127.0.0.1:1'),
+    APPROVAL_CALLER_TOKEN,
+  );
   await assert.rejects(() => client.writeApprovalSignal('publish-7', true, {} as never, 'schedule:rule-3'));
 });
 

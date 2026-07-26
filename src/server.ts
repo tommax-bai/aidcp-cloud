@@ -175,9 +175,30 @@ import {
   type ApprovalVoidReason,
 } from './publish-agent/publish-approval-store.js';
 import {
-  createInProcessPublishApprovalApi,
+  createPublishApprovalAuthorityService,
   createPublishApprovalClient,
+  createPublishApprovalDecisionWriter,
+  type PublishApprovalAuthorityPort,
 } from './publish-agent/publish-approval-api.js';
+import { createPublishDispatchTriggerReceiver } from './publish-agent/publish-dispatch-trigger.js';
+import { PublishApprovalOutboxRelay } from './publish-agent/publish-approval-outbox-relay.js';
+import type {
+  PublishApprovalDecisionWriterPort,
+  PublishDispatchTriggerKind,
+  PublishDispatchTriggerPort,
+} from './kernel/publish-approval-contract.js';
+import {
+  PublishApprovalAuthorityHttpClient,
+  registerPublishApprovalAuthorityRoutes,
+} from './transport/publish-approval-authority-http.js';
+import {
+  PublishApprovalDecisionWriterHttpClient,
+  registerPublishApprovalDecisionWriterRoutes,
+} from './transport/publish-approval-decision-http.js';
+import {
+  PublishDispatchTriggerHttpClient,
+  registerPublishDispatchTriggerRoutes,
+} from './transport/publish-dispatch-trigger-http.js';
 import {
   createApprovalWriteOutlet,
   type ApprovalDecisionContext,
@@ -335,6 +356,7 @@ import {
   serviceModeFromEnv,
   segmentsForMode,
   listenersForMode,
+  ownsPublishApprovalAuthorityForMode,
   panelEventTransportForMode,
   outboxRetentionForMode,
   DEFAULT_CONTENT_READ_API_PORT,
@@ -346,7 +368,10 @@ import { registerReviewCardDeliveryRoutes } from './transport/review-card-delive
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
 import { registerPublishLogRoutes } from './transport/publish-log-http.js';
 import { registerPipelineLogRoutes } from './transport/pipeline-log-http.js';
-import { registerPublishCardExitRoutes } from './transport/publish-card-exit-http.js';
+import {
+  PublishCardExitHttpClient,
+  registerPublishCardExitRoutes,
+} from './transport/publish-card-exit-http.js';
 import { registerImageModelSelectionRoutes } from './transport/image-model-selection-http.js';
 import { registerRoleModelSelectionRoutes } from './transport/role-model-selection-http.js';
 import { registerProviderSecretRoutes } from './transport/provider-secret-http.js';
@@ -398,13 +423,12 @@ import {
   registerAlertResolutionRoutes,
 } from './transport/alert-resolution-http.js';
 import {
-  emitRiskCommand,
-  startRiskCommandConsumer,
+  RiskCommandConsumer,
   RISK_COMMAND_CONSUMER,
   RISK_COMMAND_RETENTION_MS,
   RISK_COMMAND_TOPIC,
 } from './transport/risk-command-outbox.js';
-import { PgRiskCommandService } from './risk/risk-command-service.js';
+import { createRiskCommandApplyHandler, PgRiskCommandService } from './risk/risk-command-service.js';
 import { RiskCommandHttpClient, registerRiskCommandRoutes } from './transport/risk-command-http.js';
 import type { RiskCommandPort } from './kernel/risk-command-types.js';
 import {
@@ -415,6 +439,11 @@ import {
   PANEL_EVENT_RETENTION_MS,
   PANEL_EVENT_UNCONSUMED_RETENTION_MS,
 } from './transport/eventbus-outbox-bridge.js';
+import {
+  PanelEventDeliveryHttpClient,
+  registerPanelEventDeliveryRoutes,
+} from './transport/panel-event-delivery-http.js';
+import { PanelEventFanout } from './panel/panel-event-fanout.js';
 // event_outbox 保留期剪裁：outbox 是队列不是账本，没有剪裁就在共库的生产 PG 上无界增长。
 import {
   EVENT_OUTBOX_NOTIFY_CHANNEL,
@@ -547,6 +576,16 @@ import { InteractionApiWrites } from './interactions/interaction-api-writes.js';
 function readEnvString(name: string): string | undefined {
   const value = process.env[name];
   return value && value.trim() ? value : undefined;
+}
+
+function requirePublishApprovalInternalToken(): string {
+  const token = readEnvString('AIDCP_PUBLISH_APPROVAL_INTERNAL_TOKEN');
+  if (!token) {
+    throw new Error(
+      'AIDCP_PUBLISH_APPROVAL_INTERNAL_TOKEN is required for publish approval internal HTTP',
+    );
+  }
+  return token;
 }
 
 function readEnvPort(name: string): number | undefined {
@@ -776,6 +815,8 @@ interface CompositionContext {
   notifyPublishRejected?: (requestId: string) => void;
   ossUploader: ObjectStore | undefined;
   pacingConfigStore: PacingConfigStore;
+  /** api 进程的本地实时事件扇出；内部 ingress 写入、panel-ws 只读订阅。 */
+  panelEventFanout?: PanelEventFanout;
   panelUsers?: ReturnType<typeof parsePanelUsers>;
   personaAutoFill?: PersonaAutoFillService | undefined;
   personaAutoFillStore: PersonaAutoFillStore | undefined;
@@ -785,8 +826,11 @@ interface CompositionContext {
   port: number;
   preflightApprovePublish?: (requestId: string) => Promise<PublishApprovalPreflightResult>;
   providerRuntime: Record<string, { baseUrl: string; apiKey: string; }>;
+  publishApprovalAuthority?: PublishApprovalAuthorityPort;
   publishApprovalClient: ReturnType<typeof createPublishApprovalClient> | undefined;
+  publishApprovalDecisionWriter?: PublishApprovalDecisionWriterPort;
   publishApprovalStore: PublishApprovalStore | undefined;
+  publishDispatchTrigger?: PublishDispatchTriggerPort;
   publishDispatcher?: PublishDispatcher;
   publishLogStore: PublishLogStore;
   /**
@@ -841,7 +885,7 @@ interface CompositionContext {
   publishOrchestrator?: PublishOrchestrator;
   quotaConfigStore: QuotaConfigStore;
   readLiveContentVersion?: (recordId: number) => Promise<number | null>;
-  readPublishApproval?: (requestId: string) => Promise<{ approved: boolean; contentVersion: number; } | null>;
+  readPublishApproval?: (requestId: string) => Promise<{ approved: boolean; contentVersion: number; revision: number; } | null>;
   refreshPublishPreview?: (recordId: number) => void;
   resolveAccountChatId: (accountId: string | undefined) => Promise<string>;
   resolveCardChatId: (originChatId: string | undefined | null, accountId: string | undefined) => Promise<string>;
@@ -861,8 +905,19 @@ interface CompositionContext {
   server?: EdgeCloudServer;
   sessionConfigStore: SessionConfigStore;
   tokenUsageStore: TokenUsageStore;
-  triggerPublishDispatchOnApprove?: (requestId: string) => void;
-  writeApprovalDecision: (requestId: string, approved: boolean, payload: PublishApprovalPayload, context: ApprovalDecisionContext) => Promise<{ written: boolean; alreadyDecided?: boolean; }>;
+  triggerPublishDispatchOnApprove?: (
+    requestId: string,
+    revision: number,
+    kind: PublishDispatchTriggerKind,
+  ) => Promise<void>;
+  installPublishApprovalOutboxWake: (wake: () => void) => void;
+  wakePublishApprovalOutbox: () => void;
+  writeApprovalDecision: (
+    requestId: string,
+    approved: boolean,
+    payload: PublishApprovalPayload,
+    context: ApprovalDecisionContext,
+  ) => Promise<{ written: boolean; alreadyDecided?: boolean; revision: number; }>;
 }
 
 async function main(): Promise<void> {
@@ -901,13 +956,33 @@ async function main(): Promise<void> {
  */
 async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   const sink = ctx.configMirrorBumpSink;
-  if (!sink) {
-    console.warn('[aidcp-cloud] api 内部 API 未起：配置镜像失效信号落地端不可用（segA 未构造）');
-    return;
-  }
   const port = readEnvPort('AIDCP_API_PORT') ?? DEFAULT_API_INTERNAL_API_PORT;
   const httpServer = new InternalHttpServer();
-  registerConfigMirrorBumpRoutes(httpServer, sink);
+  if (sink) registerConfigMirrorBumpRoutes(httpServer, sink);
+  else console.warn('[aidcp-cloud] api 内部 API：配置镜像失效信号路由未注册（segA 未构造）');
+  if (ctx.panelEventFanout && ctx.deploymentTarget) {
+    registerPanelEventDeliveryRoutes(httpServer, ctx.panelEventFanout, ctx.deploymentTarget);
+  } else {
+    console.warn('[aidcp-cloud] api 内部 API：panel-event ingress 未注册（fanout 或 AIDCP_DEPLOY_ENV 不可用）');
+  }
+  if (ctx.publishApprovalAuthority) {
+    registerPublishApprovalAuthorityRoutes(
+      httpServer,
+      ctx.publishApprovalAuthority,
+      requirePublishApprovalInternalToken(),
+    );
+  } else {
+    console.warn('[aidcp-cloud] api 内部 API：publish-approval authority 未注册（属主存储或 target 不可用）');
+  }
+  if (ctx.publishApprovalDecisionWriter) {
+    registerPublishApprovalDecisionWriterRoutes(
+      httpServer,
+      ctx.publishApprovalDecisionWriter,
+      requirePublishApprovalInternalToken(),
+    );
+  } else {
+    console.warn('[aidcp-cloud] api 内部 API：publish-approval decision writer 未注册（属主存储或 target 不可用）');
+  }
   // 候审卡投递判定（change cloud-batch2-content-main）：判定要的两张表是 api 属主，实现留本进程；
   // content 进程经 ReviewCardDeliveryHttpClient 调这条 route。
   // **无缺席分支是有意的**：基础段在所有模式下都跑、且无条件赋值它（与 resolveCardChatId 同待遇），
@@ -922,7 +997,11 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   // 发布管线角色执行日志（change cloud-batch2-content-main）：`publish_pipeline_logs` 是本域属主表。
   registerPipelineLogRoutes(httpServer, ctx.pipelineLogSink);
   // 发布候审卡片出口（change cloud-batch2-content-main）：飞书客户端 / 机器人会话表 / 授权台账都在本域。
-  registerPublishCardExitRoutes(httpServer, ctx.publishCardExit);
+  registerPublishCardExitRoutes(
+    httpServer,
+    ctx.publishCardExit,
+    requirePublishApprovalInternalToken(),
+  );
   // 图片模型选择的异步取源（change cloud-batch2-content-main）：content 侧镜像刷新器调它。
   registerImageModelSelectionRoutes(httpServer, {
     fetchImageModelSelection: async () => ctx.imageModelSelection.current(),
@@ -938,7 +1017,9 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   const actual = await httpServer.listen(port);
   console.log(
     `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}` +
-      `（config-mirror bump + review-card-delivery + publish-log + pipeline-log + publish-card-exit + image-model-selection + role-model-selection + provider-secret 落地端点）`,
+      `（${sink ? 'config-mirror bump + ' : ''}` +
+      `${ctx.panelEventFanout && ctx.deploymentTarget ? 'panel-event ingress + ' : ''}` +
+      `review-card-delivery + publish-log + pipeline-log + publish-card-exit + image-model-selection + role-model-selection + provider-secret 落地端点）`,
   );
 }
 
@@ -999,8 +1080,21 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
   if (ctx.triggeredPublishRefs) registerTriggeredPublishRefsRoutes(httpServer, ctx.triggeredPublishRefs);
   else console.warn('[aidcp-cloud] automation 内部 API：参照稿触发去重读路由未注册（委托任务存储不可用）');
   const commandService = ctx.riskCommandService;
-  if (commandService) registerRiskCommandRoutes(httpServer, commandService);
+  if (commandService && ctx.deploymentTarget) {
+    registerRiskCommandRoutes(httpServer, commandService, {
+      executionTarget: ctx.deploymentTarget,
+    });
+  }
   else console.warn('[aidcp-cloud] risk-command 端点未注册：AIDCP_DEPLOY_ENV 缺失/非法，命令无人应用故不受理');
+  if (ctx.publishDispatchTrigger) {
+    registerPublishDispatchTriggerRoutes(
+      httpServer,
+      ctx.publishDispatchTrigger,
+      requirePublishApprovalInternalToken(),
+    );
+  } else {
+    console.warn('[aidcp-cloud] publish-dispatch trigger 端点未注册：dispatcher 或 approval authority 不可用');
+  }
   const actual = await httpServer.listen(port);
   console.log(
     `[aidcp-cloud] automation 内部 API 已监听 127.0.0.1:${actual}` +
@@ -1639,7 +1733,8 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 委托/排期免审）与读方（发布下发器/评论审批闸）一分进程，文件系统即不再共享，读方永远读不到
   // approved===true——**fail-closed 的静默停滞**。现在授权只认这张表；文件只剩兼容窗口内的影子写。
   let publishApprovalStore: PublishApprovalStore | undefined;
-  if (deploymentTarget) {
+  const approvalOwnerMode = serviceModeFromEnv();
+  if (ownsPublishApprovalAuthorityForMode(approvalOwnerMode) && deploymentTarget) {
     try {
       const store = new PublishApprovalStore({
         executionTarget: deploymentTarget,
@@ -1656,14 +1751,18 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     } catch (err) {
       console.error('[aidcp-cloud] PublishApprovalStore 初始化失败，人审授权全链 fail-closed:', (err as Error).message);
     }
+  } else if (!ownsPublishApprovalAuthorityForMode(approvalOwnerMode)) {
+    console.log(`[aidcp-cloud] AIDCP_SERVICE=${approvalOwnerMode}：PublishApprovalStore 归 api，本进程不构造`);
   } else {
     console.error('[aidcp-cloud] PublishApprovalStore 未启用：AIDCP_DEPLOY_ENV 缺失或非法 → 授权写入一律失败（绝不落 target 未知的授权）');
   }
-  // 内部窄接口（形状按未来 HTTP）：执行侧只经它读/作废授权，绝不直读授权表。
-  const publishApprovalApi = publishApprovalStore
-    ? createInProcessPublishApprovalApi(publishApprovalStore)
+  // API-owner authority：本地形态与 HTTP server 共用同一 adapter；automation 只持其端口/client。
+  const publishApprovalAuthority = publishApprovalStore
+    ? createPublishApprovalAuthorityService(publishApprovalStore, deploymentTarget)
     : undefined;
-  const publishApprovalClient = publishApprovalApi ? createPublishApprovalClient(publishApprovalApi) : undefined;
+  const publishApprovalClient = publishApprovalAuthority
+    ? createPublishApprovalClient(publishApprovalAuthority, deploymentTarget)
+    : undefined;
   // 兼容窗口影子写（默认开）：持久写成功之后 best-effort 写同路径同格式文件，失败只记日志。
   // 关闭它是**独立一步**（改 env 即可回滚），前置条件是盘点确认零读者 + dev/ol 各观察满一个发布周期。
   const legacyApprovalSignalEnabled = readEnvString('AIDCP_PUBLISH_APPROVAL_LEGACY_SIGNAL_FILE') !== 'false';
@@ -1696,6 +1795,20 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
         },
       })
     : undefined;
+  // segA 先于本地 relay（segC/segD）构造；用一位启动期 latch 合并早到 wake。
+  // 决定/outbox 已同事务持久化，因此这只影响低延迟，不承担可靠性；独立进程由 API relay 自己初始扫一轮。
+  let publishApprovalOutboxWakeImpl: (() => void) | undefined;
+  let publishApprovalOutboxWakePending = false;
+  ctx.wakePublishApprovalOutbox = () => {
+    if (publishApprovalOutboxWakeImpl) publishApprovalOutboxWakeImpl();
+    else publishApprovalOutboxWakePending = true;
+  };
+  ctx.installPublishApprovalOutboxWake = (wake) => {
+    publishApprovalOutboxWakeImpl = wake;
+    if (!publishApprovalOutboxWakePending) return;
+    publishApprovalOutboxWakePending = false;
+    wake();
+  };
   /**
    * 一批稿件的授权下发进度（投影用，task 4.6）。未接线 / 读失败 → 空表，投影不带下发态字段、
    * 前端回落既有呈现。MUST NOT 因读不到就伪造一个「无阻塞」的下发态。
@@ -1710,13 +1823,15 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     approved: boolean,
     payload: PublishApprovalPayload,
     context: ApprovalDecisionContext,
-  ): Promise<{ written: boolean; alreadyDecided?: boolean }> => {
+  ): Promise<{ written: boolean; alreadyDecided?: boolean; revision: number }> => {
     if (!approvalWriteOutlet) throw new Error('approval_outlet_unavailable');
     const outcome = await approvalWriteOutlet(requestId, approved, payload, context);
-    return outcome.alreadyDecided === undefined
-      ? { written: outcome.written }
-      : { written: outcome.written, alreadyDecided: outcome.alreadyDecided };
+    if (approved && outcome.written) ctx.wakePublishApprovalOutbox();
+    return outcome;
   };
+  const publishApprovalDecisionWriter = approvalWriteOutlet
+    ? createPublishApprovalDecisionWriter(writeApprovalDecision, deploymentTarget)
+    : undefined;
 
   let draftRefinementStore: DraftRefinementStore | undefined;
   if (deploymentTarget) {
@@ -2282,7 +2397,9 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.planner = planner;
   ctx.port = port;
   ctx.providerRuntime = providerRuntime;
+  ctx.publishApprovalAuthority = publishApprovalAuthority;
   ctx.publishApprovalClient = publishApprovalClient;
+  ctx.publishApprovalDecisionWriter = publishApprovalDecisionWriter;
   ctx.publishApprovalStore = publishApprovalStore;
   ctx.publishLogStore = publishLogStore;
   ctx.publishLogWriter = publishLogStore;
@@ -2325,11 +2442,21 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     uploadImageFromUrl: (url) => messenger.uploadImageFromUrl(url),
     getDefaultChat: () => botChatStore.getDefaultChat(),
     resolveCardChatId: (originChatId, accountId) => resolveCardChatId(originChatId, accountId),
-    writeApprovalSignal: (requestId, approved, payload, decidedBy) =>
-      writeApprovalDecision(requestId, approved, payload, {
-        decidedBy: decidedBy ?? 'schedule:unknown_rule',
-        decidedVia: 'schedule_auto_approve',
-      }),
+    writeApprovalSignal: (requestId, approved, payload, decidedBy) => {
+      if (!publishApprovalDecisionWriter || !deploymentTarget) {
+        throw new Error('approval_decision_writer_unavailable');
+      }
+      return publishApprovalDecisionWriter.writeDecision({
+        requestId,
+        approved,
+        payload,
+        context: {
+          decidedBy,
+          decidedVia: 'schedule_auto_approve',
+        },
+        executionTarget: deploymentTarget,
+      });
+    },
   };
 
   ctx.accountDisplayName = accountDisplayName;
@@ -2391,7 +2518,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     // change cloud-batch2-content-main：卡片出口收成一个端口（发卡 / 发通知 / 传图 / 默认群 /
     // 落点解析 / 免审预授权）。本段原先分别持有飞书客户端、机器人会话表、落点解析与授权写四样，
     // 于是**内容仓被迫依赖飞书 SDK**；实现全在属主域，这里只调。
-    publishCardExit,
+    publishCardExit: localPublishCardExit,
     // change cloud-batch2-content-main：候审卡投递判定改由基础段（属主侧）给成品。
     // 本段原先自己读 approvalPolicyStore + clientUserStore 现算——两者都绑 api 池，
     // content 拆成独立进程后连不上那个库。判定整段留属主侧，这里只调。
@@ -2401,6 +2528,15 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     // 内容段曾直接拿 api 池建两个 api 属主表的存储（发布台账 / 管线日志），两者都已上移到属主段，
     // 跨边界只剩窄端口。这一行的消失就是「内容域不再连另一个域的库」这条铁律在本段成立的机械证据。
   } = ctx;
+  const publishCardExit: PublishCardExitPort =
+    serviceModeFromEnv() === 'content'
+      ? new PublishCardExitHttpClient(
+          new InternalHttpClient(
+            readEnvString('AIDCP_API_URL') ?? `http://127.0.0.1:${DEFAULT_API_INTERNAL_API_PORT}`,
+          ),
+          requirePublishApprovalInternalToken(),
+        )
+      : localPublishCardExit;
   // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
   // 判据三条全中才搬：① segA 赋值 ② 只有本段读 ③ **segA 自己不再引用它**。
   // segA 仍引用的一律留在 segA（含声明前就被惰性回调捕获的**前向引用**，那类最阴）。
@@ -2687,15 +2823,6 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     // 而卡片契约里这个字段本就可选、缺它回落账号 id ⇒ 由属主侧构卡前自己解析（见 publishCardExit）。
     // 排期免审预授权（content-schedule）：与人工审批**同一个**授权写出口，决策主体 = 触发该免审的排期规则。
     writeApprovalSignal: publishCardExit.writeApprovalSignal,
-    // 批次 0b：下发触发由**自动化段**赋值。丢了它 = 稿件已记「已批准」却永远不会被发出去 ——
-    // 这是本组三处里后果最重的一处，绝不允许静默短路。
-    triggerApprovedDispatch: (requestId) =>
-      crossSegment(
-        ctx.triggerPublishDispatchOnApprove,
-        `稿件 ${requestId} 审批通过后的下发触发`,
-        '自动化段',
-        '该稿件已记为「已批准」但不会被下发（表现为「批了却没发」），须由自动化进程侧承接触发',
-      )?.(requestId),
     // 陪伴界面（edge-companion-ui 8.1）：候审即推 pending（发布卡自动展开到「等你确认」）。
     notifyPublishPending: (accountId, recordId, title) =>
       {
@@ -2736,7 +2863,46 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, apiPool, approvalPolicyStore, automationPool, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalClient, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountDisplayNameCandidates, accountState, accountStore, apiPool, approvalPolicyStore, automationPool, botChatStore, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, notificationContactStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolveAccountChatId, resolveCardChatId, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore } = ctx;
+  const seamMode = serviceModeFromEnv();
+  const approvalAuthorityForAutomation: PublishApprovalAuthorityPort | undefined =
+    seamMode === 'automation'
+      ? new PublishApprovalAuthorityHttpClient(
+          new InternalHttpClient(
+            readEnvString('AIDCP_API_URL') ?? `http://127.0.0.1:${DEFAULT_API_INTERNAL_API_PORT}`,
+          ),
+          requirePublishApprovalInternalToken(),
+        )
+      : publishApprovalAuthority;
+  const publishApprovalClient = approvalAuthorityForAutomation
+    ? createPublishApprovalClient(approvalAuthorityForAutomation, deploymentTarget)
+    : undefined;
+  const approvalDecisionWriterForAutomation: PublishApprovalDecisionWriterPort | undefined =
+    seamMode === 'automation'
+      ? new PublishApprovalDecisionWriterHttpClient(
+          new InternalHttpClient(
+            readEnvString('AIDCP_API_URL') ?? `http://127.0.0.1:${DEFAULT_API_INTERNAL_API_PORT}`,
+          ),
+          requirePublishApprovalInternalToken(),
+        )
+      : publishApprovalDecisionWriter;
+  const writeApprovalDecision = (
+    requestId: string,
+    approved: boolean,
+    payload: PublishApprovalPayload,
+    context: ApprovalDecisionContext,
+  ) => {
+    if (!approvalDecisionWriterForAutomation || !deploymentTarget) {
+      throw new Error('approval_decision_writer_unavailable');
+    }
+    return approvalDecisionWriterForAutomation.writeDecision({
+      requestId,
+      approved,
+      payload,
+      context,
+      executionTarget: deploymentTarget,
+    });
+  };
   // ── Block④ 三仓提取 · 批次 0d：以下句柄只被本段消费，已从 segA 下沉到此 ──────────────
   // 判据三条全中才搬：① segA 赋值 ② 只有本段读 ③ **segA 自己不再引用它**。
   // segA 仍引用的一律留在 segA（含声明前就被惰性回调捕获的**前向引用**，那类最阴）。
@@ -3097,43 +3263,46 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 那个前提已经不成立。若这里仍按 seamMode 跳过，面板提交完命令**没有任何人会应用它**：
   // 操作员看到 202、状态永远不变、日志里一个字都不会提（红线：静默假成功）。
   // 一条路径、从今天起就在生产上跑，拆进程那天这里不需要任何改动。
-  const seamMode = serviceModeFromEnv();
   const panelEventTransport = panelEventTransportForMode(seamMode);
   const riskCommandService = deploymentTarget
     ? new PgRiskCommandService({ pool: automationPool, executionTarget: deploymentTarget, logger: console })
     : undefined;
   ctx.riskCommandService = riskCommandService;
+  let riskCommandConsumer: RiskCommandConsumer | undefined;
   if (deploymentTarget && riskCommandService) {
-    const riskCommandConsumer = startRiskCommandConsumer({
+    riskCommandConsumer = new RiskCommandConsumer({
       pool: automationPool,
       executionTarget: deploymentTarget,
-      // 单写不变量收口在这一处回调：风控三写方法只在本进程 RiskController 上发生。at-least-once ⇒ 三方法均幂等。
-      apply: async (cmd, commandId) => {
-        const controller = await riskRegistry.getController(cmd.accountId);
-        try {
-          if (cmd.kind === 'applySignal') await controller.applySignal(cmd.signal);
-          else if (cmd.kind === 'setQuotaLevel') await controller.setQuotaLevel(cmd.level);
-          else await controller.recoverRestricted(cmd.reason);
-        } catch (err) {
-          // 失败必须对提交方可见：先落具名 failed，再原样抛出让 outbox 卡住重放（loud）。
-          // 吞掉它等于「本该改的账号状态没改、且无人知道」。
-          const reason = err instanceof Error ? err.message : String(err);
-          await riskCommandService.recordFailed(commandId, reason).catch(() => undefined);
-          throw err;
-        }
-        // 真态由**写完之后回读** controller 得到，绝不用入参推断（拒绝 / 收敛都会让二者不同）。
-        const state = controller.getState();
-        await riskCommandService.recordApplied(commandId, state.status, state.quotaLevel);
-      },
+      // 单写不变量收口在领域应用器：恢复命令只有写后真态为 normal 才解除该账号的 Edge pause。
+      // 消费者只在本段末尾 EdgeCloudServer 已安装进 ctx 后启动。未执行 resume 绝不能记成成功 0。
+      apply: createRiskCommandApplyHandler({
+        service: riskCommandService,
+        getController: (accountId) => riskRegistry.getController(accountId),
+        resumeEdgesForAccount: (accountId) =>
+          requireSegment(ctx.server, 'server', 'automation').resumeEdgesForAccount(accountId),
+      }),
       logger: console,
     });
+    const installedRiskCommandConsumer = riskCommandConsumer;
     if (seamMode !== 'monolith' && panelEventTransport.tee) {
       bridgeEventBusToOutbox({ eventBus, pool: automationPool, executionTarget: deploymentTarget, logger: console });
+    }
+    let panelEventReplay: PanelEventReplay | undefined;
+    if (panelEventTransport.replay) {
+      const apiBaseUrl = readEnvString('AIDCP_API_URL') ?? `http://127.0.0.1:${DEFAULT_API_INTERNAL_API_PORT}`;
+      const delivery = new PanelEventDeliveryHttpClient(new InternalHttpClient(apiBaseUrl));
+      panelEventReplay = new PanelEventReplay({
+        pool: automationPool,
+        executionTarget: deploymentTarget,
+        sink: (event) => delivery.deliver(event),
+        logger: console,
+      });
+      panelEventReplay.start();
     }
     console.log(
       `[aidcp-cloud] 拆段传输已接线（${seamMode}）：风控命令消费者${
         seamMode !== 'monolith' && panelEventTransport.tee
-          ? ' + 事件→outbox 桥'
+          ? ` + 事件→outbox 桥${panelEventReplay ? ' + owner cursor→api ingress relay' : ''}`
           : '；面板事件 tee 未启用（面板与产生端同进程，EventBus 直连，无进程外消费者）'
       }`,
     );
@@ -3141,10 +3310,18 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     await wireOutboxNotifyWakeups(seamMode, [
       {
         name: 'risk-command',
-        wake: (topic) => riskCommandConsumer.wake(topic),
-        stats: () => riskCommandConsumer.stats(),
-        backlogByTopic: () => riskCommandConsumer.backlogByTopic(),
+        wake: (topic) => installedRiskCommandConsumer.wake(topic),
+        stats: () => installedRiskCommandConsumer.stats(),
+        backlogByTopic: () => installedRiskCommandConsumer.backlogByTopic(),
       },
+      ...(panelEventReplay
+        ? [{
+            name: 'panel-event-replay',
+            wake: (topic: string) => panelEventReplay!.wake(topic),
+            stats: () => panelEventReplay!.stats(),
+            backlogByTopic: () => panelEventReplay!.backlogByTopic(),
+          }]
+        : []),
     ]);
   } else {
     console.warn(
@@ -4054,21 +4231,22 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   //   阻塞原因并 fail-closed，MUST NOT 当作「未授权」静默吞掉、更 MUST NOT 写任何终态。
   const readPublishApproval = async (
     requestId: string,
-  ): Promise<{ approved: boolean; contentVersion: number } | null> => {
+  ): Promise<{ approved: boolean; contentVersion: number; revision: number } | null> => {
     if (!publishApprovalClient) throw new ApprovalUnreadableError('approval_api_unavailable');
     const row = await publishApprovalClient.readApproval(requestId);
-    return row ? { approved: row.approved, contentVersion: row.contentVersion } : null;
-  };
-  // 布尔视图（评论审批口沿用；只关心 approved）。查询异常向上抛，由调用方按「本轮未授权」处理。
-  const isPublishApproved = async (requestId: string): Promise<boolean> => {
-    const d = await readPublishApproval(requestId);
-    return d?.approved === true;
+    return row
+      ? { approved: row.approved, contentVersion: row.contentVersion, revision: row.revision }
+      : null;
   };
   // 作废一份授权（edit-note-draft-before-publish）：**状态迁移而非删除**，历史轮次保留供审计；
   // 作废后活跃槽位让出，同 requestId 可以 revision+1 重新授权（旧「删文件=可重新审批」语义逐条保留）。
-  const voidApprovalSignal = async (requestId: string, reason: ApprovalVoidReason = 'version_stale'): Promise<void> => {
+  const voidApprovalSignal = async (
+    requestId: string,
+    expectedRevision: number,
+    reason: ApprovalVoidReason,
+  ): Promise<void> => {
     if (!publishApprovalClient) throw new ApprovalUnreadableError('approval_api_unavailable');
-    await publishApprovalClient.voidApproval(requestId, reason);
+    await publishApprovalClient.voidApproval(requestId, expectedRevision, reason);
   };
   // 读某草稿当前内容版本号（edit-note-draft-before-publish）：面板/飞书授权前的写时预检用；不存在/出错 → null。
   const readLiveContentVersion = async (recordId: number): Promise<number | null> => {
@@ -4674,20 +4852,20 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     voidApprovalSignal,
     // 授权下发进度（change publish-approval-signal-to-database）：让「已批准·待下发」成为持久可见状态，
     // 进程重启后仍成立（不再依赖进程内在途集合）。未就绪时不写进度、行为与今天一致。
-    ...(publishApprovalStore
+    ...(publishApprovalClient
       ? {
           approvalDispatchState: {
-            markDispatching: async (requestId: string) => {
-              await publishApprovalStore!.markDispatching(requestId);
+            markDispatching: async (requestId: string, expectedRevision: number) => {
+              await publishApprovalClient.markDispatching(requestId, expectedRevision);
             },
-            markConsumed: async (requestId: string) => {
-              await publishApprovalStore!.markConsumed(requestId);
+            markConsumed: async (requestId: string, expectedRevision: number) => {
+              await publishApprovalClient.markConsumed(requestId, expectedRevision);
             },
-            releaseToPending: async (requestId: string, blockedReason) => {
-              await publishApprovalStore!.releaseToPending(requestId, blockedReason);
+            releaseToPending: async (requestId: string, expectedRevision: number, blockedReason) => {
+              await publishApprovalClient.releaseToPending(requestId, expectedRevision, blockedReason);
             },
-            setBlockedReason: async (requestId: string, reason) => {
-              await publishApprovalStore!.setBlockedReason(requestId, reason);
+            setBlockedReason: async (requestId: string, expectedRevision: number, reason) => {
+              await publishApprovalClient.setBlockedReason(requestId, expectedRevision, reason);
             },
           },
         }
@@ -4762,14 +4940,31 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     logger: console,
   });
   ctx.scheduledPublishReconciler.start();
-  // 审批授权 → 触发下发（仅 publish-<n> 走此路；评论审批 comment-<…> 不触发发帖下发）。
-  // humanApproval：人工批准入口（含 already-decided 重复批准）——熔断中即视为人工确认清除并恢复 drain。
-  const triggerPublishDispatchOnApprove = (requestId: string): void => {
-    const m = /^publish-(\d+)$/.exec(requestId);
-    if (!m) return;
-    publishDispatcher
-      .dispatch(Number(m[1]), { humanApproval: true })
-      .catch((e) => console.warn('[aidcp-cloud] publish dispatch err:', e instanceof Error ? e.message : String(e)));
+  // automation owner 的短应答 receiver：只受理唤醒，不把 dispatch Promise 或平台结局塞进 HTTP 生命周期。
+  const publishDispatchTrigger =
+    approvalAuthorityForAutomation && deploymentTarget
+      ? createPublishDispatchTriggerReceiver({
+          executionTarget: deploymentTarget,
+          approvalAuthority: approvalAuthorityForAutomation,
+          dispatcher: publishDispatcher,
+          logger: console,
+        })
+      : undefined;
+  ctx.publishDispatchTrigger = publishDispatchTrigger;
+  const triggerPublishDispatchOnApprove = async (
+    requestId: string,
+    revision: number,
+    kind: PublishDispatchTriggerKind,
+  ): Promise<void> => {
+    if (!publishDispatchTrigger || !deploymentTarget) {
+      throw new Error('publish_dispatch_trigger_unavailable');
+    }
+    await publishDispatchTrigger.triggerApproved({
+      requestId,
+      revision,
+      executionTarget: deploymentTarget,
+      kind,
+    });
   };
   // 陪伴界面：拒绝发布（飞书取消/面板拒绝首写成功）→ rejected 推给该账号在线边缘（仅 publish-<n>）。
   const notifyPublishRejected = (requestId: string): void => {
@@ -4892,13 +5087,17 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         decidedBy: `client:${decidedBy}`,
         decidedVia: 'client',
       }),
-    triggerApproved: triggerPublishDispatchOnApprove,
+    triggerApproved: (trigger) => {
+      void triggerPublishDispatchOnApprove(trigger.requestId, trigger.revision, trigger.kind).catch((err) => {
+        console.warn('[aidcp-cloud] client human_reconfirm trigger 失败:', err instanceof Error ? err.message : String(err));
+      });
+    },
     notifyRejected: notifyPublishRejected,
     // 客户端稿件卡上把「已批准·待下发」与「待审批」区分开（task 6.5）。读不到 → 不带字段，旧行为不变。
-    ...(publishApprovalStore
+    ...(publishApprovalClient
       ? {
           readDispatchState: async (requestId: string) => {
-            const row = await publishApprovalStore!.readActive(requestId);
+            const row = await publishApprovalClient.readApproval(requestId);
             if (!row || !row.approved) return null;
             if (row.dispatchState === 'dispatching') return { dispatchState: 'dispatching' as const };
             if (row.dispatchState !== 'pending_dispatch') return null;
@@ -4916,45 +5115,46 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   ): Promise<import('./comm/protocol.js').PublishApprovalActionResultPayload> =>
     approvePublishForClient(payload, session.accountId);
 
-  // ── PublishApproved 命令 Inbox（change publish-approval-signal-to-database，task 3.9）─────────
-  // 授权落库与命令写出**同事务**；这里是消费侧：按 (requestId, revision) 原子认领去重后触发一次下发。
-  // 这条路径是拆分后 api → automation 的**权威通路**（跨进程 / 跨主机都成立）；今天与写方同进程，
-  // 故写方仍会同时直调一次下发做「通过即切」——两者都被 dispatch 的既有幂等闸（inFlight / status /
-  // 授权复核）吸收，MUST NOT 造成重复发布。阶段 4 提取 api 后，直调消失、只剩这条。
-  const pumpPublishApprovedInbox = async (): Promise<void> => {
-    if (!publishApprovalStore || !deploymentTarget) return;
-    let commands: Awaited<ReturnType<PublishApprovalStore['claimApprovedCommands']>>;
+  // API owner outbox relay：只有 automation 明确短应答 queued/duplicate 后才 ack；
+  // automation 独立模式不碰 API store，由 api 进程承担同一 relay。
+  const publishApprovalOutboxRelay =
+    seamMode !== 'automation' && publishApprovalStore && deploymentTarget && publishDispatchTrigger
+      ? new PublishApprovalOutboxRelay({
+          executionTarget: deploymentTarget,
+          store: publishApprovalStore,
+          trigger: publishDispatchTrigger,
+          logger: console,
+        })
+      : undefined;
+  const pumpPublishApprovalOutbox = async (): Promise<void> => {
+    if (!publishApprovalOutboxRelay) return;
     try {
-      commands = await publishApprovalStore.claimApprovedCommands(deploymentTarget, 20);
+      await publishApprovalOutboxRelay.runOnce(20);
     } catch (err) {
-      console.warn('[aidcp-cloud] PublishApproved Inbox 认领失败（本轮跳过，命令未消费）:', (err as Error).message);
-      return;
-    }
-    for (const command of commands) {
-      console.log(
-        `[aidcp-cloud] PublishApproved 命令消费 requestId=${command.requestId} revision=${command.revision} target=${command.executionTarget}`,
+      console.warn(
+        '[aidcp-cloud] PublishApproved outbox relay 失败（命令保持 pending）:',
+        err instanceof Error ? err.message : String(err),
       );
-      triggerPublishDispatchOnApprove(command.requestId);
     }
   };
+  ctx.installPublishApprovalOutboxWake(() => void pumpPublishApprovalOutbox());
 
   // 兜底补偿（at-least-once）：低频扫描已授权但未下发的待审草稿补触发（覆盖事件丢失）；靠 dispatch 幂等去重。
   const dispatchScanMs = Number(process.env.AIDCP_PUBLISH_DISPATCH_SCAN_MS ?? 60_000);
   if (dispatchScanMs > 0) {
     const scanTimer = setInterval(() => {
-      void pumpPublishApprovedInbox();
+      void pumpPublishApprovalOutbox();
       publishDispatcher.scanAndDispatchApproved().catch(() => {});
     }, dispatchScanMs);
     scanTimer.unref?.();
   }
-  // 起步先消费一轮：进程重启前落库但未消费的授权命令不能被无声丢掉。
-  void pumpPublishApprovedInbox();
+  void pumpPublishApprovalOutbox();
 
   // 待下发看门狗（change publish-approval-signal-to-database，task 4.4）：只对**无阻塞原因**的长时间
   // 待下发告警——有原因的是已解释的等待（离线/槽位/熔断/暂停/授权不可读），对它们告警只是噪声；
   // 「没有原因的长时间待下发」恰恰是执行侧静默失联的形态，本项目红线禁止它无声存在。
   // 按本机 execution_target 过滤（DEV/OL 共库异步隔离）。
-  if (publishApprovalStore && deploymentTarget) {
+  if (seamMode !== 'automation' && publishApprovalStore && deploymentTarget) {
     const pendingDispatchCandidateLimit = 50;
     const pendingDispatchWatchdog = new PendingDispatchWatchdog({
       executionTarget: deploymentTarget,
@@ -5009,12 +5209,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       await messenger.sendApprovalCard(chatId, buildCommentApprovalCard({ requestId, noteId, text, title, authorName, accountId, accountName: displayName }));
     },
     isApproved: async (requestId: string) => {
-      const approved = await isPublishApproved(requestId);
+      const decision = await readPublishApproval(requestId);
+      const approved = decision?.approved === true;
       // 评论授权没有下发段（下发状态机只被发帖下发器驱动）：人审闸读到「已批准」的这一刻，授权就被用掉了。
       // 不迁走状态的话，这条记录会永远停在「已批准·待下发」——一个不会有人来消费的假等待。
       // best-effort：迁移失败绝不影响本次放行（授权判定只看 approved）。
-      if (approved && publishApprovalStore) {
-        await publishApprovalStore.markConsumed(requestId).catch((err: unknown) => {
+      if (approved && decision && publishApprovalClient) {
+        await publishApprovalClient.markConsumed(requestId, decision.revision).catch((err: unknown) => {
           console.warn(
             `[comment] 评论授权状态迁移失败 requestId=${requestId}: ${err instanceof Error ? err.message : String(err)}`,
           );
@@ -5984,7 +6185,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           { decidedBy, decidedVia: 'delegated_task' },
         );
         if (!result.written && result.alreadyDecided !== true) throw new Error('candidate_already_rejected');
-        await publishDispatcher.dispatch(candidate.recordId, { humanApproval: true });
+        if (!result.written && result.alreadyDecided === true) {
+          await triggerPublishDispatchOnApprove(requestId, result.revision, 'human_reconfirm');
+        }
         return loadCandidate(candidate.recordId);
       },
       rejectCandidate: async (candidate, decidedBy) => {
@@ -6081,7 +6284,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     writeApproval: (requestId, approved, payload, context) =>
       writeApprovalDecision(requestId, approved, payload, context),
     // 通过即切：飞书「授权发布」首写成功即触发下发段（仅 publish-<n>）。
-    onApproved: triggerPublishDispatchOnApprove,
+    onApproved: (trigger) => {
+      void triggerPublishDispatchOnApprove(trigger.requestId, trigger.revision, trigger.kind).catch((err) => {
+        console.warn('[aidcp-cloud] feishu human_reconfirm trigger 失败:', err instanceof Error ? err.message : String(err));
+      });
+    },
     // 陪伴界面：取消首写成功 → rejected 推给在线边缘（仅 publish-<n>）。
     onRejected: notifyPublishRejected,
     // 写时版本预检（edit-note-draft-before-publish）：飞书卡片授权前比对活版本与卡片烤入版本；
@@ -6162,6 +6369,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   ctx.riskRegistry = riskRegistry;
   ctx.rolePromptProvider = rolePromptProvider;
   ctx.server = server;
+  // risk.command backlog 只能在真实 Edge resume 依赖就绪后开始消费；此前 LISTEN wake 会被未启动 consumer 忽略，
+  // start() 立即跑首轮并承接全部 backlog，不丢通知。
+  riskCommandConsumer?.start();
   ctx.triggerPublishDispatchOnApprove = triggerPublishDispatchOnApprove;
 }
 
@@ -6260,7 +6470,7 @@ function crossSegment<T>(
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, botChatStore, botChatsProvider, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commandFace, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, triggerPublishDispatchOnApprove, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, approvalPolicyStore, approvePublishForClient, automationPool, botChatStore, botChatsProvider, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commandFace, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, messenger, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resolveAccountChatId, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
   // ── Block④ 三仓提取 · 批次 0c：面板配置外观从 segC 上提到本段 ────────────────────────
   // 判据＝**构造只依赖 segA**（llm / modelConfigStore / 六个配置 store 全在 segA）。它们只被本段消费，
   // 原先建在 segC 再经 ctx 绕一圈回来 —— 那让 api 模式白白依赖 automation 段。就地建，零跨段依赖。
@@ -6359,9 +6569,55 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   // ── Block② 2e：运行模式（纯选择器，与 main() 同源）。segD 只在 monolith / api / core 跑。─────
   const mode = serviceModeFromEnv();
   const { deploymentTarget } = ctx; // 'dev'|'ol'|null（segA 设）；outbox emit / 消费的 executionTarget。
+  const panelEventFanout = mode === 'api' ? new PanelEventFanout(console) : undefined;
+  ctx.panelEventFanout = panelEventFanout;
   const automationBaseUrl =
     readEnvString('AIDCP_AUTOMATION_URL') ?? `http://127.0.0.1:${DEFAULT_AUTOMATION_INTERNAL_API_PORT}`;
   const automationHttp = new InternalHttpClient(automationBaseUrl);
+  const publishDispatchTrigger: PublishDispatchTriggerPort | undefined =
+    mode === 'api'
+      ? new PublishDispatchTriggerHttpClient(
+          automationHttp,
+          requirePublishApprovalInternalToken(),
+        )
+      : ctx.publishDispatchTrigger;
+  const triggerPublishDispatchOnApprove = async (
+    requestId: string,
+    revision: number,
+    kind: PublishDispatchTriggerKind,
+  ): Promise<void> => {
+    if (!publishDispatchTrigger || !deploymentTarget) {
+      throw new Error('publish_dispatch_trigger_unavailable');
+    }
+    await publishDispatchTrigger.triggerApproved({
+      requestId,
+      revision,
+      executionTarget: deploymentTarget,
+      kind,
+    });
+  };
+  if (mode === 'api' && publishApprovalStore && deploymentTarget && publishDispatchTrigger) {
+    const relay = new PublishApprovalOutboxRelay({
+      executionTarget: deploymentTarget,
+      store: publishApprovalStore,
+      trigger: publishDispatchTrigger,
+      logger: console,
+    });
+    const pump = () =>
+      relay.runOnce(20).catch((err) => {
+        console.warn(
+          '[aidcp-cloud] PublishApproved outbox relay 失败（命令保持 pending）:',
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    ctx.installPublishApprovalOutboxWake(() => void pump());
+    const relayIntervalMs = readEnvNumber('AIDCP_PUBLISH_DISPATCH_SCAN_MS', 60_000);
+    if (relayIntervalMs > 0) {
+      const relayTimer = setInterval(() => void pump(), relayIntervalMs);
+      relayTimer.unref?.();
+    }
+    void pump();
+  }
   const groupRoutes =
     mode === 'api' ? new GroupRouteHttpClient(automationHttp) : groupRouteStore;
   const alertResolution =
@@ -6448,11 +6704,15 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   //     那会让操作员提交完看到 202、命令却从未存在（红线：静默假成功）。
   const riskCommands: RiskCommandPort =
     mode === 'api'
-      ? new RiskCommandHttpClient(automationHttp)
+      ? new RiskCommandHttpClient(automationHttp, {
+          executionTarget: deploymentTarget ?? undefined,
+        })
       : (ctx.riskCommandService ?? {
           submitSignal: unavailableInMode('risk_command'),
           submitQuotaLevel: unavailableInMode('risk_command'),
           outcomeOf: unavailableInMode('risk_command'),
+          submitRestrictedRecovery: unavailableInMode('risk_command'),
+          restrictedRecoveryOutcomeOf: unavailableInMode('risk_command'),
         });
   // 面板对 automation 域的只读投影端口（Block③ L3：面板不直连 automation 的库）。
   //   - monolith / core：跑在本进程 automation 池上的本地实现（PgPanelAutomationRead），逐字节等价、零 HTTP。
@@ -6522,7 +6782,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           // 也不按归属禁用风控写（写改回账号级）。currentDriverTarget 只读展示直接来自 panel-store。
           publishLogStore,
           botChatStore,
-          eventBus,
+          eventBus: panelEventFanout ?? eventBus,
           edgeServer: requireSegment(server, 'server', 'automation'),
           // Block③ L3：面板自己的读走 api 属主池（accounts/persona_config/publish_log）；
           // automation 属主表（风控/告警/互动）经注入的只读端口取，面板不直连别域的库。
@@ -6539,11 +6799,11 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               decidedBy,
               decidedVia: 'console',
             });
-            // 通过即切：后台「授权发布」首写成功即触发下发段（仅 publish-<n>）。取消不触发下发，
-            // 但要通知陪伴界面 rejected（发布卡收起为「暂不发布」）。
-            // already-decided 的重复「授权」也走人工批准入口（change parallel-rewrite-drafts）：
-            // 熔断中即确认清除恢复 drain；非熔断时由 dispatch 幂等闸（inFlight/status/信号）自然吸收。
-            if (approved && (result.written || result.alreadyDecided === true)) requireSegment(triggerPublishDispatchOnApprove, 'triggerPublishDispatchOnApprove', 'automation')(requestId);
+            // 首写批准由同事务 durable outbox 发 decision_recorded；只有操作员对同一活跃授权明确重批，
+            // 才发送 human_reconfirm 取得清熔断权力。
+            if (approved && !result.written && result.alreadyDecided === true) {
+              await triggerPublishDispatchOnApprove(requestId, result.revision, 'human_reconfirm');
+            }
             else if (!approved && result.written) requireSegment(notifyPublishRejected, 'notifyPublishRejected', 'automation')(requestId);
             return result;
           },
@@ -7061,59 +7321,43 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                 return null;
               }
             },
-            recoverRestrictedForAccount: async (accountId, reason) => {
+            submitRestrictedRecovery: async (envKey, accountId, reason, requestedBy) => {
               try {
-                if (mode === 'api') {
-                  // 红线②·风控单写：api 绝不直调 RiskController。restricted 时把「解除受限」变成命令落 outbox，
-                  // 由 automation 唯一消费者经真 RiskController 应用（异步）；本同步调用只回读当前观测态、
-                  // changed=false（apply 尚未在本调用内发生）——绝不伪造状态迁移。状态判定的权威仍在 automation 的
-                  // recoverRestricted（幂等 + 复核 statusBefore）；此处映射只为回报，读到什么如实报什么。
-                  if (!deploymentTarget) return null; // 无合法 target 不能落命令（fail-closed）
-                  const state = await riskRead.getState(accountId);
-                  const stateView = {
-                    status: state.status,
-                    statusSince: state.statusSince,
-                    updatedAt: state.updatedAt,
-                  };
-                  if (state.status === 'restricted') {
-                    await emitRiskCommand(ctx.automationPool, deploymentTarget, {
-                      kind: 'recoverRestricted',
-                      accountId,
-                      reason,
-                    });
-                    return { accepted: true, statusBefore: state.status, state: stateView, changed: false };
-                  }
-                  if (state.status === 'normal') {
-                    // 幂等已完成（照真 RiskController：normal 视为已恢复），无需落命令。
-                    return { accepted: true, statusBefore: state.status, state: stateView, changed: false };
-                  }
-                  // warned / frozen：非受限，诚实拒（照真 RiskController accepted=false）。
-                  return {
-                    accepted: false,
-                    refusal: 'state_not_restricted' as const,
-                    statusBefore: state.status,
-                    state: stateView,
-                    changed: false,
-                  };
+                return await riskCommands.submitRestrictedRecovery({ envKey, accountId, reason, requestedBy });
+              } catch {
+                return null;
+              }
+            },
+            restrictedRecoveryOutcomeOf: async (commandId, envKey, accountId) => {
+              try {
+                const outcome = await riskCommands.restrictedRecoveryOutcomeOf(commandId, envKey, accountId);
+                if (outcome.state !== 'applied' && outcome.state !== 'refused') return outcome;
+                const risk = outcome.risk;
+                if (
+                  risk.status !== 'normal'
+                  && risk.status !== 'warned'
+                  && risk.status !== 'restricted'
+                  && risk.status !== 'frozen'
+                ) {
+                  console.warn('[aidcp-cloud] restricted recovery returned invalid risk status', {
+                    commandId,
+                    envKey,
+                    rawStatus: String(risk.status),
+                  });
+                  return { commandId, state: 'failed' as const, reason: 'recovery_outcome_incomplete' };
                 }
-                // monolith / core：进程内单写，直调本进程 RiskController（与今日逐字节等价）。
-                const result = await (await requireSegment(riskRegistry, 'riskRegistry', 'automation').getController(accountId)).recoverRestricted(reason);
                 return {
-                  accepted: result.accepted,
-                  ...(result.refusal ? { refusal: result.refusal } : {}),
-                  statusBefore: result.statusBefore,
-                  state: {
-                    status: result.state.status,
-                    statusSince: result.state.statusSince,
-                    updatedAt: result.state.updatedAt,
+                  ...outcome,
+                  risk: {
+                    status: risk.status,
+                    statusSince: risk.statusSince,
+                    updatedAt: risk.updatedAt,
                   },
-                  changed: result.changed,
                 };
               } catch {
                 return null;
               }
             },
-            resumeEdgesForAccount: (accountId) => requireSegment(server, 'server', 'automation').resumeEdgesForAccount(accountId),
           },
           persona: {
             get: (accountId) => requireSegment(accountPersonaService, 'accountPersonaService', 'automation').get(accountId),
@@ -7154,32 +7398,6 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     console.log('[aidcp-cloud] 客户鉴权 API 已禁用（未设置 AIDCP_CLIENT_AUTH_PORT）');
   }
 
-  // ── Block② 2e：面板事件回放（seam③·观测·仅 api 模式）──────────────────────────
-  // api 进程不含编排 EventBus 的产生端；automation 侧 tee 到 outbox 的 panel.event 由此回放进本进程
-  // EventBus（emitRaw），panel-ws 的 onAny firehose 照常拾取并广播给浏览器。
-  // monolith：EventBus 进程内直连 panel-ws，MUST NOT 起回放（红线③）。core：segD 与产生端同进程、直连，同样不起。
-  if (mode === 'api' && deploymentTarget) {
-    const replay = new PanelEventReplay({
-      pool: ctx.automationPool,
-      executionTarget: deploymentTarget,
-      // originTs：事件在 automation 进程发生的时刻（epoch ms）。透传给 panel-ws，否则回放出来的
-      // 历史事件会被面板一律显示成「刚刚发生」。解不出时为 undefined，下游诚实回落到当下。
-      sink: (event, data, originTs) => eventBus.emitRaw(event, data, originTs),
-      logger: console,
-    });
-    replay.start();
-    console.log('[aidcp-cloud] 面板事件回放已启动（api 模式：outbox panel.event → 本进程 EventBus → panel-ws）');
-    // 通知唤醒：panel.event 是全量总线 firehose，靠 2s 轮询会让面板看起来「慢半拍」；接上 LISTEN 后
-    // 回放延迟降到毫秒级。轮询周期一行未动（承重通道）。
-    await wireOutboxNotifyWakeups('api', [
-      {
-        name: 'panel-event-replay',
-        wake: (topic) => replay.wake(topic),
-        stats: () => replay.stats(),
-        backlogByTopic: () => replay.backlogByTopic(),
-      },
-    ]);
-  }
 }
 
 

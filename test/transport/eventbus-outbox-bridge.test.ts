@@ -22,6 +22,10 @@ import {
 } from '../../src/transport/eventbus-outbox-bridge.js';
 import type { OutboxQueryable } from '../../src/transport/event-outbox.js';
 import { PANEL_FRAME_MAX_BYTES } from '../../src/kernel/panel-frame-limits.js';
+import {
+  PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
+  type PanelEventDelivery,
+} from '../../src/kernel/panel-event-delivery-port.js';
 import { PANEL_WS_MAX_FRAME_BYTES } from '../../src/panel/panel-ws.js';
 
 const silent = { log() {}, warn() {} };
@@ -152,20 +156,36 @@ test('tee 把 onAny 事件编码进 outbox（topic=panel.event）；replay 解�
     ts: 1_700_000_000_000,
   });
 
-  // replay 侧：解码回 (event, data, originTs) 交给注入 sink
-  const got: { event: string; data: unknown; originTs?: number }[] = [];
+  // replay 侧：解码成带稳定 deliveryId 的版本化信封，逐条交给注入 sink
+  const got: PanelEventDelivery[] = [];
   const replay = new PanelEventReplay({
     pool,
     executionTarget: 'dev',
-    sink: (event, data, originTs) => got.push({ event, data, originTs }),
+    sink: (delivery) => {
+      got.push(delivery);
+    },
     logger: silent,
   });
   const handled = await replay.runOnce();
 
   assert.equal(handled, 2);
   assert.deepEqual(got, [
-    { event: 'note.detail', data: { noteId: 'x' }, originTs: 1_700_000_000_000 },
-    { event: 'page.scroll', data: { dy: 200 }, originTs: 1_700_000_000_000 },
+    {
+      contractVersion: PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
+      executionTarget: 'dev',
+      deliveryId: 'event_outbox:dev:1',
+      event: 'note.detail',
+      data: { noteId: 'x' },
+      originTs: 1_700_000_000_000,
+    },
+    {
+      contractVersion: PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
+      executionTarget: 'dev',
+      deliveryId: 'event_outbox:dev:2',
+      event: 'page.scroll',
+      data: { dy: 200 },
+      originTs: 1_700_000_000_000,
+    },
   ]);
 
   unsub();
@@ -188,7 +208,9 @@ test('回放透传原始时刻；老行（信封无 ts）回落到 outbox 行的
   const replay = new PanelEventReplay({
     pool,
     executionTarget: 'dev',
-    sink: (_e, _d, originTs) => got.push(originTs),
+    sink: (delivery) => {
+      got.push(delivery.originTs);
+    },
     logger: silent,
   });
   await replay.runOnce();
@@ -237,7 +259,14 @@ test('target 隔离：tee 写 dev，replay ol 拿不到', async () => {
   await flush();
 
   const got: unknown[] = [];
-  const replay = new PanelEventReplay({ pool, executionTarget: 'ol', sink: (_e, d) => got.push(d), logger: silent });
+  const replay = new PanelEventReplay({
+    pool,
+    executionTarget: 'ol',
+    sink: (delivery) => {
+      got.push(delivery.data);
+    },
+    logger: silent,
+  });
   const handled = await replay.runOnce();
   assert.equal(handled, 0);
   assert.equal(got.length, 0);
@@ -265,8 +294,87 @@ test('replay：脏（循环引用）载荷被净化后仍能回放，sink 拿到
   assert.equal(pool.events.length, 1); // 没有因脏载荷抛崩
 
   const got: unknown[] = [];
-  const replay = new PanelEventReplay({ pool, executionTarget: 'dev', sink: (_e, d) => got.push(d), logger: silent });
+  const replay = new PanelEventReplay({
+    pool,
+    executionTarget: 'dev',
+    sink: (delivery) => {
+      got.push(delivery.data);
+    },
+    logger: silent,
+  });
   await replay.runOnce();
   assert.equal((got[0] as Record<string, unknown>).keep, 'ok');
   assert.doesNotThrow(() => JSON.stringify(got[0]));
+});
+
+test('replay await HTTP sink：响应丢失时 cursor 不推进，下一轮以相同 deliveryId 重投', async () => {
+  const pool = new FakePool();
+  pool.events.push({
+    id: 7,
+    topic: PANEL_EVENT_OUTBOX_TOPIC,
+    payload: { event: 'risk.changed', data: { status: 'restricted' }, ts: 7_000 },
+    execution_target: 'dev',
+    created_at: new Date(7_000),
+  });
+  const attempts: string[] = [];
+  let loseResponse = true;
+  const replay = new PanelEventReplay({
+    pool,
+    executionTarget: 'dev',
+    sink: async (delivery) => {
+      attempts.push(delivery.deliveryId);
+      if (loseResponse) throw new Error('response_lost_after_fanout');
+    },
+    logger: silent,
+  });
+
+  assert.equal(await replay.runOnce(), 0);
+  assert.equal(pool.topicCursors.get('panel-event-replay|dev|panel.event'), undefined);
+
+  loseResponse = false;
+  assert.equal(await replay.runOnce(), 1);
+  assert.deepEqual(attempts, ['event_outbox:dev:7', 'event_outbox:dev:7']);
+  assert.equal(pool.topicCursors.get('panel-event-replay|dev|panel.event'), 7);
+});
+
+test('replay 串行 await sink：前一条未确认时不会投递后一条', async () => {
+  const pool = new FakePool();
+  pool.events.push(
+    {
+      id: 1,
+      topic: PANEL_EVENT_OUTBOX_TOPIC,
+      payload: { event: 'first', data: null },
+      execution_target: 'dev',
+      created_at: new Date(1_000),
+    },
+    {
+      id: 2,
+      topic: PANEL_EVENT_OUTBOX_TOPIC,
+      payload: { event: 'second', data: null },
+      execution_target: 'dev',
+      created_at: new Date(2_000),
+    },
+  );
+  const order: string[] = [];
+  let releaseFirst!: () => void;
+  const firstAccepted = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const replay = new PanelEventReplay({
+    pool,
+    executionTarget: 'dev',
+    sink: async (delivery) => {
+      order.push(`start:${delivery.event}`);
+      if (delivery.event === 'first') await firstAccepted;
+      order.push(`done:${delivery.event}`);
+    },
+    logger: silent,
+  });
+
+  const run = replay.runOnce();
+  await flush();
+  assert.deepEqual(order, ['start:first']);
+  releaseFirst();
+  assert.equal(await run, 2);
+  assert.deepEqual(order, ['start:first', 'done:first', 'start:second', 'done:second']);
 });

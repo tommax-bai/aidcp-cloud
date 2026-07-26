@@ -83,6 +83,7 @@
 | `AIDCP_PORT` | edge WS | automation/core 单元写 `8787`（与单体一致） | 已是现役口，通常无需改 |
 | `AIDCP_PANEL_PORT` | 面板 API | **不在单元设定，沿用 .env 现值**（默认 127.0.0.1:8090） | 核对 .env 现值 + 与 isales 不冲突 |
 | `AIDCP_CLIENT_AUTH_PORT` | 客户鉴权 | **不在单元设定，沿用 .env 现值** | 核对 .env 现值；未设=该端口禁用（预期） |
+| `AIDCP_PUBLISH_APPROVAL_INTERNAL_TOKEN` | publish approval 内部调用方鉴权 | **不在单元设定，由共享 .env 注入** | api/content/automation 必须取得同一非空 secret；缺失即拒绝多进程启动，secret 不入库 |
 | `AIDCP_GATEWAY_MODE` | 数据网关模式 | api/core 单元写 `http` | — |
 | `AIDCP_GATEWAY_BASE_URL` | 网关指向 content | api/core 单元写 `http://127.0.0.1:8092` | 与 content 端口一致即可 |
 

@@ -70,33 +70,29 @@ CREATE INDEX IF NOT EXISTS idx_publish_approval_outbox_unconsumed
   WHERE consumed_at IS NULL;
 `;
 
-export const APPROVAL_DECIDED_VIA = [
-  'feishu',
-  'console',
-  'client',
-  'delegated_task',
-  'schedule_auto_approve',
-] as const;
-export type ApprovalDecidedVia = (typeof APPROVAL_DECIDED_VIA)[number];
-
-export const APPROVAL_DISPATCH_STATES = ['pending_dispatch', 'dispatching', 'consumed', 'void'] as const;
-export type ApprovalDispatchState = (typeof APPROVAL_DISPATCH_STATES)[number];
-
 // 作废/阻塞原因枚举 + 哨兵错误抬入 kernel（change decouple-longtail-sweep）供发布下发编排跨边界共导；
 // 本文件从 kernel 导入并等值再导出，令既有消费方与内部使用无感。
 import {
+  APPROVAL_DECIDED_VIA,
+  APPROVAL_DISPATCH_STATES,
   APPROVAL_VOID_REASONS,
   isApprovalVoidReason,
   APPROVAL_BLOCKED_REASONS,
   ApprovalUnreadableError,
+  type ApprovalDecidedVia,
+  type ApprovalDispatchState,
   type ApprovalVoidReason,
   type ApprovalBlockedReason,
 } from '../kernel/publish-approval-contract.js';
 export {
+  APPROVAL_DECIDED_VIA,
+  APPROVAL_DISPATCH_STATES,
   APPROVAL_VOID_REASONS,
   isApprovalVoidReason,
   APPROVAL_BLOCKED_REASONS,
   ApprovalUnreadableError,
+  type ApprovalDecidedVia,
+  type ApprovalDispatchState,
   type ApprovalVoidReason,
   type ApprovalBlockedReason,
 };
@@ -138,8 +134,8 @@ export interface ApprovalDecisionRow {
 export interface ApprovalWriteOutcome {
   written: boolean;
   alreadyDecided?: boolean;
-  /** 首写成功时的轮次（供 Outbox 关联 / 调用方日志）。 */
-  revision?: number;
+  /** 当前活跃授权轮次；首写 trigger 与 already-decided 人工重批都必须携带。 */
+  revision: number;
 }
 
 export interface PublishApprovedCommand {
@@ -293,7 +289,10 @@ export class PublishApprovalStore {
         );
         if (inserted.rowCount && inserted.rows[0]) {
           const row = mapRow(inserted.rows[0]);
-          if (row.approved) {
+          // 只有发帖授权有 PublishDispatcher。评论授权由 CommentApprovalGate 就地读取并消费；
+          // 给评论写 PublishApproved 会让严格只收 `publish-<id>` 的 trigger 永久拒绝该命令，
+          // 旧命令还会按 id 占满 relay LIMIT，最终饿死真正的发帖授权。
+          if (row.approved && row.subjectKind === 'publish') {
             await client.query(
               `INSERT INTO publish_approval_outbox (command, request_id, revision, execution_target, payload)
                VALUES ('PublishApproved', $1, $2, $3, $4::jsonb)
@@ -324,19 +323,33 @@ export class PublishApprovalStore {
       } finally {
         client.release();
       }
-      const active = await this.readActive(input.requestId);
-      if (active) return { written: false, alreadyDecided: active.approved };
+      const active = await this.readActiveForTarget(input.requestId, target);
+      if (active) return { written: false, alreadyDecided: active.approved, revision: active.revision };
+      // 全局 request_id 唯一约束可能被另一 target 的活跃行占用。只读本 target 后仍无行时，
+      // 绝不能回读/复用另一 target 的决定或 revision；在独立 contract change 拆掉全局唯一键前，
+      // 这里稳定 fail-closed，保留跨 target liveness gap 但不制造 authority crossover。
+      throw new ApprovalExecutionTargetError('execution_target_conflict_or_unavailable');
     }
     throw new Error('publish_approval_record_contention');
   }
 
   /** 活跃行（`dispatch_state <> 'void'`）。历史轮次 MUST NOT 混入判定。 */
   async readActive(requestId: string): Promise<ApprovalDecisionRow | null> {
+    const target = this.executionTarget;
+    if (!target) throw new ApprovalExecutionTargetError();
+    return this.readActiveForTarget(requestId, target);
+  }
+
+  /** authority 边界读：共享库下必须同时匹配服务端注入的 target。 */
+  async readActiveForTarget(
+    requestId: string,
+    executionTarget: DeploymentTarget,
+  ): Promise<ApprovalDecisionRow | null> {
     const res = await this.pool.query<DecisionDbRow>(
       `SELECT ${DECISION_COLUMNS} FROM publish_approval_decision
-        WHERE request_id = $1 AND dispatch_state <> 'void'
+        WHERE request_id = $1 AND execution_target = $2 AND dispatch_state <> 'void'
         LIMIT 1`,
-      [requestId],
+      [requestId, executionTarget],
     );
     return res.rows[0] ? mapRow(res.rows[0]) : null;
   }
@@ -403,27 +416,35 @@ export class PublishApprovalStore {
   }
 
   /** 执行侧领取：`pending_dispatch → dispatching`。已被作废 / 已消费的行不迁移（返回 null）。 */
-  async markDispatching(requestId: string, revision?: number): Promise<ApprovalDecisionRow | null> {
+  async markDispatching(input: {
+    requestId: string;
+    expectedRevision: number;
+    executionTarget: DeploymentTarget;
+  }): Promise<ApprovalDecisionRow | null> {
     const res = await this.pool.query<DecisionDbRow>(
       `UPDATE publish_approval_decision
           SET dispatch_state = 'dispatching', dispatch_state_at = now(), dispatch_blocked_reason = NULL
-        WHERE request_id = $1 AND dispatch_state = 'pending_dispatch'
-          AND ($2::int IS NULL OR revision = $2::int)
+        WHERE request_id = $1 AND revision = $2 AND execution_target = $3
+          AND dispatch_state = 'pending_dispatch'
         RETURNING ${DECISION_COLUMNS}`,
-      [requestId, revision ?? null],
+      [input.requestId, input.expectedRevision, input.executionTarget],
     );
     return res.rows[0] ? mapRow(res.rows[0]) : null;
   }
 
   /** 下发序列已收敛（成功 / 终态失败）：`→ consumed`。授权已被用掉，不再是待下发。 */
-  async markConsumed(requestId: string, revision?: number): Promise<ApprovalDecisionRow | null> {
+  async markConsumed(input: {
+    requestId: string;
+    expectedRevision: number;
+    executionTarget: DeploymentTarget;
+  }): Promise<ApprovalDecisionRow | null> {
     const res = await this.pool.query<DecisionDbRow>(
       `UPDATE publish_approval_decision
           SET dispatch_state = 'consumed', dispatch_state_at = now(), dispatch_blocked_reason = NULL
-        WHERE request_id = $1 AND dispatch_state IN ('pending_dispatch','dispatching')
-          AND ($2::int IS NULL OR revision = $2::int)
+        WHERE request_id = $1 AND revision = $2 AND execution_target = $3
+          AND dispatch_state IN ('pending_dispatch','dispatching')
         RETURNING ${DECISION_COLUMNS}`,
-      [requestId, revision ?? null],
+      [input.requestId, input.expectedRevision, input.executionTarget],
     );
     return res.rows[0] ? mapRow(res.rows[0]) : null;
   }
@@ -436,40 +457,60 @@ export class PublishApprovalStore {
    * `markDispatching` 也就没跑过，行仍停在 `pending_dispatch`。若只认 `dispatching`，这条 UPDATE 命中 0 行、
    * `browser_slot_waiting` 被静默丢弃 —— 后台看不到真实原因，看门狗还会把「等槽位」误报成「下发侧失联」。
    */
-  async releaseToPending(requestId: string, blockedReason?: ApprovalBlockedReason | null): Promise<void> {
-    await this.pool.query(
+  async releaseToPending(input: {
+    requestId: string;
+    expectedRevision: number;
+    executionTarget: DeploymentTarget;
+    blockedReason?: ApprovalBlockedReason | null;
+  }): Promise<ApprovalDecisionRow | null> {
+    const res = await this.pool.query<DecisionDbRow>(
       `UPDATE publish_approval_decision
           SET dispatch_state = 'pending_dispatch', dispatch_state_at = now(), dispatch_blocked_reason = $2
-        WHERE request_id = $1 AND dispatch_state IN ('pending_dispatch','dispatching')`,
-      [requestId, blockedReason ?? null],
+        WHERE request_id = $1 AND revision = $3 AND execution_target = $4
+          AND dispatch_state IN ('pending_dispatch','dispatching')
+        RETURNING ${DECISION_COLUMNS}`,
+      [input.requestId, input.blockedReason ?? null, input.expectedRevision, input.executionTarget],
     );
+    return res.rows[0] ? mapRow(res.rows[0]) : null;
   }
 
   /**
    * 作废：**只做状态迁移，MUST NOT 删行**。活跃部分索引随即让出，下一轮授权以 revision+1 插入成功
    * （旧语义「删文件 = 可重新审批」逐条保留，并多出完整审计轨迹）。
    */
-  async voidActive(requestId: string, reason: ApprovalVoidReason): Promise<ApprovalDecisionRow | null> {
-    if (!isApprovalVoidReason(reason)) throw new Error(`invalid_void_reason:${String(reason)}`);
+  async voidActive(input: {
+    requestId: string;
+    expectedRevision: number;
+    executionTarget: DeploymentTarget;
+    reason: ApprovalVoidReason;
+  }): Promise<ApprovalDecisionRow | null> {
+    if (!isApprovalVoidReason(input.reason)) throw new Error(`invalid_void_reason:${String(input.reason)}`);
     const res = await this.pool.query<DecisionDbRow>(
       `UPDATE publish_approval_decision
           SET dispatch_state = 'void', void_reason = $2, dispatch_state_at = now(), dispatch_blocked_reason = NULL
-        WHERE request_id = $1 AND dispatch_state <> 'void'
+        WHERE request_id = $1 AND revision = $3 AND execution_target = $4 AND dispatch_state <> 'void'
         RETURNING ${DECISION_COLUMNS}`,
-      [requestId, reason],
+      [input.requestId, input.reason, input.expectedRevision, input.executionTarget],
     );
     return res.rows[0] ? mapRow(res.rows[0]) : null;
   }
 
   /** 阻塞原因写入 / 清空（`null` = 阻塞解除，MUST 清空，绝不遗留过期文案）。 */
-  async setBlockedReason(requestId: string, reason: ApprovalBlockedReason | null): Promise<void> {
-    await this.pool.query(
+  async setBlockedReason(input: {
+    requestId: string;
+    expectedRevision: number;
+    executionTarget: DeploymentTarget;
+    reason: ApprovalBlockedReason | null;
+  }): Promise<ApprovalDecisionRow | null> {
+    const res = await this.pool.query<DecisionDbRow>(
       `UPDATE publish_approval_decision
           SET dispatch_blocked_reason = $2, dispatch_state_at = now()
-        WHERE request_id = $1 AND dispatch_state IN ('pending_dispatch','dispatching')
-          AND dispatch_blocked_reason IS DISTINCT FROM $2`,
-      [requestId, reason],
+        WHERE request_id = $1 AND revision = $3 AND execution_target = $4
+          AND dispatch_state IN ('pending_dispatch','dispatching')
+        RETURNING ${DECISION_COLUMNS}`,
+      [input.requestId, input.reason, input.expectedRevision, input.executionTarget],
     );
+    return res.rows[0] ? mapRow(res.rows[0]) : null;
   }
 
   /** 面板投影批量读：一批 requestId 的活跃行。 */
@@ -504,6 +545,42 @@ export class PublishApprovalStore {
       [executionTarget, Math.max(1, Math.trunc(limit))],
     );
     return res.rows.map((row) => row.payload);
+  }
+
+  /**
+   * 可靠 relay 读：只读取、绝不预先消费。HTTP trigger 成功短应答后再调用
+   * `markApprovedCommandConsumed`；断链时行保持未消费，pending scan 仍是另一条补偿链。
+   */
+  async listPendingApprovedCommands(
+    executionTarget: DeploymentTarget,
+    limit = 20,
+  ): Promise<PublishApprovedCommand[]> {
+    const res = await this.pool.query<{ payload: PublishApprovedCommand }>(
+      `SELECT payload FROM publish_approval_outbox
+        WHERE consumed_at IS NULL AND execution_target = $1
+        ORDER BY id ASC
+        LIMIT $2`,
+      [executionTarget, Math.max(1, Math.trunc(limit))],
+    );
+    return res.rows.map((row) => row.payload);
+  }
+
+  async markApprovedCommandConsumed(command: {
+    requestId: string;
+    revision: number;
+    executionTarget: DeploymentTarget;
+  }): Promise<boolean> {
+    const res = await this.pool.query(
+      `UPDATE publish_approval_outbox
+          SET consumed_at = now()
+        WHERE command = 'PublishApproved'
+          AND request_id = $1
+          AND revision = $2
+          AND execution_target = $3
+          AND consumed_at IS NULL`,
+      [command.requestId, command.revision, command.executionTarget],
+    );
+    return (res.rowCount ?? 0) > 0;
   }
 
   async close(): Promise<void> {

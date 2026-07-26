@@ -1260,6 +1260,11 @@
     "note": "【待定稿裁决】change block3-l3-panel-read-port 新写：面板（api 属主 panel-store）对 automation 域的只读投影端口契约（PanelAutomationReader 接口 + PanelActionTotal / PanelAccountActionTotal / PanelLikeViewTotal / PanelRiskStateProjection / PanelAlertProjection / PanelInteractionProjection 纯行类型）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 risk-read-types（账号维风控状态投影端口）同类：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/risk/panel-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 面板读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
   },
   {
+    "path": "src/kernel/panel-event-delivery-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change split-cloud-api-composition-root-3b 新写：automation 的 panel.event replay 到 api 本地 fanout 的版本化投递合同（PanelEventDelivery / PanelEventDeliveryPort）与稳定 delivery id 纯函数。跨 automation/api 两域共导；零 import、零 SQL / HTTP / LLM、零进程内活状态。合同保留 execution_target 与 event_outbox:<target>:<id> 身份，使 HTTP 拒绝或回执丢失后可按同一 outbox id 至少一次重投，不承诺 exactly-once。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch。"
+  },
+  {
     "path": "src/kernel/panel-frame-limits.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change panel-event-tee-hardening 新增：面板事件单帧大小闸（PANEL_FRAME_MAX_BYTES 常量 + panelPayloadTruncated 截断标记构造 + panelPayloadByteLength 字节口径），零 import、零 SQL、零 HTTP/LLM、零进程内活状态。必须落 kernel 而非任一业务层：该上限有两个执行点——推送端 src/panel/panel-ws.ts（api）与旁路端 src/transport/eventbus-outbox-bridge.ts（automation），各写一份必然漂移成「一端截断、另一端照写几十 KB 进共库生产 PG」；放任一层都会制造一条 api↔automation 跨层边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
@@ -1545,6 +1550,11 @@
     "note": "§4.6.4：全部 12 个文件归 aidcp-api"
   },
   {
+    "path": "src/panel/panel-event-fanout.ts",
+    "layer": "api",
+    "note": "§4.6.4：全部 12 个文件归 aidcp-api"
+  },
+  {
     "path": "src/panel/panel-server.ts",
     "layer": "api",
     "note": "§4.6.4：全部 12 个文件归 aidcp-api"
@@ -1725,6 +1735,11 @@
     "note": "§4.6.3 同上：授权的窄内部接口，按未来 HTTP 形状写死、阶段 4 提取 aidcp-api 时把进程内适配器换成 HTTP 客户端。由 change publish-approval-signal-to-database 新增"
   },
   {
+    "path": "src/publish-agent/publish-approval-outbox-relay.ts",
+    "layer": "api",
+    "note": "【待定稿裁决】change split-cloud-api-composition-root-3b 新写：API 单写的 publish_approval_outbox 可靠中继，只读未确认 PublishApproved 并在 automation trigger 明确短应答后确认消费；断链或结果未知保留原命令。直接依赖 API owner PublishApprovalStore，故随授权台账归 API，不与 automation receiver 共文件。请求回写 §4.6.3。"
+  },
+  {
     "path": "src/publish-agent/publish-approval-outlet.ts",
     "layer": "api",
     "note": "§4.6.3 同上：五个审批入口收敛到这里写同一条授权记录，属台账与审批段。由 change publish-approval-signal-to-database 新增"
@@ -1733,6 +1748,11 @@
     "path": "src/publish-agent/publish-approval-store.ts",
     "layer": "api",
     "note": "§4.6.3 的机械 import 指纹判据第三条（『直接写 publish_log 或授权记录即为台账与审批段』）：本文件是 publish_approval_decision 的唯一持久写者，而 §4.6.3 正文另有直接点名『授权事实由新建的 publish_approval_decision（aidcp-api 单写）承担』。由 change publish-approval-signal-to-database 新增"
+  },
+  {
+    "path": "src/publish-agent/publish-dispatch-trigger.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】change split-cloud-api-composition-root-3b 新写：automation owner 的短应答批准触发接收器；校验 target/revision 后只唤醒本进程 PublishDispatcher，并区分 decision_recorded 去重与 human_reconfirm 清熔断语义。进程内 Set 是受理去重状态，不能进 kernel；不再依赖 API owner store。请求回写 §4.6.3。"
   },
   {
     "path": "src/publish-agent/publish-dispatcher.ts",
@@ -2325,6 +2345,11 @@
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
+    "path": "src/transport/panel-event-delivery-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/transport/pipeline-log-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
@@ -2335,7 +2360,22 @@
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
+    "path": "src/transport/publish-approval-authority-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/publish-approval-decision-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/transport/publish-card-exit-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/publish-dispatch-trigger-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },

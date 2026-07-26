@@ -109,7 +109,12 @@ function consumerWith(pool: FakePool, apply: (cmd: RiskCommand) => Promise<void>
 test('decode：三类命令往返保真', () => {
   const apply: RiskCommand = { kind: 'applySignal', accountId: 'acc-1', signal: { kind: 'confirmed', at: 123 } };
   const level: RiskCommand = { kind: 'setQuotaLevel', accountId: 'acc-1', level: 'aggressive' };
-  const recover: RiskCommand = { kind: 'recoverRestricted', accountId: 'acc-1', reason: 'ops manual' };
+  const recover: RiskCommand = {
+    kind: 'recoverRestricted',
+    envKey: 'env-1',
+    accountId: 'acc-1',
+    reason: 'ops manual',
+  };
   for (const cmd of [apply, level, recover]) {
     assert.deepEqual(decodeRiskCommand(JSON.parse(JSON.stringify(cmd))), cmd);
   }
@@ -118,10 +123,14 @@ test('decode：三类命令往返保真', () => {
 test('decode：畸形 payload 抛错（毒消息 loud，不静默）', () => {
   assert.throws(() => decodeRiskCommand(null), /必须是对象/);
   assert.throws(() => decodeRiskCommand({ kind: 'nope', accountId: 'a' }), /未知 kind/);
+  assert.throws(
+    () => decodeRiskCommand({ kind: 'recoverRestricted', envKey: 'env-1', accountId: 'a', reason: '   ' }),
+    /recoverRestricted 缺少 reason/,
+  );
   assert.throws(() => decodeRiskCommand({ kind: 'applySignal', accountId: '' }), /accountId/);
   assert.throws(() => decodeRiskCommand({ kind: 'applySignal', accountId: 'a' }), /signal\.kind/);
   assert.throws(() => decodeRiskCommand({ kind: 'setQuotaLevel', accountId: 'a' }), /level/);
-  assert.throws(() => decodeRiskCommand({ kind: 'recoverRestricted', accountId: 'a' }), /reason/);
+  assert.throws(() => decodeRiskCommand({ kind: 'recoverRestricted', accountId: 'a', reason: 'x' }), /envKey/);
 });
 
 // ── emit → consume 往返 ──────────────────────────────────────────────────────
@@ -130,7 +139,12 @@ test('emit → consume：命令原样交给注入的 apply 回调', async () => 
   const pool = new FakePool();
   await emitRiskCommand(pool, 'dev', { kind: 'applySignal', accountId: 'acc-1', signal: { kind: 'fatal' } }, silent);
   await emitRiskCommand(pool, 'dev', { kind: 'setQuotaLevel', accountId: 'acc-2', level: 'normal' }, silent);
-  await emitRiskCommand(pool, 'dev', { kind: 'recoverRestricted', accountId: 'acc-3', reason: 'ops' }, silent);
+  await emitRiskCommand(
+    pool,
+    'dev',
+    { kind: 'recoverRestricted', envKey: 'env-3', accountId: 'acc-3', reason: 'ops' },
+    silent,
+  );
 
   const seen: RiskCommand[] = [];
   const consumer = consumerWith(pool, async (cmd) => {
@@ -142,7 +156,7 @@ test('emit → consume：命令原样交给注入的 apply 回调', async () => 
   assert.deepEqual(seen, [
     { kind: 'applySignal', accountId: 'acc-1', signal: { kind: 'fatal' } },
     { kind: 'setQuotaLevel', accountId: 'acc-2', level: 'normal' },
-    { kind: 'recoverRestricted', accountId: 'acc-3', reason: 'ops' },
+    { kind: 'recoverRestricted', envKey: 'env-3', accountId: 'acc-3', reason: 'ops' },
   ]);
 });
 
@@ -167,7 +181,12 @@ test('emit：畸形命令 fail loud、绝不入队', async () => {
 test('emit：非法 target 抛错（透传 emitOutboxEvent 的闸）', async () => {
   const pool = new FakePool();
   await assert.rejects(
-    emitRiskCommand(pool, 'prod', { kind: 'recoverRestricted', accountId: 'a', reason: 'x' }, silent),
+    emitRiskCommand(
+      pool,
+      'prod',
+      { kind: 'recoverRestricted', envKey: 'env-a', accountId: 'a', reason: 'x' },
+      silent,
+    ),
     /非法 executionTarget/,
   );
 });

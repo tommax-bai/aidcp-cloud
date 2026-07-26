@@ -13,6 +13,7 @@
  * 超时天花板取仓内 model-call-timeout 精神：单次调用有界（默认 15s，硬顶 180s），
  * 绝不无限等；连接/读取/处理任一环卡住都以结构化 timeout 错误收口。
  */
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
 /** 内部 HTTP 调用的结构化错误。跨进程只搬 `code` + `message`，不搬 stack。 */
@@ -36,6 +37,11 @@ export const INTERNAL_HTTP_MAX_BODY_BYTES = 8 * 1024 * 1024;
 
 /** 路由处理器：入参与返回都是可 JSON 化的纯数据。 */
 export type RouteHandler = (args: unknown) => Promise<unknown>;
+
+interface RegisteredRoute {
+  handler: RouteHandler;
+  bearerToken?: string;
+}
 
 /** 线格式：成功。 */
 interface WireOk {
@@ -78,7 +84,7 @@ export interface InternalHttpServerOptions {
  * 仅接受 `POST /<route>`，请求体 `{ args }`，响应体 {@link WireResponse}。
  */
 export class InternalHttpServer {
-  private readonly routes = new Map<string, RouteHandler>();
+  private readonly routes = new Map<string, RegisteredRoute>();
   private readonly host: string;
   private readonly maxBodyBytes: number;
   private server: Server | null = null;
@@ -90,11 +96,23 @@ export class InternalHttpServer {
 
   /** 注册一个路由处理器。路由名重复即抛错（配置期失败，早暴露）。 */
   register(route: string, handler: RouteHandler): this {
+    return this.registerRoute(route, { handler });
+  }
+
+  /** 注册一条显式 Bearer 鉴权的路由；空白或含空白 token 在配置期直接拒绝。 */
+  registerBearer(route: string, bearerToken: string, handler: RouteHandler): this {
+    return this.registerRoute(route, {
+      handler,
+      bearerToken: validateBearerToken(bearerToken),
+    });
+  }
+
+  private registerRoute(route: string, registered: RegisteredRoute): this {
     const key = normalizeRoute(route);
     if (this.routes.has(key)) {
       throw new InternalHttpError('route_conflict', `route already registered: ${key}`);
     }
-    this.routes.set(key, handler);
+    this.routes.set(key, registered);
     return this;
   }
 
@@ -145,9 +163,13 @@ export class InternalHttpServer {
       return;
     }
     const route = normalizeRoute((req.url ?? '').split('?')[0] ?? '');
-    const handler = this.routes.get(route);
-    if (!handler) {
+    const registered = this.routes.get(route);
+    if (!registered) {
       writeJson(res, 404, errBody('route_not_found', `no route: ${route}`));
+      return;
+    }
+    if (registered.bearerToken && !hasExpectedBearer(req, registered.bearerToken)) {
+      writeJson(res, 401, errBody('internal_http_unauthorized', 'internal caller authentication failed'));
       return;
     }
     let body: string;
@@ -166,7 +188,7 @@ export class InternalHttpServer {
       return;
     }
     try {
-      const result = await handler(args);
+      const result = await registered.handler(args);
       writeJson(res, 200, { ok: true, result } satisfies WireOk);
     } catch (err) {
       writeJson(res, 200, encodeHandlerError(err));
@@ -193,8 +215,22 @@ export class InternalHttpClient {
   }
 
   call<T>(route: string, args: unknown): Promise<T> {
+    return this.request<T>(route, args);
+  }
+
+  /** 以显式 Bearer token 调用鉴权路由；空白或含空白 token 不发网络请求。 */
+  callBearer<T>(route: string, args: unknown, bearerToken: string): Promise<T> {
+    return this.request<T>(route, args, validateBearerToken(bearerToken));
+  }
+
+  private request<T>(route: string, args: unknown, bearerToken?: string): Promise<T> {
     const url = new URL(normalizeRoute(route), this.base);
     const payload = Buffer.from(JSON.stringify({ args }), 'utf8');
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      'content-length': String(payload.byteLength),
+    };
+    if (bearerToken) headers.authorization = `Bearer ${bearerToken}`;
     return new Promise<T>((resolve, reject) => {
       let settled = false;
       const finish = (fn: () => void) => {
@@ -207,10 +243,7 @@ export class InternalHttpClient {
         url,
         {
           method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'content-length': String(payload.byteLength),
-          },
+          headers,
         },
         (res) => {
           const chunks: Buffer[] = [];
@@ -280,6 +313,25 @@ function normalizeRoute(route: string): string {
 function clampTimeout(ms: number | undefined): number {
   if (ms === undefined || !Number.isFinite(ms)) return INTERNAL_HTTP_DEFAULT_TIMEOUT_MS;
   return Math.min(Math.max(Math.floor(ms), 1), INTERNAL_HTTP_TIMEOUT_CEILING_MS);
+}
+
+function validateBearerToken(token: string): string {
+  if (typeof token !== 'string' || token.length === 0 || /\s/.test(token)) {
+    throw new InternalHttpError(
+      'internal_http_auth_config_invalid',
+      'internal HTTP bearer token must be a non-empty value without whitespace',
+    );
+  }
+  return token;
+}
+
+function hasExpectedBearer(req: IncomingMessage, expectedToken: string): boolean {
+  const header = req.headers.authorization;
+  const match = typeof header === 'string' ? /^Bearer ([^\s]+)$/i.exec(header) : null;
+  if (!match) return false;
+  const expected = createHash('sha256').update(expectedToken, 'utf8').digest();
+  const actual = createHash('sha256').update(match[1], 'utf8').digest();
+  return timingSafeEqual(expected, actual);
 }
 
 function errBody(code: string, message: string): WireErr {

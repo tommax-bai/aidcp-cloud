@@ -37,6 +37,7 @@ function harness(opts: {
   approved?: boolean;
   /** 授权信号所载版本（edit-note-draft-before-publish）；缺省 = 草稿版本（版本一致，不触发版本闸）。 */
   approvedVersion?: number;
+  approvedRevision?: number;
   edgeId?: string | null;
   seqResult?: any;
   leaseError?: Error | (() => Error | undefined);
@@ -49,6 +50,8 @@ function harness(opts: {
   approvalUnreadable?: boolean;
   /** 兜底扫描的批量拉取（按本机 target 拉「已批准·待下发」）。 */
   pendingDispatchRecordIds?: () => Promise<number[]>;
+  /** authority CAS/transport 未确认时，dispatching gate 必须阻断不可逆平台动作。 */
+  dispatchProgressFails?: boolean;
 }) {
   const events: string[] = [];
   /** 7.1：被抢占事件驱动重投的调度器捕获（不自动跑，测试手动泵/断言次数）。 */
@@ -113,22 +116,37 @@ function harness(opts: {
     readApproval: async () => {
       if (opts.approvalUnreadable) throw new Error('approval_lookup_503');
       return (opts.approved ?? true)
-        ? { approved: true, contentVersion: opts.approvedVersion ?? draftVersion }
-        : { approved: false, contentVersion: opts.approvedVersion ?? draftVersion };
+        ? {
+            approved: true,
+            contentVersion: opts.approvedVersion ?? draftVersion,
+            revision: opts.approvedRevision ?? 1,
+          }
+        : {
+            approved: false,
+            contentVersion: opts.approvedVersion ?? draftVersion,
+            revision: opts.approvedRevision ?? 1,
+          };
     },
-    voidApprovalSignal: async (requestId: string, reason: string) => {
+    voidApprovalSignal: async (requestId: string, _revision: number, reason: string) => {
       voided.push(requestId);
       voidReasons.push({ requestId, reason });
       events.push('void');
     },
     approvalDispatchState: {
-      markDispatching: async (requestId: string) => { progress.push({ requestId, action: 'dispatching' }); },
-      markConsumed: async (requestId: string) => { progress.push({ requestId, action: 'consumed' }); },
-      releaseToPending: async (requestId: string, reason) => {
+      markDispatching: async (requestId: string, _revision: number) => {
+        if (opts.dispatchProgressFails) throw new Error('approval_revision_conflict');
+        progress.push({ requestId, action: 'dispatching' });
+      },
+      markConsumed: async (requestId: string, _revision: number) => {
+        progress.push({ requestId, action: 'consumed' });
+      },
+      releaseToPending: async (requestId: string, _revision: number, reason) => {
         progress.push({ requestId, action: 'pending_dispatch' });
         blocked.push({ requestId, reason: reason ?? null });
       },
-      setBlockedReason: async (requestId: string, reason) => { blocked.push({ requestId, reason: reason ?? null }); },
+      setBlockedReason: async (requestId: string, _revision: number, reason) => {
+        blocked.push({ requestId, reason: reason ?? null });
+      },
     },
     ...(opts.pendingDispatchRecordIds ? { listPendingDispatchRecordIds: opts.pendingDispatchRecordIds } : {}),
     onPublishStart: () => events.push('start'),
@@ -465,7 +483,7 @@ describe('PublishDispatcher', () => {
         withLease: async (request, work) => work({ taskId: 'task-publish-multi', edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
       },
       resolveEdgeIdForAccount: () => 'edge-X',
-      readApproval: async () => ({ approved: true, contentVersion: 0 }),
+      readApproval: async () => ({ approved: true, contentVersion: 0, revision: 1 }),
       voidApprovalSignal: async (rid) => { voided.push(rid); },
       onPublishStart: () => events.push('start'),
       onPublishEnd: () => events.push('end'),
@@ -588,7 +606,7 @@ describe('PublishDispatcher', () => {
 describe('PublishDispatcher · 持久授权与待下发态', () => {
   test('授权状态不可读 → 不下发、不写任何终态、落 approval_unreadable 阻塞原因', async () => {
     const h = harness({ approvalUnreadable: true, edgeId: 'edge-A' });
-    await h.dispatcher.dispatch(7);
+    await h.dispatcher.dispatch(7, { approvalRevision: 1 });
 
     assert.equal(h.events.includes('seq'), false, '授权读不到就绝不下发');
     assert.deepEqual(h.statusUpdates, [], '「不知道批没批」MUST NOT 烧成任何终态');
@@ -637,6 +655,15 @@ describe('PublishDispatcher · 持久授权与待下发态', () => {
     assert.equal(h.events.includes('seq'), false);
   });
 
+  test('dispatching revision CAS 未确认 → 租约内 fail closed，不发送任何平台命令', async () => {
+    const h = harness({ approved: true, approvedRevision: 9, edgeId: 'edge-A', dispatchProgressFails: true });
+    await h.dispatcher.dispatch(7, { approvalRevision: 9 });
+    assert.equal(h.events.includes('lease:acquired'), true);
+    assert.equal(h.events.includes('seq'), false, 'progress CAS 失败发生在第一条平台命令之前');
+    assert.deepEqual(h.statusUpdates, [], '不得把 authority unknown/conflict 写成发布终态');
+    assert.deepEqual(h.voided, [], 'CAS 未确认不等于可以作废当前授权');
+  });
+
   test('租约未确认 → 作废原因是 lease_unconfirmed，稿件不烧成 failed', async () => {
     const h = harness({
       approved: true,
@@ -671,4 +698,3 @@ describe('PublishDispatcher · 持久授权与待下发态', () => {
     assert.equal(h.events.includes('seq'), false);
   });
 });
-

@@ -95,10 +95,9 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
     assert.ok(JSON.stringify(sentCards[0]).includes('话题甲'), '审批卡话题取自 publishMetadata.topics');
   });
 
-  test('排期免审 → 写授权信号 + 触发下发段 + 发通知卡，不发送交互审批卡', async () => {
+  test('排期免审 → 写授权信号 + 交 durable outbox 触发 + 发通知卡，不发送交互审批卡', async () => {
     const insertedRecords: any[] = [];
     const approvalSignals: any[] = [];
-    const dispatched: string[] = [];
     const notifications: Array<{ chatId: string; card: any }> = [];
     const role = new PublishExecutorRole({
       store: { insert: async (r: any) => { insertedRecords.push(r); return 46; } },
@@ -111,9 +110,8 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
       botChatStore: { getDefaultChat: async () => ({ chatId: 'chat-1' }) },
       writeApprovalSignal: async (requestId, approved, payload) => {
         approvalSignals.push({ requestId, approved, payload });
-        return { written: true };
+        return { written: true, revision: 1 };
       },
-      triggerApprovedDispatch: (requestId) => { dispatched.push(requestId); },
       clock,
       logger: silentLogger,
     });
@@ -150,7 +148,6 @@ describe('PublishExecutorRole（生成候审段出口）', () => {
         contentVersion: 0,
       },
     }]);
-    assert.deepEqual(dispatched, ['publish-46']);
     assert.equal(notifications.length, 1, '免审只发通知卡');
     assert.equal(notifications[0].chatId, 'chat-1');
     assert.ok(JSON.stringify(notifications[0].card).includes('排期发帖已免审提交'));

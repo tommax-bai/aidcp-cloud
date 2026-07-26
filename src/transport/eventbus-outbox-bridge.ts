@@ -13,8 +13,9 @@
  * - **tee 侧（automation 组合根调用）**：`bridgeEventBusToOutbox` 对 EventBus 挂 `onAny`，把每条
  *   `{event, data}` 编码成一条 `topic='panel.event'` 的 outbox 事件。**best-effort**——emit 失败只 warn，
  *   绝不拖垮总线（onAny 是编排热路径，一条观测事件写库失败不该反噬业务）。
- * - **replay 侧（api 组合根起）**：`PanelEventReplay` 用 `OutboxConsumer` 订 `'panel.event'`，把每条
- *   解码回 `{event, data}` 交给**注入的 sink**（= panel-ws 的 push）。
+ * - **replay 侧（automation 组合根起）**：`PanelEventReplay` 用 `OutboxConsumer` 订
+ *   `'panel.event'`，把每条解码为带稳定 delivery id 的投递合同，交给**注入的异步 sink**
+ *   （= api 内部 HTTP ingress）；只有收到 api 的受理回执后才推进 cursor。
  *
  * ## 红线
  *
@@ -40,6 +41,11 @@ import {
   panelPayloadByteLength,
   panelPayloadTruncated,
 } from '../kernel/panel-frame-limits.js';
+import {
+  PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
+  makePanelEventDeliveryId,
+  type PanelEventDelivery,
+} from '../kernel/panel-event-delivery-port.js';
 import {
   OutboxConsumer,
   emitOutboxEvent,
@@ -78,11 +84,10 @@ export interface EventBusLike {
 }
 
 /**
- * 回放落点：把解码后的 `{event, data}` 推给下游（= panel-ws 的 push）。由 api 组合根注入。
- * 第三参 `originTs`（epoch ms）是事件**在产生端发生的时刻**；下游据此给面板帧打时间戳，
- * 否则任何回放都会被面板当成「刚刚发生」。解不出原始时刻时为 undefined（下游回落到当下）。
+ * 回放落点：把带稳定 deliveryId 的事件投给 api ingress。允许同步本地 sink，也允许异步 HTTP sink；
+ * replay handler 一律 await，拒绝时 outbox cursor 必须停在本条之前。
  */
-export type PanelEventSink = (event: string, data: unknown, originTs?: number) => void;
+export type PanelEventSink = (delivery: PanelEventDelivery) => void | Promise<void>;
 
 /** 跨段传输的信封形状：一条 outbox 事件的 payload。 */
 export interface PanelEventEnvelope {
@@ -218,11 +223,11 @@ export function bridgeEventBusToOutbox(options: BridgeEventBusToOutboxOptions): 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
 export interface PanelEventReplayOptions {
-  /** 复用 api 组合根已有的 Pool（replay 侧读 outbox）。 */
+  /** 复用 automation 组合根已有的 owner Pool（replay 侧读 outbox）。 */
   pool: OutboxQueryable;
   /** 归属目标；只回放本 target 的行。MUST 为 'dev' | 'ol'（非法由 OutboxConsumer 构造抛）。 */
   executionTarget: string;
-  /** 注入的落点：解码后的事件推给它（= panel-ws 的 push）。 */
+  /** 注入的落点：解码后的事件逐条推给 api ingress。 */
   sink: PanelEventSink;
   /** 消费者名，默认 'panel-event-replay'。 */
   consumer?: string;
@@ -234,7 +239,7 @@ export interface PanelEventReplayOptions {
 }
 
 /**
- * replay 侧（api 组合根起）：用 `OutboxConsumer` 订 `'panel.event'`，逐条解码 → 交给注入 sink。
+ * replay 侧（automation 组合根起）：用 `OutboxConsumer` 订 `'panel.event'`，逐条解码 → await 注入 sink。
  * 只是给 OutboxConsumer 装一个专用 handler 的薄壳，生命周期（start/stop/wake/runOnce）全透传。
  */
 export class PanelEventReplay {
@@ -255,9 +260,15 @@ export class PanelEventReplay {
       // 原始时刻：信封里的 ts 优先；老行没有它就回落到 outbox 行的 created_at（≈ 产生时刻，
       // 差一次事务提交）。两者都取不到才交 undefined，由下游诚实回落到当下——绝不编一个假时间。
       const originTs = decoded.ts ?? toEpochMs(event.createdAt);
-      // sink（panel-ws push）自身兜住异常；此处不再吞，让 handler 语义与 OutboxConsumer 的
-      // at-least-once 对齐（sink 抛则停在本条之前、下一轮重放）。
-      sink(decoded.event, decoded.data, originTs);
+      // HTTP 成功只表示 api 本地 fanout 已接受；reject 必须原样冒泡，让 OutboxConsumer 停在本条之前重放。
+      await sink({
+        contractVersion: PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
+        executionTarget: event.executionTarget,
+        deliveryId: makePanelEventDeliveryId(event.executionTarget, event.id),
+        event: decoded.event,
+        data: decoded.data,
+        ...(originTs === undefined ? {} : { originTs }),
+      });
     };
 
     this.consumer = new OutboxConsumer({

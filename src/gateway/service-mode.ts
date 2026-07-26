@@ -99,6 +99,14 @@ export function listenersForMode(mode: ServiceMode): ListenerPlan {
   }
 }
 
+/**
+ * publish approval decision/store 的物理属主门禁。
+ * 拆分进程时只有 api 构造属主存储；core/monolith 因包含 api 段而保留进程内权威。
+ */
+export function ownsPublishApprovalAuthorityForMode(mode: ServiceMode): boolean {
+  return mode === 'api' || mode === 'core' || mode === 'monolith';
+}
+
 /** content 进程内部 HTTP 读 API 的默认监听端口（可由 `AIDCP_CONTENT_PORT` 覆盖）。 */
 export const DEFAULT_CONTENT_READ_API_PORT = 8092;
 
@@ -108,7 +116,7 @@ export const DEFAULT_CONTENT_READ_API_PORT = 8092;
 export interface PanelEventTransportPlan {
   /** 是否把本进程的编排事件 tee 进 `event_outbox`（写方）。 */
   tee: boolean;
-  /** 是否从 `event_outbox` 回放 `panel.event` 进本进程 EventBus（读方）。 */
+  /** 是否从 automation-owned `event_outbox` 回放并主动投递到 api ingress。 */
   replay: boolean;
 }
 
@@ -122,8 +130,8 @@ export interface PanelEventTransportPlan {
  *   | ---------- | ------------- | ----------------------- | ----- | ------ |
  *   | monolith   | A+B+C+D       | 同进程（直连总线）      | 否    | 否     |
  *   | content    | A+B           | 不在本进程，也无产生端  | 否    | 否     |
- *   | automation | A+C           | **另一个进程（api）**   | **是**| 否     |
- *   | api        | A+D           | 本进程，但无产生端      | 否    | **是** |
+ *   | automation | A+C           | **另一个进程（api）**   | **是**| **是** |
+ *   | api        | A+D           | 本进程，但无产生端      | 否    | 否     |
  *   | core       | A+C+D         | 同进程（直连总线）      | 否    | 否     |
  *
  * `core` 那一行是本函数存在的直接原因：它此前满足「非 monolith」于是照写不误，而回放门禁只在 `api`
@@ -136,9 +144,9 @@ export interface PanelEventTransportPlan {
 export function panelEventTransportForMode(mode: ServiceMode): PanelEventTransportPlan {
   switch (mode) {
     case 'automation':
-      return { tee: true, replay: false };
+      return { tee: true, replay: true };
     case 'api':
-      return { tee: false, replay: true };
+      return { tee: false, replay: false };
     case 'core':
     case 'content':
     case 'monolith':

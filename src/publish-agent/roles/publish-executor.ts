@@ -128,8 +128,6 @@ export interface PublishExecutorDeps {
     payload: PublishApprovalPayload,
     decidedBy: string,
   ) => Promise<ApprovalWriteResult>;
-  /** 授权信号写入后触发既有下发段；免审不直接发布。 */
-  triggerApprovedDispatch?: (requestId: string) => void;
   /** 角色执行超时（毫秒，默认 30s）。只覆盖落库 + 发卡，无内联人审等待，故无需放大。 */
   roleTimeoutMs?: number;
   clock?: () => number;
@@ -159,7 +157,6 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     payload: PublishApprovalPayload,
     decidedBy: string,
   ) => Promise<ApprovalWriteResult>;
-  private triggerApprovedDispatch?: (requestId: string) => void;
 
   constructor(deps: PublishExecutorDeps) {
     super({ logger: deps.logger, clock: deps.clock });
@@ -171,7 +168,6 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
     this.notifyPublishPending = deps.notifyPublishPending;
     this.getAccountName = deps.getAccountName;
     this.writeApprovalSignal = deps.writeApprovalSignal;
-    this.triggerApprovedDispatch = deps.triggerApprovedDispatch;
     // 发布门 = waitAll(['gateDecision','titleSelection','publishMetadata'])：标题没就绪不发布；标题 abort 不发布（黑板天然保证）。
     // change split-topic-roles：加 publishMetadata 为等待键——话题唯一真源为 publishMetadata.topics（finalTags 已恒空），
     //   卡/落库/下发三处话题一致，并消除原先 context.get('publishMetadata') 的取值竞态。
@@ -466,9 +462,7 @@ export class PublishExecutorRole extends BasePublishRole<ExecutorInput, PublishR
       // 决策主体 = 触发免审的那条排期规则（按账号具名），使审计能回答「谁批的」。
       const result = await this.writeApprovalSignal(requestId, true, payload, `schedule_auto_approve:${accountId}`);
       const authorized = result.written || result.alreadyDecided === true;
-      if (authorized) {
-        this.triggerApprovedDispatch?.(requestId);
-      }
+      // 自动批准只由持久 outbox relay 产生 decision_recorded；绝不取得 human_reconfirm/清熔断权。
       const notification = await this.trySendAutoApproveNotification(title, requestId, context, accountId, recordId, authorized);
       if (!authorized) {
         return {

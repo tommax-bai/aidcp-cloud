@@ -5,6 +5,10 @@ import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 import { EventBus } from '../src/event-bus/index.js';
 import {
+  PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
+} from '../src/kernel/panel-event-delivery-port.js';
+import { PanelEventFanout } from '../src/panel/panel-event-fanout.js';
+import {
   startPanelWs,
   serializePanelFrame,
   backpressureDecision,
@@ -54,6 +58,35 @@ test('panel WS: 首帧有效 token → 认证 + 收到 EventBus 扇出帧（#25�
   ws.close();
   await handle.close();
   await new Promise<void>((r) => server.close(() => r()));
+});
+
+test('panel WS: API-local fanout ingress → 已认证 WebSocket，保留 automation 原始时间', async () => {
+  const { server, port } = await httpListen();
+  const fanout = new PanelEventFanout(silent);
+  const handle = startPanelWs({ httpServer: server, eventBus: fanout, jwtSecret: 'sec', logger: silent });
+  const ws = await connect(port, signJwt({ sub: 'alice' }, 'sec', 3600));
+  await waitAuthed(handle);
+
+  const framePromise = new Promise<{ ts: number; kind: string; data: unknown }>((resolve) => {
+    ws.once('message', (data) => resolve(JSON.parse(data.toString())));
+  });
+  await fanout.deliver({
+    contractVersion: PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
+    executionTarget: 'dev',
+    deliveryId: 'event_outbox:dev:3',
+    event: 'interaction.occurred',
+    data: { action: 'like' },
+    originTs: 1_700_000_000_123,
+  });
+
+  assert.deepEqual(await framePromise, {
+    ts: 1_700_000_000_123,
+    kind: 'interaction.occurred',
+    data: { action: 'like' },
+  });
+  ws.close();
+  await handle.close();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
 test('panel WS: 首帧无效 token → close 4401（#25）', async () => {

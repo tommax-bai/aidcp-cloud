@@ -59,11 +59,15 @@ test('持久写失败 → 诚实抛出，绝不退化成只写文件（第二事
 test('后到的决定（alreadyDecided）不影子写：与旧 O_EXCL「不覆盖」逐条对应', async () => {
   let shadowWrites = 0;
   const outlet = createApprovalWriteOutlet({
-    store: { record: async () => ({ written: false, alreadyDecided: false }) },
+    store: { record: async () => ({ written: false, alreadyDecided: false, revision: 1 }) },
     legacySignal: { enabled: true, write: async () => { shadowWrites += 1; } },
     logger: { warn: () => {} },
   });
-  assert.deepEqual(await outlet('publish-42', true, payload, context), { written: false, alreadyDecided: false });
+  assert.deepEqual(await outlet('publish-42', true, payload, context), {
+    written: false,
+    alreadyDecided: false,
+    revision: 1,
+  });
   assert.equal(shadowWrites, 0);
 });
 

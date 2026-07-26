@@ -76,6 +76,11 @@ export interface ApprovalWriteResult {
   written: boolean;
   /** 若已被先前决定，返回其 approved 值（first-writer-wins）。 */
   alreadyDecided?: boolean;
+  /**
+   * 当前活跃授权轮次。持久 authority writer 必须返回；旧文件型测试/过渡适配可暂缺，
+   * 但缺失时调用方不得伪造一次无 revision 的人工重批 trigger。
+   */
+  revision?: number;
 }
 
 /**

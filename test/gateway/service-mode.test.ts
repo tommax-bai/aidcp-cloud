@@ -5,6 +5,7 @@ import {
   serviceModeFromEnv,
   segmentsForMode,
   listenersForMode,
+  ownsPublishApprovalAuthorityForMode,
   panelEventTransportForMode,
   outboxRetentionForMode,
   DEFAULT_CONTENT_READ_API_PORT,
@@ -89,6 +90,15 @@ describe('service-mode 纯选择器（Block② 2d：env → 段/监听计划，�
   it('默认内部读 API 端口为 8092', () => {
     assert.equal(DEFAULT_CONTENT_READ_API_PORT, 8092);
   });
+
+  it('publish approval 持久权威只在 api-containing 模式构造', () => {
+    assert.deepEqual(
+      ALL_MODES.filter(ownsPublishApprovalAuthorityForMode),
+      ['monolith', 'api', 'core'],
+    );
+    assert.equal(ownsPublishApprovalAuthorityForMode('content'), false);
+    assert.equal(ownsPublishApprovalAuthorityForMode('automation'), false);
+  });
 });
 
 describe('面板事件旁路的模式门禁（哪种模式写 outbox、哪种模式不写）', () => {
@@ -97,22 +107,21 @@ describe('面板事件旁路的模式门禁（哪种模式写 outbox、哪种模
     assert.deepEqual(teeing, ['automation']);
   });
 
-  it('只有 api 回放', () => {
+  it('只有 automation 从 owner outbox 回放并主动推送 api ingress', () => {
     const replaying = ALL_MODES.filter((m) => panelEventTransportForMode(m).replay);
-    assert.deepEqual(replaying, ['api']);
+    assert.deepEqual(replaying, ['automation']);
   });
 
   it('core：面板与产生端同进程 ⇒ 既不写也不回放（此前无消费者地满速率写生产库）', () => {
     assert.deepEqual(panelEventTransportForMode('core'), { tee: false, replay: false });
   });
 
-  it('不存在「写了却没人读」的模式：tee 开 ⇔ 本进程不回放且另有进程回放', () => {
+  it('automation 同时负责 tee 与 owner cursor replay；api 只接 ingress', () => {
     for (const mode of ALL_MODES) {
       const plan = panelEventTransportForMode(mode);
-      assert.equal(plan.tee && plan.replay, false, `mode=${mode} 不该自己写自己读`);
-      // 写方存在 ⇔ 读方存在于另一个模式（automation ↔ api 是同一次部署的两个进程）
-      if (plan.tee) assert.equal(panelEventTransportForMode('api').replay, true);
+      assert.equal(plan.tee, plan.replay, `mode=${mode} 的 owner producer/relay 必须同属 automation`);
     }
+    assert.deepEqual(panelEventTransportForMode('api'), { tee: false, replay: false });
   });
 });
 

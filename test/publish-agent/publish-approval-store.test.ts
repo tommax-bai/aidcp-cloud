@@ -120,8 +120,44 @@ test('record: 首写成功 → written:true，且授权与 PublishApproved 命�
   );
 });
 
+test('record: comment 批准只写授权决定，不产生没有发布消费者的 PublishApproved outbox', async () => {
+  const { sqls, pool } = txPool((sql) => {
+    if (sql.includes('INSERT INTO publish_approval_decision')) {
+      return {
+        rows: [
+          decisionRow({
+            request_id: 'comment-note-42-171',
+            subject_kind: 'comment',
+            candidate_ref: 'note-42-171',
+          }),
+        ],
+        rowCount: 1,
+      };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
+
+  assert.deepEqual(
+    await store.record({
+      ...input,
+      requestId: 'comment-note-42-171',
+      subjectKind: 'comment',
+      candidateRef: 'note-42-171',
+    }),
+    { written: true, revision: 1 },
+  );
+  assert.equal(
+    sqls.some((sql) => sql.includes('publish_approval_outbox')),
+    false,
+    '评论没有 PublishDispatcher，不能产生会永久被 publish trigger 拒绝的命令',
+  );
+});
+
 test('record: 撞活跃行唯一索引 → written:false + 首个决定值（first-writer-wins）', async () => {
-  const { pool } = txPool((sql) => {
+  const captured: Array<{ sql: string; args: unknown[] }> = [];
+  const { pool } = txPool((sql, args) => {
+    captured.push({ sql, args });
     // ON CONFLICT ... DO NOTHING 返回零行 = 已有活跃决定
     if (sql.includes('INSERT INTO publish_approval_decision')) return { rows: [], rowCount: 0 };
     if (sql.includes('SELECT') && sql.includes('publish_approval_decision')) {
@@ -130,7 +166,38 @@ test('record: 撞活跃行唯一索引 → written:false + 首个决定值（fir
     return { rows: [], rowCount: 0 };
   });
   const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
-  assert.deepEqual(await store.record(input), { written: false, alreadyDecided: false });
+  assert.deepEqual(await store.record(input), { written: false, alreadyDecided: false, revision: 1 });
+  const insert = captured.find((call) => call.sql.includes('INSERT INTO publish_approval_decision'));
+  assert.ok(insert);
+  assert.match(insert.sql, /ON CONFLICT \(request_id\) WHERE dispatch_state <> 'void' DO NOTHING/);
+  assert.equal(insert.args[9], 'dev');
+  const conflictRead = captured.find((call) =>
+    /^\s*SELECT/.test(call.sql) && call.sql.includes('publish_approval_decision'));
+  assert.deepEqual(conflictRead?.args, ['publish-42', 'dev']);
+});
+
+test('record: 全局唯一被其他 target 占用时 fail-closed，绝不复用跨 target 决定或 revision', async () => {
+  const captured: Array<{ sql: string; args: unknown[] }> = [];
+  const { pool } = txPool((sql, args) => {
+    captured.push({ sql, args });
+    if (sql.includes('INSERT INTO publish_approval_decision')) return { rows: [], rowCount: 0 };
+    if (sql.includes('SELECT') && sql.includes('publish_approval_decision')) {
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
+  await assert.rejects(
+    () => store.record(input),
+    (err: unknown) =>
+      err instanceof ApprovalExecutionTargetError &&
+      err.message === 'execution_target_conflict_or_unavailable',
+  );
+  const reads = captured.filter((call) =>
+    /^\s*SELECT/.test(call.sql) && call.sql.includes('publish_approval_decision'));
+  assert.equal(reads.length, 1, '冲突后只读本 target，不扫描或复用另一 target 的 authority');
+  assert.match(reads[0].sql, /execution_target = \$2/);
+  assert.deepEqual(reads[0].args, ['publish-42', 'dev']);
 });
 
 test('voidActive: 只做状态迁移（UPDATE + void_reason），绝不 DELETE；枚举外原因被拒', async () => {
@@ -140,12 +207,26 @@ test('voidActive: 只做状态迁移（UPDATE + void_reason），绝不 DELETE�
     return { rows: [decisionRow({ dispatch_state: 'void', void_reason: 'version_stale' })], rowCount: 1 };
   });
   const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
-  const row = await store.voidActive('publish-42', 'version_stale');
+  const row = await store.voidActive({
+    requestId: 'publish-42',
+    expectedRevision: 1,
+    executionTarget: 'dev',
+    reason: 'version_stale',
+  });
   assert.equal(row?.dispatchState, 'void');
   assert.equal(row?.voidReason, 'version_stale');
   assert.match(seen.join('\n'), /UPDATE publish_approval_decision/);
   assert.doesNotMatch(seen.join('\n'), /DELETE FROM publish_approval_decision/);
-  await assert.rejects(() => store.voidActive('publish-42', 'nope' as never), /invalid_void_reason/);
+  await assert.rejects(
+    () =>
+      store.voidActive({
+        requestId: 'publish-42',
+        expectedRevision: 1,
+        executionTarget: 'dev',
+        reason: 'nope' as never,
+      }),
+    /invalid_void_reason/,
+  );
 });
 
 test('待下发查询按本机 target 隔离；告警候选只取无阻塞原因的行', async () => {
@@ -191,21 +272,56 @@ test('退回待下发也接受 pending_dispatch：等槽位那条路径压根没
     return { rows: [], rowCount: 0 };
   });
   const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
-  await store.releaseToPending('publish-42', 'browser_slot_waiting');
+  await store.releaseToPending({
+    requestId: 'publish-42',
+    expectedRevision: 1,
+    executionTarget: 'dev',
+    blockedReason: 'browser_slot_waiting',
+  });
 
   // browser_wake_failed 在 acquire 阶段就 reject：业务回调没执行 ⇒ markDispatching 没跑过 ⇒ 行仍停在
   // pending_dispatch。WHERE 若只认 dispatching，这条 UPDATE 命中 0 行、阻塞原因被静默丢弃。
   assert.match(captured[0].sql, /dispatch_state IN \('pending_dispatch','dispatching'\)/);
   assert.equal(captured[0].args[1], 'browser_slot_waiting');
+  assert.equal(captured[0].args[2], 1);
+  assert.equal(captured[0].args[3], 'dev');
+});
+
+test('所有 authority 状态写都以 requestId + revision + target 做 CAS', async () => {
+  const captured: Array<{ sql: string; args: unknown[] }> = [];
+  const { pool } = txPool((sql, args) => {
+    captured.push({ sql, args });
+    return { rows: [decisionRow()], rowCount: 1 };
+  });
+  const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
+  await store.markDispatching({ requestId: 'publish-42', expectedRevision: 1, executionTarget: 'dev' });
+  await store.markConsumed({ requestId: 'publish-42', expectedRevision: 1, executionTarget: 'dev' });
+  await store.setBlockedReason({
+    requestId: 'publish-42',
+    expectedRevision: 1,
+    executionTarget: 'dev',
+    reason: 'breaker_open',
+  });
+
+  for (const call of captured) {
+    assert.match(call.sql, /request_id = \$1/);
+    assert.match(call.sql, /revision = \$(?:2|3)/);
+    assert.match(call.sql, /execution_target = \$(?:3|4)/);
+    assert.equal(call.args[0], 'publish-42');
+    assert.equal(call.args.includes(1), true);
+    assert.equal(call.args.includes('dev'), true);
+  }
 });
 
 test('活跃读只返回未作废行（历史轮次绝不混入判定）', async () => {
-  const captured: string[] = [];
-  const { pool } = txPool((sql) => {
-    captured.push(sql);
+  const captured: Array<{ sql: string; args: unknown[] }> = [];
+  const { pool } = txPool((sql, args) => {
+    captured.push({ sql, args });
     return { rows: [decisionRow()], rowCount: 1 };
   });
   const store = new PublishApprovalStore({ executionTarget: 'dev', pool });
   await store.readActive('publish-42');
-  assert.match(captured[0], /dispatch_state <> 'void'/);
+  assert.match(captured[0].sql, /execution_target = \$2/);
+  assert.match(captured[0].sql, /dispatch_state <> 'void'/);
+  assert.deepEqual(captured[0].args, ['publish-42', 'dev']);
 });

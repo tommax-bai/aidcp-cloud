@@ -5,15 +5,18 @@ import type {
 import type { DispatchDraft, EditDraftPatch, EditDraftResult } from './publish-log-store.js';
 import { normalizePlatformId } from '../kernel/platform-types.js';
 import { validatePublishSchedule } from './schedule-policy.js';
+import type { PublishHumanReconfirmTrigger } from '../kernel/publish-approval-contract.js';
 
 interface ApprovalSnapshot {
   approved: boolean;
   contentVersion: number;
+  revision: number;
 }
 
 interface ApprovalWriteResult {
   written: boolean;
   alreadyDecided?: boolean;
+  revision?: number;
 }
 
 export interface ClientPublishApprovalDeps {
@@ -37,7 +40,7 @@ export interface ClientPublishApprovalDeps {
     payload: { title: string; content: string; tags: string[]; contentVersion: number },
     decidedBy: string,
   ): Promise<ApprovalWriteResult>;
-  triggerApproved(requestId: string): void;
+  triggerApproved(trigger: PublishHumanReconfirmTrigger): void;
   notifyRejected(requestId: string): void;
   /**
    * 授权的下发进度（change publish-approval-signal-to-database，task 6.5）：随应答增量回给客户端，
@@ -46,7 +49,22 @@ export interface ClientPublishApprovalDeps {
   readDispatchState?(
     requestId: string,
   ): Promise<{ dispatchState: 'pending_dispatch' | 'dispatching' | 'blocked'; dispatchBlockedReason?: string } | null>;
+  logger?: Pick<Console, 'warn'>;
   clock?: () => number;
+}
+
+function triggerHumanReconfirm(
+  deps: ClientPublishApprovalDeps,
+  requestId: string,
+  revision: number | undefined,
+): void {
+  if (!Number.isInteger(revision) || Number(revision) < 1) {
+    (deps.logger ?? console).warn(
+      `[client-publish-approval] already-decided 重批缺少有效 revision，未发送 human_reconfirm requestId=${requestId}`,
+    );
+    return;
+  }
+  deps.triggerApproved({ requestId, revision: Number(revision), kind: 'human_reconfirm' });
 }
 
 function explicitPlan(payload: PublishApprovalActionPayload):
@@ -111,7 +129,7 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
     }
     if (existing) {
       if (existing.approved !== payload.approved) return { requestId, ok: false, reason: 'already_decided' };
-      if (existing.approved) deps.triggerApproved(requestId);
+      if (existing.approved) triggerHumanReconfirm(deps, requestId, existing.revision);
       return {
         requestId,
         ok: true,
@@ -197,7 +215,7 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
     );
     if (!result.written) {
       if (result.alreadyDecided !== payload.approved) return { requestId, ok: false, reason: 'already_decided' };
-      if (payload.approved) deps.triggerApproved(requestId);
+      if (payload.approved) triggerHumanReconfirm(deps, requestId, result.revision);
       return {
         requestId,
         ok: true,
@@ -207,8 +225,8 @@ export function createClientPublishApprovalHandler(deps: ClientPublishApprovalDe
         ...(payload.approved ? await readDispatchFields(deps, requestId) : {}),
       };
     }
-    if (payload.approved) deps.triggerApproved(requestId);
-    else deps.notifyRejected(requestId);
+    // 首写批准只产生事务 outbox 的 decision_recorded；不能从客户端入口伪造 human_reconfirm。
+    if (!payload.approved) deps.notifyRejected(requestId);
     return {
       requestId,
       ok: true,

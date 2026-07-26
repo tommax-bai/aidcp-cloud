@@ -26,8 +26,15 @@ export const PUBLISH_CARD_EXIT_ROUTES = {
   writeApprovalSignal: 'publish-card-exit/write-approval-signal',
 } as const;
 
-/** 把一个本地卡片出口注册为内部 HTTP route。只做参数解包 → 转调 → 回传，零业务逻辑。 */
-export function registerPublishCardExitRoutes(server: InternalHttpServer, local: PublishCardExitPort): void {
+/**
+ * 把一个本地卡片出口注册为内部 HTTP route。只有写授权事实的单写入口要求 approval caller token；
+ * 其余卡片/落点方法不借此扩大鉴权改动。
+ */
+export function registerPublishCardExitRoutes(
+  server: InternalHttpServer,
+  local: PublishCardExitPort,
+  approvalCallerToken: string,
+): void {
   server.register(PUBLISH_CARD_EXIT_ROUTES.sendApprovalCard, async (args) => {
     const a = args as { chatId: string; data: PublishApprovalCardData };
     await local.sendApprovalCard(a.chatId, a.data);
@@ -47,7 +54,7 @@ export function registerPublishCardExitRoutes(server: InternalHttpServer, local:
     const a = args as { originChatId: string | undefined | null; accountId: string | undefined };
     return local.resolveCardChatId(a.originChatId, a.accountId);
   });
-  server.register(PUBLISH_CARD_EXIT_ROUTES.writeApprovalSignal, (args) => {
+  server.registerBearer(PUBLISH_CARD_EXIT_ROUTES.writeApprovalSignal, approvalCallerToken, (args) => {
     const a = args as {
       requestId: string;
       approved: boolean;
@@ -60,7 +67,10 @@ export function registerPublishCardExitRoutes(server: InternalHttpServer, local:
 
 /** `PublishCardExitPort` 的 HTTP 实现：每个方法一次调用，失败原样抛。 */
 export class PublishCardExitHttpClient implements PublishCardExitPort {
-  constructor(private readonly http: InternalHttpClient) {}
+  constructor(
+    private readonly http: InternalHttpClient,
+    private readonly approvalCallerToken: string,
+  ) {}
 
   async sendApprovalCard(chatId: string, data: PublishApprovalCardData): Promise<void> {
     await this.http.call(PUBLISH_CARD_EXIT_ROUTES.sendApprovalCard, { chatId, data });
@@ -88,11 +98,15 @@ export class PublishCardExitHttpClient implements PublishCardExitPort {
     payload: PublishApprovalPayload,
     decidedBy: string,
   ): Promise<ApprovalWriteResult> {
-    return this.http.call<ApprovalWriteResult>(PUBLISH_CARD_EXIT_ROUTES.writeApprovalSignal, {
-      requestId,
-      approved,
-      payload,
-      decidedBy,
-    });
+    return this.http.callBearer<ApprovalWriteResult>(
+      PUBLISH_CARD_EXIT_ROUTES.writeApprovalSignal,
+      {
+        requestId,
+        approved,
+        payload,
+        decidedBy,
+      },
+      this.approvalCallerToken,
+    );
   }
 }
