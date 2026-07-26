@@ -18,6 +18,7 @@ function assembled(over: Partial<AssembledContent>): AssembledContent {
     imageUrl: null,
     aiScore: 0,
     qualityScore: 0,
+    qualityStatus: 'scored',
     rewritten: false,
     flaggedPhrases: [],
     assembledAt: clock(),

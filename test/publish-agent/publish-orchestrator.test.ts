@@ -13,6 +13,7 @@ import { CoverSelectorRole } from '../../src/publish-agent/roles/cover-selector.
 import { ContentCleanerRole } from '../../src/publish-agent/roles/content-cleaner.js';
 import { AiFlavorScorerRole } from '../../src/publish-agent/roles/ai-flavor-scorer.js';
 import { QualityScorerRole } from '../../src/publish-agent/roles/quality-scorer.js';
+import { FacebookMediaSelectorRole } from '../../src/publish-agent/roles/facebook-media-selector.js';
 import { ContentAssemblerRole } from '../../src/publish-agent/roles/content-assembler.js';
 import { TitleCreatorRole } from '../../src/publish-agent/roles/title-creator.js';
 import {
@@ -39,13 +40,15 @@ import type { PipelineFields, TriggerInput } from '../../src/publish-agent/types
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };
 
-function makeTriggerInput(): TriggerInput {
+function makeTriggerInput(platform: TriggerInput['platform'] = 'xiaohongshu'): TriggerInput {
   return {
+    platform,
     metrics: { hoursSinceLastPublish: 30, newConceptCount: 3, likedSinceLastPublish: 20 },
     generateInput: {
       concepts: [{ keyword: 'RAG 重排' }, { keyword: 'vLLM 量化' }, { keyword: 'KV cache' }],
       likedContents: [{ id: 1, title: 'RAG 实战', summary: '分块很关键', author: '老王' }],
       soul: {
+        writing_language: 'zh-CN',
         identity: { name: '小林', role: 'AI研发', background: '3年', tone: '理性' },
         interests: { primary: ['LLM'], secondary: [], seed_keywords: ['RAG'] },
         engagement_rules: { like: [], skip: [], comment_trigger: [] },
@@ -86,7 +89,11 @@ function makeReferenceTriggerInput(): TriggerInput {
  * fakeLlm 按 system prompt 路由：发布决策→Scout、正文创作→Creator、
  * 配图选题→ImageSetPlanner、配图指令→ImagePromptComposer、质量评审→QualityScorer、审批决策→Gatekeeper。
  */
-function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enableImage?: boolean }) {
+function buildFullPipeline(
+  llmResponses: Record<string, string>,
+  opts?: { enableImage?: boolean; facebookMedia?: boolean },
+) {
+  const llmCalls = { quality: 0, gatekeeper: 0 };
   const fakeLlm = {
     chat: async (messages: any[]) => {
       const systemContent = messages[0]?.content ?? '';
@@ -99,14 +106,20 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
       // change split-topic-roles：话题生成 → 候选；话题评判 → 保留子集。
       if (systemContent.includes('话题生成')) return llmResponses.topicGen ?? '{"topics":["测试话题","大模型"]}';
       if (systemContent.includes('话题评判')) return llmResponses.topicEval ?? '{"kept":["测试话题"]}';
-      if (systemContent.includes('正文创作')) return llmResponses.creator;
+      if (systemContent.includes('正文创作') || systemContent.includes('Facebook 帖子创作者')) return llmResponses.creator;
       // 品类判定（category-adaptive-images-and-judgment）：读正文选一个品类 key，供配图风格档。
       if (systemContent.includes('品类分类器')) return llmResponses.category ?? '{"category":"food"}';
       // 配图三角色（publish-multi-image）：选题（配图选题师）→ 指令（文生图 prompt 工程师）。缺省给合法产物。
       if (systemContent.includes('配图选题')) return llmResponses.imageSet ?? '{"wantImage":true,"imageCount":1,"themes":[{"subject":"配图示意"}],"styleHint":null}';
       if (systemContent.includes('prompt 工程师') || systemContent.includes('文生图')) return llmResponses.imageCompose ?? '{"imagePrompt":"tech illustration","imageStyle":"illustration"}';
-      if (systemContent.includes('质量评审')) return llmResponses.assembler;
-      if (systemContent.includes('审批决策')) return llmResponses.gatekeeper;
+      if (systemContent.includes('质量评审')) {
+        llmCalls.quality += 1;
+        return llmResponses.assembler;
+      }
+      if (systemContent.includes('审批决策')) {
+        llmCalls.gatekeeper += 1;
+        return llmResponses.gatekeeper;
+      }
       return '{}';
     },
     complete: async () => '',
@@ -137,6 +150,18 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   // 配图三角色（publish-multi-image）：选题 → 指令 → 执行。
   orchestrator.registerRole(new ImageSetPlannerRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new ImagePromptComposerRole({ llmClient: fakeLlm as any, ...common }));
+  if (opts?.facebookMedia) {
+    orchestrator.registerRole(new FacebookMediaSelectorRole({
+      mediaStore: {
+        reserveNext: async () => ({
+          id: 61,
+          images: [{ id: 611, url: 'https://example.com/facebook-media.png' }],
+        }),
+      } as any,
+      idGen: () => 'test',
+      ...common,
+    }));
+  }
   orchestrator.registerRole(new ImageGeneratorRole({ imageProvider: fakeImageProvider, enableImageGeneration: opts?.enableImage ?? false, ...common }));
   orchestrator.registerRole(new CoverSelectorRole(common));
   orchestrator.registerRole(new ContentCleanerRole({ postProcessor: fakePostProcessor, ...common }));
@@ -160,7 +185,7 @@ function buildFullPipeline(llmResponses: Record<string, string>, opts?: { enable
   orchestrator.registerRole(new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, ...common }));
   orchestrator.registerRole(new PublishExecutorRole({ store: fakeStore, ...common }));
 
-  return { orchestrator, insertedRecords, pushedEnvelopes };
+  return { orchestrator, insertedRecords, pushedEnvelopes, llmCalls };
 }
 
 describe('PublishOrchestrator', () => {
@@ -179,7 +204,7 @@ describe('PublishOrchestrator', () => {
     const result = await orchestrator.trigger(makeTriggerInput());
 
     // decouple-publish-generation-from-dispatch：生成候审段终止于「落库待审 + 发审批卡」，不下发边缘。
-    assert.equal(result.status, 'pending_approval');
+    assert.equal(result.status, 'pending_approval', result.reason);
     assert.equal(result.dispatched, false);
     assert.equal(result.recordId, 42);
     assert.equal(result.runId, 'run-001');
@@ -189,6 +214,31 @@ describe('PublishOrchestrator', () => {
     // 稳定边界：组装产出仍含八字段（细拆后等价）。
     // 既有 25 个发布角色 + 保真洗稿 4 角色 + 封面形态决策（textcard-cover-form）= 30。
     assert.equal(orchestrator.getRoles().length, 30);
+  });
+
+  test('Facebook 完整链路跳过质量评分与评分门禁 LLM，仍落待人工审批草稿', async () => {
+    const { orchestrator, insertedRecords, llmCalls } = buildFullPipeline(
+      {
+        scout: JSON.stringify({ shouldPublish: true, publishDirection: '求职经验', keyPoints: ['避坑'], confidence: 0.9, reason: '充足' }),
+        creator: JSON.stringify({
+          title: '越南求职避坑',
+          content: '最近整理越南工厂招聘信息时，我发现同一个岗位在不同群里的薪资和要求可能差很多。联系招聘方前，最好先确认公司全名、工厂地址、工作时间、加班计算方式和住宿安排；遇到先交押金、培训费或证件保管费的情况要格外谨慎。面试时把底薪、津贴、试用期和发薪日期逐项问清，并保留聊天记录和正式合同。也欢迎有真实求职经验的朋友补充可靠渠道，帮助大家少走弯路。',
+          tags: ['越南找工作', '求职防骗'],
+          tone: 'casual',
+          style: { type: '经验分享' },
+        }),
+      },
+      { enableImage: true, facebookMedia: true },
+    );
+
+    const result = await orchestrator.trigger(makeTriggerInput('facebook'));
+
+    assert.equal(llmCalls.quality, 0, 'Facebook 不调用 QualityScorer LLM');
+    assert.equal(llmCalls.gatekeeper, 0, 'Facebook 不调用 ApprovalGatekeeper LLM');
+    assert.equal(result.status, 'pending_approval', result.reason);
+    assert.equal(result.dispatched, false);
+    assert.equal(insertedRecords.length, 1);
+    assert.equal(insertedRecords[0].qualityScore, null, '落库边界不得伪造质量分');
   });
 
   test('保真洗稿链路：referenceNote 绕过 Scout/Creator，经审核后复用下游发布链', async () => {

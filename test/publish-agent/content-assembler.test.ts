@@ -19,12 +19,18 @@ function makeCreatedContent(): CreatedContent {
 }
 
 /** 写入瘦身 ContentAssembler 所需的全部上游键（createdContent + 5 个 waitAll 键）。 */
-function writeAllUpstream(ctx: PipelineContext<PipelineFields>, over: { imageUrls?: string[] } = {}) {
+function writeAllUpstream(
+  ctx: PipelineContext<PipelineFields>,
+  over: {
+    imageUrls?: string[];
+    qualityReport?: NonNullable<PipelineFields['qualityReport']>;
+  } = {},
+) {
   const urls = over.imageUrls ?? [];
   ctx.write('createdContent', makeCreatedContent());
   ctx.write('cleanedContent', { content: '正文(cleaned)', rewritten: true, flaggedPhrases: ['首先'], aiScore: 0.15, cleanedAt: clock() });
   ctx.write('aiFlavorScore', { aiScore: 0.15, scoredAt: clock() });
-  ctx.write('qualityReport', { qualityScore: 85, reviewedAt: clock() });
+  ctx.write('qualityReport', over.qualityReport ?? { qualityScore: 85, status: 'scored', reviewedAt: clock() });
   ctx.write('imageDirective', { imagePrompt: null, imageUrls: urls, imageUrl: urls[0] ?? null, imageStyle: null, fallbackStrategy: 'skip', directedAt: clock() });
   ctx.write('coverSelection', { imageUrls: urls, hasCover: urls.length > 0, selectedAt: clock() });
 }
@@ -39,7 +45,7 @@ describe('ContentAssemblerRole（瘦身，纯组装）', () => {
     ctx.write('createdContent', makeCreatedContent());
     ctx.write('cleanedContent', { content: 'c', rewritten: false, flaggedPhrases: [], aiScore: 0.1, cleanedAt: clock() });
     ctx.write('aiFlavorScore', { aiScore: 0.1, scoredAt: clock() });
-    ctx.write('qualityReport', { qualityScore: 70, reviewedAt: clock() });
+    ctx.write('qualityReport', { qualityScore: 70, status: 'scored', reviewedAt: clock() });
     ctx.write('imageDirective', { imagePrompt: null, imageUrls: [], imageUrl: null, imageStyle: null, fallbackStrategy: 'skip', directedAt: clock() });
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(ctx.get('assembledContent'), undefined);
@@ -65,9 +71,24 @@ describe('ContentAssemblerRole（瘦身，纯组装）', () => {
     assert.equal(a.imageUrl, 'https://example.com/a.png', 'imageUrl 派生 = 首张（封面）');
     assert.equal(a.aiScore, 0.15);
     assert.equal(a.qualityScore, 85);
+    assert.equal(a.qualityStatus, 'scored');
     assert.equal(a.rewritten, true);
     assert.deepEqual(a.flaggedPhrases, ['首先']);
     assert.equal(a.assembledAt, clock());
+  });
+
+  test('Facebook 不评分结果按 null + not_applicable 原样组装', async () => {
+    const role = new ContentAssemblerRole({ clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    writeAllUpstream(ctx, {
+      qualityReport: { qualityScore: null, status: 'not_applicable', reviewedAt: clock() },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const a = ctx.get('assembledContent');
+    assert.equal(a?.qualityScore, null);
+    assert.equal(a?.qualityStatus, 'not_applicable');
   });
 
   test('无图：imageUrls 空 + imageUrl 诚实为 null（来自空封面）', async () => {

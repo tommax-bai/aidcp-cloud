@@ -15,6 +15,7 @@ function makeAssembledContent(overrides?: Partial<AssembledContent>): AssembledC
     imageUrl: null,
     aiScore: 0.1,
     qualityScore: 80,
+    qualityStatus: 'scored',
     rewritten: false,
     flaggedPhrases: [],
     assembledAt: 1700000000000,
@@ -36,6 +37,7 @@ describe('ApprovalGatekeeperRole', () => {
     const role = new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
     const ctx = new PipelineContext<PipelineFields>();
     role.register(ctx);
+    ctx.write('trigger', { platform: 'xiaohongshu' } as any);
     ctx.write('assembledContent', makeAssembledContent());
 
     await new Promise(r => setTimeout(r, 50));
@@ -61,6 +63,7 @@ describe('ApprovalGatekeeperRole', () => {
     const role = new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
     const ctx = new PipelineContext<PipelineFields>();
     role.register(ctx);
+    ctx.write('trigger', { platform: 'xiaohongshu' } as any);
     ctx.write('assembledContent', makeAssembledContent({ aiScore: 0.4 }));
 
     await new Promise(r => setTimeout(r, 50));
@@ -81,6 +84,7 @@ describe('ApprovalGatekeeperRole', () => {
     const role = new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
     const ctx = new PipelineContext<PipelineFields>();
     role.register(ctx);
+    ctx.write('trigger', { platform: 'xiaohongshu' } as any);
     ctx.write('assembledContent', makeAssembledContent({ aiScore: 0.5, qualityScore: 70 }));
 
     // executeWithFallback retries with delays
@@ -101,6 +105,7 @@ describe('ApprovalGatekeeperRole', () => {
     const role = new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
     const ctx = new PipelineContext<PipelineFields>();
     role.register(ctx);
+    ctx.write('trigger', { platform: 'xiaohongshu' } as any);
     ctx.write('assembledContent', makeAssembledContent({ aiScore: 0.2, qualityScore: 80 }));
 
     // executeWithFallback retries with delays
@@ -121,6 +126,7 @@ describe('ApprovalGatekeeperRole', () => {
     const role = new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
     const ctx = new PipelineContext<PipelineFields>();
     role.register(ctx);
+    ctx.write('trigger', { platform: 'xiaohongshu' } as any);
     ctx.write('assembledContent', makeAssembledContent({
       aiScore: 0.7,
       flaggedPhrases: ['首先', '其次', '综上所述'],
@@ -133,5 +139,57 @@ describe('ApprovalGatekeeperRole', () => {
     assert.ok(decision);
     assert.equal(decision.recommendedAction, 'abort');
     assert.match(decision.reason, /硬编码/);
+  });
+
+  test('Facebook → 不调用 Gatekeeper LLM，确定性进入人工审批', async () => {
+    let calls = 0;
+    const fakeLlm = {
+      chat: async () => {
+        calls += 1;
+        throw new Error('Facebook must not call gatekeeper LLM');
+      },
+      complete: async () => '',
+    };
+    const role = new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('trigger', { platform: 'facebook' } as any);
+    ctx.write('assembledContent', makeAssembledContent({
+      qualityScore: null,
+      qualityStatus: 'not_applicable',
+    }));
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const decision = ctx.get('gateDecision');
+    assert.equal(calls, 0);
+    assert.equal(decision?.needsApproval, true);
+    assert.equal(decision?.recommendedAction, 'manual_review');
+    assert.equal(decision?.reason, 'facebook_quality_scoring_disabled');
+  });
+
+  test('非 Facebook 缺失真实质量分 → fail closed，不调用 LLM', async () => {
+    let calls = 0;
+    const fakeLlm = {
+      chat: async () => {
+        calls += 1;
+        return '{}';
+      },
+      complete: async () => '',
+    };
+    const role = new ApprovalGatekeeperRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    role.register(ctx);
+    ctx.write('trigger', { platform: 'xiaohongshu' } as any);
+    ctx.write('assembledContent', makeAssembledContent({
+      qualityScore: null,
+      qualityStatus: 'not_applicable',
+    }));
+
+    await new Promise(r => setTimeout(r, 50));
+
+    assert.equal(calls, 0);
+    assert.equal(ctx.get('gateDecision')?.recommendedAction, 'abort');
+    assert.equal(ctx.get('gateDecision')?.reason, 'quality_score_missing');
   });
 });

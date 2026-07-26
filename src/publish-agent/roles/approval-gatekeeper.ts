@@ -1,6 +1,11 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
-import type { PipelineFields, AssembledContent, GateDecision } from '../../kernel/publish-pipeline-types.js';
+import type {
+  PipelineFields,
+  AssembledContent,
+  GateDecision,
+  TriggerInput,
+} from '../../kernel/publish-pipeline-types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildGatekeeperPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
@@ -16,7 +21,12 @@ export interface ApprovalGatekeeperDeps {
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
-export class ApprovalGatekeeperRole extends BasePublishRole<AssembledContent, GateDecision> {
+interface ApprovalGatekeeperInput {
+  assembled: AssembledContent;
+  platform: TriggerInput['platform'];
+}
+
+export class ApprovalGatekeeperRole extends BasePublishRole<ApprovalGatekeeperInput, GateDecision> {
   readonly config: RoleConfig = {
     name: 'ApprovalGatekeeper',
     watchKeys: ['assembledContent'],
@@ -31,20 +41,43 @@ export class ApprovalGatekeeperRole extends BasePublishRole<AssembledContent, Ga
     this.llmClient = deps.llmClient;
   }
 
-  protected extractInput(snapshot: Partial<PipelineFields>): AssembledContent {
-    return snapshot.assembledContent!;
+  protected extractInput(snapshot: Partial<PipelineFields>): ApprovalGatekeeperInput {
+    return {
+      assembled: snapshot.assembledContent!,
+      platform: snapshot.trigger?.platform ?? 'xiaohongshu',
+    };
   }
 
-  protected async execute(input: AssembledContent, context: PipelineContext<PipelineFields>): Promise<GateDecision> {
+  protected async execute(input: ApprovalGatekeeperInput, context: PipelineContext<PipelineFields>): Promise<GateDecision> {
+    if (input.platform === 'facebook') {
+      this.logger.log('[ApprovalGatekeeper] platform=facebook action=manual_review; LLM skipped');
+      return {
+        needsApproval: true,
+        recommendedAction: 'manual_review',
+        reason: 'facebook_quality_scoring_disabled',
+        decidedAt: this.clock(),
+      };
+    }
+
+    if (input.assembled.qualityStatus !== 'scored' || input.assembled.qualityScore === null) {
+      this.logger.warn('[ApprovalGatekeeper] scored quality result missing; aborting');
+      return {
+        needsApproval: false,
+        recommendedAction: 'abort',
+        reason: 'quality_score_missing',
+        decidedAt: this.clock(),
+      };
+    }
+
     const { result, usedFallback } = await executeWithFallback(
       async () => {
         const raw = await this.llmClient.chat([
           { role: 'system', content: '你是发布审批决策者。严格返回JSON。' },
-          { role: 'user', content: buildGatekeeperPrompt(input) },
+          { role: 'user', content: buildGatekeeperPrompt(input.assembled) },
         ], { timeoutMs: GATE_TIMEOUT_MS, accountId: this.accountIdFrom(context) });
         return this.parseOutput(raw);
       },
-      { default: this.getHardcodedDecision(input), reason: 'LLM gatekeeper failed' },
+      { default: this.getHardcodedDecision(input.assembled), reason: 'LLM gatekeeper failed' },
     );
 
     if (usedFallback) {
@@ -70,6 +103,9 @@ export class ApprovalGatekeeperRole extends BasePublishRole<AssembledContent, Ga
   private getHardcodedDecision(assembled: AssembledContent): Omit<GateDecision, 'decidedAt'> {
     if (assembled.aiScore > 0.6 && assembled.flaggedPhrases.length >= 3) {
       return { needsApproval: false, recommendedAction: 'abort', reason: 'AI味过重且禁用词过多（硬编码规则）' };
+    }
+    if (assembled.qualityScore === null || assembled.qualityStatus !== 'scored') {
+      return { needsApproval: false, recommendedAction: 'abort', reason: 'quality_score_missing' };
     }
     if (assembled.qualityScore < 60) {
       return { needsApproval: false, recommendedAction: 'retry', reason: '质量评分不达标（硬编码规则）' };

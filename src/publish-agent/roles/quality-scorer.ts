@@ -1,6 +1,14 @@
 import { BasePublishRole } from './base-role.js';
 import type { RoleConfig } from './base-role.js';
-import type { PipelineFields, CreatedContent, CleanedContent, QualityReport, PostProcessResult, ImageCategory } from '../types.js';
+import type {
+  PipelineFields,
+  CreatedContent,
+  CleanedContent,
+  QualityReport,
+  PostProcessResult,
+  ImageCategory,
+  TriggerInput,
+} from '../types.js';
 import type { PipelineContext } from '../pipeline-context.js';
 import { buildAssemblerPrompt } from '../prompts.js';
 import { executeWithFallback } from '../retry-strategy.js';
@@ -14,6 +22,7 @@ const QUALITY_TIMEOUT_MS = Number(process.env.AIDCP_PUBLISH_QUALITY_TIMEOUT_MS ?
 interface QualityScorerInput {
   created: CreatedContent;
   cleaned: CleanedContent;
+  platform: TriggerInput['platform'];
   // change category-adaptive-images-and-judgment：评审接人设 + 本帖品类（管线内已可达，无新跨阶段 plumbing）。
   soul: Soul | null;
   category: ImageCategory;
@@ -21,7 +30,8 @@ interface QualityScorerInput {
 
 /**
  * QualityScorer — 内容质量评分（A 阶段2，从 ContentAssembler 拆出 Step 2）。
- * LLM 评审产出 qualityScore；失败/非法 JSON → 按 aiScore 公式降级（逐字沿用现 content-assembler.ts:66）。
+ * 非 Facebook：LLM 评审产出 qualityScore；失败/非法 JSON → 按 aiScore 公式降级。
+ * Facebook：不调用 LLM，显式产出 not_applicable，供下游保留统一生命周期。
  * 与 AiFlavorScorer 分职：本角色只产 qualityScore，绝不硬编码满分、绝不抹分。
  */
 export interface QualityScorerDeps {
@@ -49,12 +59,18 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
     return {
       created: snapshot.createdContent!,
       cleaned: snapshot.cleanedContent!,
+      platform: snapshot.trigger?.platform ?? 'xiaohongshu',
       soul: snapshot.trigger?.generateInput?.soul ?? null,
       category: snapshot.postCategory?.category ?? 'general',
     };
   }
 
   protected async execute(input: QualityScorerInput, context: PipelineContext<PipelineFields>): Promise<QualityReport> {
+    if (input.platform === 'facebook') {
+      this.logger.log('[QualityScorer] platform=facebook status=not_applicable; LLM skipped');
+      return { qualityScore: null, status: 'not_applicable', reviewedAt: this.clock() };
+    }
+
     const ppResult: PostProcessResult = {
       content: input.cleaned.content,
       aiScore: input.cleaned.aiScore,
@@ -74,11 +90,11 @@ export class QualityScorerRole extends BasePublishRole<QualityScorerInput, Quali
       { default: { qualityScore: Math.round((1 - input.cleaned.aiScore) * 70) }, reason: 'LLM quality review failed' },
     );
     if (usedFallback) this.logger.warn('[QualityScorer] 评审失败，按 aiScore 公式降级');
-    return { qualityScore: review.qualityScore, reviewedAt: this.clock() };
+    return { qualityScore: review.qualityScore, status: 'scored', reviewedAt: this.clock() };
   }
 
   protected override getDefaultOutput(): QualityReport {
-    return { qualityScore: 50, reviewedAt: this.clock() };
+    return { qualityScore: 50, status: 'scored', reviewedAt: this.clock() };
   }
 
   private parseReviewOutput(raw: string): { qualityScore: number } {

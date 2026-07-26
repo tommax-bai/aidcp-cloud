@@ -150,6 +150,7 @@ const EXAMPLE_ASSEMBLED: AssembledContent = {
   imageUrl: null,
   aiScore: 0.1,
   qualityScore: 82,
+  qualityStatus: 'scored',
   rewritten: false,
   flaggedPhrases: [],
   assembledAt: 0,

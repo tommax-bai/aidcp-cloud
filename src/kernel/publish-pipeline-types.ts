@@ -459,7 +459,10 @@ export interface AssembledContent {
   /** @deprecated 封面单数派生（= imageUrls[0] ?? null）；审计/向后兼容，过渡后删。 */
   imageUrl: string | null;
   aiScore: number;
-  qualityScore: number;
+  /** Facebook 不执行质量评分时为 null；不得伪造占位分数。 */
+  qualityScore: number | null;
+  /** scored=已真实评分；not_applicable=平台策略明确不评分。 */
+  qualityStatus: 'scored' | 'not_applicable';
   rewritten: boolean;
   flaggedPhrases: string[];
   assembledAt: number;
@@ -615,9 +618,10 @@ export interface AiFlavorScore {
   scoredAt: number;
 }
 
-/** QualityScorer 输出：质量评分（LLM 评审；失败按 aiScore 公式降级）。 */
+/** QualityScorer 输出：非 Facebook 执行评分；Facebook 显式产出 not_applicable。 */
 export interface QualityReport {
-  qualityScore: number;
+  qualityScore: number | null;
+  status: 'scored' | 'not_applicable';
   reviewedAt: number;
 }
 

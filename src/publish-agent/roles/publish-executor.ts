@@ -54,7 +54,7 @@ export interface PublishLogStore {
     /** 多图：全部成功配图 URL（下发段读回逐张上传；[0]=封面）。缺省回落 imageUrl 单图。 */
     images?: string[];
     status: string;
-    qualityScore: number;
+    qualityScore: number | null;
     aiScore: number;
     sourceConcepts?: string[];
     sourceLikedIds?: number[];

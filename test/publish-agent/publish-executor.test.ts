@@ -32,6 +32,7 @@ function makeAssembledContent(): AssembledContent {
     imageUrl: 'https://example.com/a.png',
     aiScore: 0.1,
     qualityScore: 80,
+    qualityStatus: 'scored',
     rewritten: false,
     flaggedPhrases: [],
     assembledAt: 1700000000000,
