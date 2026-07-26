@@ -96,6 +96,8 @@ export const SYNC_READ_STREAM_DEFINITIONS = {
 >;
 
 export type SyncReadStream = keyof typeof SYNC_READ_STREAM_DEFINITIONS;
+export type SyncReadConsumer =
+  (typeof SYNC_READ_STREAM_DEFINITIONS)[SyncReadStream]['consumer'];
 
 export type SyncReadJson =
   | null
@@ -173,6 +175,7 @@ export interface SyncReadMirrorHealth {
  */
 export interface SyncReadConsumerCheckpoint {
   executionTarget: DeploymentTarget;
+  consumer: SyncReadConsumer;
   stream: SyncReadStream;
   appliedCursor: string | null;
   payloadDigest: string | null;
@@ -182,6 +185,183 @@ export interface SyncReadConsumerCheckpoint {
   lastAppliedAt: number | null;
   state: SyncReadMirrorState;
   lastError: string | null;
+}
+
+export type SyncReadCheckpointLoadResult =
+  | { outcome: 'loaded'; checkpoint: SyncReadConsumerCheckpoint }
+  | { outcome: 'not_found'; checkpoint: null }
+  | {
+      outcome: 'unknown';
+      checkpoint: null;
+      reason: 'checkpoint_invalid';
+      message: string;
+    };
+
+export type SyncReadCheckpointSaveResult =
+  | { outcome: 'stored'; checkpoint: SyncReadConsumerCheckpoint }
+  | {
+      outcome: 'rejected';
+      reason:
+        | 'checkpoint_invalid'
+        | 'old_cursor'
+        | 'historical_checkpoint'
+        | 'same_cursor_payload_drift';
+      currentCursor: string | null;
+      message: string;
+    };
+
+export interface SyncReadCheckpointBackend {
+  readonly consumer: SyncReadConsumer;
+  load(
+    executionTarget: DeploymentTarget,
+    stream: SyncReadStream,
+  ): Promise<unknown | null>;
+  store(
+    checkpoint: SyncReadConsumerCheckpoint,
+  ): Promise<
+    | { stored: true; row: unknown }
+    | { stored: false; current: unknown | null }
+  >;
+}
+
+export interface SyncReadConsumerCheckpointStoreOptions {
+  executionTarget: DeploymentTarget;
+  consumer: SyncReadConsumer;
+  backend: SyncReadCheckpointBackend;
+}
+
+/**
+ * Consumer-local checkpoint orchestration. The backend is owner-specific so
+ * api and automation never need to write a shared cross-owner table.
+ */
+export class SyncReadConsumerCheckpointStore {
+  private readonly executionTarget: DeploymentTarget;
+  private readonly consumer: SyncReadConsumer;
+  private readonly backend: SyncReadCheckpointBackend;
+
+  constructor(options: SyncReadConsumerCheckpointStoreOptions) {
+    if (options.backend.consumer !== options.consumer) {
+      throw new Error(
+        `sync_read_checkpoint_backend_consumer_mismatch expected=${options.consumer} actual=${options.backend.consumer}`,
+      );
+    }
+    this.executionTarget = options.executionTarget;
+    this.consumer = options.consumer;
+    this.backend = options.backend;
+  }
+
+  async load(stream: SyncReadStream): Promise<SyncReadCheckpointLoadResult> {
+    if (SYNC_READ_STREAM_DEFINITIONS[stream].consumer !== this.consumer) {
+      return {
+        outcome: 'unknown',
+        checkpoint: null,
+        reason: 'checkpoint_invalid',
+        message: `stream ${stream} does not belong to consumer ${this.consumer}`,
+      };
+    }
+    const row = await this.backend.load(this.executionTarget, stream);
+    if (row === null) return { outcome: 'not_found', checkpoint: null };
+    try {
+      return {
+        outcome: 'loaded',
+        checkpoint: parseSyncReadConsumerCheckpoint(row, {
+          executionTarget: this.executionTarget,
+          consumer: this.consumer,
+          stream,
+        }),
+      };
+    } catch (error) {
+      return {
+        outcome: 'unknown',
+        checkpoint: null,
+        reason: 'checkpoint_invalid',
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async save(input: unknown): Promise<SyncReadCheckpointSaveResult> {
+    let checkpoint: SyncReadConsumerCheckpoint;
+    try {
+      checkpoint = parseSyncReadConsumerCheckpoint(input, {
+        executionTarget: this.executionTarget,
+        consumer: this.consumer,
+      });
+    } catch (error) {
+      return {
+        outcome: 'rejected',
+        reason: 'checkpoint_invalid',
+        currentCursor: null,
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const stored = await this.backend.store(checkpoint);
+    if (stored.stored) {
+      try {
+        return {
+          outcome: 'stored',
+          checkpoint: parseSyncReadConsumerCheckpoint(stored.row, {
+            executionTarget: this.executionTarget,
+            consumer: this.consumer,
+            stream: checkpoint.stream,
+          }),
+        };
+      } catch (error) {
+        return {
+          outcome: 'rejected',
+          reason: 'checkpoint_invalid',
+          currentCursor: null,
+          message: `stored checkpoint could not be verified: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+    }
+
+    let current: SyncReadConsumerCheckpoint | null = null;
+    try {
+      current =
+        stored.current === null
+          ? null
+          : parseSyncReadConsumerCheckpoint(stored.current, {
+              executionTarget: this.executionTarget,
+              consumer: this.consumer,
+              stream: checkpoint.stream,
+            });
+    } catch (error) {
+      return {
+        outcome: 'rejected',
+        reason: 'checkpoint_invalid',
+        currentCursor: null,
+        message: `current checkpoint could not be verified: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+    const currentCursor = current?.appliedCursor ?? null;
+    const cursorOrder =
+      currentCursor !== null &&
+      checkpoint.appliedCursor !== null
+        ? compareUnsignedSyncReadCursor(checkpoint.appliedCursor, currentCursor)
+        : -1;
+    const reason =
+      cursorOrder !== 0
+        ? 'old_cursor'
+        : checkpoint.payloadDigest !== current?.payloadDigest
+          ? 'same_cursor_payload_drift'
+          : 'historical_checkpoint';
+    return {
+      outcome: 'rejected',
+      reason,
+      currentCursor,
+      message:
+        reason === 'same_cursor_payload_drift'
+          ? `same cursor ${currentCursor} cannot replace its persisted payload digest`
+          : reason === 'historical_checkpoint'
+            ? `same cursor ${currentCursor} carried older or inconsistent observation metadata`
+            : `checkpoint cursor ${checkpoint.appliedCursor ?? '(null)'} is older than ${currentCursor ?? '(null)'}`,
+    };
+  }
 }
 
 export type SyncReadProcessReadiness =
@@ -209,7 +389,8 @@ export type SyncReadApplyResult =
       reason:
         | 'invalid_envelope'
         | 'old_cursor'
-        | 'same_cursor_payload_drift';
+        | 'same_cursor_payload_drift'
+        | 'recovery_owner_fetch_required';
       currentCursor: string | null;
       message: string;
     };
@@ -340,17 +521,20 @@ export interface AtomicSyncReadMirrorOptions<T extends SyncReadJson> {
 export class AtomicSyncReadMirror<T extends SyncReadJson = SyncReadJson> {
   private readonly executionTarget: DeploymentTarget;
   private readonly stream: SyncReadStream;
+  private readonly consumer: SyncReadConsumer;
   private readonly factScope: SyncReadFactScope;
   private readonly required: boolean;
   private readonly validateValue: ((value: unknown) => value is T) | undefined;
   private readonly clock: () => number;
   private current: { value: Readonly<T>; metadata: SyncReadAppliedMetadata } | null = null;
+  private restoredMetadata: SyncReadAppliedMetadata | null = null;
   private forcedState: 'invalid' | 'recovering' | null = null;
   private lastError: string | null = null;
 
   constructor(options: AtomicSyncReadMirrorOptions<T>) {
     this.executionTarget = options.executionTarget;
     this.stream = options.stream;
+    this.consumer = SYNC_READ_STREAM_DEFINITIONS[options.stream].consumer;
     this.factScope = SYNC_READ_STREAM_DEFINITIONS[options.stream].factScope;
     this.required = options.required ?? true;
     this.validateValue = options.validateValue;
@@ -373,28 +557,41 @@ export class AtomicSyncReadMirror<T extends SyncReadJson = SyncReadJson> {
       return {
         outcome: 'rejected',
         reason: 'invalid_envelope',
-        currentCursor: this.current?.metadata.appliedCursor ?? null,
+        currentCursor:
+          this.current?.metadata.appliedCursor ??
+          this.restoredMetadata?.appliedCursor ??
+          null,
         message,
       };
     }
 
     const now = this.clock();
     const digest = syncReadPayloadDigest(envelope.value);
-    if (!this.current) {
+    const reference = this.current?.metadata ?? this.restoredMetadata;
+    if (this.forcedState === 'recovering' && source !== 'owner_fetch') {
+      this.lastError = 'authenticated owner snapshot required before replay';
+      return {
+        outcome: 'rejected',
+        reason: 'recovery_owner_fetch_required',
+        currentCursor: reference?.appliedCursor ?? null,
+        message: this.lastError,
+      };
+    }
+    if (!reference) {
       this.replace(envelope, digest, now);
       return { outcome: 'applied', cursor: envelope.cursor, payloadDigest: digest };
     }
 
     const comparison = compareUnsignedSyncReadCursor(
       envelope.cursor,
-      this.current.metadata.appliedCursor,
+      reference.appliedCursor,
     );
     if (comparison < 0) {
-      this.lastError = `out_of_order cursor=${envelope.cursor} current=${this.current.metadata.appliedCursor}`;
+      this.lastError = `out_of_order cursor=${envelope.cursor} current=${reference.appliedCursor}`;
       return {
         outcome: 'rejected',
         reason: 'old_cursor',
-        currentCursor: this.current.metadata.appliedCursor,
+        currentCursor: reference.appliedCursor,
         message: this.lastError,
       };
     }
@@ -402,14 +599,40 @@ export class AtomicSyncReadMirror<T extends SyncReadJson = SyncReadJson> {
       this.replace(envelope, digest, now);
       return { outcome: 'applied', cursor: envelope.cursor, payloadDigest: digest };
     }
-    if (digest !== this.current.metadata.payloadDigest) {
+    if (digest !== reference.payloadDigest) {
       this.forcedState = 'invalid';
       this.lastError = `same cursor ${envelope.cursor} carried a different payload digest`;
       return {
         outcome: 'rejected',
         reason: 'same_cursor_payload_drift',
-        currentCursor: this.current.metadata.appliedCursor,
+        currentCursor: reference.appliedCursor,
         message: this.lastError,
+      };
+    }
+    if (!this.current) {
+      if (source !== 'owner_fetch' || envelope.asOf <= reference.sourceAsOf) {
+        return {
+          outcome: 'already_applied',
+          cursor: envelope.cursor,
+          payloadDigest: digest,
+        };
+      }
+      this.current = {
+        value: envelope.value,
+        metadata: {
+          ...reference,
+          sourceAsOf: envelope.asOf,
+          lastObservedAt: now,
+          freshUntil: envelope.freshUntil,
+        },
+      };
+      this.restoredMetadata = null;
+      this.forcedState = null;
+      this.lastError = null;
+      return {
+        outcome: 'freshness_renewed',
+        cursor: envelope.cursor,
+        payloadDigest: digest,
       };
     }
     if (
@@ -439,10 +662,51 @@ export class AtomicSyncReadMirror<T extends SyncReadJson = SyncReadJson> {
     this.lastError = message;
   }
 
+  restoreCheckpoint(input: unknown): SyncReadCheckpointLoadResult {
+    let checkpoint: SyncReadConsumerCheckpoint;
+    try {
+      checkpoint = parseSyncReadConsumerCheckpoint(input, {
+        executionTarget: this.executionTarget,
+        consumer: this.consumer,
+        stream: this.stream,
+      });
+    } catch (error) {
+      this.current = null;
+      this.restoredMetadata = null;
+      this.forcedState = 'invalid';
+      this.lastError = error instanceof Error ? error.message : String(error);
+      return {
+        outcome: 'unknown',
+        checkpoint: null,
+        reason: 'checkpoint_invalid',
+        message: this.lastError,
+      };
+    }
+    this.current = null;
+    this.restoredMetadata =
+      checkpoint.appliedCursor === null
+        ? null
+        : {
+            appliedCursor: checkpoint.appliedCursor,
+            payloadDigest: checkpoint.payloadDigest!,
+            sourceAsOf: checkpoint.sourceAsOf!,
+            lastObservedAt: checkpoint.lastObservedAt!,
+            freshUntil: checkpoint.freshUntil!,
+            lastAppliedAt: checkpoint.lastAppliedAt!,
+          };
+    this.forcedState = 'recovering';
+    this.lastError = 'checkpoint restored; authenticated owner snapshot required';
+    return { outcome: 'loaded', checkpoint };
+  }
+
   view(now = this.clock()): SyncReadMirrorView<T> {
     if (!this.current) {
       if (this.forcedState === 'invalid' || this.forcedState === 'recovering') {
-        return { state: this.forcedState, value: null, metadata: null };
+        return {
+          state: this.forcedState,
+          value: null,
+          metadata: this.restoredMetadata ? { ...this.restoredMetadata } : null,
+        };
       }
       return { state: 'uninitialized', value: null, metadata: null };
     }
@@ -483,9 +747,13 @@ export class AtomicSyncReadMirror<T extends SyncReadJson = SyncReadJson> {
     const health = this.health(now);
     return {
       executionTarget: health.executionTarget,
+      consumer: this.consumer,
       stream: health.stream,
       appliedCursor: health.appliedCursor,
-      payloadDigest: this.current?.metadata.payloadDigest ?? null,
+      payloadDigest:
+        this.current?.metadata.payloadDigest ??
+        this.restoredMetadata?.payloadDigest ??
+        null,
       sourceAsOf: health.sourceAsOf,
       lastObservedAt: health.lastObservedAt,
       freshUntil: health.freshUntil,
@@ -511,6 +779,7 @@ export class AtomicSyncReadMirror<T extends SyncReadJson = SyncReadJson> {
         lastAppliedAt: now,
       },
     };
+    this.restoredMetadata = null;
     this.forcedState = null;
     this.lastError = null;
   }
@@ -609,6 +878,206 @@ function deliveryStateOf(state: SyncReadMirrorState): SyncReadDeliveryState {
     case 'recovering':
       return 'unknown';
   }
+}
+
+export interface SyncReadCheckpointExpectation {
+  executionTarget: DeploymentTarget;
+  consumer: SyncReadConsumer;
+  stream?: SyncReadStream;
+}
+
+export interface SyncReadCheckpointStorageRow {
+  execution_target: unknown;
+  consumer: unknown;
+  stream: unknown;
+  applied_cursor: unknown;
+  payload_digest: unknown;
+  source_as_of_ms: unknown;
+  last_observed_at_ms: unknown;
+  fresh_until_ms: unknown;
+  last_applied_at_ms: unknown;
+  state: unknown;
+  last_error: unknown;
+}
+
+export function syncReadCheckpointFromStorageRow(
+  row: SyncReadCheckpointStorageRow,
+): unknown {
+  return {
+    executionTarget: row.execution_target,
+    consumer: row.consumer,
+    stream: row.stream,
+    appliedCursor:
+      row.applied_cursor === null ? null : String(row.applied_cursor),
+    payloadDigest: row.payload_digest,
+    sourceAsOf: storageTimestamp(row.source_as_of_ms),
+    lastObservedAt: storageTimestamp(row.last_observed_at_ms),
+    freshUntil: storageTimestamp(row.fresh_until_ms),
+    lastAppliedAt: storageTimestamp(row.last_applied_at_ms),
+    state: row.state,
+    lastError: row.last_error,
+  };
+}
+
+export function parseSyncReadConsumerCheckpoint(
+  input: unknown,
+  expectation: SyncReadCheckpointExpectation,
+): SyncReadConsumerCheckpoint {
+  if (!isRecord(input)) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_type',
+      'sync-read checkpoint must be an object',
+    );
+  }
+  if (input.executionTarget !== expectation.executionTarget) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_target',
+      `checkpoint target ${String(input.executionTarget)} does not match ${expectation.executionTarget}`,
+    );
+  }
+  if (input.consumer !== expectation.consumer) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_consumer',
+      `checkpoint consumer ${String(input.consumer)} does not match ${expectation.consumer}`,
+    );
+  }
+  if (!isSyncReadStream(input.stream)) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_stream',
+      `checkpoint stream ${String(input.stream)} is not registered`,
+    );
+  }
+  if (expectation.stream !== undefined && input.stream !== expectation.stream) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_stream',
+      `checkpoint stream ${input.stream} does not match ${expectation.stream}`,
+    );
+  }
+  if (SYNC_READ_STREAM_DEFINITIONS[input.stream].consumer !== expectation.consumer) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_stream_consumer',
+      `checkpoint stream ${input.stream} does not belong to consumer ${expectation.consumer}`,
+    );
+  }
+  if (!isSyncReadMirrorState(input.state)) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_state',
+      `checkpoint state ${String(input.state)} is invalid`,
+    );
+  }
+  const lastError = nullableString(input.lastError, 'lastError');
+  if (input.appliedCursor === null) {
+    if (
+      input.payloadDigest !== null ||
+      input.sourceAsOf !== null ||
+      input.lastObservedAt !== null ||
+      input.freshUntil !== null ||
+      input.lastAppliedAt !== null
+    ) {
+      throw new SyncReadSnapshotValidationError(
+        'checkpoint_partial',
+        'checkpoint without an applied cursor cannot carry applied metadata',
+      );
+    }
+    if (input.state === 'ready' || input.state === 'stale') {
+      throw new SyncReadSnapshotValidationError(
+        'checkpoint_state',
+        `checkpoint state ${input.state} requires an applied cursor`,
+      );
+    }
+    return {
+      executionTarget: expectation.executionTarget,
+      consumer: expectation.consumer,
+      stream: input.stream,
+      appliedCursor: null,
+      payloadDigest: null,
+      sourceAsOf: null,
+      lastObservedAt: null,
+      freshUntil: null,
+      lastAppliedAt: null,
+      state: input.state,
+      lastError,
+    };
+  }
+  if (typeof input.appliedCursor !== 'string') {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_cursor',
+      'checkpoint appliedCursor must be a canonical unsigned decimal string or null',
+    );
+  }
+  assertUnsignedCursor(input.appliedCursor);
+  if (
+    typeof input.payloadDigest !== 'string' ||
+    !/^sha256:[0-9a-f]{64}$/.test(input.payloadDigest)
+  ) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_digest',
+      'checkpoint payloadDigest must be a sha256 digest',
+    );
+  }
+  const sourceAsOf = assertTimestamp(input.sourceAsOf, 'checkpoint sourceAsOf');
+  const lastObservedAt = assertTimestamp(
+    input.lastObservedAt,
+    'checkpoint lastObservedAt',
+  );
+  const freshUntil = assertTimestamp(input.freshUntil, 'checkpoint freshUntil');
+  const lastAppliedAt = assertTimestamp(
+    input.lastAppliedAt,
+    'checkpoint lastAppliedAt',
+  );
+  if (freshUntil < sourceAsOf) {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_freshness',
+      'checkpoint freshUntil must be greater than or equal to sourceAsOf',
+    );
+  }
+  if (input.state === 'uninitialized') {
+    throw new SyncReadSnapshotValidationError(
+      'checkpoint_state',
+      'checkpoint state uninitialized cannot carry an applied cursor',
+    );
+  }
+  return {
+    executionTarget: expectation.executionTarget,
+    consumer: expectation.consumer,
+    stream: input.stream,
+    appliedCursor: input.appliedCursor,
+    payloadDigest: input.payloadDigest,
+    sourceAsOf,
+    lastObservedAt,
+    freshUntil,
+    lastAppliedAt,
+    state: input.state,
+    lastError,
+  };
+}
+
+function isSyncReadMirrorState(value: unknown): value is SyncReadMirrorState {
+  return (
+    value === 'uninitialized' ||
+    value === 'ready' ||
+    value === 'stale' ||
+    value === 'invalid' ||
+    value === 'recovering'
+  );
+}
+
+function nullableString(value: unknown, name: string): string | null {
+  if (value === null) return null;
+  if (typeof value === 'string') return value;
+  throw new SyncReadSnapshotValidationError(
+    'checkpoint_string',
+    `checkpoint ${name} must be a string or null`,
+  );
+}
+
+function storageTimestamp(value: unknown): unknown {
+  if (value === null || typeof value === 'number') return value;
+  if (typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : value;
+  }
+  return value;
 }
 
 function assertUnsignedCursor(value: string): void {

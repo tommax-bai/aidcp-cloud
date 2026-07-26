@@ -213,6 +213,7 @@ test('recovering preserves last good value but is not ready', () => {
   assert.equal(mirror.health().deliveryState, 'unknown');
   assert.deepEqual(mirror.checkpoint(), {
     executionTarget: 'dev',
+    consumer: 'api',
     stream: 'session_config_global',
     appliedCursor: '1',
     payloadDigest: syncReadPayloadDigest({ value: 'first' }),

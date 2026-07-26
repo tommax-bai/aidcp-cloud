@@ -76,8 +76,14 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * nullable recovery 结果列、环境作用域与 resume 阶段，并把 state check 扩为允许 `applying/refused`。
  * 旧 signal/quota 读写形状不变，
  * 迁移缺失时 recovery owner 写会显式失败并由 outbox 保持重放，故同样只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
+ * 注：`0082_api_sync_read_consumer_checkpoint` /
+ * `0083_automation_sync_read_consumer_checkpoint`（change split-cloud-api-composition-root-4b）
+ * 分别建立 api 与 automation consumer 自己的 target-scoped cursor/readiness/health 恢复表。
+ * 两表不保存 owner payload、共享事实或业务 version；独立组合根启用前不承重，缺表时对应 mirror
+ * bootstrap 响亮失败而 monolith 行为不变，故只抬 KNOWN_MAX、不抬 REQUIRED。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0080_restricted_recovery_outcome';
+export const KNOWN_MAX_SCHEMA_VERSION = '0083_automation_sync_read_consumer_checkpoint';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 
