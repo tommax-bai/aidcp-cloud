@@ -92,7 +92,12 @@ function isRoster(value: unknown): value is readonly AccountIdentityProjectionRo
         isRecord(row) &&
         typeof row.accountId === 'string' &&
         typeof row.platform === 'string' &&
-        isNullableString(row.groupLabel),
+        isNullableString(row.groupLabel) &&
+        (row.createdAt === null ||
+          (typeof row.createdAt === 'number' &&
+            Number.isSafeInteger(row.createdAt) &&
+            row.createdAt >= 0)) &&
+        (row.status === 'active' || row.status === 'paused'),
     )
   );
 }

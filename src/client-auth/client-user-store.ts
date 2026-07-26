@@ -50,7 +50,7 @@ import { generateKey, hashKey, verifyKey, decoyVerify } from './key.js';
 import { RETIRED_ACCOUNT_ID } from '../account-store.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 import { resolveAccountDisplayName } from '../account-display-name.js';
-import { isMirrorStale, type ConfigMirrorKey } from '../config-mirror-freshness.js';
+import { isMirrorStale } from '../config-mirror-freshness.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-version-store.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import type { ClientEnvAutomationReader, OffboardProjection } from '../kernel/client-env-automation-types.js';
@@ -887,24 +887,6 @@ export class ClientUserStore {
     await this.refreshEnvironmentSlowStartMirror();
   }
 
-  /**
-   * 独立事务推进一次镜像版本——**仅供本身不在事务内的批量维护写**（如一次性回灌迁移）使用。
-   * 常规配置写入 MUST 走 `writeWithMirrorBump`（同事务），绝不用本方法代替。
-   */
-  private async bumpMirrorBestEffort(mirrorKey: ConfigMirrorKey): Promise<void> {
-    if (!this.mirrorVersionBumper) return;
-    try {
-      await this.mirrorVersionBumper.bumpInTx(this.pool, mirrorKey);
-      this.mirrorVersionBumper.notifyAfterCommit?.(mirrorKey);
-    } catch (err) {
-      console.warn(
-        `[client-env] 镜像版本推进失败 mirror=${mirrorKey}（其它进程将等到下一次写入才失效）: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-
   /** 重建环境自动化出口闸镜像（构建新 Set → 原子替换引用，防并发现读撞上半填）。 */
   async refreshAutomationGateMirror(): Promise<void> {
     const blocked = await this.pool.query<{ env_key: string }>(
@@ -947,8 +929,12 @@ export class ClientUserStore {
    * 必须在 accounts 表完成 init 后调用；旧列只用于迁移，不参与后续运行时读取或双写。
    */
   async migrateEnvironmentSlowStartFromAccounts(): Promise<number> {
-    const result = await this.pool.query(
-      `WITH pending AS (
+    const result = await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'client_environment_slow_start',
+      (q) => q.query(
+        `WITH pending AS (
          SELECT e.env_key, a.slow_start_since AS legacy_since
            FROM client_environments e
            LEFT JOIN accounts a ON a.account_id=e.account_id
@@ -961,9 +947,8 @@ export class ClientUserStore {
          FROM pending
         WHERE e.env_key=pending.env_key
        RETURNING e.env_key`,
+      ),
     );
-    // 慢启动锚点是闸门镜像：一次性回灌同样要推进版本，否则另一 target 的进程到重启前看不到。
-    await this.bumpMirrorBestEffort('client_environment_slow_start');
     await this.refreshEnvironmentSlowStartMirror();
     return result.rowCount ?? result.rows.length;
   }
@@ -1338,6 +1323,9 @@ export class ClientUserStore {
         [intentId, envKey],
       );
       await client.query('COMMIT');
+      this.mirrorVersionBumper?.notifyAfterCommit?.(
+        'client_environment_slow_start',
+      );
       const row = assigned.rows[0];
       return { ok: true, idempotent: false, environment: { envKey: row.env_key, label: row.label,
         platform: row.platform, source: 'admin', assignedAt: row.assigned_at.getTime() } };
@@ -1737,36 +1725,47 @@ export class ClientUserStore {
       }))
       .filter((i) => i.envKey && !seen.has(i.envKey) && (seen.add(i.envKey), true));
     if (!clean.length) return 0;
-    for (const i of clean) {
-      let accountId = i.accountId;
-      if (accountId) {
-        // D5 写闸：同一事务内先查跨客户争用，冲突则拒写绑定（accountId→null，label/platform 照常）+ 告警。
-        const client = await this.pool.connect();
-        try {
-          await client.query('BEGIN');
+    const client = await this.pool.connect();
+    const hasBindingObservation = clean.some((item) => item.accountId !== null);
+    try {
+      await client.query('BEGIN');
+      for (const i of clean) {
+        let accountId = i.accountId;
+        if (accountId) {
+          // D5 写闸与写入在同一事务；整批只提交一次，版本与全部绑定观察同生共死。
           const owner = await this.ownerOfEnv(client, i.envKey);
           const conflicted = await this.bindingConflictsAcrossCustomers(client, i.envKey, accountId, owner);
           if (conflicted) {
             this.emitBindingConflict({ envKey: i.envKey, accountId, ownerUserId: owner });
             accountId = null;
           }
-          await this.upsertEnvironment(client, i.envKey, i.label, i.platform, source, accountId);
-          await client.query('COMMIT');
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw err;
-        } finally {
-          client.release();
         }
-      } else {
-        await this.upsertEnvironment(this.pool, i.envKey, i.label, i.platform, source, null);
+        await this.upsertEnvironment(
+          client,
+          i.envKey,
+          i.label,
+          i.platform,
+          source,
+          accountId,
+        );
       }
+      if (hasBindingObservation) {
+        await this.mirrorVersionBumper?.bumpInTx(
+          client,
+          'client_environment_slow_start',
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-    // 只有真实 accountId 到来时绑定才可能变化；null 在 COALESCE 语义下不会擦除既有绑定。
-    if (clean.some((item) => item.accountId != null)) {
-      // 绑定变化 → 慢启动锚点按账号的解析结果随之变化（含「歧义」判定）。本进程刷镜像之外，
-      // 还要推进版本让别的 target 的进程失效重载。
-      await this.bumpMirrorBestEffort('client_environment_slow_start');
+    if (hasBindingObservation) {
+      this.mirrorVersionBumper?.notifyAfterCommit?.(
+        'client_environment_slow_start',
+      );
       await this.refreshEnvironmentSlowStartMirror();
     }
     return clean.length;

@@ -64,7 +64,7 @@ export const ACCOUNT_PROJECTION_TABLE = 'automation_account_projection';
 export const ACCOUNT_PROJECTION_STATE_TABLE = 'automation_account_projection_state';
 
 /** 提供这两张表的迁移版本 id（探不到时要能回答「补跑哪一条」）。 */
-export const ACCOUNT_PROJECTION_SINCE_VERSION = '0077_automation_account_projection';
+export const ACCOUNT_PROJECTION_SINCE_VERSION = '0084_automation_account_projection_sync_read';
 
 /** 默认刷新周期：正常态的实际陈旧度。 */
 export const DEFAULT_ACCOUNT_PROJECTION_REFRESH_MS = 30_000;
@@ -133,7 +133,14 @@ export class PgAccountProjectionStore {
     const verdict = classifySchemaCapability(
       {
         tables: new Map([
-          [ACCOUNT_PROJECTION_TABLE, new Set(['account_id', 'platform', 'group_label', 'projected_at'])],
+          [ACCOUNT_PROJECTION_TABLE, new Set([
+            'account_id',
+            'platform',
+            'group_label',
+            'created_at',
+            'status',
+            'projected_at',
+          ])],
           [ACCOUNT_PROJECTION_STATE_TABLE, new Set(['singleton', 'refreshed_at', 'fresh_until', 'source_rows'])],
         ]),
         indexes: new Map([
@@ -200,19 +207,27 @@ export class PgAccountProjectionStore {
     const accountIds = roster.map((row) => row.accountId);
     const platforms = roster.map((row) => row.platform);
     const groupLabels = roster.map((row) => row.groupLabel);
+    const createdAts = roster.map((row) =>
+      row.createdAt === null ? null : new Date(row.createdAt));
+    const statuses = roster.map((row) => row.status);
 
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       await client.query(
-        `INSERT INTO automation_account_projection (account_id, platform, group_label, projected_at)
-         SELECT t.account_id, t.platform, t.group_label, now()
-           FROM unnest($1::text[], $2::text[], $3::text[]) AS t(account_id, platform, group_label)
+        `INSERT INTO automation_account_projection
+           (account_id, platform, group_label, created_at, status, projected_at)
+         SELECT t.account_id, t.platform, t.group_label, t.created_at, t.status, now()
+           FROM unnest(
+             $1::text[], $2::text[], $3::text[], $4::timestamptz[], $5::text[]
+           ) AS t(account_id, platform, group_label, created_at, status)
          ON CONFLICT (account_id) DO UPDATE
            SET platform = EXCLUDED.platform,
                group_label = EXCLUDED.group_label,
+               created_at = EXCLUDED.created_at,
+               status = EXCLUDED.status,
                projected_at = EXCLUDED.projected_at`,
-        [accountIds, platforms, groupLabels],
+        [accountIds, platforms, groupLabels, createdAts, statuses],
       );
       await client.query(
         `INSERT INTO automation_account_projection_state (singleton, refreshed_at, fresh_until, source_rows)

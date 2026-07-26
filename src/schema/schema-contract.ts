@@ -87,8 +87,12 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 分别建立 api 与 automation consumer 自己的 target-scoped cursor/readiness/health 恢复表。
  * 两表不保存 owner payload、共享事实或业务 version；独立组合根启用前不承重，缺表时对应 mirror
  * bootstrap 响亮失败而 monolith 行为不变，故只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
+ * 注：`0084_automation_account_projection_sync_read`（change split-cloud-api-composition-root-4b）
+ * 只给既有共享 B4 投影增加 post-4a 仍有 automation 消费者的 created_at/status；展示与卡片字段
+ * 不进入投影。独立 automation 的相关闸门缺列即能力级 fail-closed，故只抬 KNOWN_MAX。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0083_automation_sync_read_consumer_checkpoint';
+export const KNOWN_MAX_SCHEMA_VERSION = '0084_automation_account_projection_sync_read';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

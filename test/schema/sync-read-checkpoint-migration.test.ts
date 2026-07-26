@@ -91,6 +91,6 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!automation.includes('0082_api_sync_read_consumer_checkpoint'));
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0083_automation_sync_read_consumer_checkpoint',
+    '0084_automation_account_projection_sync_read',
   );
 });

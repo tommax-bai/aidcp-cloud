@@ -29,6 +29,10 @@ export interface AccountIdentityProjectionRow {
   platform: string;
   /** accounts.group_label 原样文本；库内 NULL 即 null（不与空串合并）。 */
   groupLabel: string | null;
+  /** 账号创建时刻；历史异常 NULL 保持 null，不从当前时间猜。 */
+  createdAt: number | null;
+  /** automation 暂停闸使用的权威状态。 */
+  status: 'active' | 'paused';
 }
 
 /**

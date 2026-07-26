@@ -42,8 +42,20 @@ test('refresh 原样搬三列、只 upsert 不删除，并在同一事务里推�
   const calls: Call[] = [];
   const roster: AccountIdentityProjectionRow[] = [
     // 刻意带上大小写 / 空白 / 空标签：投影 MUST 原样存，守卫的谓词才可能逐字等价。
-    { accountId: 'acc-1', platform: ' FaceBook ', groupLabel: '华东组' },
-    { accountId: 'acc-2', platform: 'xiaohongshu', groupLabel: null },
+    {
+      accountId: 'acc-1',
+      platform: ' FaceBook ',
+      groupLabel: '华东组',
+      createdAt: 1_700_000_000_000,
+      status: 'paused',
+    },
+    {
+      accountId: 'acc-2',
+      platform: 'xiaohongshu',
+      groupLabel: null,
+      createdAt: null,
+      status: 'active',
+    },
   ];
   const store = new PgAccountProjectionStore({
     pool: fakePool(calls),
@@ -64,11 +76,16 @@ test('refresh 原样搬三列、只 upsert 不删除，并在同一事务里推�
     '账号从不物理删除；刷新 MUST NOT 按快照做差集删除（否则一次读失败就能清空整张投影）',
   );
 
-  const upsert = calls.find((c) => c.sql.includes('INSERT INTO automation_account_projection ('))!;
+  const upsert = calls.find((c) => c.sql.includes('INSERT INTO automation_account_projection'))!;
   assert.match(upsert.sql, /ON CONFLICT \(account_id\) DO UPDATE/);
   assert.deepEqual(upsert.params[0], ['acc-1', 'acc-2']);
   assert.deepEqual(upsert.params[1], [' FaceBook ', 'xiaohongshu'], 'platform MUST 原样，不 trim 不小写');
   assert.deepEqual(upsert.params[2], ['华东组', null], 'group_label MUST 原样，NULL 不折成空串');
+  assert.deepEqual(
+    (upsert.params[3] as Array<Date | null>).map((value) => value?.getTime() ?? null),
+    [1_700_000_000_000, null],
+  );
+  assert.deepEqual(upsert.params[4], ['paused', 'active']);
 
   const state = calls.find((c) => c.sql.includes('INSERT INTO automation_account_projection_state'))!;
   assert.deepEqual(state.params, [300_000, 2]);
@@ -103,14 +120,22 @@ test('写入失败回滚，且不推进新鲜期', async () => {
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
-      if (sql.includes('INSERT INTO automation_account_projection (')) throw new Error('disk full');
+      if (sql.includes('INSERT INTO automation_account_projection')) throw new Error('disk full');
       return { rows: [] };
     },
     release() {},
   };
   const store = new PgAccountProjectionStore({
     pool: { connect: async () => client } as unknown as pg.Pool,
-    source: { listAccountIdentities: async () => [{ accountId: 'a', platform: 'facebook', groupLabel: null }] },
+    source: {
+      listAccountIdentities: async () => [{
+        accountId: 'a',
+        platform: 'facebook',
+        groupLabel: null,
+        createdAt: null,
+        status: 'active',
+      }],
+    },
     logger: silent,
   });
   const result = await store.refresh();

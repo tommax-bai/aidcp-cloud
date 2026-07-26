@@ -348,13 +348,17 @@ export class PgAccountStore implements AccountStore {
       account_id: string;
       platform: string | null;
       group_label: string | null;
-    }>('SELECT account_id, platform, group_label FROM accounts');
+      created_at: Date | null;
+      status: string;
+    }>('SELECT account_id, platform, group_label, created_at, status FROM accounts');
     return rows.map((r) => ({
       accountId: r.account_id,
       // 库内 platform 是 NOT NULL DEFAULT，理论上不会是 NULL；真遇上也不猜平台，落空串让
       // 消费方的平台谓词自然判假（fail-closed），MUST NOT 在这里补一个默认平台。
       platform: r.platform ?? '',
       groupLabel: r.group_label ?? null,
+      createdAt: r.created_at ? r.created_at.getTime() : null,
+      status: r.status === 'paused' ? 'paused' : 'active',
     }));
   }
 
@@ -396,16 +400,21 @@ export class PgAccountStore implements AccountStore {
     // 已从「建 controller 时 await PG 读 created_at」改为经 provider 现读内存镜像；本进程 init() 之后
     // 新登记的账号若不在此回填，该旁路会对它静默失效（默认关，但那是回滚拉杆，不能悄悄少一半）。
     const normalized = platform ? normalizePlatformId(platform) : 'xiaohongshu';
-    const { rows } = await this.pool.query<{
-      platform: string;
-      created_at: Date | null;
-      label: string | null;
-      nickname: string | null;
-      operator_alias: string | null;
-    }>(
-      `INSERT INTO accounts (account_id, label, platform) VALUES ($1, $1, $2)
+    const { rows } = await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'account_status',
+      (q) => q.query<{
+        platform: string;
+        created_at: Date | null;
+        label: string | null;
+        nickname: string | null;
+        operator_alias: string | null;
+      }>(
+        `INSERT INTO accounts (account_id, label, platform) VALUES ($1, $1, $2)
        ON CONFLICT (account_id) DO NOTHING RETURNING platform, created_at, label, nickname, operator_alias`,
-      [accountId, normalized],
+        [accountId, normalized],
+      ),
     );
     if (rows.length > 0) {
       this.displayNameCache.set(accountId, {
@@ -553,9 +562,14 @@ export class PgAccountStore implements AccountStore {
     if (accountId === RETIRED_ACCOUNT_ID) return { ok: false, reason: 'retired_account' };
     const clean = (groupLabel ?? '').trim();
     const value = clean === '' ? null : clean.length > 64 ? clean.slice(0, 64) : clean;
-    const { rows } = await this.pool.query<{ group_label: string | null }>(
-      `UPDATE accounts SET group_label = $2 WHERE account_id = $1 RETURNING group_label`,
-      [accountId, value],
+    const { rows } = await writeWithMirrorBump(
+      this.pool,
+      this.mirrorVersionBumper,
+      'account_status',
+      (q) => q.query<{ group_label: string | null }>(
+        `UPDATE accounts SET group_label = $2 WHERE account_id = $1 RETURNING group_label`,
+        [accountId, value],
+      ),
     );
     if (rows.length === 0) return { ok: false, reason: 'account_not_found' };
     return { ok: true, groupLabel: rows[0].group_label };

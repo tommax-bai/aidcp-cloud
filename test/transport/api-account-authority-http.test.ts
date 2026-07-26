@@ -33,7 +33,13 @@ async function withAccountServer(
   const roster: AccountRosterAuthorityPort = {
     async listAccountIdentities() {
       ownerCalls.push('listAccountIdentities');
-      return [{ accountId: 'acct-1', platform: 'facebook', groupLabel: 'north' }];
+      return [{
+        accountId: 'acct-1',
+        platform: 'facebook',
+        groupLabel: 'north',
+        createdAt: 1_700_000_000_000,
+        status: 'active',
+      }];
     },
   };
   const ownership: AccountOwnershipAuthorityPort = {
