@@ -18,7 +18,7 @@ export interface FillBudgetConfig {
   /** 每字符预算。实测均值 ~150–165ms（含 CDP 往返），留约 1.5x 余量。 */
   perCharMs: number;
   /**
-   * 单步预算上限。MUST 显著小于边缘发布租约 TTL（AIDCP_EDGE_PUBLISH_LEASE_MS，默认 600s）——
+   * 单步预算上限。MUST 显著小于边缘发布租约 TTL（AIDCP_EDGE_PUBLISH_LEASE_MS，默认 1000s）——
    * 否则边缘会在打字途中单方面过期租约、恢复浏览循环，在半写的编辑器上滚页导航。
    */
   maxMs: number;
@@ -27,14 +27,14 @@ export interface FillBudgetConfig {
 export const DEFAULT_FILL_BUDGET: FillBudgetConfig = {
   baseMs: 20_000,
   perCharMs: 250,
-  maxMs: 240_000,
+  maxMs: 400_000,
 };
 
 /** 预算上限相对发布租约 TTL 的安全比例。 */
 export const FILL_BUDGET_LEASE_RATIO = 0.4;
 
 /** 发布租约 TTL 的兜底值（与 AIDCP_EDGE_PUBLISH_LEASE_MS 的默认值一致）。 */
-export const DEFAULT_PUBLISH_LEASE_MS = 10 * 60_000;
+export const DEFAULT_PUBLISH_LEASE_MS = 1_000_000;
 
 /**
  * 预算必须容得下的最小正文长度。内容管线的设计产出区间是 200–500 字；

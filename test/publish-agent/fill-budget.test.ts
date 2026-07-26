@@ -54,6 +54,9 @@ describe('正文填写单步预算（FB 逐字输入 vs 固定单步墙）', () 
     assert.equal(computeFillTimeoutMs('🙂'), 20_000 + 250);
     // 上限硬钳。
     assert.equal(computeFillTimeoutMs('字'.repeat(100_000)), DEFAULT_FILL_BUDGET.maxMs);
+    assert.equal(maxFillChars(), 1_520, '默认 Facebook 逐字输入硬上限为 1520 字');
+    assert.equal(isContentTooLong('字'.repeat(1_520)), false);
+    assert.equal(isContentTooLong('字'.repeat(1_521)), true);
   });
 
   it('预算上限 MUST 按发布租约 TTL 收敛——绝不让边缘在打字途中过期租约', () => {
@@ -61,8 +64,8 @@ describe('正文填写单步预算（FB 逐字输入 vs 固定单步墙）', () 
     const clamped = clampFillBudgetToLease(DEFAULT_FILL_BUDGET, 120_000, (m) => warnings.push(m));
     assert.equal(clamped.maxMs, 48_000, '120s 租约 → 上限压回 0.4×=48s');
     assert.equal(warnings.length, 1);
-    // 默认 600s 租约容得下默认 240s 上限，不该被动。
-    assert.deepEqual(clampFillBudgetToLease(DEFAULT_FILL_BUDGET, 600_000), DEFAULT_FILL_BUDGET);
+    // 默认 1000s 租约容得下默认 400s 上限，不该被动。
+    assert.deepEqual(clampFillBudgetToLease(DEFAULT_FILL_BUDGET, 1_000_000), DEFAULT_FILL_BUDGET);
   });
 
   it('Facebook 的 select_mode/fill_field 带各自预算；小红书全路径不带（30s 常数窗口零回归）', () => {
@@ -73,6 +76,8 @@ describe('正文填写单步预算（FB 逐字输入 vs 固定单步墙）', () 
     const fbFill = fb.find((c) => c.kind === 'fill_field');
     assert.equal(fbSelect?.timeoutMs, 40_000);
     assert.equal(fbFill?.timeoutMs, 20_000 + 300 * 250);
+    const fbAtLimit = seq.buildCommandSequence(input({ platform: 'facebook', content: '字'.repeat(1_520), images: [] }));
+    assert.equal(fbAtLimit.find((c) => c.kind === 'fill_field')?.timeoutMs, 400_000);
 
     const xhs = seq.buildCommandSequence(input({ platform: 'xiaohongshu', content: '字'.repeat(300), images: ['a'] }));
     for (const cmd of xhs) {
@@ -156,7 +161,7 @@ describe('预算配置的失效模式（复审补洞）', () => {
     // 任一项 NaN 都会一路污染到 timeoutMs，让云端 setTimeout(NaN) 立刻触发 → 孤儿打字级联复活。
     assert.deepEqual(sanitizeFillBudget({ baseMs: NaN, perCharMs: NaN, maxMs: NaN }, w), DEFAULT_FILL_BUDGET);
     // maxMs 不大于 baseMs → 一个字都打不了。
-    assert.equal(sanitizeFillBudget({ baseMs: 20_000, perCharMs: 250, maxMs: 5_000 }, w).maxMs, 240_000);
+    assert.equal(sanitizeFillBudget({ baseMs: 20_000, perCharMs: 250, maxMs: 5_000 }, w).maxMs, 400_000);
     assert.ok(warnings.length >= 4);
   });
 
@@ -164,7 +169,7 @@ describe('预算配置的失效模式（复审补洞）', () => {
     const warnings: string[] = [];
     const clamped = clampFillBudgetToLease(DEFAULT_FILL_BUDGET, NaN, (m) => warnings.push(m));
     assert.equal(Number.isFinite(clamped.maxMs), true);
-    assert.equal(clamped.maxMs, DEFAULT_FILL_BUDGET.maxMs, '默认 600s 租约容得下 240s 上限');
+    assert.equal(clamped.maxMs, DEFAULT_FILL_BUDGET.maxMs, '默认 1000s 租约容得下 400s 上限');
     assert.equal(warnings.length, 1);
   });
 

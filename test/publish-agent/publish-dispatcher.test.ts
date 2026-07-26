@@ -65,6 +65,7 @@ function harness(opts: {
   const blocked: Array<{ requestId: string; reason: string | null }> = [];
   const progress: Array<{ requestId: string; action: string }> = [];
   const leasePriorities: string[] = [];
+  const leaseDurations: Array<number | undefined> = [];
   const uiStates: Array<{ accountId: string; recordId: number; state: string; title?: string | null }> = [];
   const recordedPublishes: string[] = [];
   let scannedTarget: 'dev' | 'ol' | null | undefined;
@@ -98,6 +99,7 @@ function harness(opts: {
     edgeTaskLeases: {
       withLease: async (request, work) => {
         leasePriorities.push(request.priority);
+        leaseDurations.push(request.leaseMs);
         const leaseError = typeof opts.leaseError === 'function' ? opts.leaseError() : opts.leaseError;
         if (leaseError) throw leaseError;
         events.push('lease:acquired');
@@ -169,6 +171,7 @@ function harness(opts: {
     progress,
     notices,
     leasePriorities,
+    leaseDurations,
     uiStates,
     redispatched,
     recordedPublishes,
@@ -193,6 +196,7 @@ describe('PublishDispatcher', () => {
     assert.equal(h.seqInput.edgeId, 'edge-A');
     assert.equal(h.seqInput.approvedByUser, true);
     assert.deepEqual(h.leasePriorities, ['automatic'], '兜底/非人工触发按 automatic 排队');
+    assert.deepEqual(h.leaseDurations, [1_000_000], '默认发布租约覆盖 400s 填写预算并保留 60% 序列余量');
     assert.deepEqual(h.attached, [{ id: 7, count: 2 }], '如实标记真实附着数 K=2');
     assert.deepEqual(h.postWrite, { id: 7, postId: 'post_real', postUrl: undefined });
     assert.deepEqual(h.recordedPublishes, ['acct-A'], '发布前是否越权不影响事实记账：平台确认发布后必须占用 publish 配额');
