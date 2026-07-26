@@ -350,6 +350,10 @@ import { registerPublishCardExitRoutes } from './transport/publish-card-exit-htt
 import { registerImageModelSelectionRoutes } from './transport/image-model-selection-http.js';
 import { registerRoleModelSelectionRoutes } from './transport/role-model-selection-http.js';
 import { registerProviderSecretRoutes } from './transport/provider-secret-http.js';
+import { registerAccountPlatformRoutes } from './transport/account-platform-http.js';
+import { registerTriggeredPublishRefsRoutes } from './transport/triggered-publish-refs-http.js';
+import type { TriggeredPublishRefsReader } from './kernel/delegated-task-types.js';
+import type { AccountPlatformReader } from './kernel/platform-types.js';
 import type { RoleModelSelectionReader, RoleModelSelectionSource } from './kernel/role-model-selection-port.js';
 import type { ProviderSecretReader } from './kernel/provider-secret-port.js';
 import type { ImageModelSelectionReader } from './kernel/image-model-selection-port.js';
@@ -797,6 +801,16 @@ interface CompositionContext {
   /** 厂商密钥窄读（change cloud-batch2-content-main）：启动期几次调用，不需要镜像。 */
   providerSecretReader: ProviderSecretReader;
   /**
+   * 账号平台窄读（change cloud-batch2-content-main）：`accounts` 属 api，内容域的素材库守卫经它问。
+   * 缺账号 → null 是**答案**不是兜底；读失败必须抛，两者 MUST 可区分。
+   */
+  accountPlatformReader: AccountPlatformReader | undefined;
+  /**
+   * 「哪些参照稿已被触发过」（change cloud-batch2-content-main）：委托任务台账属 automation，
+   * 内容域的精选库拿它判去重。读不到 MUST 抛 —— 回空集合会让每条用过的参照稿重新变成可用。
+   */
+  triggeredPublishRefs: TriggeredPublishRefsReader | undefined;
+  /**
    * 候审预览读（change cloud-batch2-content-main）。内容段只在**界面推送口在场时**才调它 ——
    * 那个推送口由自动化段赋值，content 进程里恒缺席，故这条读在 content 里恒不可达。
    * content 的 `main()` MUST 注入 `unavailableInMode(...)`：不可达就该是不可达，
@@ -896,6 +910,10 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   // 三张配置表与凭据表都是本域属主表，content 侧经这两条 route 取。
   registerRoleModelSelectionRoutes(httpServer, ctx.roleModelSelectionSource);
   registerProviderSecretRoutes(httpServer, ctx.providerSecretReader);
+  // 账号平台窄读（change cloud-batch2-content-main）：`accounts` 是本域属主表。
+  // 未装配即如实告警、不注册 —— 绝不注册一条注定 500 的路由。
+  if (ctx.accountPlatformReader) registerAccountPlatformRoutes(httpServer, ctx.accountPlatformReader);
+  else console.warn('[aidcp-cloud] api 内部 API：账号平台读路由未注册（账号存储不可用）');
   const actual = await httpServer.listen(port);
   console.log(
     `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}` +
@@ -928,6 +946,10 @@ async function startAutomationReadApi(ctx: CompositionContext): Promise<void> {
   const port = readEnvPort('AIDCP_AUTOMATION_PORT') ?? DEFAULT_AUTOMATION_READ_API_PORT;
   const httpServer = new InternalHttpServer();
   registerRiskReadRoutes(httpServer, local);
+  // 参照稿触发去重读（change cloud-batch2-content-main）：委托任务台账是本域属主表，
+  // content 侧精选库经这条 route 取。缺则如实告警、不注册。
+  if (ctx.triggeredPublishRefs) registerTriggeredPublishRefsRoutes(httpServer, ctx.triggeredPublishRefs);
+  else console.warn('[aidcp-cloud] automation 内部 API：参照稿触发去重读路由未注册（委托任务存储不可用）');
   const commandService = ctx.riskCommandService;
   if (commandService) registerRiskCommandRoutes(httpServer, commandService);
   else console.warn('[aidcp-cloud] risk-command 端点未注册：AIDCP_DEPLOY_ENV 缺失/非法，命令无人应用故不受理');
@@ -2286,6 +2308,10 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.roleModelSelection = roleModelSelection;
   ctx.roleModelSelectionSource = roleModelSelectionSource;
   ctx.providerSecretReader = providerSecretReader;
+  ctx.accountPlatformReader = accountStore?.getPlatformOrNull
+    ? { getPlatformOrNull: (id: string) => accountStore.getPlatformOrNull!(id) }
+    : undefined;
+  ctx.triggeredPublishRefs = delegatedTaskStore;
   ctx.resolvePersona = resolvePersona;
 }
 
