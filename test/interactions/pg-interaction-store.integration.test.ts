@@ -9,6 +9,7 @@ import { PgInteractionAuthGate } from '../../src/interactions/interaction-auth-g
 import {
   INTERACTION_TEST_EXECUTION_TARGET,
   drainInteractionAuditRelay,
+  interactionAccountPlatform,
 } from '../helpers/interaction-store-test-deps.js';
 import { InteractionInboxService } from '../../src/interactions/interaction-inbox-service.js';
 import { InteractionMetrics } from '../../src/interactions/metrics.js';
@@ -39,12 +40,13 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const store = new InteractionStore({ pool, clock: () => 1784044802100, apiPurge: new InteractionApiWrites(),
-      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
+      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET,
+      accountPlatform: interactionAccountPlatform() });
     try {
       await pool.query(`TRUNCATE
         interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
         interaction_messages,interaction_threads,interaction_sync_batches,interaction_sync_cursors,
-        interaction_auth_state,interaction_runtime_controls,event_outbox,event_outbox_cursor
+        interaction_auth_state,interaction_runtime_controls,event_outbox,event_outbox_cursor,event_outbox_topic_cursor
         RESTART IDENTITY CASCADE`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
         ('acct_wc_demo','mock Edge account','wechat_channels')
@@ -338,12 +340,13 @@ test('PostgreSQL: circuit reset, replay-safe thread states and periodic classify
     const pool = new pg.Pool({ connectionString });
     const now = 1_784_044_900_000;
     const store = new InteractionStore({ pool, clock: () => now,
-      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
+      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET,
+      accountPlatform: interactionAccountPlatform() });
     try {
       await pool.query(`TRUNCATE
         interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
         interaction_messages,interaction_threads,interaction_sync_batches,interaction_sync_cursors,
-        interaction_auth_state,interaction_runtime_controls,event_outbox,event_outbox_cursor
+        interaction_auth_state,interaction_runtime_controls,event_outbox,event_outbox_cursor,event_outbox_topic_cursor
         RESTART IDENTITY CASCADE`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
         ('acct_wc_store_circuit','store-circuit','wechat_channels')
@@ -546,14 +549,15 @@ test('PostgreSQL mock Edge E2E: sync → list/detail → generate/approve/send �
   { skip: skipReason }, async () => {
     const pool = new pg.Pool({ connectionString });
     const store = new InteractionStore({ pool, clock: () => attemptGate.now,
-      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET });
+      authGate: new PgInteractionAuthGate({ pool }), executionTarget: INTERACTION_TEST_EXECUTION_TARGET,
+      accountPlatform: interactionAccountPlatform() });
     const configs = new ReplyConfigStore({ pool });
     try {
       await pool.query(`TRUNCATE
         interaction_api_requests,interaction_audit_events,interaction_send_attempts,interaction_reply_jobs,
         interaction_messages,interaction_threads,interaction_sync_batches,interaction_sync_cursors,
         interaction_auth_state,interaction_runtime_controls,reply_rules,reply_templates,account_reply_profiles,
-        interaction_reply_config_versions,interaction_reply_configs,event_outbox,event_outbox_cursor
+        interaction_reply_config_versions,interaction_reply_configs,event_outbox,event_outbox_cursor,event_outbox_topic_cursor
         RESTART IDENTITY CASCADE`);
       await pool.query(`INSERT INTO accounts(account_id,label,platform) VALUES
         ('acct_wc_e2e','e2e','wechat_channels') ON CONFLICT (account_id) DO UPDATE SET platform=EXCLUDED.platform`);

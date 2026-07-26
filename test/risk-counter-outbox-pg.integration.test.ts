@@ -7,6 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 
 import { PgRiskCounterOutboxStore } from '../src/risk/risk-counter-outbox-store.js';
@@ -15,37 +16,6 @@ import { OUTBOX_URL_ENV, resolveIntegrationDatabase } from './helpers/pg-test-da
 const target = resolveIntegrationDatabase(OUTBOX_URL_ENV);
 const connectionString = target.enabled ? target.connectionString : undefined;
 const skipReason = target.enabled ? (false as const) : target.skipReason;
-
-const SCHEMA_SQL = `
-CREATE TABLE risk_counters (
-  id          BIGSERIAL PRIMARY KEY,
-  account_id  TEXT NOT NULL,
-  action      TEXT NOT NULL,
-  count       INTEGER NOT NULL DEFAULT 1,
-  occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  outbox_id   BIGINT
-);
-CREATE UNIQUE INDEX uq_risk_counters_outbox
-  ON risk_counters (outbox_id) WHERE outbox_id IS NOT NULL;
-
-CREATE TABLE risk_counter_outbox (
-  id                BIGSERIAL PRIMARY KEY,
-  account_id        TEXT NOT NULL,
-  action            TEXT NOT NULL,
-  occurred_at       TIMESTAMPTZ NOT NULL,
-  execution_target  TEXT NOT NULL,
-  dedupe_key        TEXT NOT NULL,
-  status            TEXT NOT NULL DEFAULT 'pending',
-  attempts          INTEGER NOT NULL DEFAULT 0,
-  claim_token       TEXT,
-  claim_expires_at  TIMESTAMPTZ,
-  last_error        TEXT,
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE UNIQUE INDEX uq_risk_counter_outbox_target_dedupe
-  ON risk_counter_outbox (execution_target, dedupe_key);
-`;
 
 test(
   'PostgreSQL: partial outbox_id index is inferred and duplicate apply remains exactly-once',
@@ -62,7 +32,21 @@ test(
     });
 
     try {
-      await pool.query(SCHEMA_SQL);
+      // 0061 also adds accounts.execution_target; keep only that unrelated prerequisite local,
+      // then execute the canonical risk migrations so this test cannot drift from deployed DDL.
+      await pool.query('CREATE TABLE accounts (account_id TEXT PRIMARY KEY)');
+      await pool.query(await readFile(new URL('../migrations/0002_risk_control.sql', import.meta.url), 'utf8'));
+      await pool.query(await readFile(
+        new URL('../migrations/0061_risk_writer_ownership_and_outbox.sql', import.meta.url),
+        'utf8',
+      ));
+      const index = await pool.query<{ predicate: string | null }>(
+        `SELECT pg_get_expr(indpred, indrelid) AS predicate
+           FROM pg_index
+          WHERE indexrelid = 'uq_risk_counters_outbox'::regclass`,
+      );
+      assert.equal(index.rows[0]?.predicate, '(outbox_id IS NOT NULL)');
+
       const store = new PgRiskCounterOutboxStore({ executionTarget: 'dev', pool });
       await store.init();
 

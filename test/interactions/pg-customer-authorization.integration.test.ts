@@ -61,7 +61,11 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       await pool.query(`INSERT INTO client_env_scope
         (user_id,env_key,label,platform,source,assigned_by)
         VALUES ('user-a','env-auth-b','伪造归属','wechat_channels','client','user-a')`);
-      await users.init();
+      // Runtime init is probe-only; re-run the canonical migration to prove its legacy cleanup is idempotent.
+      await pool.query(await readFile(
+        new URL('../../migrations/0040_customer_env_authority.sql', import.meta.url),
+        'utf8',
+      ));
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_scope
         WHERE user_id='user-a' AND env_key='env-auth-b'`)).rows[0].n, 0);
       const legacyAudit = (await pool.query<{ source: string; reason: string }>(
@@ -285,28 +289,41 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       $$ LANGUAGE plpgsql`);
       await pool.query(`CREATE TRIGGER aidcp_test_skip_auth_revoke
         BEFORE UPDATE ON interaction_auth_state FOR EACH ROW EXECUTE FUNCTION aidcp_test_skip_auth_revoke()`);
+      let acceptedOffboardId = '';
       try {
-        await assert.rejects(
-          users.beginEnvironmentOffboard('user-offboard-b', 'env-offboard-b'),
-          /interaction_auth_state_revoke_missed/,
+        const accepted = await users.beginEnvironmentOffboard('user-offboard-b', 'env-offboard-b');
+        assert.equal(accepted.ok, true);
+        if (!accepted.ok) return;
+        acceptedOffboardId = accepted.offboard.offboardId;
+        assert.deepEqual(
+          {
+            state: accepted.offboard.state,
+            accountId: accepted.offboard.accountId,
+            purgeDueAt: accepted.offboard.purgeDueAt,
+          },
+          { state: 'accepted', accountId: null, purgeDueAt: null },
+          'api admission remains truthful when automation materialization fails',
         );
         assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_offboards
           WHERE account_id='acct-offboard-b'`)).rows[0].n, 0, 'failed revocation must roll back the offboard row');
-        assert.equal((await users.listEnvScope('user-offboard-b')).length, 1,
-          'failed revocation must not remove authoritative ownership');
+        assert.equal((await users.listEnvScope('user-offboard-b')).length, 0,
+          'accepted cleanup admission revokes authoritative ownership before asynchronous materialization');
+        assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_revocation_holds
+          WHERE env_key='env-offboard-b' AND offboard_id=$1 AND materialized_at IS NULL`,
+          [acceptedOffboardId])).rows[0].n, 1, 'failed materialization remains durably retryable');
       } finally {
         await pool.query(`DROP TRIGGER IF EXISTS aidcp_test_skip_auth_revoke ON interaction_auth_state`);
         await pool.query(`DROP FUNCTION IF EXISTS aidcp_test_skip_auth_revoke()`);
       }
 
-      const noEdgeReceipt = await users.beginEnvironmentOffboard('user-offboard-b', 'env-offboard-b');
-      assert.equal(noEdgeReceipt.ok, true);
-      if (!noEdgeReceipt.ok) return;
+      const materializedOffboard = (await users.reconcileCleanupAdmissions())
+        .find((item) => item.offboardId === acceptedOffboardId);
+      assert.ok(materializedOffboard, 'reconciliation must materialize the accepted admission with the same id');
       await pool.query(`UPDATE interaction_offboards SET purge_due_at=to_timestamp(1)
-        WHERE offboard_id=$1`, [noEdgeReceipt.offboard.offboardId]);
+        WHERE offboard_id=$1`, [materializedOffboard.offboardId]);
       assert.equal(await interactions.purgeDueOffboards(1_784_044_833_000), 1,
         'Cloud 到期清除不得等待 Edge 回执');
-      assert.equal((await users.getOffboard('user-offboard-b', noEdgeReceipt.offboard.offboardId))?.state, 'purged');
+      assert.equal((await users.getOffboard('user-offboard-b', materializedOffboard.offboardId))?.state, 'purged');
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_threads
         WHERE account_id='acct-offboard-b'`)).rows[0].n, 0);
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_auth_state
@@ -314,22 +331,22 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       const unconfirmedAudit = (await pool.query<{ status: string }>(
         `SELECT status FROM interaction_offboard_audit
           WHERE offboard_id=$1 AND event='cloud_purged' ORDER BY created_at DESC LIMIT 1`,
-        [noEdgeReceipt.offboard.offboardId],
+        [materializedOffboard.offboardId],
       )).rows[0];
       assert.equal(unconfirmedAudit.status, 'purged_edge_unconfirmed');
 
       assert.equal((await interactions.applyOffboardResult({
-        offboardId: noEdgeReceipt.offboard.offboardId, envKey: 'env-offboard-b', accountId: 'acct-offboard-b',
+        offboardId: materializedOffboard.offboardId, envKey: 'env-offboard-b', accountId: 'acct-offboard-b',
         platform: 'wechat_channels', status: 'cleared', errorCode: null, finishedAt: 1_784_044_834_000,
       })).duplicate, false, 'Cloud 已清除后到达的 Edge 回执仍须独立记账');
       const lateEdge = (await pool.query<{ edge_result_status: string | null }>(
         `SELECT edge_result_status FROM interaction_offboards WHERE offboard_id=$1`,
-        [noEdgeReceipt.offboard.offboardId],
+        [materializedOffboard.offboardId],
       )).rows[0];
       assert.equal(lateEdge.edge_result_status, 'cleared');
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM interaction_offboard_audit
         WHERE offboard_id=$1 AND event='edge_cleanup_confirmed_after_cloud_purge'
-          AND status='purged_edge_confirmed'`, [noEdgeReceipt.offboard.offboardId])).rows[0].n, 1);
+          AND status='purged_edge_confirmed'`, [materializedOffboard.offboardId])).rows[0].n, 1);
 
       const terminated = await users.updateUser('user-term', { status: 'disabled' }, 'admin-termination');
       assert.equal(terminated.ok, true);
