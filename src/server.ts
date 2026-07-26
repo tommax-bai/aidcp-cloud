@@ -348,6 +348,10 @@ import { registerPublishLogRoutes } from './transport/publish-log-http.js';
 import { registerPipelineLogRoutes } from './transport/pipeline-log-http.js';
 import { registerPublishCardExitRoutes } from './transport/publish-card-exit-http.js';
 import { registerImageModelSelectionRoutes } from './transport/image-model-selection-http.js';
+import { registerRoleModelSelectionRoutes } from './transport/role-model-selection-http.js';
+import { registerProviderSecretRoutes } from './transport/provider-secret-http.js';
+import type { RoleModelSelectionReader, RoleModelSelectionSource } from './kernel/role-model-selection-port.js';
+import type { ProviderSecretReader } from './kernel/provider-secret-port.js';
 import type { ImageModelSelectionReader } from './kernel/image-model-selection-port.js';
 import type { PublishCardExitPort } from './kernel/publish-card-exit-port.js';
 import type { PipelineLogSink } from './kernel/pipeline-log-contract.js';
@@ -429,7 +433,7 @@ import { RoleConfigStore } from './config/role-config-store.js';
 import { createRoleConfigPanel, type ModelProbeResult } from './config/role-config-facade.js';
 import { CategoryConfigStore } from './config/category-config-store.js';
 import { createCategoryConfigPanel } from './config/category-config-facade.js';
-import { categoryOf, type ThinkingMode } from './config/role-catalog.js';
+import { ROLE_CATALOG, categoryOf, type ThinkingMode } from './config/role-catalog.js';
 // 账号人设（change account-persona-config，stream F）：按账号可配 + 热加载，回落打包 soul.yaml 不 brick。
 import { PersonaStore, createPersonaResolver } from './config/persona-store.js';
 import { createPersonaPanel } from './config/persona-facade.js';
@@ -784,6 +788,15 @@ interface CompositionContext {
    */
   imageModelSelection: ImageModelSelectionReader;
   /**
+   * 角色模型解析的**同步**读（change cloud-batch2-content-main）：单体 = 就地四层回落；
+   * content 拆进程后注入 `PollingRoleModelSelectionMirror`（属主侧预解析 + 本地查表）。
+   */
+  roleModelSelection: RoleModelSelectionReader;
+  /** 角色模型解析的异步取源（属主侧实现，供 content 侧镜像刷新器调）。 */
+  roleModelSelectionSource: RoleModelSelectionSource;
+  /** 厂商密钥窄读（change cloud-batch2-content-main）：启动期几次调用，不需要镜像。 */
+  providerSecretReader: ProviderSecretReader;
+  /**
    * 候审预览读（change cloud-batch2-content-main）。内容段只在**界面推送口在场时**才调它 ——
    * 那个推送口由自动化段赋值，content 进程里恒缺席，故这条读在 content 里恒不可达。
    * content 的 `main()` MUST 注入 `unavailableInMode(...)`：不可达就该是不可达，
@@ -879,10 +892,14 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
   registerImageModelSelectionRoutes(httpServer, {
     fetchImageModelSelection: async () => ctx.imageModelSelection.current(),
   });
+  // 角色模型解析的异步取源 + 厂商密钥窄读（change cloud-batch2-content-main）：
+  // 三张配置表与凭据表都是本域属主表，content 侧经这两条 route 取。
+  registerRoleModelSelectionRoutes(httpServer, ctx.roleModelSelectionSource);
+  registerProviderSecretRoutes(httpServer, ctx.providerSecretReader);
   const actual = await httpServer.listen(port);
   console.log(
     `[aidcp-cloud] api 内部 API 已监听 127.0.0.1:${actual}` +
-      `（config-mirror bump + review-card-delivery + publish-log + pipeline-log + publish-card-exit + image-model-selection 落地端点）`,
+      `（config-mirror bump + review-card-delivery + publish-log + pipeline-log + publish-card-exit + image-model-selection + role-model-selection + provider-secret 落地端点）`,
   );
 }
 
@@ -1390,6 +1407,39 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     }
     return undefined;
   };
+  // ── 角色模型解析 / 厂商密钥的跨属主口（change cloud-batch2-content-main）────────────────
+  // 上面那四个 resolve* 读的三张配置表（角色覆盖 / 分类默认 / 全局）全是 **api 属主**，
+  // 分类归属还来自 api 侧的角色目录。内容域的文本出口每次调用都要它们，且调用是**同步**的。
+  //
+  // 所以属主侧**把答案算好再送**，而不是把三张表送过去：送表等于要求调用方也持有那份目录、
+  // 复刻四层回落 —— 正是「两侧各写一份、各自编译通过、只有真跑才发现不一致」的形态。
+  // 单体下这个 reader 就地解析，与那四个 resolve* 同源逐字等价；拆进程后 content 换成本地镜像查表。
+  const roleModelSelection: RoleModelSelectionReader = {
+    forRole: (role) => {
+      const sel = resolveSelection(role);
+      const temperature = resolveTempForRole(role);
+      const thinkingMode = resolveThinkingForRole(role);
+      return {
+        provider: sel.provider,
+        model: sel.model,
+        ...(temperature === undefined ? {} : { temperature }),
+        ...(thinkingMode === undefined ? {} : { thinkingMode }),
+      };
+    },
+  };
+  // 取源：把**全部已登记角色**逐个预解析成快照。未登记角色查不到 → 调用方用 fallback（即全局那一层），
+  // 与单体下逐字一致（那种角色本来就穿过前两层落到全局）。
+  const roleModelSelectionSource: RoleModelSelectionSource = {
+    fetchRoleModelSelections: async () => ({
+      fallback: roleModelSelection.forRole(),
+      byRole: Object.fromEntries(ROLE_CATALOG.map((r) => [r.roleId, roleModelSelection.forRole(r.roleId)])),
+    }),
+  };
+  // 厂商密钥：只在启动期被调几次、不在热路径 ⇒ 普通异步跨进程读即可，不需要镜像。
+  const providerSecretReader: ProviderSecretReader = {
+    getSecretForRuntime: (provider, field) => credentialStore.getSecretForRuntime(provider, field),
+  };
+
   // token 用量记账（change llm-token-usage-stats）：出口 onCall 钩子只做纯内存累加，
   // 定时 flush 到 llm_token_usage 预聚合表（专用池隔离热路径）。须早于接受 LLM 调用/探活建好。
   const tokenUsageStore = new TokenUsageStore({ pool: tokenUsagePool, schemaEnsurer: ensureCapabilitySchema });
@@ -2233,6 +2283,9 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.resolveReviewCardDelivery = resolveReviewCardDelivery;
   ctx.publishCardExit = publishCardExit;
   ctx.imageModelSelection = imageModelSelection;
+  ctx.roleModelSelection = roleModelSelection;
+  ctx.roleModelSelectionSource = roleModelSelectionSource;
+  ctx.providerSecretReader = providerSecretReader;
   ctx.resolvePersona = resolvePersona;
 }
 

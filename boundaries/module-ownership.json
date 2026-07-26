@@ -1290,6 +1290,11 @@
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/platform/registry.ts 析出纯类型契约段（PlatformId / Surface / NoteScopedAction / OrchestrationCapability / DelegatedAction(Support) / ScheduledAutomationAction(Support/Mode) / AvailableScheduledAutomationAction / NoteSupport / CommentPlatformProfile / PlatformRegistryEntry），零 SQL / 零 HTTP / 零 LLM / 零模块级活状态。PLATFORM_REGISTRY 数据 + *_COMMENT_PROFILE 常量 + 读表函数（normalizePlatformId/platformRegistryEntry/commentProfileForPlatform/…）按 §9「平台能力由 aidcp-automation 单写」留 registry.ts（automation）。SCHEDULED_AUTOMATION_ACTIONS 运行时数组留 registry.ts 并 satisfies 本联合。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
   },
   {
+    "path": "src/kernel/provider-secret-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change cloud-batch2-content-main 新写：厂商密钥窄读口（ProviderSecretReader，单方法 getSecretForRuntime）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。provider_credentials 是 api 属主表而用密钥的是内容域的文本 / 图片 / 对象存储出口；本口只在启动期被调几次、不在热路径 ⇒ 普通异步跨进程读，**不需要镜像**。契约明写「读不到 ≠ 没配」：缺凭据回 null、读失败必须抛（吞成 null 会让调用方静默少构造一个出口，表现为链路悄悄不工作且零报错）。明文只用于构造出口客户端，MUST NOT 日志化 / 回前端 / 落盘。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-batch2"
+  },
+  {
     "path": "src/kernel/publish-approval-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/publish-agent/publish-approval-store.ts 析出发布审批纯枚举 + 哨兵错误（APPROVAL_VOID_REASONS / ApprovalVoidReason / isApprovalVoidReason / APPROVAL_BLOCKED_REASONS / ApprovalBlockedReason 字面 tuple 与派生 union；ApprovalUnreadableError 纯 Error 子类，与 schema-capability-contract 的 SchemaCapabilityError 同一手法）。零 import、零 SQL、无 pg、无模块级 Set-Map。ApprovalDecisionStore 类 + pg 读写留 publish-approval-store.ts（automation）并从 kernel 导入等值再导出。供发布下发编排跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
@@ -1353,6 +1358,11 @@
     "path": "src/kernel/risk-read-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change block2-api-split 新增：风控只读窄面端口契约（RiskReadPort，getState / effectiveQuotas / slowStartView 异步读），零 import。零 SQL / HTTP / LLM / 无进程内活状态。风控最终状态单写仍留 automation 的 apply-callback；api/panel 经本端口取只读投影（默认 local 直连本地 RiskController、http 经 RiskReadHttpClient）。为拆进程后 api 侧读风控态而立。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-process-split"
+  },
+  {
+    "path": "src/kernel/role-model-selection-port.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change cloud-batch2-content-main 新写：角色模型解析端口（RoleModelSelection / RoleModelSelectionSnapshot 纯结果类型 + Source 异步取源口 + Reader 同步读口）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。解析要读三张 api 属主配置表（role_config / category_config / model_config）且分类归属来自 api 的角色目录，而调用点是**同步**的、在每次模型调用路径上 ⇒ 属主侧把**已登记角色逐个预解析**成快照再送，调用方查表；送表会要求调用方复刻四层回落，正是两侧各写一份必然漂移的形态。thinkingMode 内联 'off'|'on' 字面量而不 import 角色目录同名类型，照 llm-contract.ts 既有判例（kernel MUST NOT 反向依赖 api 属主的角色目录）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-batch2"
   },
   {
     "path": "src/kernel/role-runtime.ts",
@@ -2280,6 +2290,11 @@
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
   {
+    "path": "src/transport/provider-secret-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/transport/publish-card-exit-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
@@ -2316,6 +2331,11 @@
   },
   {
     "path": "src/transport/risk-read-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/role-model-selection-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   }
