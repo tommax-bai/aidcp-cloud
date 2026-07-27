@@ -24,6 +24,7 @@
     { "table": "client_env_scope_audit", "owner": "api", "basis": "§5.1「客户、环境归属和账号绑定」→ aidcp-api" },
     { "table": "client_environment_deletion_requests", "owner": "api", "basis": "§5.1「client_environments（环境花名册与绑定事实）」域 → aidcp-api 单写" },
     { "table": "client_environment_installations", "owner": "api", "basis": "§5.1「client_environments」域 → aidcp-api 单写" },
+    { "table": "client_environment_proxy_authorities", "owner": "api", "basis": "change cloud-authoritative-environment-proxy；环境原始代理权威属于「客户、环境归属和账号绑定」域，与 client_environments 同属 aidcp-api 单写" },
     { "table": "client_environments", "owner": "api", "basis": "§5.1 具名 client_environments → aidcp-api 单写。注：本表另有一类 SQL 字面量扫不到的跨边界形态（写点全在 api，但由组合根在自动化握手路径上调用），见 §12 阶段 0 清单第 1 行，MUST 靠人工盘点补位" },
     { "table": "client_users", "owner": "api", "basis": "§5.1 具名 client_users → aidcp-api" },
     { "table": "concepts", "owner": "content", "basis": "§5.1「内容事实与评估」→ aidcp-content" },

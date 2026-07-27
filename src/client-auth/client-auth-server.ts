@@ -17,8 +17,11 @@ import { isIP } from 'node:net';
 import { signJwt, verifyJwt } from '../panel/jwt.js';
 import { parseBearer } from '../panel/auth.js';
 import type { TokenRevocationStore } from '../panel/revocation.js';
-import type { ClientUserStore } from './client-user-store.js';
-import type { ClientOffboardView } from './client-user-store.js';
+import {
+  normalizeEnvironmentProxyAuthority,
+  type ClientOffboardView,
+  type ClientUserStore,
+} from './client-user-store.js';
 import type { LoginRateLimiter } from './rate-limiter.js';
 import { DelegatedTaskServiceError, type DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
 import type { DelegatedTaskIntent, JsonValue } from '../kernel/delegated-task-types.js';
@@ -729,6 +732,71 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         };
       }));
       sendJson(res, 200, { environments });
+      return;
+    }
+
+    const proxyAuthorityMatch = /^\/environments\/([^/]+)\/proxy-authority$/.exec(url);
+    if (proxyAuthorityMatch) {
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(proxyAuthorityMatch[1] ?? '').trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      if (method === 'GET') {
+        const result = await deps.store.readEnvironmentProxyAuthority(userId, envKey);
+        if (!result.ok) {
+          const status = result.reason === 'schema_unavailable' ? 503 : 404;
+          sendJson(res, status, { error: result.reason });
+          return;
+        }
+        sendJson(res, 200, { data: result.record, meta: { requestId: randomUUID(), asOf: Date.now() } });
+        return;
+      }
+      if (method === 'PUT') {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const raw = body as Record<string, unknown>;
+        const allowed = new Set(['expectedRevision', 'authority', 'source']);
+        const authority = normalizeEnvironmentProxyAuthority(raw.authority);
+        const expectedRevision = raw.expectedRevision;
+        const source = raw.source;
+        if (Object.keys(raw).some((key) => !allowed.has(key)) ||
+            (expectedRevision !== null &&
+              (typeof expectedRevision !== 'number' || !Number.isInteger(expectedRevision) || expectedRevision < 1)) ||
+            !authority || (source !== 'edge_edit' && source !== 'local_migration')) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const result = await deps.store.writeEnvironmentProxyAuthority(userId, envKey, {
+          expectedRevision: expectedRevision as number | null,
+          authority,
+          source,
+        });
+        if (!result.ok) {
+          const status = result.reason === 'schema_unavailable' ? 503 :
+            result.reason === 'proxy_authority_conflict' ? 409 :
+              result.reason === 'invalid_authority' ? 400 : 404;
+          sendJson(res, status, {
+            error: result.reason,
+            ...(result.currentRevision !== undefined ? { currentRevision: result.currentRevision } : {}),
+          });
+          return;
+        }
+        sendJson(res, 200, { data: result.record, meta: { requestId: randomUUID(), asOf: Date.now() } });
+        return;
+      }
+      sendJson(res, 405, { error: 'method_not_allowed' });
       return;
     }
 
@@ -1925,12 +1993,16 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       const raw = body as Record<string, unknown>;
-      const allowed = new Set(['intentId', 'proof', 'envKey', 'label', 'platform', 'slowStartEnabled']);
+      const allowed = new Set([
+        'intentId', 'proof', 'envKey', 'label', 'platform', 'slowStartEnabled', 'proxyAuthority',
+      ]);
+      const proxyAuthority = normalizeEnvironmentProxyAuthority(raw.proxyAuthority);
       if (Object.keys(raw).some((key) => !allowed.has(key)) ||
           typeof raw.intentId !== 'string' || typeof raw.proof !== 'string' ||
           typeof raw.envKey !== 'string' || (raw.label != null && typeof raw.label !== 'string') ||
           typeof raw.platform !== 'string' ||
-          (raw.slowStartEnabled !== undefined && typeof raw.slowStartEnabled !== 'boolean')) {
+          (raw.slowStartEnabled !== undefined && typeof raw.slowStartEnabled !== 'boolean') ||
+          !proxyAuthority) {
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
@@ -1941,12 +2013,14 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         label: raw.label as string | null | undefined,
         platform: raw.platform,
         slowStartEnabled: raw.slowStartEnabled as boolean | undefined,
+        proxyAuthority,
       });
       if (!result.ok) {
         const status = result.reason === 'disabled' ? 401 :
+          result.reason === 'schema_unavailable' ? 503 :
           result.reason === 'invalid_intent' ? 404 :
-            result.reason === 'intent_expired' ? 410 :
-              result.reason === 'invalid_environment' ? 400 : 409;
+              result.reason === 'intent_expired' ? 410 :
+              result.reason === 'invalid_environment' || result.reason === 'invalid_proxy_authority' ? 400 : 409;
         sendJson(res, status, { error: result.reason });
         return;
       }

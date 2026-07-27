@@ -103,8 +103,12 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 注：`0087_automation_account_projection_shared_cursor`（change split-cloud-api-composition-root-4b）
  * 在既有 B4 shared projection-state 行记录 applied cursor/digest，跨 dev/ol 串行防旧快照回退；
  * target checkpoint 只保留 delivery/readiness。
+ *
+ * 注：`0088_client_environment_proxy_authority`（change cloud-authoritative-environment-proxy）
+ * 为 api owner 增加环境原始代理权威；客户鉴权接口缺表时显式返回 schema unavailable，
+ * Edge 不会回退到 AdsPower 当前执行副本，故只抬 KNOWN_MAX、不抬 monolith REQUIRED。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0087_automation_account_projection_shared_cursor';
+export const KNOWN_MAX_SCHEMA_VERSION = '0088_client_environment_proxy_authority';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

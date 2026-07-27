@@ -7,6 +7,7 @@ import {
   CLIENT_USERS_SCHEMA_SQL,
   ClientUserStore,
   createEnvironmentHandshakeAuthority,
+  normalizeEnvironmentProxyAuthority,
 } from '../src/client-auth/client-user-store.js';
 import { shanghaiDayStartMs } from '../src/time/shanghai-day.js';
 import type { ClientEnvAutomationReader } from '../src/kernel/client-env-automation-types.js';
@@ -41,6 +42,41 @@ function fakeAutomationReads(overrides: Partial<ClientEnvAutomationReader> = {})
     ...overrides,
   };
 }
+
+test('normalizeEnvironmentProxyAuthority accepts explicit states and rejects malformed credential payloads', () => {
+  assert.deepEqual(normalizeEnvironmentProxyAuthority({ state: 'no_proxy' }), { state: 'no_proxy' });
+  assert.deepEqual(normalizeEnvironmentProxyAuthority({
+    state: 'configured',
+    proxyType: 'SOCKS5',
+    proxyHost: 'proxy.example',
+    proxyPort: 1080,
+    proxyUser: 'alice',
+    proxyPassword: 'secret',
+  }), {
+    state: 'configured',
+    proxyType: 'socks5',
+    proxyHost: 'proxy.example',
+    proxyPort: 1080,
+    proxyUser: 'alice',
+    proxyPassword: 'secret',
+  });
+  for (const malformed of [
+    { state: 'no_proxy', proxyPassword: 'stale' },
+    { state: 'configured', proxyType: 'ftp', proxyHost: 'proxy.example', proxyPort: 21 },
+    { state: 'configured', proxyType: 'http', proxyHost: 'proxy.example', proxyPort: 70000 },
+    { state: 'configured', proxyType: 'http', proxyHost: 'bad host', proxyPort: 8080 },
+    {
+      state: 'configured',
+      proxyType: 'http',
+      proxyHost: 'proxy.example',
+      proxyPort: 8080,
+      proxyUser: '',
+      proxyPassword: 'secret',
+    },
+  ]) {
+    assert.equal(normalizeEnvironmentProxyAuthority(malformed), null);
+  }
+});
 
 test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度', async () => {
   const pool = fakePool((sql) => {
@@ -695,6 +731,7 @@ test('completeProvisioningIntent rejects malformed intent/proof before touching 
   const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   assert.deepEqual(await store.completeProvisioningIntent('user-a', {
     intentId: 'not-a-uuid', proof: 'short', envKey: 'fresh-env', platform: 'facebook',
+    proxyAuthority: { state: 'no_proxy' },
   }), { ok: false, reason: 'invalid_intent' });
 });
 
@@ -727,6 +764,14 @@ test('completeProvisioningIntent atomically stores Facebook slow start at Shangh
   const before = Date.now();
   const result = await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool }).completeProvisioningIntent('user-a', {
     intentId, proof, envKey: 'fb-new', label: 'FB new', platform: 'facebook', slowStartEnabled: true,
+    proxyAuthority: {
+      state: 'configured',
+      proxyType: 'http',
+      proxyHost: 'proxy.example',
+      proxyPort: 8080,
+      proxyUser: 'proxy-user',
+      proxyPassword: 'plain-proxy-password',
+    },
   });
   const after = Date.now();
   assert.equal(result.ok, true);
@@ -737,6 +782,11 @@ test('completeProvisioningIntent atomically stores Facebook slow start at Shangh
   assert.ok(stored instanceof Date);
   assert.ok(stored.getTime() >= shanghaiDayStartMs(before));
   assert.ok(stored.getTime() <= shanghaiDayStartMs(after));
+  const proxyInsert = calls.find((call) => /INSERT INTO client_environment_proxy_authorities/.test(call.sql))!;
+  assert.deepEqual(proxyInsert.params, [
+    'fb-new', 'configured', 'http', 'proxy.example', 8080,
+    'proxy-user', 'plain-proxy-password', 'user-a',
+  ]);
   assert.ok(calls.some((call) => call.sql === 'COMMIT'));
 });
 
@@ -748,6 +798,7 @@ test('completeProvisioningIntent rejects non-Facebook slow start before PostgreS
     envKey: 'xhs-new',
     platform: 'xiaohongshu',
     slowStartEnabled: true,
+    proxyAuthority: { state: 'no_proxy' },
   });
   assert.deepEqual(result, { ok: false, reason: 'invalid_environment' });
 });
