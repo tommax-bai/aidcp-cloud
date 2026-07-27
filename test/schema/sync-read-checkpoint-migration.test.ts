@@ -92,7 +92,7 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!automation.includes('0082_api_sync_read_consumer_checkpoint'));
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0091_facebook_comment_config_snapshot_revision',
+    '0093_facebook_rule_mode_runtime',
   );
 });
 

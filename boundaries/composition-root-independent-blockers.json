@@ -4,12 +4,12 @@
   "claimBlocked": true,
   "claim": "api, automation, and content are independently bootable without foreign owner pools, stores, or synchronous in-process dependencies",
   "summary": {
-    "total": 51,
+    "total": 52,
     "byCategory": {
       "4b-mirror": 14,
       "operator-command": 4,
       "content-owner": 7,
-      "composition-root": 26
+      "composition-root": 27
     }
   },
   "blockers": [
@@ -391,6 +391,16 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:FacebookGroupJoinAutomationStore:api:src/config/facebook-group-join-automation-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-facebook-rule-mode-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:FacebookRuleModeStore:api:src/config/facebook-rule-mode-store.ts"
       ]
     },
     {

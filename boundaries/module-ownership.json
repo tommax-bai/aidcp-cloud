@@ -625,6 +625,11 @@
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
+    "path": "src/config/facebook-rule-mode-store.ts",
+    "layer": "api",
+    "note": "change facebook-rule-mode-cadence：Facebook 规则开关、账号平台校验、审计回读与配置镜像失效均属于 api 配置权威；运行计数和批次已拆到 automation store，本文件只读写 api 属主表"
+  },
+  {
     "path": "src/config/hot-lead-config-facade.ts",
     "layer": "api",
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
@@ -1220,6 +1225,11 @@
     "note": "【待定稿裁决】P2-7 从 src/publish-agent/facebook-publish-media-store.ts 析出 Facebook 发帖素材池的**跨域契约段**：状态枚举常量 FACEBOOK_PUBLISH_MEDIA_STATUSES + 五个纯 DTO（FacebookPublishImageInput / ImageView / ImageSetView / MediaListView / UploadResult / SetPatch）+ 错误原因联合 FacebookPublishMediaErrorReason + 跨进程识别键 FACEBOOK_PUBLISH_MEDIA_ERROR_NAME 与结构化守卫 isFacebookPublishMediaError。**整文件进不了 kernel**：属主文件自建 pg 池（new Pool）、含建表 DDL 字面量、走对象存储，四条准入判据两条当场不过，故只析出无依赖的契约段、存储实现留 content 并等值再导出。**错误类 FacebookPublishMediaError 亦不进 kernel**（Error 子类是行为；判例 llm-contract.ts / interaction-reply-contract.ts 同样把类留属主）：面板层改用结构化守卫按 name+reason 两字段识别，跨进程/跨包都成立——原 err instanceof FacebookPublishMediaError 拆进程后恒 false，会把 object_store_unavailable(503) / status_locked(409) 静默退化成 unavailable(400)，属「MUST NOT 静默假成功」红线。零 import、零 SQL、零 HTTP/LLM、零进程内活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-P2-7"
   },
   {
+    "path": "src/kernel/facebook-rule-mode-types.ts",
+    "layer": "kernel",
+    "note": "change facebook-rule-mode-cadence：跨 api 配置面与 automation 运行面共享的固定规则定义、纯 DTO 和结果 union；零 import、零 SQL、零活状态，避免任一属主反向导入另一属主实现"
+  },
+  {
     "path": "src/kernel/feed-action.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/cache/interaction-feed-store.ts 析出：FeedAction 纯类型联合，零 import、零 SQL、零活状态。存储实现留 interaction-feed-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
@@ -1593,6 +1603,16 @@
     "path": "src/orchestrator/content-scheduler.ts",
     "layer": "api",
     "note": "§4.7 / §4.6.5 第 12 项：内容排期调度器归 api"
+  },
+  {
+    "path": "src/orchestrator/facebook-rule-mode-runtime-store.ts",
+    "layer": "automation",
+    "note": "change facebook-rule-mode-cadence：target-scoped 浏览事实、进度、批次和动作终态是 automation 运行权威，本文件只读写 automation 属主表"
+  },
+  {
+    "path": "src/orchestrator/facebook-rule-mode.ts",
+    "layer": "automation",
+    "note": "change facebook-rule-mode-cadence：有效模式仲裁与规则浏览卡片选择直接服务 automation 浏览闭环，不持配置权威、不写数据库"
   },
   {
     "path": "src/orchestrator/index.ts",

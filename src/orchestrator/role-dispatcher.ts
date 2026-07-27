@@ -116,7 +116,7 @@ import {
 import type {
   ApplyFacebookRuleViewResult,
   FacebookRuleActionState,
-} from '../config/facebook-rule-mode-store.js';
+} from '../kernel/facebook-rule-mode-types.js';
 import {
   selectFacebookRuleCard,
   stableFacebookRuleContentKey,

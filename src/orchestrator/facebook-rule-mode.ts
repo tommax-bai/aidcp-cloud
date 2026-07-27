@@ -1,12 +1,8 @@
 import type { PageCardsData } from '../event-bus/types.js';
+import type { FacebookBrowseMode } from '../kernel/facebook-rule-mode-types.js';
 import { facebookPostKey, hasObviousHighRiskFacebookCaption } from '../platform/facebook-presented-video.js';
 
-export type FacebookBrowseMode =
-  | 'facebook_rule'
-  | 'persona'
-  | 'slow_start'
-  | 'blocked'
-  | 'unsupported';
+export type { FacebookBrowseMode } from '../kernel/facebook-rule-mode-types.js';
 
 export interface FacebookRuleModeDecision {
   mode: FacebookBrowseMode;

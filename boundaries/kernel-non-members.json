@@ -2,7 +2,7 @@
   "sourceOfTruth": "aidcp/docs/cloud-service-decomposition-proposal.md §4.7「kernel 段」（花名册 + 新增唯一通道 + 两处待裁决项）与 §10.9（协议归属终局裁决）。",
   "rule": "本文件登记「被多边共同导入、但 MUST NOT 进 kernel」的文件及其原因。门禁对每一条断言：路径仍存在，且其归属层不是 kernel。这些文件的多边共导本身是违规，进 import 豁免清单等待削减，MUST NOT 靠改归属绕过。",
   "kernelRoster": {
-    "note": "kernel 花名册以定稿 §4.7 kernel 段为唯一权威。本基线原为 4 文件 251 行；change lift-shared-contracts-to-kernel 抬入 4 个纯共享契约（soul-types / interaction-types / persona-format / title-clamp），均满足 §4.7 kernel 准入（无 SQL / 无 HTTP / 无 LLM / 无进程内活状态 / 不反向依赖业务层，逐条见 ownership-rules.json 对应 fileOverride 的 basis）。这 4 条是【待定稿裁决】：请求控制仓回写 §4.7 kernel 段的花名册与计数，见 docpatch RK1。新增成员 MUST 先走 §4.7 的三条通道（准入 + 析出为独立新文件 + 同批回写 §4.7 目录行与计数）。",
+    "note": "kernel 花名册以定稿 §4.7 kernel 段为唯一权威。本基线原为 4 文件 251 行；后续纯共享契约的每次增量都必须满足准入、析出独立文件、同批回写 §4.7 三条通道。change facebook-rule-mode-cadence 新增 facebook-rule-mode-types.ts，控制仓 §4.7 已同步裁定；它只含固定定义、纯 DTO 和结果 union，供 api 配置面与 automation 运行面共导。",
     "members": [
       "src/time/shanghai-day.ts",
       "src/time/source-published-time.ts",
@@ -88,6 +88,7 @@
       "src/kernel/event-fanout-port.ts",
       "src/kernel/risk-contract.ts",
       "src/kernel/facebook-publish-media-types.ts",
+      "src/kernel/facebook-rule-mode-types.ts",
       "src/kernel/persona-ports.ts",
       "src/kernel/default-chat-provider.ts",
       "src/kernel/account-pause-port.ts",

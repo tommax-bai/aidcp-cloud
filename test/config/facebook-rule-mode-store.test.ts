@@ -7,6 +7,7 @@ import {
   FACEBOOK_RULE_VIEW_THRESHOLD,
   FacebookRuleModeStore,
 } from '../../src/config/facebook-rule-mode-store.js';
+import { FacebookRuleModeRuntimeStore } from '../../src/orchestrator/facebook-rule-mode-runtime-store.js';
 import type { SchemaProber } from '../../src/kernel/schema-capability-contract.js';
 
 interface ProgressRow {
@@ -276,15 +277,44 @@ const readySchema: SchemaProber = async (_client, tables) => ({
 });
 
 function store(pool: pg.Pool, target: 'dev' | 'ol') {
-  return new FacebookRuleModeStore({
+  const configStore = new FacebookRuleModeStore({ pool, schemaProber: readySchema });
+  const runtimeStore = new FacebookRuleModeRuntimeStore({
     pool,
     executionTarget: target,
     schemaProber: readySchema,
   });
+  return {
+    async init() {
+      await configStore.init();
+      await runtimeStore.init();
+    },
+    getConfig: (accountId: string) => configStore.getConfig(accountId),
+    setAccount: (
+      accountId: string,
+      patch: { enabled?: boolean },
+      updatedBy: string,
+    ) => configStore.setAccount(accountId, patch, updatedBy),
+    async getView(accountId: string) {
+      return {
+        config: configStore.getConfig(accountId),
+        runtime: await runtimeStore.getRuntimeView(accountId),
+      };
+    },
+    applyConfirmedView: (input: {
+      accountId: string;
+      contentKey: string;
+      sourceDedupeKey: string;
+      occurredAt: number;
+    }) => runtimeStore.applyConfirmedView(input),
+    updateBatch: (
+      batchId: string,
+      patch: Parameters<FacebookRuleModeRuntimeStore['updateBatch']>[1],
+    ) => runtimeStore.updateBatch(batchId, patch),
+  };
 }
 
 async function apply(
-  targetStore: FacebookRuleModeStore,
+  targetStore: ReturnType<typeof store>,
   index: number,
   overrides: Partial<{ accountId: string; contentKey: string; sourceDedupeKey: string }> = {},
 ) {
@@ -322,7 +352,6 @@ describe('FacebookRuleModeStore config authority', () => {
     const db = memoryDatabase({ 'fb-1': 'facebook' });
     const targetStore = new FacebookRuleModeStore({
       pool: db.pool,
-      executionTarget: 'dev',
       schemaProber: async () => ({
         tables: new Set(),
         columns: new Set(),
@@ -340,7 +369,6 @@ describe('FacebookRuleModeStore config authority', () => {
     const bumped: string[] = [];
     const targetStore = new FacebookRuleModeStore({
       pool: db.pool,
-      executionTarget: 'dev',
       schemaProber: readySchema,
       mirrorVersionBumper: {
         bumpDomain: 'api',

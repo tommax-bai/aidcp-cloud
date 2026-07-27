@@ -1,6 +1,6 @@
 # generated from boundaries/table-ownership.json — DO NOT EDIT BY HAND
 # regenerate: npx tsx scripts/db-split/generate-owner-table-lists.ts
-# owner=automation count=48
+# owner=automation count=51
 alerts
 anchor_staging
 anchors
@@ -20,6 +20,9 @@ facebook_group_membership
 facebook_group_target
 facebook_group_target_scope
 facebook_region_comment_template_config
+facebook_rule_batch
+facebook_rule_progress
+facebook_rule_view_fact
 group_route
 hot_lead_queue
 interaction_api_requests

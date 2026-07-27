@@ -43,7 +43,7 @@ import type {
   ContactCommentAttemptAudit,
 } from '../kernel/api-direct-port.js';
 import type { FacebookRuleModeView } from './facebook-rule-mode-store.js';
-import type { FacebookBrowseMode } from '../orchestrator/facebook-rule-mode.js';
+import type { FacebookBrowseMode } from '../kernel/facebook-rule-mode-types.js';
 
 const { Pool } = pg;
 

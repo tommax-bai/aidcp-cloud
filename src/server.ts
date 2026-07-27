@@ -586,8 +586,12 @@ import {
 import { FacebookCommentConfigStore } from './config/facebook-comment-config-store.js';
 import {
   FacebookRuleModeStore,
-  type FacebookRuleActionState,
 } from './config/facebook-rule-mode-store.js';
+import { FacebookRuleModeRuntimeStore } from './orchestrator/facebook-rule-mode-runtime-store.js';
+import type {
+  FacebookRuleActionState,
+  FacebookRuleModeView,
+} from './kernel/facebook-rule-mode-types.js';
 import { decideFacebookBrowseMode } from './orchestrator/facebook-rule-mode.js';
 import { FacebookCommentAuditStore } from './comment-agent/facebook-comment-audit-store.js';
 import {
@@ -1008,6 +1012,7 @@ interface CompositionContext {
   facebookCommentAuditStore: FacebookCommentAuditStore;
   facebookCommentConfigStore: FacebookCommentConfigStore;
   facebookRuleModeStore?: FacebookRuleModeStore;
+  facebookRuleModeRuntimeStore?: FacebookRuleModeRuntimeStore;
   facebookGroupJoinAuditStore: FacebookGroupJoinAuditStore;
   facebookGroupJoinAutomationStore: FacebookGroupJoinAutomationStore;
   facebookGroupMembershipStore: FacebookGroupMembershipStore;
@@ -2127,10 +2132,15 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   const facebookRuleModeStore = deploymentTarget
     ? new FacebookRuleModeStore({
         configPool: configMirrorPool,
+        schemaProber: probeSchemaShape,
+        mirrorVersionBumper: mirrorVersionStore,
+      })
+    : undefined;
+  const facebookRuleModeRuntimeStore = deploymentTarget
+    ? new FacebookRuleModeRuntimeStore({
         runtimePool: automationPool,
         executionTarget: deploymentTarget,
         schemaProber: probeSchemaShape,
-        mirrorVersionBumper: mirrorVersionStore,
       })
     : undefined;
   // Facebook 定时评论每次触发的审计行（facebook-scheduled-comment 2.7）：best-effort、不阻塞主链路。
@@ -2237,6 +2247,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     await facebookGroupJoinAutomationStore.init();
     await facebookCommentConfigStore.init();
     await facebookRuleModeStore?.init();
+    await facebookRuleModeRuntimeStore?.init();
     await facebookCommentAuditStore.init();
     await facebookGroupTargetStore.init();
     await facebookGroupMembershipStore.init();
@@ -3175,6 +3186,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.facebookCommentAuditStore = facebookCommentAuditStore;
   ctx.facebookCommentConfigStore = facebookCommentConfigStore;
   ctx.facebookRuleModeStore = facebookRuleModeStore;
+  ctx.facebookRuleModeRuntimeStore = facebookRuleModeRuntimeStore;
   ctx.facebookGroupJoinAuditStore = facebookGroupJoinAuditStore;
   ctx.facebookGroupJoinAutomationStore = facebookGroupJoinAutomationStore;
   ctx.facebookGroupMembershipStore = facebookGroupMembershipStore;
@@ -3843,7 +3855,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountState, accountStore, apiPool, automationPool, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookRuleModeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore } = ctx;
+  const { accountDisplayName, accountState, accountStore, apiPool, automationPool, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookRuleModeStore, facebookRuleModeRuntimeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore } = ctx;
   const seamMode = serviceModeFromEnv();
   let apiDirectPorts = ctx.apiDirectAuthorities ?? {};
   if (seamMode === 'automation') {
@@ -4281,7 +4293,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       loadScopes: (accountIds) => facebookGroupTargetStore.scopedTargetCountsForAccounts(accountIds),
       loadRecentResults: (accountIds) => facebookGroupJoinAuditStore.latestScheduledResults(accountIds),
     });
-    if (!facebookRuleModeStore) return projected;
+    if (!facebookRuleModeStore || !facebookRuleModeRuntimeStore) return projected;
     if (configMirrorGate.isStale('content_schedule')) {
       console.warn('[facebook-rule] catalog projection unavailable: content_schedule mirror stale');
       return projected;
@@ -4290,7 +4302,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       if (row.platform !== 'facebook') return row;
       try {
         const [view, controller] = await Promise.all([
-          facebookRuleModeStore.getView(row.accountId),
+          Promise.all([
+            Promise.resolve(facebookRuleModeStore.getConfig(row.accountId)),
+            facebookRuleModeRuntimeStore.getRuntimeView(row.accountId),
+          ]).then(([config, runtime]): FacebookRuleModeView => ({ config, runtime })),
           resolveController(row.accountId),
         ]);
         const decision = decideFacebookBrowseMode({
@@ -6464,10 +6479,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           slowStart: ctx.controller.slowStartView(),
         });
       },
-      ...(facebookRuleModeStore
+      ...(facebookRuleModeStore && facebookRuleModeRuntimeStore
         ? {
-            applyFacebookRuleView: (input) => facebookRuleModeStore.applyConfirmedView(input),
-            updateFacebookRuleBatch: (batchId, patch) => facebookRuleModeStore.updateBatch(batchId, patch),
+            applyFacebookRuleView: (input) => facebookRuleModeRuntimeStore.applyConfirmedView(input),
+            updateFacebookRuleBatch: (batchId, patch) => facebookRuleModeRuntimeStore.updateBatch(batchId, patch),
             explainRuleJoin: () => ctx.controller.explain('join_group'),
             triggerFacebookRuleJoinContact: async (accountId: string) => {
               if (!commentScheduler) return { started: false, reason: 'comment_scheduler_unavailable' };
@@ -7615,7 +7630,7 @@ function crossSegment<T>(
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, apiFeishuOwner, approvalPolicyStore, approvePublishForClient, automationPool, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookRuleModeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, apiFeishuOwner, approvalPolicyStore, approvePublishForClient, automationPool, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookRuleModeStore, facebookRuleModeRuntimeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
   // ── Block④ 三仓提取 · 批次 0c：面板配置外观从 segC 上提到本段 ────────────────────────
   // 判据＝**构造只依赖 segA**（llm / modelConfigStore / 六个配置 store 全在 segA）。它们只被本段消费，
   // 原先建在 segC 再经 ctx 绕一圈回来 —— 那让 api 模式白白依赖 automation 段。就地建，零跨段依赖。
@@ -8612,9 +8627,12 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             set: (accountId, patch, updatedBy) =>
               facebookCommentConfigStore.setAccount(accountId, patch, updatedBy),
           },
-          facebookRuleMode: facebookRuleModeStore
+          facebookRuleMode: facebookRuleModeStore && facebookRuleModeRuntimeStore
             ? {
-                get: (accountId) => facebookRuleModeStore.getView(accountId),
+                get: async (accountId) => ({
+                  config: facebookRuleModeStore.getConfig(accountId),
+                  runtime: await facebookRuleModeRuntimeStore.getRuntimeView(accountId),
+                }),
                 set: (accountId, patch, updatedBy) =>
                   facebookRuleModeStore.setAccount(accountId, patch, updatedBy),
               }
