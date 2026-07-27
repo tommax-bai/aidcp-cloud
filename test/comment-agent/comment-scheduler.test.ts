@@ -790,6 +790,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     /** 开帖回读的帖子正文/他人评论（读了再写：喂给撰写器）。 */
     postText?: string;
     comments?: string[];
+    /** 空关键词首帖可返回 canonical permalink 或 Edge 同页 targetRef。 */
+    firstPostTarget?: string;
   } = {}): {
     deps: CommentSchedulerDeps;
     audits: Audit[];
@@ -828,7 +830,9 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
           }
         } else if (env.type === 'note.open') {
           const payload = env.payload as { url?: string; selection?: string };
-          const url = payload.selection === 'first_commentable_group_post' ? PERMALINK : payload.url;
+          const url = payload.selection === 'first_commentable_group_post'
+            ? cfg.firstPostTarget ?? PERMALINK
+            : payload.url;
           if (cfg.openOk === false) {
             bus.emit('action.completed', { action: 'open_note', ok: false, reason: cfg.openReason ?? 'editor_not_found', ts: 0 } as never);
           } else {
@@ -951,6 +955,33 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(composeArgs[0].keyword, '');
     assert.equal(composeArgs[0].postText, '群内首帖正文');
     assert.deepEqual(composeArgs[0].comments, ['首帖评论']);
+  });
+
+  it('空关键词 permalinkless 首帖：targetRef 贯穿去重、审批和提交', async () => {
+    const targetRef = `aidcp:facebook-group-feed-post:v1:${'c3'.repeat(32)}`;
+    const { deps, audits, posted, envelopes, dedupRecorded } = fbFlowDeps({
+      keywords: [],
+      firstPostTarget: targetRef,
+      submit: { ok: true },
+      postText: '群内没有 permalink 的首帖正文',
+    });
+    const approvals: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      approval: {
+        request: async (request) => { approvals.push(request.noteId); },
+        isApproved: async () => true,
+        timeoutMs: 20,
+        pollMs: 1,
+      },
+    }).triggerManual('fb-1');
+    await tick();
+
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.deepEqual(posted, ['note.open', 'interaction.comment']);
+    assert.deepEqual(approvals, [targetRef]);
+    assert.equal(envelopes.find((env) => env.type === 'interaction.comment')?.payload.noteId, targetRef);
+    assert.deepEqual(dedupRecorded, [targetRef]);
   });
 
   it('空关键词首帖已评过：不顺延第二帖、不搜索、不提交', async () => {
@@ -1904,9 +1935,10 @@ describe('join-comment 结果卡不泄露裸群 id/URL', () => {
       ['timeout', /读取超时/],
       ['no_candidates', /有界下滚探测后仍未找到/],
       ['editor_not_found', /评论入口未就绪或不可用/],
+      ['ambiguous_target', /帖子边界或评论入口不唯一/],
       ['target_context_mismatch', /帖子身份或上下文无法唯一确认/],
       ['all_deduped', /已评论过/],
-      ['invalid_target', /链接无效/],
+      ['invalid_target', /目标无效/],
       ['open_failed', /打开失败/],
     ] as const;
     for (const [reason, expected] of cases) {

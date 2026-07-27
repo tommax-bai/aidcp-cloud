@@ -10,6 +10,7 @@ import {
   FACEBOOK_COMMENT_SUBMIT_BASE_MS,
   FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS,
   FACEBOOK_COMMENT_SUBMIT_MAX_MS,
+  isFacebookFirstPostTargetRef,
 } from '../../src/comment-agent/facebook-edge-steps.js';
 
 interface Env {
@@ -157,6 +158,49 @@ describe('buildFacebookEdgeSteps', () => {
 
     const r = await steps(bus, pusher).openFirstPost('https://www.facebook.com/groups/1');
     assert.deepEqual(r, { ok: true, permalink, postText: '首帖正文' });
+  });
+
+  it('openFirstPost：接受严格的 Edge 同页 targetRef，并原样用于评论', async () => {
+    const bus = new EventBus();
+    const targetRef = `aidcp:facebook-group-feed-post:v1:${'a1'.repeat(32)}`;
+    const { pusher, sent } = makePusher((env) => {
+      if (env.type === 'note.open') {
+        bus.emit('note.detail.arrived', {
+          detail: { noteId: targetRef, content: '无 permalink 的首帖正文' },
+          ts: 0,
+        } as never);
+      }
+      if (env.type === 'interaction.comment') {
+        bus.emit('action.completed', { action: 'comment', ok: true, ts: 0 } as never);
+      }
+    });
+
+    const open = await steps(bus, pusher).openFirstPost('https://www.facebook.com/groups/1');
+    assert.deepEqual(open, { ok: true, targetRef, postText: '无 permalink 的首帖正文' });
+    assert.equal(isFacebookFirstPostTargetRef(targetRef), true);
+    const submit = await steps(bus, pusher).submitComment(targetRef, 'good 6666');
+    assert.equal(submit.ok, true);
+    assert.equal(sent.at(-1)?.payload.noteId, targetRef);
+  });
+
+  it('openFirstPost：拒绝畸形 targetRef；ordinary open 也不接受严格 targetRef', async () => {
+    const bus = new EventBus();
+    const malformed = `aidcp:facebook-group-feed-post:v1:${'A1'.repeat(32)}`;
+    const strict = `aidcp:facebook-group-feed-post:v1:${'b2'.repeat(32)}`;
+    const { pusher, sent } = makePusher((env) => {
+      if (env.type === 'note.open') {
+        bus.emit('note.detail.arrived', { detail: { noteId: malformed }, ts: 0 } as never);
+      }
+    });
+    const first = await steps(bus, pusher, 30).openFirstPost('https://www.facebook.com/groups/1');
+    assert.equal(first.ok, false);
+    assert.equal(first.reason, 'timeout');
+    assert.equal(isFacebookFirstPostTargetRef(malformed), false);
+
+    sent.length = 0;
+    const ordinary = await steps(bus, pusher).openPost(strict);
+    assert.deepEqual(ordinary, { ok: false, reason: 'invalid_target' });
+    assert.deepEqual(sent, []);
   });
 
   it('openFirstPost：透传 Native 有界探测的具体失败原因', async () => {

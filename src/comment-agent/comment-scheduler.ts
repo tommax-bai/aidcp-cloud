@@ -150,9 +150,10 @@ export function commentOutcomeReason(c: FacebookCommentRunResult): string {
       if (c.reason === 'timeout') return '群内首帖读取超时，未进入评论';
       if (c.reason === 'no_candidates') return '有界下滚探测后仍未找到可评论的群内首帖';
       if (c.reason === 'editor_not_found') return '已找到群内首帖，但评论入口未就绪或不可用';
+      if (c.reason === 'ambiguous_target') return '群内首帖的帖子边界或评论入口不唯一，未评论';
       if (c.reason === 'target_context_mismatch') return '已打开群内首帖，但帖子身份或上下文无法唯一确认';
       if (c.reason === 'all_deduped') return '群内首帖已评论过，本次未重复评论';
-      if (c.reason === 'invalid_target') return '群内首帖链接无效';
+      if (c.reason === 'invalid_target') return '群内首帖目标无效';
       if (c.reason === 'open_failed' || c.reason === 'nav_error') return '群内首帖打开失败';
       return '群内未找到合适的可评论帖子';
     case 'compose_skipped':
@@ -974,7 +975,7 @@ export class CommentScheduler {
           } else {
             // 空关键词：不发 search.execute，Edge 直接选择并打开群讨论流第一条可评论帖子。
             open = await steps.openFirstPost(containerUrl);
-            target = open.permalink;
+            target = open.permalink ?? open.targetRef;
             if (!open.ok || !target) {
               audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason ?? 'invalid_target', shadow, container });
               if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
@@ -987,7 +988,8 @@ export class CommentScheduler {
             }
           }
 
-          // 两种定位策略在此收敛：都必须已经打开精确 permalink，并读回该目标正文 + 顶部他人评论。
+          // 两种定位策略在此收敛：搜索必须是 canonical permalink；空关键词首帖也可使用 Edge 在
+          // 当前 keep-open 页面内签发的严格 targetRef。两者都已读回同一目标正文 + 顶部他人评论。
           if (!open.ok) {
             audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow, keyword, container });
             if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
@@ -1038,7 +1040,7 @@ export class CommentScheduler {
 
           // 5) 结构化账号/来源审批策略是唯一审批授权；未接线/超时/拒绝均不提交。
           const approved = await this.approveFacebookComment(accountId, {
-            permalink: target,
+            target,
             text: v.text,
             ...(contactInfo ? { contactInfo } : {}),
             container,
@@ -1199,7 +1201,7 @@ export class CommentScheduler {
    */
   private async approveFacebookComment(
     accountId: string,
-    input: { permalink: string; text: string; contactInfo?: string | null; container: string; coverageRelaxed?: boolean },
+    input: { target: string; text: string; contactInfo?: string | null; container: string; coverageRelaxed?: boolean },
     approvalMode: ContentScheduleApprovalMode = 'review',
     originChatId?: string,
   ): Promise<{ text: string; contactInfo?: string } | null> {
@@ -1217,7 +1219,7 @@ export class CommentScheduler {
         notify: this.deps.autoApproveNotify,
         payload: {
           requestId,
-          noteId: input.permalink,
+          noteId: input.target,
           text: reviewText,
           title,
           authorName: 'Facebook',
@@ -1240,7 +1242,7 @@ export class CommentScheduler {
     try {
       await approval.request({
         requestId,
-        noteId: input.permalink,
+        noteId: input.target,
         text: reviewText,
         title,
         authorName: 'Facebook',

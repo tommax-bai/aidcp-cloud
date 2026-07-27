@@ -63,6 +63,14 @@ function canonicalFacebookPostKey(value: string | undefined): string | null {
   return key && key !== value ? key : null;
 }
 
+const FACEBOOK_FIRST_POST_TARGET_PREFIX = 'aidcp:facebook-group-feed-post:v1:';
+
+export function isFacebookFirstPostTargetRef(value: string | undefined): boolean {
+  return typeof value === 'string'
+    && value.startsWith(FACEBOOK_FIRST_POST_TARGET_PREFIX)
+    && /^[0-9a-f]{64}$/.test(value.slice(FACEBOOK_FIRST_POST_TARGET_PREFIX.length));
+}
+
 function isCanonicalFacebookGroupPostPermalink(value: string): boolean {
   if (!canonicalFacebookPostKey(value)) return false;
   try {
@@ -119,8 +127,10 @@ export interface FacebookSearchStepResult {
 export interface FacebookOpenStepResult {
   ok: boolean;
   reason?: string;
-  /** First-post mode returns the selected stable permalink as the actual target. */
+  /** First-post mode returns this only when Facebook exposed a canonical group-post URL. */
   permalink?: string;
+  /** First-post-only Edge-issued live-container target; never a Facebook permalink or post ID. */
+  targetRef?: string;
   /** 帖子文字正文（图片帖常空）+ 顶部他人评论（change facebook-comment-read-before-write）——供撰写器读了再写。 */
   postText?: string;
   comments?: string[];
@@ -185,7 +195,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
   searchInContainer(keyword: string, container: string): Promise<FacebookSearchStepResult>;
   openFirstPost(container: string): Promise<FacebookOpenStepResult>;
   openPost(url: string): Promise<FacebookOpenStepResult>;
-  submitComment(permalink: string, text: string, groupChatCode?: string, fastReturnToFeed?: boolean): Promise<FacebookCommentStepResult>;
+  submitComment(target: string, text: string, groupChatCode?: string, fastReturnToFeed?: boolean): Promise<FacebookCommentStepResult>;
 } {
   const timeout = deps.stepTimeoutMs ?? FACEBOOK_STEP_TIMEOUT_MS;
   // 开帖步专用上界（边端先答，见 FACEBOOK_OPEN_STEP_TIMEOUT_MS）。与上一行同形：显式注入优先（测试用小值快速验超时），
@@ -252,7 +262,13 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
         return { ok: false, reason: 'invalid_target' };
       }
       const outcome = await sendAndRace<
-        { kind: 'detail'; permalink: string; postText?: string; comments?: string[] } | { kind: 'fail'; reason: string }
+        {
+          kind: 'detail';
+          target: string;
+          canonical: boolean;
+          postText?: string;
+          comments?: string[];
+        } | { kind: 'fail'; reason: string }
       >(
         deps.bus,
         [
@@ -260,15 +276,17 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
             event: 'note.detail.arrived',
             match: (data) => {
               const d = data as NoteDetailArrived;
-              const permalink = String(d.detail?.noteId ?? '').trim();
-              if (!isCanonicalFacebookGroupPostPermalink(permalink)) {
+              const target = String(d.detail?.noteId ?? '').trim();
+              const canonical = isCanonicalFacebookGroupPostPermalink(target);
+              if (!canonical && !isFacebookFirstPostTargetRef(target)) {
                 return undefined;
               }
               const postText = (d.detail.content ?? '').trim();
               const comments = Array.isArray(d.detail.comments) ? d.detail.comments : [];
               return {
                 kind: 'detail',
-                permalink,
+                target,
+                canonical,
                 ...(postText ? { postText } : {}),
                 ...(comments.length > 0 ? { comments } : {}),
               };
@@ -297,7 +315,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
       if (outcome.kind === 'fail') return { ok: false, reason: outcome.reason };
       return {
         ok: true,
-        permalink: outcome.permalink,
+        ...(outcome.canonical ? { permalink: outcome.target } : { targetRef: outcome.target }),
         ...(outcome.postText ? { postText: outcome.postText } : {}),
         ...(outcome.comments ? { comments: outcome.comments } : {}),
       };
@@ -346,7 +364,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
       return { ok: true, ...(outcome.postText ? { postText: outcome.postText } : {}), ...(outcome.comments ? { comments: outcome.comments } : {}) };
     },
 
-    async submitComment(permalink, text, groupChatCode, fastReturnToFeed = false) {
+    async submitComment(target, text, groupChatCode, fastReturnToFeed = false) {
       // 长度感知超时（P0-1）：长评论逐字输入+提交后 reload/校验整段耗时可超固定 28s；用文案长度放大提交步超时，
       // 让慢但成功的提交等到真实回执（ok / verification_ambiguous，两者都会打去重标记），杜绝「误判 timeout → 再发一条」。
       const submitTimeout = facebookCommentSubmitTimeoutMs(text, timeout);
@@ -366,7 +384,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
         () =>
           push(
             makeEnvelope('interaction.comment', randomUUID(), Date.now(), {
-              noteId: permalink,
+              noteId: target,
               text,
               ...(groupChatCode && groupChatCode.length > 0 ? { groupChatCode } : {}),
               ...(fastReturnToFeed ? { fastReturnToFeed: true } : {}),

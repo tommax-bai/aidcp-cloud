@@ -859,8 +859,10 @@ export interface NoteOpenPayload {
    */
   url?: string;
   /**
-   * Facebook 评论无关键词路径（change facebook-join-contact-first-post）：
-   * 从 `container` 群讨论流选择第一条具备稳定 permalink 且可评论的顶层帖子，再打开并上报详情。
+   * Facebook 评论无关键词路径（changes facebook-join-contact-first-post,
+   * facebook-first-post-container-fallback）：从 `container` 群讨论流选择第一条可评论帖子。
+   * 有 canonical permalink 时进入详情；无 permalink 但可唯一绑定同页帖子容器时，就地读取并用严格
+   * `aidcp:facebook-group-feed-post:v1:<sha256>` targetRef 作为 note.detail.noteId。
    * 这是只读选帖/开帖，不得伪装成 `search.execute`；缺省保持既有按 url/noteId/index 开帖语义。
    */
   selection?: 'first_commentable_group_post';
@@ -1512,6 +1514,7 @@ export interface InteractionFollowPayload {
 export interface InteractionCommentPayload {
   /** 评论 commit 任务租约。 */
   taskId?: string;
+  /** canonical note id；或仅在 Facebook 首帖 keep-open 流内使用 Edge 签发的严格同页 targetRef。 */
   noteId: string;
   /** 评论正文（云端已撰写 / 去AI味 / 人审通过后下发）。边缘**逐字符拟人输入**这一段。 */
   text: string;
@@ -1651,6 +1654,7 @@ export interface NoteImagePayload {
 }
 
 export interface NoteDetailPayload {
+  /** canonical note id；或 Facebook 首帖选择返回的严格同页 targetRef（不得当作 permalink 展示）。 */
   noteId: string;
   title: string;
   content: string;
