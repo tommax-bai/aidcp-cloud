@@ -17,7 +17,7 @@ export interface FacebookContainer {
 
 export type FacebookCommentMode = 'generated' | 'template';
 
-/** fail-closed 生效判定：关键词 + 正文模式配置（目标群由 joined ledger 另行选择）。 */
+/** fail-closed 生效判定：正文模式必须可用；关键词为空表示群内首帖模式（目标群由 joined ledger 另行选择）。 */
 export interface EffectiveFacebookCommentConfig {
   enabled: boolean;
   keywords: string[];

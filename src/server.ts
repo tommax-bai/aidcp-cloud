@@ -588,7 +588,11 @@ import {
   FacebookGroupTargetStore,
 } from './comment-agent/facebook-group-store.js';
 import { FacebookGroupJoinScheduler } from './comment-agent/facebook-group-join-scheduler.js';
-import { ContentScheduler } from './orchestrator/content-scheduler.js';
+import {
+  ContentScheduler,
+  scheduledContactCommentLabel,
+  scheduledContactCommentOptions,
+} from './orchestrator/content-scheduler.js';
 import { isWeekActiveAt } from './risk/session-limits.js';
 import { createRolePromptProvider } from './config/role-prompt-preview.js';
 import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from './publish-agent/prompts-preview.js';
@@ -7006,39 +7010,41 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               },
               isCommentBusy: (accountId: string) => commentScheduler!.isRunning(accountId),
               commentedTodayCount: (accountId: string) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
-              // 联系评论两件套（change content-schedule-group-comments → generalize-contact-info）：同一评论机器 + injectContact，
-              // 尝试型持久日上限——触发回执 ok（任务真开跑）即记 attempt（被人审拒/无目标也占额度，保守方向）。
+              // 联系评论两件套：Facebook = 加群评论（联系），先 joinFirst 再 injectContact 评论；
+              // 其它平台维持既有联系评论。触发回执 ok 才记持久 attempt。
               triggerContactComment: async (accountId: string, approvalMode) => {
+                let actionLabel = '联系评论';
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
                   await deliverStructuredNotification({
                     kind: 'command_result',
                     input: {
-                        command: '排期联系评论（自动）',
-                        ok: false,
-                        level,
-                        title,
-                        message,
-                        accountId,
-                      },
-                    })
-                    .catch((e) => console.warn('[content-scheduler] 排期联系评论回执卡发送失败：', (e as Error).message));
+                      command: `排期${actionLabel}（自动）`,
+                      ok: false,
+                      level,
+                      title,
+                      message,
+                      accountId,
+                    },
+                  })
+                    .catch((e) => console.warn(`[content-scheduler] 排期${actionLabel}回执卡发送失败：`, (e as Error).message));
                 };
                 try {
+                  const platform = await accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu';
+                  actionLabel = scheduledContactCommentLabel(platform);
                   const controller = await resolveController(accountId);
                   if (!controller.canDo('comment')) {
-                    await sendReceiptCard('warning', '排期联系评论：配额拒绝，本槽未触发', `风控 canDo('comment')=false（自动路径必过配额；手动 /comment --contact 不受此限）`);
+                    await sendReceiptCard('warning', `排期${actionLabel}：配额拒绝，本槽未触发`, `风控 canDo('comment')=false（自动路径必过配额；手动 /comment --contact 不受此限）`);
                     return;
                   }
-                  const receipt = await commentScheduler!.triggerManual(accountId, {
-                    injectContact: true,
-                    priority: 'automatic',
-                    approvalMode,
-                  });
+                  const receipt = await commentScheduler!.triggerManual(
+                    accountId,
+                    scheduledContactCommentOptions(platform, approvalMode),
+                  );
                   if (!receipt.ok) {
                     // 瞬时未开始：归还小时格、本小时内有界重试；不发卡（放弃时统一发一张）。不占尝试额度。
                     if (receipt.code) return { started: false, reason: receipt.code };
                     // 持久性未触发（缺联系方式 fail-closed / 未绑人设 / 在跑）：透传回执如实回卡；不占尝试额度。
-                    await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期联系评论：${receipt.title}`, receipt.message);
+                    await sendReceiptCard(receipt.level === 'error' ? 'error' : 'warning', `排期${actionLabel}：${receipt.title}`, receipt.message);
                     return;
                   }
                   // 任务真开跑 → 记一条持久 attempt（尝试型日上限；重启不清零、绝不超发）。终态结果卡评论链自补。
@@ -7048,7 +7054,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                   }
                   await configCommands.recordContactCommentAttempt(accountId);
                 } catch (e) {
-                  await sendReceiptCard('error', '排期联系评论：触发异常', (e as Error).message);
+                  await sendReceiptCard('error', `排期${actionLabel}：触发异常`, (e as Error).message);
                 }
               },
               contactAttemptsTodayCount: (accountId: string) =>
@@ -7075,7 +7081,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
             await deliverStructuredNotification({
               kind: 'command_result',
               input: {
-                  command: `排期${action === 'comment' ? '评论' : action === 'contact_comment' ? '联系评论' : action === 'join' ? '加群' : '发帖'}（自动）`,
+                command: `排期${action === 'comment'
+                  ? '评论'
+                  : action === 'contact_comment'
+                    ? scheduledContactCommentLabel(await accountStore?.getPlatform?.(accountId) ?? 'xiaohongshu')
+                    : action === 'join'
+                      ? '加群'
+                      : '发帖'}（自动）`,
                   ok: false,
                   level: 'warning',
                   title: '本小时未能开始，已放弃',

@@ -141,7 +141,7 @@ export function joinOnlyReceipt(join: {
 export function commentOutcomeReason(c: FacebookCommentRunResult): string {
   switch (c.outcome) {
     case 'no_targets':
-      return c.reason === 'no_keywords' ? '该账号未配置 Facebook 评论关键词' : '群内无可评论目标';
+      return '群内无可评论目标';
     case 'no_strong_candidate':
       return '群内未找到合适的可评论帖子';
     case 'compose_skipped':
@@ -806,16 +806,15 @@ export class CommentScheduler {
     const shadow = false;
 
     const cfg = d.facebookConfigFor!(accountId);
-    if (cfg.keywords.length === 0) {
-      audit({ accountId, outcome: 'no_targets', reason: 'no_keywords', shadow, ...(manualTarget ? { container: manualTarget } : {}) });
-      return;
-    }
     if (cfg.commentMode === 'template' && cfg.commentTemplates.length === 0) {
       audit({ accountId, outcome: 'compose_skipped', reason: 'empty_template', shadow, ...(manualTarget ? { container: manualTarget } : {}) });
       return;
     }
 
-    const keyword = cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0];
+    // 关键词是定位策略而非启用闸：有词走群内搜索；空词直接打开群讨论流第一条可评论帖。
+    const keyword = cfg.keywords.length > 0
+      ? (cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0] ?? '')
+      : '';
     let containerUrl: string;
     let container: string;
     let coverageCfg: FacebookCoverageCommentConfig | undefined;
@@ -895,45 +894,61 @@ export class CommentScheduler {
           });
           const dedup = d.dedupFor(accountId);
 
-          // 1) 容器内搜索候选帖（边端只在 joined/pinned 群内搜、绝不全站）。用 url 下发。
-          const search = await steps.searchInContainer(keyword, containerUrl);
-          // 边缘回传的真实群名 → 回填配置容器名（人只看群名、不看 id）；本轮后续审计也改用真名。
-          if (search.containerName) {
-            container = search.containerName;
-            void d.facebookResolveContainerName?.(accountId, containerUrl, search.containerName);
-          }
-          if (!search.ok) {
-            audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow, keyword, container });
-            if (usingCoverage && search.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, search.reason);
-            return;
-          }
-          // 2) 选一个未评过的候选（防重复真发：跳过 dedup 已标记的 permalink）。
-          // --force（manual-comment-force-flag）：放开每帖去重，直接取第一个候选（已评过的也可再评）；否则跳过已评过的。
           let target: string | undefined;
-          if (options.force) {
-            target = search.candidates[0]?.permalink;
-          } else {
-            for (const c of search.candidates) {
-              const seen = await dedup.hasInteracted(c.permalink, 'comment').catch(() => false);
-              if (!seen) {
-                target = c.permalink;
-                break;
+          let open: Awaited<ReturnType<typeof steps.openPost>>;
+          if (keyword) {
+            // 有关键词：维持既有群内搜索 → 候选 → 开帖链，绝不回落首帖。
+            const search = await steps.searchInContainer(keyword, containerUrl);
+            if (search.containerName) {
+              container = search.containerName;
+              void d.facebookResolveContainerName?.(accountId, containerUrl, search.containerName);
+            }
+            if (!search.ok) {
+              audit({ accountId, outcome: mapFacebookBlockOutcome(search.reason), reason: search.reason, shadow, keyword, container });
+              if (usingCoverage && search.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, search.reason);
+              return;
+            }
+            // --force 放开每帖去重；否则按搜索顺序找第一条未评候选。
+            if (options.force) {
+              target = search.candidates[0]?.permalink;
+            } else {
+              for (const c of search.candidates) {
+                const seen = await dedup.hasInteracted(c.permalink, 'comment').catch(() => false);
+                if (!seen) {
+                  target = c.permalink;
+                  break;
+                }
               }
             }
+            if (!target) {
+              audit({
+                accountId,
+                outcome: 'no_strong_candidate',
+                reason: search.candidates.length === 0 ? 'no_candidates' : 'all_deduped',
+                shadow,
+                keyword,
+                container,
+              });
+              return;
+            }
+            open = await steps.openPost(target);
+          } else {
+            // 空关键词：不发 search.execute，Edge 直接选择并打开群讨论流第一条可评论帖子。
+            open = await steps.openFirstPost(containerUrl);
+            target = open.permalink;
+            if (!open.ok || !target) {
+              audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason ?? 'invalid_target', shadow, container });
+              if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
+              return;
+            }
+            if (!options.force && await dedup.hasInteracted(target, 'comment').catch(() => false)) {
+              // “首帖”是确定目标；已评过也不顺延第二帖、不偷偷改走搜索。
+              audit({ accountId, outcome: 'no_strong_candidate', reason: 'all_deduped', shadow, container });
+              return;
+            }
           }
-          if (!target) {
-            audit({
-              accountId,
-              outcome: 'no_strong_candidate',
-              reason: search.candidates.length === 0 ? 'no_candidates' : 'all_deduped',
-              shadow,
-              keyword,
-              container,
-            });
-            return;
-          }
-          // 3) 开帖（permalink 直驱详情页），读回帖子正文（图片帖常空）+ 顶部他人评论。
-          const open = await steps.openPost(target);
+
+          // 两种定位策略在此收敛：都必须已经打开精确 permalink，并读回该目标正文 + 顶部他人评论。
           if (!open.ok) {
             audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow, keyword, container });
             if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
@@ -952,11 +967,15 @@ export class CommentScheduler {
             audit({ accountId, outcome: 'compose_skipped', reason: 'empty_compose', shadow, keyword, container });
             return;
           }
-          // 只拒不修的确定性校验（llm-output-honesty）：相关性以「关键词 + 帖子正文 + 他人评论」为语境
-          //（评论既由这些产出、天然相关；仍守零重叠即拒的兜底）。任一违规 → compose_skipped 终局，绝不修复后发。
+          // 只拒不修的确定性校验（llm-output-honesty）。配置了关键词时，相关性以「关键词 + 帖子正文 +
+          // 他人评论」为语境；空关键词首帖模式没有稳定的词法锚点，帖子整段文本（尤其 CJK）不能冒充
+          // “关键词”做子串闸，否则自然改写几乎必被 weak_relevance 误拒。该模式由读上下文 prompt + 人审/免审策略把关，
+          // 链接、联系方式、@、刷屏、长度、低信号等确定性安全闸仍全部执行。
           // --force（manual-comment-force-flag）：传空 targetKeywords → 校验器 keywords.length>0 守卫使相关性分支 no-op；
           // 但 url/联系方式/@提及/刷屏/长度/低信号等**安全校验**在其之前、照常执行（force 绝不放开安全校验）。
-          const relevanceCtx = options.force ? [] : [keyword, ...(postText ? [postText] : []), ...comments].filter(Boolean);
+          const relevanceCtx = options.force || !keyword
+            ? []
+            : [keyword, ...(postText ? [postText] : []), ...comments].filter(Boolean);
           const v = validateFacebookComment(draft, { targetKeywords: relevanceCtx });
           if (!v.ok) {
             audit({ accountId, outcome: 'compose_skipped', reason: v.reason, shadow, keyword, container, textLength: draft.length });

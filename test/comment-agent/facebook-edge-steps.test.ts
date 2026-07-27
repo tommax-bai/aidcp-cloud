@@ -118,6 +118,46 @@ describe('buildFacebookEdgeSteps', () => {
     assert.equal(sent[0].payload.url, url);
   });
 
+  it('openFirstPost：下发群内首帖选择，不发 search.execute，并接受实际群帖 permalink', async () => {
+    const bus = new EventBus();
+    const container = 'https://www.facebook.com/groups/1';
+    const permalink = 'https://www.facebook.com/groups/1/posts/2';
+    const { pusher, sent } = makePusher((env) => {
+      if (env.type === 'note.open') {
+        bus.emit('note.detail.arrived', {
+          detail: { noteId: permalink, content: '首帖正文', comments: ['首条评论'] },
+          ts: 0,
+        } as never);
+      }
+    });
+    const r = await steps(bus, pusher).openFirstPost(container);
+    assert.deepEqual(r, {
+      ok: true,
+      permalink,
+      postText: '首帖正文',
+      comments: ['首条评论'],
+    });
+    assert.deepEqual(sent.map((env) => env.type), ['note.open']);
+    assert.equal(sent[0].payload.selection, 'first_commentable_group_post');
+    assert.equal(sent[0].payload.container, container);
+    assert.equal(sent[0].payload.url, undefined);
+  });
+
+  it('openFirstPost：边端回非群帖 permalink 不误认，最终诚实超时', async () => {
+    const bus = new EventBus();
+    const { pusher } = makePusher((env) => {
+      if (env.type === 'note.open') {
+        bus.emit('note.detail.arrived', {
+          detail: { noteId: 'https://www.facebook.com/123/posts/2', content: '背景帖' },
+          ts: 0,
+        } as never);
+      }
+    });
+    const r = await steps(bus, pusher, 30).openFirstPost('https://www.facebook.com/groups/1');
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'timeout');
+  });
+
   it('open：note.detail 的 noteId 不匹配 url → 不误认（超时）', async () => {
     const bus = new EventBus();
     const { pusher } = makePusher((env) => {

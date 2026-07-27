@@ -62,11 +62,11 @@ test('getForAccount: 缺行返回空默认（供面板回显）', () => {
   });
 });
 
-test('effectiveConfigFor: fail-closed — 无关键词或模板模式无模板则不生效；容器不再决定启用', async () => {
+test('effectiveConfigFor: 空关键词启用首帖模式；模板模式无模板仍不生效；容器不再决定启用', async () => {
   const { pool } = fakePool();
   const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
-  // 空配置
-  assert.equal(store.effectiveConfigFor('acc-1').enabled, false);
+  // 生成模式空关键词是合法的“群内首帖”策略；目标群由 joined ledger 运行时选择。
+  assert.equal(store.effectiveConfigFor('acc-1').enabled, true);
   // 只有关键词、无 legacy 容器 → 生成模式仍生效；目标群由 joined ledger 运行时选择。
   await store.setAccount('acc-1', { keywords: ['coffee'], containers: [] }, 'panel:op');
   const generated = store.effectiveConfigFor('acc-1');

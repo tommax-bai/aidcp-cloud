@@ -859,6 +859,14 @@ export interface NoteOpenPayload {
    */
   url?: string;
   /**
+   * Facebook 评论无关键词路径（change facebook-join-contact-first-post）：
+   * 从 `container` 群讨论流选择第一条具备稳定 permalink 且可评论的顶层帖子，再打开并上报详情。
+   * 这是只读选帖/开帖，不得伪装成 `search.execute`；缺省保持既有按 url/noteId/index 开帖语义。
+   */
+  selection?: 'first_commentable_group_post';
+  /** `selection='first_commentable_group_post'` 的 Facebook 群完整链接；其它 note.open 调用省略。 */
+  container?: string;
+  /**
    * 浏览读取所在界面（change platform-browse-protocol，可选）。'detail'=导航进详情页读取（今天默认）；
    * 'feed'=在信息流就地展开读取、不离开列表（Facebook 就地浏览，旗标+能力 gated）。缺省='detail'⇒逐位等价。
    */

@@ -96,6 +96,8 @@ export interface FacebookSearchStepResult {
 export interface FacebookOpenStepResult {
   ok: boolean;
   reason?: string;
+  /** First-post mode returns the selected stable permalink as the actual target. */
+  permalink?: string;
   /** 帖子文字正文（图片帖常空）+ 顶部他人评论（change facebook-comment-read-before-write）——供撰写器读了再写。 */
   postText?: string;
   comments?: string[];
@@ -158,6 +160,7 @@ function sendAndRace<T>(
 
 export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
   searchInContainer(keyword: string, container: string): Promise<FacebookSearchStepResult>;
+  openFirstPost(container: string): Promise<FacebookOpenStepResult>;
   openPost(url: string): Promise<FacebookOpenStepResult>;
   submitComment(permalink: string, text: string, groupChatCode?: string, fastReturnToFeed?: boolean): Promise<FacebookCommentStepResult>;
 } {
@@ -219,6 +222,62 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
       }
       if (outcome.kind === 'fail') return { ok: false, reason: outcome.reason, candidates: [] };
       return { ok: true, candidates: outcome.cards, ...(outcome.containerName ? { containerName: outcome.containerName } : {}) };
+    },
+
+    async openFirstPost(container) {
+      if (!container.trim()) {
+        return { ok: false, reason: 'invalid_target' };
+      }
+      const outcome = await sendAndRace<
+        { kind: 'detail'; permalink: string; postText?: string; comments?: string[] } | { kind: 'fail'; reason: string }
+      >(
+        deps.bus,
+        [
+          {
+            event: 'note.detail.arrived',
+            match: (data) => {
+              const d = data as NoteDetailArrived;
+              const permalink = String(d.detail?.noteId ?? '').trim();
+              if (!canonicalFacebookPostKey(permalink) || !/\/groups\/[^/]+\/(?:posts|permalink)\//i.test(permalink)) {
+                return undefined;
+              }
+              const postText = (d.detail.content ?? '').trim();
+              const comments = Array.isArray(d.detail.comments) ? d.detail.comments : [];
+              return {
+                kind: 'detail',
+                permalink,
+                ...(postText ? { postText } : {}),
+                ...(comments.length > 0 ? { comments } : {}),
+              };
+            },
+          },
+          {
+            event: 'action.completed',
+            match: (data) => {
+              const d = data as ActionCompleted;
+              if (d.action !== 'open_note') return undefined;
+              return { kind: 'fail', reason: d.reason ?? 'open_failed' };
+            },
+          },
+        ],
+        openTimeout,
+        () => push(makeEnvelope('note.open', randomUUID(), Date.now(), {
+          selection: 'first_commentable_group_post',
+          container,
+          ...(deps.taskId ? { taskId: deps.taskId } : {}),
+        } as never)),
+      );
+      if (outcome === null) {
+        log.warn?.('[fb-edge-steps] first-post open 超时/离线');
+        return { ok: false, reason: 'timeout' };
+      }
+      if (outcome.kind === 'fail') return { ok: false, reason: outcome.reason };
+      return {
+        ok: true,
+        permalink: outcome.permalink,
+        ...(outcome.postText ? { postText: outcome.postText } : {}),
+        ...(outcome.comments ? { comments: outcome.comments } : {}),
+      };
     },
 
     async openPost(url) {

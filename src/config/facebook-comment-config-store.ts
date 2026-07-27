@@ -5,7 +5,7 @@
  * 运行时容器来自账号已加入群组账本；legacy containers 仍保留用于回滚 / 旧数据读取。
  *
  * 安全不变量（复刻 QuotaConfigStore / ContentScheduleStore）：
- * - fail-closed：关键词为空，或模板模式无模板 → effectiveConfigFor().enabled=false（不生效、诚实 no-op）。
+ * - fail-closed：模板模式无模板 → effectiveConfigFor().enabled=false；关键词为空是合法首帖模式。
  * - 写库成功才刷内存镜像（避免「镜像已变、库未变」不一致）。
  * - 绝不造幽灵行：setAccount 写前校验 accounts 存在；退役保留账号拒。
  * - 非法值（非字符串数组）整块拒 invalid_value，不静默丢弃。
@@ -237,12 +237,12 @@ export class FacebookCommentConfigStore {
     );
   }
 
-  /** 调度器消费点：fail-closed 收口——目标群由 joined ledger 另行选择。 */
+  /** 调度器消费点：正文来源 fail-closed；关键词为空是首帖模式，目标群由 joined ledger 另行选择。 */
   effectiveConfigFor(accountId: string): EffectiveFacebookCommentConfig {
     const row = this.getForAccount(accountId);
     const hasBodySource = row.commentMode === 'generated' || row.commentTemplates.length > 0;
     return {
-      enabled: row.keywords.length > 0 && hasBodySource,
+      enabled: hasBodySource,
       keywords: row.keywords,
       containers: row.containers,
       commentMode: row.commentMode,

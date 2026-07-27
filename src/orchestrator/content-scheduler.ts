@@ -32,6 +32,27 @@ export interface OnlineAccountIdentity {
 
 export type VerifiedOnlineAccountIdentity = OnlineAccountIdentity & { envKey: string };
 
+export function scheduledContactCommentLabel(platform: PlatformId): string {
+  return platform === 'facebook' ? '加群评论（联系）' : '联系评论';
+}
+
+export function scheduledContactCommentOptions(
+  platform: PlatformId,
+  approvalMode: ContentScheduleApprovalMode,
+): {
+  injectContact: true;
+  priority: 'automatic';
+  approvalMode: ContentScheduleApprovalMode;
+  joinFirst?: true;
+} {
+  return {
+    injectContact: true,
+    priority: 'automatic',
+    approvalMode,
+    ...(platform === 'facebook' ? { joinFirst: true as const } : {}),
+  };
+}
+
 export interface ScheduledPostExecution {
   executionTarget: DeploymentTarget;
   envKey: string;
@@ -119,7 +140,8 @@ export interface ContentSchedulerDeps {
   joinAutomationFor?(accountId: string): { enabled: boolean; dailyCap: number; weekMask: string | null };
   /**
    * 联系评论两件套（change content-schedule-group-comments）。可选：任一未注入 → 该动作整体跳过（零回归）。
-   * triggerContactComment 实现负责 canDo('comment') 配额闸 + triggerManual(injectContact:true) + 回执 ok 记持久 attempt +
+   * Facebook 映射为“加群评论（联系）”，triggerManual(injectContact:true,joinFirst:true)；
+   * 其它平台维持 triggerManual(injectContact:true)。实现负责 canDo('comment') 配额闸 + 回执 ok 记持久 attempt +
    * 触发失败回黄卡（缺联系方式 fail-closed 由触发回执透传；终态结果卡评论链自补）。单飞复用 isCommentBusy（同一评论机器）。
    */
   triggerContactComment?(accountId: string, approvalMode: ContentScheduleApprovalMode): Promise<unknown>;

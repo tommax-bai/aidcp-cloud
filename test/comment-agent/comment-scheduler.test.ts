@@ -632,7 +632,17 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
           if (e.type === 'search.execute') {
             bus.emit('page.cards.arrived', { cards: [{ index: 0, noteId: 'https://fb.com/g/1/posts/9' }], ts: 0 } as never);
           } else if (e.type === 'note.open') {
-            bus.emit('note.detail.arrived', { detail: { noteId: (e.payload as { url?: string }).url, content: '', comments: ['原评论：手冲咖啡真香'] }, ts: 0 } as never);
+            const payload = e.payload as { url?: string; selection?: string };
+            bus.emit('note.detail.arrived', {
+              detail: {
+                noteId: payload.selection === 'first_commentable_group_post'
+                  ? 'https://www.facebook.com/groups/1/posts/9'
+                  : payload.url,
+                content: '',
+                comments: ['原评论：手冲咖啡真香'],
+              },
+              ts: 0,
+            } as never);
           } else if (e.type === 'interaction.comment') {
             bus.emit('action.completed', { action: 'comment', ok: true, ts: 0 } as never);
           }
@@ -643,7 +653,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
       stepTimeoutMs: 60,
       random: () => 0,
       facebookConfigFor: () => ({
-        enabled: (over.keywords ?? ['咖啡']).length > 0 && ((over.commentMode ?? 'generated') === 'generated' || (over.commentTemplates ?? []).length > 0),
+        enabled: (over.commentMode ?? 'generated') === 'generated' || (over.commentTemplates ?? []).length > 0,
         keywords: over.keywords ?? ['咖啡'],
         containers: (over.containers ?? ['g1']).map((u) => ({ url: u })),
         commentMode: over.commentMode ?? 'generated',
@@ -651,7 +661,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
       }),
       facebookCoverageConfigFor: () => ({
         coverageEnabled: true,
-        enabled: (over.keywords ?? ['咖啡']).length > 0 && (over.containers ?? ['g1']).length > 0,
+        enabled: ((over.commentMode ?? 'generated') === 'generated' || (over.commentTemplates ?? []).length > 0)
+          && (over.containers ?? ['g1']).length > 0,
         keywords: over.keywords ?? ['咖啡'],
         containers: (over.containers ?? ['g1']).map((u) => ({ url: u })),
         commentMode: over.commentMode ?? 'generated',
@@ -759,6 +770,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
 
   /** FB 真发流水线的假边端：按命令类型 emit 对应上报到同一私有总线；可配搜索失败/开帖失败/提交结果/候选集。 */
   function fbFlowDeps(cfg: {
+    keywords?: string[];
     candidates?: string[];
     searchFail?: string;
     openOk?: boolean;
@@ -811,7 +823,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
             } as never);
           }
         } else if (env.type === 'note.open') {
-          const url = (env.payload as { url?: string }).url;
+          const payload = env.payload as { url?: string; selection?: string };
+          const url = payload.selection === 'first_commentable_group_post' ? PERMALINK : payload.url;
           if (cfg.openOk === false) {
             bus.emit('action.completed', { action: 'open_note', ok: false, reason: cfg.openReason ?? 'editor_not_found', ts: 0 } as never);
           } else {
@@ -854,7 +867,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       }),
       facebookConfigFor: () => ({
         enabled: true,
-        keywords: ['咖啡'],
+        keywords: cfg.keywords ?? ['咖啡'],
         containers: [{ url: 'https://www.facebook.com/groups/legacy-config' }],
         commentMode: cfg.commentMode ?? 'generated',
         commentTemplates: cfg.commentTemplates ?? [],
@@ -862,7 +875,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       facebookCoverageConfigFor: () => ({
         coverageEnabled: true,
         enabled: (cfg.coverageContainers ?? ['https://www.facebook.com/groups/1']).length > 0,
-        keywords: ['咖啡'],
+        keywords: cfg.keywords ?? ['咖啡'],
         containers: (cfg.coverageContainers ?? ['https://www.facebook.com/groups/1']).map((url) => ({ url })),
         commentMode: cfg.commentMode ?? 'generated',
         commentTemplates: cfg.commentTemplates ?? [],
@@ -895,6 +908,40 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     // 群名自动回填：边缘回传真名 → 调 resolveContainerName（url→真名）；审计用群名、不用 id。
     assert.deepEqual(resolvedNames, [{ url: 'https://www.facebook.com/groups/1', name: 'Puerto Rico Y Sus Encantos e Historia' }]);
     assert.equal(audits.at(-1)?.container, 'Puerto Rico Y Sus Encantos e Historia');
+  });
+
+  it('空关键词：直接取群内首帖→评论，不发 search.execute、不回退搜索', async () => {
+    const { deps, audits, posted, envelopes, dedupRecorded, composeArgs } = fbFlowDeps({
+      keywords: [],
+      submit: { ok: true },
+      postText: '群内首帖正文',
+      comments: ['首帖评论'],
+    });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.deepEqual(posted, ['note.open', 'interaction.comment']);
+    const open = envelopes.find((env) => env.type === 'note.open');
+    assert.equal(open?.payload.selection, 'first_commentable_group_post');
+    assert.equal(open?.payload.container, 'https://www.facebook.com/groups/1');
+    assert.equal(open?.payload.url, undefined);
+    assert.deepEqual(dedupRecorded, [PERMALINK]);
+    assert.equal(composeArgs[0].keyword, '');
+    assert.equal(composeArgs[0].postText, '群内首帖正文');
+    assert.deepEqual(composeArgs[0].comments, ['首帖评论']);
+  });
+
+  it('空关键词首帖已评过：不顺延第二帖、不搜索、不提交', async () => {
+    const { deps, audits, posted, dedupRecorded } = fbFlowDeps({
+      keywords: [],
+      seen: [PERMALINK],
+    });
+    await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'no_strong_candidate');
+    assert.equal(audits.at(-1)?.reason, 'all_deduped');
+    assert.deepEqual(posted, ['note.open']);
+    assert.deepEqual(dedupRecorded, []);
   });
 
   // ── change facebook-manual-comment-keepopen-lease：keep-open 租约贯穿人审、三命令透传 taskId ──

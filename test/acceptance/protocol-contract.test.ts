@@ -165,8 +165,9 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.deepEqual((back!.payload as SessionEndPayload).autoResumeInMs, 60_000);
   });
 
-  it('AC-PROTO-08 Facebook 定向评论可选载荷字段往返存活（container / url，防两端静默漂移）', () => {
-    // change facebook-scheduled-comment 给 search.execute 加 container?、note.open 加 url?（复用消息、零新增类型）。
+  it('AC-PROTO-08 Facebook 定向评论可选载荷字段往返存活（container / url / selection，防两端静默漂移）', () => {
+    // change facebook-scheduled-comment 给 search.execute 加 container?、note.open 加 url?；
+    // change facebook-join-contact-first-post 再给 note.open 加 selection?/container?（复用消息、零新增类型）。
     // 两份 protocol.ts 须逐字镜像这两个字段；typecheck 的 MessageType 穷举抓不到可选字段漂移，故此往返断言兜底。
     const search: SearchExecutePayload = {
       keyword: '咖啡',
@@ -184,6 +185,14 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const open: NoteOpenPayload = { url: 'https://www.facebook.com/groups/123456/posts/999' };
     const openBack = parseEnvelope(JSON.stringify(makeEnvelope('note.open', 'o-1', 1700000000000, open)));
     assert.equal((openBack!.payload as NoteOpenPayload).url, 'https://www.facebook.com/groups/123456/posts/999');
+
+    const firstOpen: NoteOpenPayload = {
+      selection: 'first_commentable_group_post',
+      container: 'https://www.facebook.com/groups/123456',
+    };
+    const firstOpenBack = parseEnvelope(JSON.stringify(makeEnvelope('note.open', 'o-2', 1700000000000, firstOpen)));
+    assert.equal((firstOpenBack!.payload as NoteOpenPayload).selection, 'first_commentable_group_post');
+    assert.equal((firstOpenBack!.payload as NoteOpenPayload).container, 'https://www.facebook.com/groups/123456');
   });
 
   it('AC-PROTO-08B comment --feed 快返字段往返存活（防两端静默漂移）', () => {
