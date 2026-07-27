@@ -410,10 +410,43 @@ export type CreateProvisioningIntentResult =
   | { ok: true; intentId: string; proof: string; expiresAt: number }
   | { ok: false; reason: 'disabled' | 'schema_unavailable' };
 
+export type EnvironmentProxyType = 'http' | 'https' | 'socks5';
+export type EnvironmentProxyAuthorityValue =
+  | { state: 'no_proxy' }
+  | {
+      state: 'configured';
+      proxyType: EnvironmentProxyType;
+      proxyHost: string;
+      proxyPort: number;
+      proxyUser: string;
+      proxyPassword: string;
+    };
+
+export interface EnvironmentProxyAuthorityRecord {
+  envKey: string;
+  authority: EnvironmentProxyAuthorityValue;
+  revision: number;
+  source: 'provisioning' | 'edge_edit' | 'local_migration' | 'admin';
+  updatedAt: number;
+}
+
+export type ReadEnvironmentProxyAuthorityResult =
+  | { ok: true; record: EnvironmentProxyAuthorityRecord }
+  | { ok: false; reason: 'environment_not_owned' | 'uninitialized' | 'schema_unavailable' };
+
+export type WriteEnvironmentProxyAuthorityResult =
+  | { ok: true; record: EnvironmentProxyAuthorityRecord }
+  | {
+      ok: false;
+      reason: 'invalid_authority' | 'environment_not_owned' | 'proxy_authority_conflict' | 'schema_unavailable';
+      currentRevision?: number;
+    };
+
 export type CompleteProvisioningIntentResult =
   | { ok: true; environment: ClientEnvScopeRow; idempotent: boolean }
   | { ok: false; reason: 'disabled' | 'invalid_intent' | 'intent_expired' | 'intent_target_mismatch' |
-      'invalid_environment' | 'environment_already_registered' | 'env_already_assigned' };
+      'invalid_environment' | 'invalid_proxy_authority' | 'proxy_authority_mismatch' |
+      'environment_already_registered' | 'env_already_assigned' | 'schema_unavailable' };
 
 /**
  * 一条离场的对外视图。
@@ -495,6 +528,93 @@ const ENV_KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const PROVISIONING_INTENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROVISIONING_PROOF_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const PROVISIONING_PLATFORMS = new Set(['xiaohongshu', 'facebook', 'wechat_channels']);
+const ENVIRONMENT_PROXY_TYPES = new Set<EnvironmentProxyType>(['http', 'https', 'socks5']);
+
+interface EnvironmentProxyAuthorityDbRow {
+  env_key: string;
+  state: 'configured' | 'no_proxy';
+  proxy_type: EnvironmentProxyType | null;
+  proxy_host: string | null;
+  proxy_port: number | null;
+  proxy_user: string | null;
+  proxy_password: string | null;
+  revision: number;
+  source: EnvironmentProxyAuthorityRecord['source'];
+  updated_at: Date;
+}
+
+export function normalizeEnvironmentProxyAuthority(value: unknown): EnvironmentProxyAuthorityValue | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.state === 'no_proxy') {
+    return Object.keys(raw).length === 1 ? { state: 'no_proxy' } : null;
+  }
+  const allowed = new Set(['state', 'proxyType', 'proxyHost', 'proxyPort', 'proxyUser', 'proxyPassword']);
+  if (raw.state !== 'configured' || Object.keys(raw).some((key) => !allowed.has(key))) return null;
+  const proxyType = String(raw.proxyType ?? '').trim().toLowerCase() as EnvironmentProxyType;
+  const proxyHost = String(raw.proxyHost ?? '').trim();
+  const proxyPort = typeof raw.proxyPort === 'number' ? raw.proxyPort : Number.NaN;
+  const proxyUser = typeof raw.proxyUser === 'string' ? raw.proxyUser : '';
+  const proxyPassword = typeof raw.proxyPassword === 'string' ? raw.proxyPassword : '';
+  if (!ENVIRONMENT_PROXY_TYPES.has(proxyType) ||
+      !proxyHost || proxyHost.length > 512 || /\s/.test(proxyHost) ||
+      !Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535 ||
+      proxyUser.length > 512 || proxyPassword.length > 2048 ||
+      (proxyPassword.length > 0 && proxyUser.length === 0)) {
+    return null;
+  }
+  return { state: 'configured', proxyType, proxyHost, proxyPort, proxyUser, proxyPassword };
+}
+
+function proxyAuthorityValuesEqual(
+  left: EnvironmentProxyAuthorityValue,
+  right: EnvironmentProxyAuthorityValue,
+): boolean {
+  if (left.state !== right.state) return false;
+  if (left.state === 'no_proxy' || right.state === 'no_proxy') return true;
+  return left.proxyType === right.proxyType &&
+    left.proxyHost === right.proxyHost &&
+    left.proxyPort === right.proxyPort &&
+    left.proxyUser === right.proxyUser &&
+    left.proxyPassword === right.proxyPassword;
+}
+
+function mapProxyAuthorityRow(row: EnvironmentProxyAuthorityDbRow): EnvironmentProxyAuthorityRecord {
+  const authority: EnvironmentProxyAuthorityValue = row.state === 'no_proxy'
+    ? { state: 'no_proxy' }
+    : {
+        state: 'configured',
+        proxyType: row.proxy_type as EnvironmentProxyType,
+        proxyHost: String(row.proxy_host),
+        proxyPort: Number(row.proxy_port),
+        proxyUser: String(row.proxy_user),
+        proxyPassword: String(row.proxy_password),
+      };
+  return {
+    envKey: row.env_key,
+    authority,
+    revision: Number(row.revision),
+    source: row.source,
+    updatedAt: row.updated_at.getTime(),
+  };
+}
+
+function proxyAuthoritySqlValues(authority: EnvironmentProxyAuthorityValue): [
+  EnvironmentProxyType | null,
+  string | null,
+  number | null,
+  string | null,
+  string | null,
+] {
+  if (authority.state === 'no_proxy') return [null, null, null, null, null];
+  return [
+    authority.proxyType,
+    authority.proxyHost,
+    authority.proxyPort,
+    authority.proxyUser,
+    authority.proxyPassword,
+  ];
+}
 
 function provisioningProofHash(proof: string): string {
   return crypto.createHash('sha256').update(proof, 'utf8').digest('hex');
@@ -1192,6 +1312,122 @@ export class ClientUserStore {
     }
   }
 
+  async readEnvironmentProxyAuthority(
+    userId: string,
+    envKeyInput: string,
+  ): Promise<ReadEnvironmentProxyAuthorityResult> {
+    const envKey = String(envKeyInput || '').trim();
+    if (!userId || !ENV_KEY_PATTERN.test(envKey)) {
+      return { ok: false, reason: 'environment_not_owned' };
+    }
+    try {
+      const { rows } = await this.pool.query<EnvironmentProxyAuthorityDbRow & { owned_env_key: string }>(
+        `SELECT e.env_key AS owned_env_key,
+                a.env_key,a.state,a.proxy_type,a.proxy_host,a.proxy_port,a.proxy_user,a.proxy_password,
+                a.revision,a.source,a.updated_at
+           FROM client_env_scope s
+           JOIN client_environments e
+             ON e.env_key=s.env_key AND e.lifecycle_state='active'
+           LEFT JOIN client_environment_proxy_authorities a ON a.env_key=e.env_key
+          WHERE s.user_id=$1 AND s.env_key=$2 AND s.source='admin'`,
+        [userId, envKey],
+      );
+      const row = rows[0];
+      if (!row) return { ok: false, reason: 'environment_not_owned' };
+      if (!row.env_key) return { ok: false, reason: 'uninitialized' };
+      return { ok: true, record: mapProxyAuthorityRow(row) };
+    } catch (error) {
+      if (isMissingTable(error)) return { ok: false, reason: 'schema_unavailable' };
+      throw error;
+    }
+  }
+
+  async writeEnvironmentProxyAuthority(
+    userId: string,
+    envKeyInput: string,
+    input: {
+      expectedRevision: number | null;
+      authority: unknown;
+      source: 'edge_edit' | 'local_migration';
+    },
+  ): Promise<WriteEnvironmentProxyAuthorityResult> {
+    const envKey = String(envKeyInput || '').trim();
+    const authority = normalizeEnvironmentProxyAuthority(input.authority);
+    const expectedRevision = input.expectedRevision;
+    if (!userId || !ENV_KEY_PATTERN.test(envKey)) {
+      return { ok: false, reason: 'environment_not_owned' };
+    }
+    if (!authority ||
+        (expectedRevision !== null && (!Number.isInteger(expectedRevision) || expectedRevision < 1)) ||
+        !['edge_edit', 'local_migration'].includes(input.source)) {
+      return { ok: false, reason: 'invalid_authority' };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const owned = await client.query(
+        `SELECT e.env_key
+           FROM client_env_scope s
+           JOIN client_environments e
+             ON e.env_key=s.env_key AND e.lifecycle_state='active'
+          WHERE s.user_id=$1 AND s.env_key=$2 AND s.source='admin'
+          FOR UPDATE OF e`,
+        [userId, envKey],
+      );
+      if (!owned.rows[0]) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'environment_not_owned' };
+      }
+      const currentResult = await client.query<EnvironmentProxyAuthorityDbRow>(
+        `SELECT env_key,state,proxy_type,proxy_host,proxy_port,proxy_user,proxy_password,
+                revision,source,updated_at
+           FROM client_environment_proxy_authorities
+          WHERE env_key=$1
+          FOR UPDATE`,
+        [envKey],
+      );
+      const current = currentResult.rows[0];
+      if ((!current && expectedRevision !== null) ||
+          (current && expectedRevision !== Number(current.revision))) {
+        await client.query('ROLLBACK');
+        return {
+          ok: false,
+          reason: 'proxy_authority_conflict',
+          ...(current ? { currentRevision: Number(current.revision) } : {}),
+        };
+      }
+      const values = proxyAuthoritySqlValues(authority);
+      const written = current
+        ? await client.query<EnvironmentProxyAuthorityDbRow>(
+            `UPDATE client_environment_proxy_authorities
+                SET state=$2,proxy_type=$3,proxy_host=$4,proxy_port=$5,proxy_user=$6,proxy_password=$7,
+                    revision=revision+1,source=$8,updated_by=$9,updated_at=now()
+              WHERE env_key=$1
+              RETURNING env_key,state,proxy_type,proxy_host,proxy_port,proxy_user,proxy_password,
+                        revision,source,updated_at`,
+            [envKey, authority.state, ...values, input.source, userId],
+          )
+        : await client.query<EnvironmentProxyAuthorityDbRow>(
+            `INSERT INTO client_environment_proxy_authorities
+               (env_key,state,proxy_type,proxy_host,proxy_port,proxy_user,proxy_password,
+                revision,source,updated_by,updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,now())
+             RETURNING env_key,state,proxy_type,proxy_host,proxy_port,proxy_user,proxy_password,
+                       revision,source,updated_at`,
+            [envKey, authority.state, ...values, input.source, userId],
+          );
+      await client.query('COMMIT');
+      return { ok: true, record: mapProxyAuthorityRow(written.rows[0]) };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (isMissingTable(error)) return { ok: false, reason: 'schema_unavailable' };
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   /**
    * Cloud 权威完成“本次程序化新建”：锁 user+intent，核 proof/TTL，再在同一事务中登记
    * 从未出现过的 envKey、写入唯一 active owner、标记 intent completed。任何拒绝均不部分落库。
@@ -1205,6 +1441,7 @@ export class ClientUserStore {
       label?: string | null;
       platform?: string | null;
       slowStartEnabled?: boolean;
+      proxyAuthority: unknown;
     },
   ): Promise<CompleteProvisioningIntentResult> {
     const intentId = String(input.intentId || '').trim();
@@ -1213,6 +1450,7 @@ export class ClientUserStore {
     const label = String(input.label || '').trim().slice(0, 256) || null;
     const platformText = String(input.platform || '').trim().toLowerCase();
     const platform = PROVISIONING_PLATFORMS.has(platformText) ? platformText : null;
+    const proxyAuthority = normalizeEnvironmentProxyAuthority(input.proxyAuthority);
     if (!userId) return { ok: false, reason: 'disabled' };
     if (!PROVISIONING_INTENT_ID_PATTERN.test(intentId) || !PROVISIONING_PROOF_PATTERN.test(proof)) {
       return { ok: false, reason: 'invalid_intent' };
@@ -1220,6 +1458,7 @@ export class ClientUserStore {
     if (!ENV_KEY_PATTERN.test(envKey) || !platform) {
       return { ok: false, reason: 'invalid_environment' };
     }
+    if (!proxyAuthority) return { ok: false, reason: 'invalid_proxy_authority' };
     if (input.slowStartEnabled === true && platform !== 'facebook') {
       return { ok: false, reason: 'invalid_environment' };
     }
@@ -1265,6 +1504,19 @@ export class ClientUserStore {
             WHERE user_id=$1 AND env_key=$2 AND source='admin'`,
           [userId, envKey],
         );
+        const existingAuthority = await client.query<EnvironmentProxyAuthorityDbRow>(
+          `SELECT env_key,state,proxy_type,proxy_host,proxy_port,proxy_user,proxy_password,
+                  revision,source,updated_at
+             FROM client_environment_proxy_authorities
+            WHERE env_key=$1`,
+          [envKey],
+        );
+        const authorityRow = existingAuthority.rows[0];
+        if (!authorityRow ||
+            !proxyAuthorityValuesEqual(mapProxyAuthorityRow(authorityRow).authority, proxyAuthority)) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'proxy_authority_mismatch' };
+        }
         await client.query('COMMIT');
         const row = existing.rows[0];
         if (!row) return { ok: false, reason: 'env_already_assigned' };
@@ -1292,6 +1544,14 @@ export class ClientUserStore {
         await client.query('ROLLBACK');
         return { ok: false, reason: 'environment_already_registered' };
       }
+      const proxyValues = proxyAuthoritySqlValues(proxyAuthority);
+      await client.query(
+        `INSERT INTO client_environment_proxy_authorities
+           (env_key,state,proxy_type,proxy_host,proxy_port,proxy_user,proxy_password,
+            revision,source,updated_by,updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,1,'provisioning',$8,now())`,
+        [envKey, proxyAuthority.state, ...proxyValues, userId],
+      );
       // 新环境带 slow_start_since 落库 = 慢启动锚点这个**闸门镜像**变了：同事务推进版本，
       // 否则另一 target 的进程到重启前都把这个新号当「未开启慢启动」= 满配额跑。
       await this.mirrorVersionBumper?.bumpInTx(client, 'client_environment_slow_start');
@@ -1316,6 +1576,7 @@ export class ClientUserStore {
         platform: row.platform, source: 'admin', assignedAt: row.assigned_at.getTime() } };
     } catch (error) {
       await client.query('ROLLBACK');
+      if (isMissingTable(error)) return { ok: false, reason: 'schema_unavailable' };
       if ((error as { code?: string; constraint?: string })?.code === '23505') {
         return { ok: false, reason: 'env_already_assigned' };
       }

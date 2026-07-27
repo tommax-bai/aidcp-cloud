@@ -6,7 +6,13 @@ import type {
   ClientAuthDeps,
   ClientEnvironmentRiskRecoveryOutcome,
 } from '../src/client-auth/client-auth-server.js';
-import type { ClientUserStore, ClientEnvScopeRow, ClientOffboardView } from '../src/client-auth/client-user-store.js';
+import type {
+  ClientUserStore,
+  ClientEnvScopeRow,
+  ClientOffboardView,
+  EnvironmentProxyAuthorityRecord,
+  EnvironmentProxyAuthorityValue,
+} from '../src/client-auth/client-user-store.js';
 import { LoginRateLimiter } from '../src/client-auth/rate-limiter.js';
 import { TokenRevocationStore } from '../src/panel/revocation.js';
 import { verifyJwt } from '../src/panel/jwt.js';
@@ -39,6 +45,7 @@ function makeFakeStore(): {
   /** envKey → 环境级慢启动起点。 */
   slowStarts: Map<string, number | null>;
   slowStartWrites: { envKey: string; enabled: boolean }[];
+  proxyAuthorities: Map<string, EnvironmentProxyAuthorityRecord>;
   cleanupGrants: Map<string, { edgeId: string; jtiHash: string; expiresAt: number; used: boolean }>;
 } {
   const users = new Map<string, { userId: string; key: string; status: 'enabled' | 'disabled' }>();
@@ -48,6 +55,7 @@ function makeFakeStore(): {
   const bindings = new Map<string, string>();
   const slowStarts = new Map<string, number | null>();
   const slowStartWrites: { envKey: string; enabled: boolean }[] = [];
+  const proxyAuthorities = new Map<string, EnvironmentProxyAuthorityRecord>();
   const cleanupGrants = new Map<string, { edgeId: string; jtiHash: string; expiresAt: number; used: boolean }>();
   const intents = new Map<string, { userId: string; proof: string; expiresAt: number; envKey?: string }>();
   let nextIntent = 1;
@@ -118,6 +126,40 @@ function makeFakeStore(): {
       slowStarts.set(envKey, enabled ? now : null);
       return this.getEnvironmentSlowStart(userId, envKey);
     },
+    async readEnvironmentProxyAuthority(userId: string, envKey: string) {
+      const owned = (scope.get(userId) ?? []).some((item) => item.envKey === envKey);
+      if (!owned) return { ok: false as const, reason: 'environment_not_owned' as const };
+      const record = proxyAuthorities.get(envKey);
+      return record
+        ? { ok: true as const, record }
+        : { ok: false as const, reason: 'uninitialized' as const };
+    },
+    async writeEnvironmentProxyAuthority(userId: string, envKey: string, input: {
+      expectedRevision: number | null;
+      authority: EnvironmentProxyAuthorityValue;
+      source: 'edge_edit' | 'local_migration';
+    }) {
+      const owned = (scope.get(userId) ?? []).some((item) => item.envKey === envKey);
+      if (!owned) return { ok: false as const, reason: 'environment_not_owned' as const };
+      const current = proxyAuthorities.get(envKey);
+      if ((!current && input.expectedRevision !== null) ||
+          (current && input.expectedRevision !== current.revision)) {
+        return {
+          ok: false as const,
+          reason: 'proxy_authority_conflict' as const,
+          ...(current ? { currentRevision: current.revision } : {}),
+        };
+      }
+      const record: EnvironmentProxyAuthorityRecord = {
+        envKey,
+        authority: input.authority,
+        revision: (current?.revision ?? 0) + 1,
+        source: input.source,
+        updatedAt: Date.now(),
+      };
+      proxyAuthorities.set(envKey, record);
+      return { ok: true as const, record };
+    },
     // 反向：某账号是否可被该客户经其某环境触达（供任务动作归属判定）。同源争用闸。
     async isAccountReachableByUser(userId: string, accountId: string) {
       const acct = (accountId ?? '').trim();
@@ -138,7 +180,7 @@ function makeFakeStore(): {
     },
     async completeProvisioningIntent(userId: string, input: {
       intentId: string; proof: string; envKey: string; label?: string | null; platform?: string | null;
-      slowStartEnabled?: boolean;
+      slowStartEnabled?: boolean; proxyAuthority: EnvironmentProxyAuthorityValue;
     }) {
       const intent = intents.get(input.intentId);
       if (!intent || intent.userId !== userId || intent.proof !== input.proof) {
@@ -151,6 +193,11 @@ function makeFakeStore(): {
         return { ok: false as const, reason: 'invalid_environment' as const };
       }
       if (intent.envKey === input.envKey) {
+        const existingAuthority = proxyAuthorities.get(input.envKey);
+        if (!existingAuthority ||
+            JSON.stringify(existingAuthority.authority) !== JSON.stringify(input.proxyAuthority)) {
+          return { ok: false as const, reason: 'proxy_authority_mismatch' as const };
+        }
         const environment = (scope.get(userId) ?? []).find((item) => item.envKey === input.envKey)!;
         return { ok: true as const, environment, idempotent: true };
       }
@@ -163,6 +210,13 @@ function makeFakeStore(): {
         platform: input.platform ?? null, source: 'admin', assignedAt: Date.now() };
       scope.set(userId, [...(scope.get(userId) ?? []), environment]);
       slowStarts.set(input.envKey, input.slowStartEnabled === true ? Date.now() : null);
+      proxyAuthorities.set(input.envKey, {
+        envKey: input.envKey,
+        authority: input.proxyAuthority,
+        revision: 1,
+        source: 'provisioning',
+        updatedAt: Date.now(),
+      });
       return { ok: true as const, environment, idempotent: false };
     },
     async beginEnvironmentOffboard(userId: string, envKey: string) {
@@ -212,6 +266,7 @@ function makeFakeStore(): {
     bindings,
     slowStarts,
     slowStartWrites,
+    proxyAuthorities,
     cleanupGrants,
   };
 }
@@ -365,6 +420,80 @@ test('/my-environments 只返回本客户归属(N2 权威过滤)', async () => {
       // 无令牌 → 401
       const anon = await fetch(`${base}/my-environments`);
       assert.equal(anon.status, 401);
+    },
+  );
+});
+
+test('proxy authority exact routes enforce ownership and CAS without leaking credentials to roster/errors', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('alice', { userId: 'u1', key: 'ck_alice', status: 'enabled' });
+  fx.users.set('bob', { userId: 'u2', key: 'ck_bob', status: 'enabled' });
+  fx.scope.set('u1', [{ envKey: 'p1', label: 'Alice env', platform: 'facebook', source: 'admin', assignedAt: 0 }]);
+  fx.scope.set('u2', [{ envKey: 'p2', label: 'Bob env', platform: 'facebook', source: 'admin', assignedAt: 0 }]);
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const login = await (await fetch(`${base}/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'alice', key: 'ck_alice' }),
+      })).json() as { token: string };
+      const headers = { authorization: `Bearer ${login.token}`, 'content-type': 'application/json' };
+      const credential = {
+        state: 'configured',
+        proxyType: 'socks5',
+        proxyHost: 'proxy.example',
+        proxyPort: 1080,
+        proxyUser: 'alice-proxy',
+        proxyPassword: 'secret-proxy-password',
+      };
+
+      const created = await fetch(`${base}/environments/p1/proxy-authority`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ expectedRevision: null, source: 'edge_edit', authority: credential }),
+      });
+      assert.equal(created.status, 200);
+      const createdBody = await created.json() as { data: EnvironmentProxyAuthorityRecord };
+      assert.equal(createdBody.data.revision, 1);
+      assert.deepEqual(createdBody.data.authority, credential);
+
+      const read = await fetch(`${base}/environments/p1/proxy-authority`, { headers });
+      assert.equal(read.status, 200);
+      assert.deepEqual((await read.json() as { data: EnvironmentProxyAuthorityRecord }).data.authority, credential);
+
+      const rosterText = await (await fetch(`${base}/my-environments`, { headers })).text();
+      assert.doesNotMatch(rosterText, /alice-proxy|secret-proxy-password/);
+
+      const stale = await fetch(`${base}/environments/p1/proxy-authority`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          expectedRevision: 99,
+          source: 'edge_edit',
+          authority: { state: 'no_proxy' },
+        }),
+      });
+      assert.equal(stale.status, 409);
+      const staleText = await stale.text();
+      assert.match(staleText, /proxy_authority_conflict/);
+      assert.match(staleText, /"currentRevision":1/);
+      assert.doesNotMatch(staleText, /alice-proxy|secret-proxy-password/);
+
+      const foreign = await fetch(`${base}/environments/p2/proxy-authority`, { headers });
+      assert.equal(foreign.status, 404);
+      assert.deepEqual(await foreign.json(), { error: 'environment_not_owned' });
+
+      const cleared = await fetch(`${base}/environments/p1/proxy-authority`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ expectedRevision: 1, source: 'edge_edit', authority: { state: 'no_proxy' } }),
+      });
+      assert.equal(cleared.status, 200);
+      const clearedBody = await cleared.json() as { data: EnvironmentProxyAuthorityRecord };
+      assert.equal(clearedBody.data.revision, 2);
+      assert.deepEqual(clearedBody.data.authority, { state: 'no_proxy' });
     },
   );
 });
@@ -642,7 +771,8 @@ test('官方新建 intent 可原子完成当前客户归属，重试幂等且旧
       assert.equal(issued.status, 201);
       const intent = (await issued.json()) as { data: { intentId: string; proof: string } };
       const completionBody = JSON.stringify({ intentId: intent.data.intentId, proof: intent.data.proof,
-        envKey: 'fresh-env-1', label: '新环境', platform: 'facebook', slowStartEnabled: true });
+        envKey: 'fresh-env-1', label: '新环境', platform: 'facebook', slowStartEnabled: true,
+        proxyAuthority: { state: 'no_proxy' } });
       const completed = await fetch(`${base}/environment-provisioning/complete`, {
         method: 'POST', headers, body: completionBody,
       });
@@ -665,7 +795,8 @@ test('官方新建 intent 可原子完成当前客户归属，重试幂等且旧
       })).json()) as { data: { intentId: string; proof: string } };
       const legacy = await fetch(`${base}/environment-provisioning/complete`, {
         method: 'POST', headers, body: JSON.stringify({ intentId: legacyIntent.data.intentId,
-          proof: legacyIntent.data.proof, envKey: 'fresh-env-legacy', label: '', platform: 'facebook' }),
+          proof: legacyIntent.data.proof, envKey: 'fresh-env-legacy', label: '', platform: 'facebook',
+          proxyAuthority: { state: 'no_proxy' } }),
       });
       assert.equal(legacy.status, 201);
       assert.equal(fx.slowStarts.get('fresh-env-legacy'), null, '旧客户端省略字段时保持关闭');
@@ -676,7 +807,7 @@ test('官方新建 intent 可原子完成当前客户归属，重试幂等且旧
       const xhs = await fetch(`${base}/environment-provisioning/complete`, {
         method: 'POST', headers, body: JSON.stringify({ intentId: xhsIntent.data.intentId,
           proof: xhsIntent.data.proof, envKey: 'fresh-env-xhs', label: '', platform: 'xiaohongshu',
-          slowStartEnabled: true }),
+          slowStartEnabled: true, proxyAuthority: { state: 'no_proxy' } }),
       });
       assert.equal(xhs.status, 400);
       assert.equal(fx.registered.has('fresh-env-xhs'), false);
@@ -706,7 +837,8 @@ test('创建完成不能认领已登记环境，也不能把同一 intent 换到
       })).json()) as { data: { intentId: string; proof: string } };
       const existing = await fetch(`${base}/environment-provisioning/complete`, { method: 'POST', headers,
         body: JSON.stringify({ intentId: intent.data.intentId, proof: intent.data.proof,
-          envKey: 'existing-env', label: '', platform: 'xiaohongshu' }) });
+          envKey: 'existing-env', label: '', platform: 'xiaohongshu',
+          proxyAuthority: { state: 'no_proxy' } }) });
       assert.equal(existing.status, 409);
       assert.equal(((await existing.json()) as { error: string }).error, 'environment_already_registered');
       assert.deepEqual(fx.scope.get('user-a'), undefined);
@@ -716,11 +848,13 @@ test('创建完成不能认领已登记环境，也不能把同一 intent 换到
       })).json()) as { data: { intentId: string; proof: string } };
       const first = await fetch(`${base}/environment-provisioning/complete`, { method: 'POST', headers,
         body: JSON.stringify({ intentId: freshIntent.data.intentId, proof: freshIntent.data.proof,
-          envKey: 'fresh-a', label: '', platform: 'xiaohongshu' }) });
+          envKey: 'fresh-a', label: '', platform: 'xiaohongshu',
+          proxyAuthority: { state: 'no_proxy' } }) });
       assert.equal(first.status, 201);
       const switched = await fetch(`${base}/environment-provisioning/complete`, { method: 'POST', headers,
         body: JSON.stringify({ intentId: freshIntent.data.intentId, proof: freshIntent.data.proof,
-          envKey: 'fresh-b', label: '', platform: 'xiaohongshu' }) });
+          envKey: 'fresh-b', label: '', platform: 'xiaohongshu',
+          proxyAuthority: { state: 'no_proxy' } }) });
       assert.equal(switched.status, 409);
       assert.equal(((await switched.json()) as { error: string }).error, 'intent_target_mismatch');
       assert.deepEqual((fx.scope.get('user-a') ?? []).map((item) => item.envKey), ['fresh-a']);

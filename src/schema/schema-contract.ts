@@ -76,8 +76,39 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * nullable recovery 结果列、环境作用域与 resume 阶段，并把 state check 扩为允许 `applying/refused`。
  * 旧 signal/quota 读写形状不变，
  * 迁移缺失时 recovery owner 写会显式失败并由 outbox 保持重放，故同样只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
+ * 注：`0081_offboard_admission_claims`（change split-cloud-api-composition-root-4a）只给 api
+ * admission ledger 增加 claim/CAS 列与 command receipt inbox。独立 automation 的 offboard
+ * reconcile 依赖该能力；迁移缺失时 API owner route 显式报 schema/SQL 错且 automation 保持
+ * admission pending，不会伪造物化完成。故只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
+ * 注：`0082_api_sync_read_consumer_checkpoint` /
+ * `0083_automation_sync_read_consumer_checkpoint`（change split-cloud-api-composition-root-4b）
+ * 分别建立 api 与 automation consumer 自己的 target-scoped cursor/readiness/health 恢复表。
+ * 两表不保存 owner payload、共享事实或业务 version；独立组合根启用前不承重，缺表时对应 mirror
+ * bootstrap 响亮失败而 monolith 行为不变，故只抬 KNOWN_MAX、不抬 REQUIRED。
+ *
+ * 注：`0084_automation_account_projection_sync_read`（change split-cloud-api-composition-root-4b）
+ * 只给既有共享 B4 投影增加 post-4a 仍有 automation 消费者的 created_at/status；展示与卡片字段
+ * 不进入投影。独立 automation 的相关闸门缺列即能力级 fail-closed，故只抬 KNOWN_MAX。
+ *
+ * 注：`0085_automation_sync_read_owner_generation`（change split-cloud-api-composition-root-4b）
+ * 只持久化 automation A3-A6 的 target-scoped digest/generation/emit-dedup 水位，不保存 runtime
+ * 业务 payload。缺表时独立 runtime snapshot 响亮失败，绝不把进程内重置 cursor 当作恢复。
+ *
+ * 注：`0086_session_config_global_sync_read_revision`（change split-cloud-api-composition-root-4b）
+ * 在 A1 owner 单例行内持久化 shared revision；mask mutation 与 revision 同一 UPSERT，outbox
+ * 清理不影响 snapshot cursor，且不引入平行 revision authority。
+ *
+ * 注：`0087_automation_account_projection_shared_cursor`（change split-cloud-api-composition-root-4b）
+ * 在既有 B4 shared projection-state 行记录 applied cursor/digest，跨 dev/ol 串行防旧快照回退；
+ * target checkpoint 只保留 delivery/readiness。
+ *
+ * 注：`0088_client_environment_proxy_authority`（change cloud-authoritative-environment-proxy）
+ * 为 api owner 增加环境原始代理权威；客户鉴权接口缺表时显式返回 schema unavailable，
+ * Edge 不会回退到 AdsPower 当前执行副本，故只抬 KNOWN_MAX、不抬 monolith REQUIRED。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0080_restricted_recovery_outcome';
+export const KNOWN_MAX_SCHEMA_VERSION = '0088_client_environment_proxy_authority';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

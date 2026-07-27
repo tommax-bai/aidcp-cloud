@@ -111,6 +111,7 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       const completed = await users.completeProvisioningIntent('user-a', {
         intentId: provision.intentId, proof: provision.proof, envKey: 'env-auth-provisioned',
         label: '客户端新建', platform: 'facebook', slowStartEnabled: true,
+        proxyAuthority: { state: 'no_proxy' },
       });
       assert.equal(completed.ok, true);
       if (!completed.ok) return;
@@ -125,6 +126,7 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       const retried = await users.completeProvisioningIntent('user-a', {
         intentId: provision.intentId, proof: provision.proof, envKey: 'env-auth-provisioned',
         label: '客户端新建', platform: 'facebook', slowStartEnabled: true,
+        proxyAuthority: { state: 'no_proxy' },
       });
       assert.equal(retried.ok && retried.idempotent, true);
       assert.equal((await pool.query<{ slow_start_since: Date | null }>(
@@ -132,6 +134,61 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       )).rows[0].slow_start_since, null, '完成重试不得复活已关闭的慢启动');
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_scope
         WHERE env_key='env-auth-provisioned' AND user_id='user-a' AND source='admin'`)).rows[0].n, 1);
+      assert.deepEqual(await users.readEnvironmentProxyAuthority('user-a', 'env-auth-provisioned'), {
+        ok: true,
+        record: {
+          envKey: 'env-auth-provisioned',
+          authority: { state: 'no_proxy' },
+          revision: 1,
+          source: 'provisioning',
+          updatedAt: (await pool.query<{ updated_at: Date }>(
+            `SELECT updated_at FROM client_environment_proxy_authorities WHERE env_key='env-auth-provisioned'`,
+          )).rows[0].updated_at.getTime(),
+        },
+      });
+      const configuredProxy = {
+        state: 'configured' as const,
+        proxyType: 'http' as const,
+        proxyHost: 'proxy.example',
+        proxyPort: 8080,
+        proxyUser: 'proxy-user',
+        proxyPassword: 'plain-proxy-password',
+      };
+      const proxyEdit = await users.writeEnvironmentProxyAuthority('user-a', 'env-auth-provisioned', {
+        expectedRevision: 1,
+        authority: configuredProxy,
+        source: 'edge_edit',
+      });
+      assert.equal(proxyEdit.ok && proxyEdit.record.revision, 2);
+      assert.deepEqual((await pool.query(
+        `SELECT proxy_type,proxy_host,proxy_port,proxy_user,proxy_password,revision
+           FROM client_environment_proxy_authorities WHERE env_key='env-auth-provisioned'`,
+      )).rows[0], {
+        proxy_type: 'http',
+        proxy_host: 'proxy.example',
+        proxy_port: 8080,
+        proxy_user: 'proxy-user',
+        proxy_password: 'plain-proxy-password',
+        revision: 2,
+      });
+      assert.deepEqual(await users.writeEnvironmentProxyAuthority('user-a', 'env-auth-provisioned', {
+        expectedRevision: 1,
+        authority: { state: 'no_proxy' },
+        source: 'edge_edit',
+      }), { ok: false, reason: 'proxy_authority_conflict', currentRevision: 2 });
+      assert.deepEqual(await users.completeProvisioningIntent('user-a', {
+        intentId: provision.intentId,
+        proof: provision.proof,
+        envKey: 'env-auth-provisioned',
+        label: '客户端新建',
+        platform: 'facebook',
+        slowStartEnabled: true,
+        proxyAuthority: { state: 'no_proxy' },
+      }), { ok: false, reason: 'proxy_authority_mismatch' });
+      assert.deepEqual(await users.readEnvironmentProxyAuthority('user-b', 'env-auth-provisioned'), {
+        ok: false,
+        reason: 'environment_not_owned',
+      });
       const storedProof = (await pool.query<{ proof_hash: string }>(
         `SELECT proof_hash FROM client_env_provisioning_intents WHERE intent_id=$1`, [provision.intentId],
       )).rows[0].proof_hash;
@@ -144,6 +201,7 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       assert.deepEqual(await users.completeProvisioningIntent('user-b', {
         intentId: bobIntent.intentId, proof: bobIntent.proof, envKey: 'env-auth-provisioned',
         label: '伪造认领', platform: 'facebook',
+        proxyAuthority: { state: 'no_proxy' },
       }), { ok: false, reason: 'environment_already_registered' });
       assert.equal((await users.listEnvScope('user-b')).some((row) => row.envKey === 'env-auth-provisioned'), false);
 
@@ -153,10 +211,12 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
       assert.equal((await users.completeProvisioningIntent('user-a', {
         intentId: mismatchIntent.intentId, proof: mismatchIntent.proof, envKey: 'env-auth-first',
         label: null, platform: 'xiaohongshu',
+        proxyAuthority: { state: 'no_proxy' },
       })).ok, true);
       assert.deepEqual(await users.completeProvisioningIntent('user-a', {
         intentId: mismatchIntent.intentId, proof: mismatchIntent.proof, envKey: 'env-auth-second',
         label: null, platform: 'xiaohongshu',
+        proxyAuthority: { state: 'no_proxy' },
       }), { ok: false, reason: 'intent_target_mismatch' });
 
       await pool.query(`UPDATE client_users SET status='disabled' WHERE user_id='user-a'`);
@@ -391,6 +451,7 @@ test('PostgreSQL: provisioned video environment without an auth binding gets ter
         envKey: 'env-provisioned-unbound',
         label: '尚未登录的视频号环境',
         platform: 'wechat_channels',
+        proxyAuthority: { state: 'no_proxy' },
       });
       assert.equal(completed.ok, true);
 

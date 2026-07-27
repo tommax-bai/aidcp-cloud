@@ -1,11 +1,13 @@
 # generated from boundaries/table-ownership.json — DO NOT EDIT BY HAND
 # regenerate: npx tsx scripts/db-split/generate-owner-table-lists.ts
-# owner=automation count=45
+# owner=automation count=47
 alerts
 anchor_staging
 anchors
 automation_account_projection
 automation_account_projection_state
+automation_sync_read_consumer_checkpoint
+automation_sync_read_owner_generation
 delegated_task_attempts
 delegated_task_events
 delegated_tasks
