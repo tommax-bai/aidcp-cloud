@@ -63,6 +63,29 @@ function canonicalFacebookPostKey(value: string | undefined): string | null {
   return key && key !== value ? key : null;
 }
 
+function isCanonicalFacebookGroupPostPermalink(value: string): boolean {
+  if (!canonicalFacebookPostKey(value)) return false;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || (host !== 'facebook.com' && !host.endsWith('.facebook.com')) || url.hash) {
+      return false;
+    }
+    if (/^\/groups\/[^/]+\/(?:posts|permalink)\/[^/?#]+\/?$/i.test(url.pathname)) {
+      return !url.search;
+    }
+    if (!/^\/groups\/[^/]+\/?$/i.test(url.pathname)) return false;
+    const keys = [...url.searchParams.keys()];
+    return (
+      keys.length === 1 &&
+      keys[0] === 'multi_permalinks' &&
+      (url.searchParams.get('multi_permalinks') ?? '').trim().length > 0
+    );
+  } catch {
+    return false;
+  }
+}
+
 export interface FacebookEdgeStepsDeps {
   /** 该连接的私有事件总线（handler.ts 把边端上报 emit 到这里）。 */
   bus: EventBus;
@@ -238,7 +261,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
             match: (data) => {
               const d = data as NoteDetailArrived;
               const permalink = String(d.detail?.noteId ?? '').trim();
-              if (!canonicalFacebookPostKey(permalink) || !/\/groups\/[^/]+\/(?:posts|permalink)\//i.test(permalink)) {
+              if (!isCanonicalFacebookGroupPostPermalink(permalink)) {
                 return undefined;
               }
               const postText = (d.detail.content ?? '').trim();

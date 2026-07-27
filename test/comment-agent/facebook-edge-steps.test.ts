@@ -143,6 +143,22 @@ describe('buildFacebookEdgeSteps', () => {
     assert.equal(sent[0].payload.url, undefined);
   });
 
+  it('openFirstPost：接受等价 canonical multi_permalinks 群帖身份', async () => {
+    const bus = new EventBus();
+    const permalink = 'https://www.facebook.com/groups/1?multi_permalinks=2';
+    const { pusher } = makePusher((env) => {
+      if (env.type === 'note.open') {
+        bus.emit('note.detail.arrived', {
+          detail: { noteId: permalink, content: '首帖正文' },
+          ts: 0,
+        } as never);
+      }
+    });
+
+    const r = await steps(bus, pusher).openFirstPost('https://www.facebook.com/groups/1');
+    assert.deepEqual(r, { ok: true, permalink, postText: '首帖正文' });
+  });
+
   it('openFirstPost：边端回非群帖 permalink 不误认，最终诚实超时', async () => {
     const bus = new EventBus();
     const { pusher } = makePusher((env) => {
