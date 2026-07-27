@@ -115,8 +115,12 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 注：`0090_facebook_comment_mode_configured`
  * 为 api owner 的账号 Facebook 评论配置增加独立的方案显式性；历史持久化行标记为显式，
  * 新行只有明确写入 commentMode 才置位。缺列时评论配置能力在 probe 处 fail-closed。
+ *
+ * 注：`0091_facebook_comment_config_snapshot_revision`
+ * 推进 API owner 的 facebook_comment_config 镜像版本，使 0090 新增的快照字段与新 cursor
+ * 同步生效；否则重启消费者会在旧 cursor 上看见新 payload 并以 same_cursor_payload_drift 拒绝。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0090_facebook_comment_mode_configured';
+export const KNOWN_MAX_SCHEMA_VERSION = '0091_facebook_comment_config_snapshot_revision';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

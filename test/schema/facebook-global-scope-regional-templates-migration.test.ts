@@ -59,3 +59,25 @@ test('0090 preserves existing persisted modes as explicit and defaults future ro
   assert.match(sql, /ALTER COLUMN comment_mode_configured SET DEFAULT false/);
   assert.doesNotMatch(sql, /ALTER COLUMN comment_mode_configured SET NOT NULL/);
 });
+
+test('0091 advances the facebook comment snapshot cursor after the payload shape changes', async () => {
+  const sql = await readFile(
+    new URL(
+      '../../migrations/0091_facebook_comment_config_snapshot_revision.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+
+  assert.match(sql, /-- aidcp:kind=expand/);
+  assert.match(sql, /-- aidcp:objects=table:config_mirror_version/);
+  assert.match(
+    sql,
+    /INSERT INTO config_mirror_version[\s\S]*VALUES \('facebook_comment_config', 1, now\(\)\)/,
+  );
+  assert.match(
+    sql,
+    /ON CONFLICT \(mirror_key\)[\s\S]*version = config_mirror_version\.version \+ 1/,
+  );
+  assert.doesNotMatch(sql, /\b(?:DROP|TRUNCATE|DELETE)\b/i);
+});
