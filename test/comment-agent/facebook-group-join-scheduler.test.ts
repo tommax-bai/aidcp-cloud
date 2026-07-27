@@ -276,7 +276,7 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.deepEqual(h.paused, []); // 租约失败不是 login/captcha → 不暂停账号
   });
 
-  it('fail-fast: observe 报 not_ready（慢渲染）→ 当前目标立即 failed，绝不喂判定角色/LLM', async () => {
+  it('bounded recovery: observe 连续两次 not_ready → 当前目标 failed，绝不喂判定角色/LLM', async () => {
     const h = makeHarness({
       auto: true,
       // 若未被拦截，preClickDeterministic 对该半成品页返回 null → 问 LLM（默认 ambiguous_skip）→ markOutcome('failed')。
@@ -296,15 +296,15 @@ describe('FacebookGroupJoinScheduler', () => {
     const r = await h.scheduler.triggerScheduled('acc-fb');
     assert.equal(r.triggered, true);
     assert.equal(r.outcome, 'not_ready'); // 直接返回页面未就绪，而非 ambiguous_skip（= 证明没走 LLM）
-    // 只发了 observe（click=false）一次，没有第二次 clickJoin。
-    assert.equal(h.sent.length, 1);
-    assert.equal(h.sent[0].payload.click, false);
+    // 只重开一次 observe，仍未就绪后终止；绝不进入 clickJoin。
+    assert.deepEqual(h.sent.map((e) => e.payload.click), [false, false]);
     assert.ok(h.membershipCalls.includes(`outcome:${GROUP}:failed:not_ready`));
     assert.ok(!h.membershipCalls.some((c) => c.startsWith(`retry:${GROUP}:`)));
+    assert.ok(h.auditRows.some((row) => row.outcome === 'claimed' && row.reason === 'bounded_reobserve:not_ready'));
     assert.ok(h.auditRows.some((row) => row.reason === 'not_ready'));
   });
 
-  it('fail-fast: 打开群页 nav_error → 直接 failed 并保留具体审计，不进入 no_targets 冷却窗口', async () => {
+  it('bounded recovery: 打开群页连续 nav_error → failed 并保留具体审计，不进入 no_targets 冷却窗口', async () => {
     const h = makeHarness({
       auto: true,
       edge: (env, bus) => {
@@ -320,8 +320,10 @@ describe('FacebookGroupJoinScheduler', () => {
     });
     const r = await h.scheduler.triggerScheduled('acc-fb');
     assert.deepEqual(r, { triggered: true, groupUrl: GROUP, outcome: 'nav_error' });
+    assert.deepEqual(h.sent.map((e) => e.payload.click), [false, false]);
     assert.ok(h.membershipCalls.includes(`outcome:${GROUP}:failed:nav_error`));
     assert.ok(!h.membershipCalls.some((c) => c.startsWith(`retry:${GROUP}:`)));
+    assert.ok(h.auditRows.some((row) => row.outcome === 'claimed' && row.reason === 'bounded_reobserve:nav_error'));
     assert.ok(h.auditRows.some((row) => row.outcome === 'nav_error' && row.reason === 'nav_error'));
     assert.deepEqual(h.paused, []);
   });
@@ -345,6 +347,96 @@ describe('FacebookGroupJoinScheduler', () => {
     assert.equal(second.outcome, 'nav_error');
     assert.equal(h.membershipCalls.filter((call) => call === 'claim').length, 2);
     assert.ok(!h.auditRows.some((row) => row.outcome === 'no_targets'));
+  });
+
+  it('bounded recovery: 首次 not_ready、fresh observe 就绪后继续点击并确认 joined', async () => {
+    let call = 0;
+    const h = makeHarness({
+      auto: true,
+      edge: (env, bus) => {
+        call++;
+        if (call === 1) {
+          bus.emit('action.completed', {
+            action: 'join_group',
+            ok: false,
+            reason: 'not_ready',
+            groupUrl: env.payload.groupUrl,
+            clicked: false,
+            observation: { groupUrl: env.payload.groupUrl, documentReady: 'loading', actionNodeCount: 0 },
+            ts: 0,
+          } as never);
+          return;
+        }
+        if (call === 2) {
+          bus.emit('action.completed', {
+            action: 'join_group',
+            ok: false,
+            reason: 'observation_only',
+            groupUrl: env.payload.groupUrl,
+            clicked: false,
+            observation: { groupUrl: env.payload.groupUrl, documentReady: 'complete', actionNodeCount: 4, mainCtaText: 'Join group' },
+            ts: 0,
+          } as never);
+          return;
+        }
+        bus.emit('action.completed', {
+          action: 'join_group',
+          ok: true,
+          groupUrl: env.payload.groupUrl,
+          clicked: true,
+          observation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Join group' },
+          postObservation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Joined', membershipSignals: ['You are now a member'] },
+          ts: 0,
+        } as never);
+      },
+    });
+
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+
+    assert.equal(r.outcome, 'joined');
+    assert.deepEqual(h.sent.map((e) => e.payload.click), [false, false, true]);
+    assert.ok(h.auditRows.some((row) => row.outcome === 'claimed' && row.reason === 'bounded_reobserve:not_ready'));
+    assert.ok(h.membershipCalls.some((entry) => entry.startsWith(`joined:${GROUP}:`)));
+    assert.ok(!h.membershipCalls.some((entry) => entry.startsWith(`retry:${GROUP}:`)));
+  });
+
+  it('post-click slow confirmation is terminal and never re-observes or re-clicks', async () => {
+    let call = 0;
+    const h = makeHarness({
+      auto: true,
+      edge: (env, bus) => {
+        call++;
+        if (call === 1) {
+          bus.emit('action.completed', {
+            action: 'join_group',
+            ok: false,
+            reason: 'observation_only',
+            groupUrl: env.payload.groupUrl,
+            clicked: false,
+            observation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Join group' },
+            ts: 0,
+          } as never);
+          return;
+        }
+        bus.emit('action.completed', {
+          action: 'join_group',
+          ok: false,
+          reason: 'post_not_confirmed_slow',
+          groupUrl: env.payload.groupUrl,
+          clicked: true,
+          observation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Join group' },
+          postObservation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Join group' },
+          ts: 0,
+        } as never);
+      },
+    });
+
+    const r = await h.scheduler.triggerScheduled('acc-fb');
+
+    assert.equal(r.outcome, 'post_not_confirmed_slow');
+    assert.deepEqual(h.sent.map((e) => e.payload.click), [false, true]);
+    assert.ok(h.membershipCalls.includes(`outcome:${GROUP}:failed:post_not_confirmed_slow`));
+    assert.ok(!h.auditRows.some((row) => row.reason?.startsWith('bounded_reobserve:')));
   });
 
   it('real: instant pre-click + joined post-click 写 joined', async () => {

@@ -89,7 +89,7 @@ function leaseFailureReason(err: unknown): string {
   return `lease_unavailable:${err instanceof Error ? err.message.slice(0, 60) : String(err)}`;
 }
 
-// 尚未加入阶段的网络/渲染/租约失败：用户裁决为本目标立即失败，不冷却、不隐藏重试。
+// 尚未加入阶段的执行失败：有界 no-click 页面恢复耗尽后，本目标立即失败且不写数据库冷却。
 function isJoinExecutionFailure(reason: string): boolean {
   return (
     reason === 'timeout' ||
@@ -102,6 +102,10 @@ function isJoinExecutionFailure(reason: string): boolean {
   );
 }
 
+function isNoClickReadinessFailure(result: FacebookGroupJoinStepResult): boolean {
+  if (result.clicked === true || !result.reason) return false;
+  return result.reason.startsWith('not_ready') || result.reason.startsWith('nav_error');
+}
 
 export class FacebookGroupJoinScheduler {
   private readonly running = new Set<string>();
@@ -270,15 +274,27 @@ export class FacebookGroupJoinScheduler {
       return { triggered: false, groupUrl: assigned.groupUrl, reason: 'assignment_not_executable' };
     }
 
-    // P0-3：租约获取/掉线异常兜底。withLease 可抛 EdgeTaskLeaseError（edge_offline / acquire_timeout / edge_disconnected）；
-    // 不接住会绕过 markEdgeFailure，把成员账本留在 'joining'（cooldown 为空）→ 每 60s 心跳又把该行捞起重试、attempts++、
-    // 几次即撞上限被永久标 'failed'（真机热循环）。接住归为可重试瞬态 lease_unavailable：给短冷却 + 审计，绝不假成功。
+    // 租约异常必须在本次目标上诚实收敛，否则成员账本会留在 joining。慢页面恢复只覆盖明确未点击的
+    // not_ready/nav_error：第二次仍走 observe（无条件导航）取得一份干净页面，不恢复旧的数据库冷却占位。
     let observed: FacebookGroupJoinStepResult;
     try {
-      observed = await this.deps.edgeTaskLeases.withLease(
+      const observeOnce = (): Promise<FacebookGroupJoinStepResult> => this.deps.edgeTaskLeases.withLease(
         { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
         (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(assigned.groupUrl),
       );
+      observed = await observeOnce();
+      if (isNoClickReadinessFailure(observed)) {
+        await this.audit({
+          accountId,
+          groupUrl: assigned.groupUrl,
+          outcome: 'claimed',
+          phase: 'scheduler',
+          reason: `bounded_reobserve:${observed.reason}`,
+          shadow: false,
+          ...(observed.observation ? { observation: observed.observation } : {}),
+        });
+        observed = await observeOnce();
+      }
     } catch (err) {
       const reason = leaseFailureReason(err);
       await this.markEdgeFailure(accountId, assigned, reason);
