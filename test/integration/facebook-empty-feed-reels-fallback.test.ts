@@ -95,6 +95,135 @@ test('Facebook Reels 卡片到达才把 fallback 确认为完成，之后迟到�
   dispatcher.endSession('test');
 });
 
+test('Facebook 未确认到底：继续普通 Feed 滚动，不授权 Reels', () => {
+  const commands: EdgeCommand[] = [];
+  const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
+  dispatcher.setup();
+  dispatcher.startSession();
+
+  dispatcher.bus.emit('action.completed', {
+    action: 'scroll',
+    ok: false,
+    reason: 'feed_continuation_unconfirmed',
+    ts: 1,
+  });
+
+  const continuation = commands.filter(
+    (command) => command.action === 'scroll' && command.reason === 'feed_continuation_unconfirmed',
+  );
+  assert.equal(continuation.length, 1, '未形成终止证据时立即走现有普通滚动闸继续');
+  assert.equal(
+    commands.some((command) => command.reason === 'empty_feed_reels_fallback'),
+    false,
+    '非终态续滚绝不授权 Reels',
+  );
+  dispatcher.endSession('test');
+});
+
+test('Facebook confirmed Reels 后非空普通 Feed 回归：开启新的 fallback epoch', () => {
+  const commands: EdgeCommand[] = [];
+  const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
+  dispatcher.setup();
+  dispatcher.startSession();
+
+  dispatcher.bus.emit('feed.empty.confirmed', { ts: 1 });
+  dispatcher.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: 'reel', likeCount: 0, collectCount: 0, noteId: 'https://www.facebook.com/reel/1' }],
+    listKind: 'reels',
+    ts: 2,
+  });
+  dispatcher.bus.emit('feed.empty.confirmed', { ts: 3 });
+  dispatcher.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: 'feed', likeCount: 0, collectCount: 0, noteId: 'https://www.facebook.com/a/posts/1' }],
+    listKind: 'feed',
+    ts: 4,
+  });
+  dispatcher.bus.emit('action.completed', {
+    action: 'scroll',
+    ok: false,
+    reason: 'feed_exhausted',
+    ts: 5,
+  });
+
+  const fallback = commands.filter(
+    (command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback',
+  );
+  assert.equal(fallback.length, 2, '回到可读普通 Feed 后，新的真实到底可再授权一次');
+  dispatcher.endSession('test');
+});
+
+test('Facebook pending 握手或 confirmed 后空 Feed 批次不会重开 fallback epoch', () => {
+  const commands: EdgeCommand[] = [];
+  const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
+  dispatcher.setup();
+  dispatcher.startSession();
+
+  dispatcher.bus.emit('feed.empty.confirmed', { ts: 1 });
+  dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'feed', ts: 2 });
+  dispatcher.bus.emit('feed.empty.confirmed', { ts: 3 });
+  dispatcher.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: 'reel', likeCount: 0, collectCount: 0, noteId: 'https://www.facebook.com/reel/1' }],
+    listKind: 'reels',
+    ts: 4,
+  });
+  dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'feed', ts: 5 });
+  dispatcher.bus.emit('feed.empty.confirmed', { ts: 6 });
+
+  const fallback = commands.filter(
+    (command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback',
+  );
+  assert.equal(fallback.length, 1, 'pending/空批次不构成权威 Feed 回归');
+  dispatcher.endSession('test');
+});
+
+test('Facebook 搜索批次不重开 fallback epoch，也不消费普通 Feed 继续态', () => {
+  const commands: EdgeCommand[] = [];
+  const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
+  dispatcher.setup();
+  dispatcher.startSession();
+
+  dispatcher.bus.emit('feed.empty.confirmed', { ts: 1 });
+  dispatcher.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: 'reel', likeCount: 0, collectCount: 0, noteId: 'https://www.facebook.com/reel/1' }],
+    listKind: 'reels',
+    ts: 2,
+  });
+  dispatcher.bus.emit('search.approved', {
+    keyword: 'test',
+    reason: 'test',
+    currentPageType: 'feed',
+    source: 'new_concept',
+    ts: 3,
+  });
+  dispatcher.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: 'search', likeCount: 0, collectCount: 0, noteId: 'https://www.facebook.com/a/posts/2' }],
+    listKind: 'feed',
+    ts: 4,
+  });
+  dispatcher.bus.emit('action.completed', {
+    action: 'scroll',
+    ok: false,
+    reason: 'feed_continuation_unconfirmed',
+    ts: 5,
+  });
+  dispatcher.bus.emit('action.completed', {
+    action: 'scroll',
+    ok: false,
+    reason: 'feed_exhausted',
+    ts: 6,
+  });
+
+  const fallback = commands.filter(
+    (command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback',
+  );
+  const continuation = commands.filter(
+    (command) => command.action === 'scroll' && command.reason === 'feed_continuation_unconfirmed',
+  );
+  assert.equal(fallback.length, 1, '搜索卡不得把 confirmed epoch 重置为 idle');
+  assert.equal(continuation.length, 0, '搜索态的同名失败不得进入普通 Feed 续滚');
+  dispatcher.endSession('test');
+});
+
 test('Facebook fallback 被浏览配额或软暂停抑制时不进入 pending，保留后续授权资格', () => {
   const quotaCommands: EdgeCommand[] = [];
   const quota = new RoleDispatcher({

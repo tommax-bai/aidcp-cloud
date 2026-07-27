@@ -3339,6 +3339,16 @@ export class RoleDispatcher {
       this.eventBus.on('page.cards.arrived', (payload) => {
         if (
           this.accountPlatform === 'facebook'
+          && payload.listKind === 'feed'
+          && payload.cards.length > 0
+          && this.sessionContext.sourcePageType === 'feed'
+          && this.reelsFallbackState === 'confirmed'
+        ) {
+          this.resetFacebookReelsFallback();
+          console.log('[RoleDispatcher] Facebook 非空普通 Feed 已回归 → 开启新的 Reels fallback epoch');
+        }
+        if (
+          this.accountPlatform === 'facebook'
           && payload.listKind === 'reels'
           && payload.cards.length > 0
           && this.reelsFallbackState !== 'confirmed'
@@ -3576,8 +3586,21 @@ export class RoleDispatcher {
           }
           return;
         }
-        // Facebook 普通 Feed 确认到底：复用已部署 Reels fallback 握手，每场只授权一次；重复到底回执直接吞掉，
-        // 不再刷新同一普通 Feed。其他平台保持既有 refresh 自愈，避免转 idle → 240s nudge 循环。
+        // Native 有界续滚结束但没有终止证据：保持普通 Feed，由 Cloud 现有配额/暂停/节奏闸继续下一条滚动命令。
+        // 该原因绝不授权 Reels；若命令被当前闸抑制，既有恢复事件会在闸打开后重新驱动，不制造裸定时器。
+        if (
+          payload.action === 'scroll' &&
+          payload.reason === 'feed_continuation_unconfirmed' &&
+          this.accountPlatform === 'facebook' &&
+          this.sessionActive &&
+          this.sessionContext.sourcePageType === 'feed'
+        ) {
+          console.log('[RoleDispatcher] Facebook Feed 未形成终止证据 → 继续普通 Feed 滚动');
+          this.sendScrollCommand('feed_continuation_unconfirmed');
+          return;
+        }
+        // Facebook 普通 Feed 确认到底：复用已部署 Reels fallback 握手；同一 fallback epoch 内重复到底回执吞掉，
+        // 可读 Reels 后若非空普通 Feed 已权威回归，则下一次真实到底可开启新 epoch。其他平台保持既有 refresh 自愈。
         if (
           payload.action === 'scroll' &&
           payload.reason === 'feed_exhausted' &&
