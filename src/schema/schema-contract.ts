@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
+export const REQUIRED_SCHEMA_VERSION = '0093_facebook_rule_mode_runtime';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -119,8 +119,12 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 注：`0091_facebook_comment_config_snapshot_revision`
  * 推进 API owner 的 facebook_comment_config 镜像版本，使 0090 新增的快照字段与新 cursor
  * 同步生效；否则重启消费者会在旧 cursor 上看见新 payload 并以 same_cursor_payload_drift 拒绝。
+ *
+ * `0092_facebook_rule_mode_config` 与 `0093_facebook_rule_mode_runtime` 分属 api/automation，
+ * 分别增加账号开关和 target-scoped 规则进度/批次。新 store 不保留运行时 DDL，启动必须先
+ * 通过精确 schema probe；缺迁移时该固定规则能力不可工作，故 REQUIRED 与 KNOWN_MAX 抬到 0093。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0091_facebook_comment_config_snapshot_revision';
+export const KNOWN_MAX_SCHEMA_VERSION = '0093_facebook_rule_mode_runtime';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

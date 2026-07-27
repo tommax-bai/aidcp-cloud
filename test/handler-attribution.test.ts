@@ -194,6 +194,8 @@ test('Reels 空/畸形多卡不记 view；后续普通 feed detail 保持既有�
 test('Facebook Feed 主视频呈现即按规范身份记一次 view；重报和随后 detail 不重复', async () => {
   const eventBus = new EventBus();
   const got = capture(eventBus);
+  const ruleViews: unknown[] = [];
+  eventBus.on('facebook.rule.view.confirmed', (event) => { ruleViews.push(event); });
   const handler = makeHandler(eventBus);
   const session: EdgeSession = { sessionId: 's-feed-video-view', accountId: 'acc-fb', platform: 'facebook' };
   const card = {
@@ -217,6 +219,80 @@ test('Facebook Feed 主视频呈现即按规范身份记一次 view；重报和�
   assert.deepEqual(got.filter((event) => event.action === 'view'), [{
     action: 'view', accountId: 'acc-fb', noteId: card.noteId,
   }]);
+  assert.deepEqual(ruleViews, [{
+    accountId: 'acc-fb',
+    noteId: card.noteId,
+    sourceDedupeKey: `feed-video-1:rule-view:${card.noteId}`,
+    source: 'feed_video',
+    occurredAt: 1000,
+  }], '只有首次、已持久进入风控漏斗的确认浏览才能推进规则进度');
+});
+
+test('Facebook 普通 detail 推进规则浏览事实；非 Facebook 与 refreshOnly 均不推进', async () => {
+  const eventBus = new EventBus();
+  const ruleViews: unknown[] = [];
+  eventBus.on('facebook.rule.view.confirmed', (event) => { ruleViews.push(event); });
+  const handler = makeHandler(eventBus);
+
+  await handler.handle(makeEnvelope('note.detail', 'fb-detail', 1, {
+    noteId: 'https://www.facebook.com/posts/42',
+    title: 'safe',
+    content: 'safe body',
+    likeCount: 0,
+    collectCount: 0,
+  }), { sessionId: 'fb', accountId: 'acc-fb', platform: 'facebook' });
+  await handler.handle(makeEnvelope('note.detail', 'xhs-detail', 2, {
+    noteId: 'xhs-42',
+    title: 'safe',
+    content: 'safe body',
+    likeCount: 0,
+    collectCount: 0,
+  }), { sessionId: 'xhs', accountId: 'acc-xhs', platform: 'xiaohongshu' });
+  await handler.handle(makeEnvelope('note.detail', 'fb-refresh', 3, {
+    noteId: 'https://www.facebook.com/posts/43',
+    title: 'safe',
+    content: 'safe body',
+    likeCount: 0,
+    collectCount: 0,
+    refreshOnly: true,
+  }), { sessionId: 'fb-refresh', accountId: 'acc-fb', platform: 'facebook' });
+
+  assert.deepEqual(ruleViews, [{
+    accountId: 'acc-fb',
+    noteId: 'https://www.facebook.com/posts/42',
+    sourceDedupeKey: 'fb-detail:rule-view:https://www.facebook.com/posts/42',
+    source: 'detail',
+    occurredAt: 1000,
+  }]);
+});
+
+test('风控事实持久入队失败时 Facebook 规则浏览事实不发射、不推进', async () => {
+  const eventBus = new EventBus();
+  const ruleViews: unknown[] = [];
+  eventBus.on('facebook.rule.view.confirmed', (event) => { ruleViews.push(event); });
+  const handler = new DefaultMessageHandler({
+    planner: new SimplePlanner(),
+    llm,
+    cache: noopCache,
+    eventBus,
+    clock: () => 1000,
+    riskAccounting: {
+      enqueue: async () => { throw new Error('outbox unavailable'); },
+      record: async () => ({ allowed: true }),
+    },
+  });
+
+  await assert.rejects(
+    () => handler.handle(makeEnvelope('note.detail', 'fb-failed', 1, {
+      noteId: 'https://www.facebook.com/posts/failed',
+      title: 'safe',
+      content: 'safe body',
+      likeCount: 0,
+      collectCount: 0,
+    }), { sessionId: 'fb-failed', accountId: 'acc-fb', platform: 'facebook' }),
+    /outbox unavailable/,
+  );
+  assert.deepEqual(ruleViews, []);
 });
 
 test('Facebook Feed 0/多视频和非规范视频目标不提前记 view；普通详情计数保持不变', async () => {

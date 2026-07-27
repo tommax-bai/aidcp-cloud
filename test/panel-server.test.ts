@@ -143,6 +143,115 @@ test('自检拒绝保留端口（forbidden_port）', async () => {
   await h.close();
 });
 
+test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非法/非 FB/缺账号', async () => {
+  let enabled = false;
+  const writes: Array<{ accountId: string; patch: { enabled?: boolean }; updatedBy: string }> = [];
+  const view = (accountId: string) => ({
+    config: {
+      accountId,
+      enabled,
+      definitionId: 'facebook_browse_10_like_1_join_contact_1' as const,
+      definitionVersion: 1 as const,
+      updatedAt: enabled ? '2026-07-27T00:00:00.000Z' : null,
+      updatedBy: enabled ? 'panel:alice' : null,
+    },
+    runtime: {
+      viewCount: 0,
+      threshold: 10 as const,
+      currentBatch: null,
+      updatedAt: null,
+    },
+  });
+  const facebookRuleMode: NonNullable<PanelDeps['facebookRuleMode']> = {
+    get: async (accountId) => view(accountId),
+    set: async (accountId, patch, updatedBy) => {
+      writes.push({ accountId, patch, updatedBy });
+      if (accountId === 'missing') return { ok: false, reason: 'account_not_found' };
+      if (accountId === 'xhs-1') return { ok: false, reason: 'unsupported_platform' };
+      if (patch.enabled === undefined) return { ok: false, reason: 'no_valid_fields' };
+      enabled = patch.enabled;
+      return { ok: true, row: view(accountId).config };
+    },
+  };
+  const h = await startPanelApi({ ...deps, facebookRuleMode } as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const unauth = await fetch(`${base}/api/accounts/fb-1/facebook-rule-mode`);
+    assert.equal(unauth.status, 401);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = await login.json() as { token: string };
+    const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+    const initial = await fetch(`${base}/api/accounts/fb-1/facebook-rule-mode`, { headers: auth });
+    assert.equal(initial.status, 200);
+    assert.equal(((await initial.json()) as { config: { enabled: boolean } }).config.enabled, false);
+
+    const invalid = await fetch(`${base}/api/accounts/fb-1/facebook-rule-mode`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ enabled: 'yes' }),
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(writes.length, 0);
+
+    const saved = await fetch(`${base}/api/accounts/fb-1/facebook-rule-mode`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(saved.status, 200);
+    assert.equal(((await saved.json()) as { config: { enabled: boolean; updatedBy: string } }).config.enabled, true);
+    assert.deepEqual(writes[0], {
+      accountId: 'fb-1',
+      patch: { enabled: true },
+      updatedBy: 'panel:alice',
+    });
+
+    const unsupported = await fetch(`${base}/api/accounts/xhs-1/facebook-rule-mode`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(unsupported.status, 400);
+    assert.equal(((await unsupported.json()) as { reason: string }).reason, 'unsupported_platform');
+
+    const missing = await fetch(`${base}/api/accounts/missing/facebook-rule-mode`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test('Facebook 规则模式 API 未接 authority 时返回 unavailable，不伪造 disabled/zero', async () => {
+  const h = await startPanelApi(deps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = await login.json() as { token: string };
+    const response = await fetch(`${base}/api/accounts/fb-1/facebook-rule-mode`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, 503);
+    assert.equal(((await response.json()) as { error: string }).error, 'facebook_rule_mode_unavailable');
+  } finally {
+    await h.close();
+  }
+});
+
 test('环境管理 API 展示资产/账号摘要，旧删除路径保持不可用', async () => {
   const clientUsers = {
     async listAllEnvironments() {

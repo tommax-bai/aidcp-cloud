@@ -202,4 +202,33 @@ describe('ContentCuratorRole', () => {
     assert.equal(passEmitted, false);
     assert.equal(rejectEmitted, false);
   });
+
+  it('规则模式判定关闭人设评估时不调用 LLM、也不产出质量事件', async () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    let calls = 0;
+    const role = new ContentCuratorRole({
+      eventBus: bus,
+      soul: mockSoul,
+      llm: {
+        complete: async () => {
+          calls += 1;
+          return '{"action":"pass","reason":"unexpected","confidence":1}';
+        },
+      },
+      sessionContext: ctx,
+      shouldEvaluate: () => false,
+    });
+    role.subscribe();
+    let outcomes = 0;
+    bus.on('quality.pass', () => { outcomes += 1; });
+    bus.on('quality.reject', () => { outcomes += 1; });
+
+    bus.emit('note.detail.arrived', { detail: sampleNote, ts: Date.now() });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(calls, 0);
+    assert.equal(outcomes, 0);
+    role.unsubscribe();
+  });
 });

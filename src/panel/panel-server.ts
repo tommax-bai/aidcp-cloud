@@ -1281,6 +1281,17 @@ function createRequestHandler(
       sendJson(res, 200, deps.facebookCommentConfig.get(accountId));
       return;
     }
+    if (method === 'GET' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-rule-mode')) {
+      const accountId = decodeURIComponent(
+        url.slice('/api/accounts/'.length, -'/facebook-rule-mode'.length),
+      );
+      if (!deps.facebookRuleMode) {
+        sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
+        return;
+      }
+      sendJson(res, 200, await deps.facebookRuleMode.get(accountId));
+      return;
+    }
     // Facebook 发帖素材池：必须在通配 GET /api/accounts/:id 之前注册。
     if (url.startsWith('/api/accounts/') && url.includes('/facebook-publish-media')) {
       if (!deps.facebookPublishMedia) {
@@ -1943,6 +1954,39 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, result.row);
+      return;
+    }
+    if (method === 'PUT' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-rule-mode')) {
+      const accountId = decodeURIComponent(
+        url.slice('/api/accounts/'.length, -'/facebook-rule-mode'.length),
+      );
+      if (!deps.facebookRuleMode) {
+        sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as Record<string, unknown>;
+      if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_value' });
+        return;
+      }
+      const result = await deps.facebookRuleMode.set(
+        accountId,
+        { ...(raw.enabled === undefined ? {} : { enabled: raw.enabled }) },
+        `panel:${verified.payload.sub}`,
+      );
+      if (!result.ok) {
+        if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
+        else sendJson(res, 400, { error: 'bad_request', reason: result.reason });
+        return;
+      }
+      sendJson(res, 200, await deps.facebookRuleMode.get(accountId));
       return;
     }
     // 风控写（V1 task 8.4）：经 registry 取账号 controller 单写；status 经枚举信号种类、quota 经 setQuotaLevel

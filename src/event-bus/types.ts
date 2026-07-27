@@ -123,6 +123,14 @@ export interface EventMap {
   'session.ended': { stats: SessionStats };
   // targetId（change interaction-feed-enrichment）：展示账本去重键——笔记动作=noteId，关注=authorId。noteId 保留（喂 likedNoteStore）。
   'interaction.occurred': { action: 'view' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group'; accountId?: string; noteId?: string; targetId?: string };
+  /** 风控 view fact 已持久入队后的 Facebook 规则模式候选事实。 */
+  'facebook.rule.view.confirmed': {
+    accountId: string;
+    noteId: string;
+    sourceDedupeKey: string;
+    source: 'detail' | 'reels' | 'feed_video';
+    occurredAt: number;
+  };
   /** Platform-observed search fact; deliberately separate from note-scoped interaction accounting. */
   'search.occurred': {
     accountId?: string;

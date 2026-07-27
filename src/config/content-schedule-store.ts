@@ -42,6 +42,8 @@ import type {
   AutomationConfigCommandsPort,
   ContactCommentAttemptAudit,
 } from '../kernel/api-direct-port.js';
+import type { FacebookRuleModeView } from './facebook-rule-mode-store.js';
+import type { FacebookBrowseMode } from '../orchestrator/facebook-rule-mode.js';
 
 const { Pool } = pg;
 
@@ -128,6 +130,11 @@ export interface ContentScheduleCatalogRow {
   updatedBy: string | null;
   /** 仅 Facebook 行聚合；领域配置仍由独立 store 持久化。 */
   joinGroupAutomation?: FacebookJoinGroupAutomationCatalogView;
+  /** 仅 Facebook 行聚合；配置、计数与平台动作终态保持分层。 */
+  facebookRuleMode?: FacebookRuleModeView & {
+    effectiveMode: FacebookBrowseMode;
+    blocker: string | null;
+  };
 }
 
 export interface FacebookJoinGroupAutomationCatalogView {

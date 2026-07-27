@@ -28,12 +28,15 @@ export interface ContentCuratorRoleOptions extends RoleOptions {
   sessionContext: SessionContext;
   /** 平台词表（站名/内容名/指标）：dispatcher 经 commonOptions 注入，缺省回落小红书。 */
   platformProfile?: CommentPlatformProfile;
+  /** 规则模式等非人设读链可关闭本角色；关闭时不得读取 Soul 或调用 LLM。 */
+  shouldEvaluate?: () => boolean;
 }
 
 export class ContentCuratorRole extends BaseRole {
   readonly roleName: RoleName = 'content_curator';
   private readonly sessionContext: SessionContext;
   private readonly platformProfile: CommentPlatformProfile;
+  private readonly shouldEvaluate: () => boolean;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: ContentCuratorRoleOptions) {
@@ -41,6 +44,7 @@ export class ContentCuratorRole extends BaseRole {
     if (!options.llm) throw new Error('ContentCuratorRole 需要 LlmClient');
     this.sessionContext = options.sessionContext;
     this.platformProfile = options.platformProfile ?? XHS_COMMENT_PROFILE;
+    this.shouldEvaluate = options.shouldEvaluate ?? (() => true);
   }
 
   subscribe(): void {
@@ -57,6 +61,7 @@ export class ContentCuratorRole extends BaseRole {
   // ─── 事件处理 ─────────────────────────────────────────────
 
   private async onNoteDetailArrived(payload: { detail: NoteData; ts: number }): Promise<void> {
+    if (!this.shouldEvaluate()) return;
     const noteData = payload.detail;
     const sourcePageType = this.sessionContext.sourcePageType;
     // 一次判定固定一份人设快照，避免 LLM 在途期间热更新导致 prompt 与 rule-id 校验来自两版配置。

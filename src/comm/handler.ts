@@ -558,6 +558,9 @@ export class DefaultMessageHandler implements MessageHandler {
         return null;
       case 'page.cards': {
         const { cards, startupId, documentGeneration, listKind, listState } = env.payload as PageCardsPayload;
+        let presentedRuleView:
+          | { noteId: string; source: 'reels' | 'feed_video'; sourceDedupeKey: string }
+          | undefined;
         // 留存最近一批卡快照（change platform-browse-protocol）：note-scoped 互动回执带独立见证 observation 时，
         // 归账仲裁据此逐字段比对选中卡（信息流就地点赞防点错卡）。详情页/无 observation 时不消费——阶段 0 惰性。
         session.lastCards = cards;
@@ -580,6 +583,13 @@ export class DefaultMessageHandler implements MessageHandler {
             accountId: session.accountId,
             ...(noteId ? { noteId } : {}),
           });
+          if (session.accountId && noteId) {
+            presentedRuleView = {
+              noteId,
+              source: 'reels',
+              sourceDedupeKey: `${env.id}:rule-view:${noteId}`,
+            };
+          }
         } else {
           // 任一后续普通/空/畸形列表都结束「当前 Reel 已记 view」关联，不能抑制未来普通详情记账。
           session.countedReelViewNoteId = undefined;
@@ -602,6 +612,13 @@ export class DefaultMessageHandler implements MessageHandler {
                 accountId: session.accountId,
                 noteId,
               });
+              if (session.accountId) {
+                presentedRuleView = {
+                  noteId,
+                  source: 'feed_video',
+                  sourceDedupeKey: `${env.id}:rule-view:${noteId}`,
+                };
+              }
             }
           }
         }
@@ -636,6 +653,15 @@ export class DefaultMessageHandler implements MessageHandler {
           ...(listKind ? { listKind } : {}),
           ts: this.clock(),
         });
+        if (presentedRuleView && session.accountId) {
+          this.bus(session).emit('facebook.rule.view.confirmed', {
+            accountId: session.accountId,
+            noteId: presentedRuleView.noteId,
+            sourceDedupeKey: presentedRuleView.sourceDedupeKey,
+            source: presentedRuleView.source,
+            occurredAt: this.clock(),
+          });
+        }
         return null;
       }
       case 'note.detail': {
@@ -669,6 +695,19 @@ export class DefaultMessageHandler implements MessageHandler {
             accountId: session.accountId,
             ...(detail.noteId ? { noteId: detail.noteId } : {}),
           });
+          if (
+            normalizePlatformId(session.platform) === 'facebook'
+            && session.accountId
+            && detail.noteId
+          ) {
+            this.bus(session).emit('facebook.rule.view.confirmed', {
+              accountId: session.accountId,
+              noteId: detail.noteId,
+              sourceDedupeKey: `${env.id}:rule-view:${detail.noteId}`,
+              source: 'detail',
+              occurredAt: this.clock(),
+            });
+          }
         }
         return null;
       }

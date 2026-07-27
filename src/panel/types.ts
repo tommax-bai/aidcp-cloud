@@ -33,6 +33,10 @@ import type {
   SetFacebookCommentConfigResult,
 } from '../config/facebook-comment-config-store.js';
 import type {
+  FacebookRuleModeView,
+  SetFacebookRuleModeResult,
+} from '../config/facebook-rule-mode-store.js';
+import type {
   FacebookPublishImageInput,
   FacebookPublishMediaListView,
   FacebookPublishSetPatch,
@@ -307,6 +311,14 @@ export interface PanelDeps {
       patch: FacebookCommentConfigPatch,
       updatedBy: string,
     ): Promise<SetFacebookCommentConfigResult>;
+  };
+  facebookRuleMode?: {
+    get(accountId: string): Promise<FacebookRuleModeView>;
+    set(
+      accountId: string,
+      patch: { enabled?: boolean },
+      updatedBy: string,
+    ): Promise<SetFacebookRuleModeResult>;
   };
   /**
    * 每账号 Facebook 发帖素材池（manual upload only）。未注入则 `/api/accounts/:id/facebook-publish-media`

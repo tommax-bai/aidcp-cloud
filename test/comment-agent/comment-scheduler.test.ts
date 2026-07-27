@@ -1511,6 +1511,87 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.match(cards.at(-1)!.title, /加群 \+ 评论成功/);
   });
 
+  it('规则批次即时闸在加群前失效 → 不加群、不评论，并回传 risk_suppressed 终态', async () => {
+    const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
+    let joinCalls = 0;
+    const results: Array<{ outcome: string; joinOutcome?: string; reason?: string }> = [];
+    const receipt = await new CommentScheduler({
+      ...deps,
+      facebookJoinNewGroup: async () => {
+        joinCalls += 1;
+        return { triggered: true, outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/blocked' };
+      },
+    }).triggerManual('fb-1', {
+      joinFirst: true,
+      actionGate: (action) => action === 'join_group'
+        ? { allowed: false, reason: 'slow_start_active' }
+        : { allowed: true },
+      onResult: (result) => { results.push(result); },
+    });
+    assert.equal(receipt.ok, true);
+    await tick();
+    assert.equal(joinCalls, 0);
+    assert.deepEqual(posted, []);
+    assert.deepEqual(results, [{
+      outcome: 'no_targets',
+      joinOutcome: 'risk_suppressed',
+      reason: 'slow_start_active',
+    }]);
+  });
+
+  it('规则批次已确认加群后评论闸失效 → 保留 joined，评论 risk_suppressed 且不下发评论', async () => {
+    const JOINED = 'https://www.facebook.com/groups/rule-joined';
+    const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
+    const results: Array<{ outcome: string; joinOutcome?: string; reason?: string }> = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED }),
+    }).triggerManual('fb-1', {
+      joinFirst: true,
+      actionGate: (action) => action === 'comment'
+        ? { allowed: false, reason: 'comment_quota_exhausted' }
+        : { allowed: true },
+      onResult: (result) => { results.push(result); },
+    });
+    await tick();
+    assert.deepEqual(posted, []);
+    assert.deepEqual(results, [{
+      outcome: 'quota_denied',
+      reason: 'comment_quota_exhausted',
+      joinOutcome: 'joined',
+      groupUrl: JOINED,
+    }]);
+  });
+
+  it('规则批次审批完成后再次现读闸；冷启动接管时不提交已批准评论', async () => {
+    const JOINED = 'https://www.facebook.com/groups/rule-approval';
+    const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
+    let commentGateCalls = 0;
+    const results: Array<{ outcome: string; joinOutcome?: string; reason?: string }> = [];
+    await new CommentScheduler({
+      ...deps,
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED }),
+    }).triggerManual('fb-1', {
+      joinFirst: true,
+      actionGate: (action) => {
+        if (action === 'join_group') return { allowed: true };
+        commentGateCalls += 1;
+        return commentGateCalls === 1
+          ? { allowed: true }
+          : { allowed: false, reason: 'slow_start_active' };
+      },
+      onResult: (result) => { results.push(result); },
+    });
+    await tick();
+    assert.deepEqual(posted, ['search.execute', 'note.open'], '审批前可定位，但最终闸失败后不得提交评论');
+    assert.equal(commentGateCalls, 2);
+    assert.equal(results.length, 1);
+    assert.equal(results[0]?.outcome, 'quota_denied');
+    assert.equal(results[0]?.reason, 'slow_start_active');
+    assert.equal(results[0]?.joinOutcome, 'joined');
+    assert.equal((results[0] as { groupUrl?: string }).groupUrl, JOINED);
+  });
+
   // ── Feature B（change facebook-comment-review-and-targeted-join）：/comment --join=<url> 加入指定群再评论 ──
   it('Feature B：--join=<url> → 路由到 facebookJoinSpecificGroup（非 New），容器 pin 到该指定群', async () => {
     const URL = 'https://www.facebook.com/groups/901700573618044';

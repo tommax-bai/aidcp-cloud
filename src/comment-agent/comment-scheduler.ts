@@ -73,6 +73,9 @@ export interface FacebookCommentRunResult {
   outcome: FacebookCommentOutcome;
   reason?: string;
   container?: string;
+  /** join-then-comment 调用的独立加群终态；普通评论省略。 */
+  joinOutcome?: string;
+  groupUrl?: string;
 }
 
 /** Stable terminal observation used by queued delegated tasks; only verified `commented` is a success. */
@@ -418,6 +421,8 @@ export class CommentScheduler {
       originChatId?: string;
       /** Async terminal observation. Existing callers may omit it; queued tasks use it for honest accounting. */
       onResult?: (result: CommentTerminalObservation) => Promise<void> | void;
+      /** Rule-batch-only just-in-time ownership/risk gate, re-read before join and before comment submit. */
+      actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
     },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
@@ -517,14 +522,20 @@ export class CommentScheduler {
           force: options?.force === true,
           fastReturnToFeed: options?.fastReturnToFeed === true,
           approvalMode,
+          ...(options?.actionGate ? { actionGate: options.actionGate } : {}),
           ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
         })
           .then((result) => options?.onResult?.(result))
-          .catch((err) =>
+          .catch(async (err) => {
             (this.deps.logger ?? console).warn(
               `[comment-scheduler] FB 加群评论任务异常 account=${accountId}：${(err as Error).message}`,
-            ),
-          )
+            );
+            await options?.onResult?.({
+              outcome: 'submit_failed',
+              reason: `join_comment_exception:${(err as Error).message}`,
+              joinOutcome: 'ambiguous',
+            });
+          })
           .finally(() => this.running.delete(accountId));
         return {
           ok: true,
@@ -616,6 +627,7 @@ export class CommentScheduler {
       approvalMode?: ContentScheduleApprovalMode;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
+      actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
     },
   ): Promise<CommentCommandReceipt & { reason?: string }> {
     if (!accountId || accountId === 'default') {
@@ -760,6 +772,7 @@ export class CommentScheduler {
       approvalMode?: ContentScheduleApprovalMode;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
+      actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
     } = {},
   ): Promise<FacebookCommentRunResult> {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
@@ -802,6 +815,7 @@ export class CommentScheduler {
       approvalMode?: ContentScheduleApprovalMode;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
+      actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
     },
     audit: (row: FacebookCommentAuditRow) => void,
   ): Promise<void> {
@@ -1030,6 +1044,19 @@ export class CommentScheduler {
           if (contactInfo) groupChatCode = approved.contactInfo;
 
           // 6) 提交评论 + 服务器确认（边端 own-identity 收窄）。成功记风控走 interaction.occurred 自动路径，绝不在此重复 record。
+          const finalGate = options.actionGate?.('comment');
+          if (finalGate && !finalGate.allowed) {
+            audit({
+              accountId,
+              outcome: 'quota_denied',
+              reason: finalGate.reason ?? 'rule_comment_gate_denied',
+              shadow: false,
+              keyword,
+              container,
+              textLength: v.text.length,
+            });
+            return;
+          }
           // 提交被更高优先级任务抢占 / 边端失配 taskId 静默丢弃 → submitComment 超时回 ok:false → 走 else 诚实非提交（不打去重、可重试）。
           const submit = await steps.submitComment(target, v.text, groupChatCode, options.fastReturnToFeed === true);
           // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
@@ -1085,9 +1112,18 @@ export class CommentScheduler {
       approvalMode?: ContentScheduleApprovalMode;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
+      actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
     } = {},
   ): Promise<FacebookCommentRunResult> {
     const d = this.deps;
+    const joinGate = options.actionGate?.('join_group');
+    if (joinGate && !joinGate.allowed) {
+      return {
+        outcome: 'no_targets',
+        reason: joinGate.reason ?? 'rule_join_gate_denied',
+        joinOutcome: 'risk_suppressed',
+      };
+    }
     let join: { triggered: boolean; reason?: string; groupUrl?: string; outcome?: string };
     try {
       // manual=true：手动 /comment --join 加群跳过配额闸（会话额度 + 风控速率/状态）。见 triggerScheduled 契约。
@@ -1102,13 +1138,31 @@ export class CommentScheduler {
         title: '加群失败',
         message: `加群调度异常：${(err as Error).message}；未评论。`,
       }, undefined, options.originChatId);
-      return { outcome: 'submit_failed', reason: `join_exception:${(err as Error).message}` };
+      return {
+        outcome: 'submit_failed',
+        reason: `join_exception:${(err as Error).message}`,
+        joinOutcome: 'failed',
+      };
     }
     const isMember =
       join.triggered && (join.outcome === 'joined' || join.outcome === 'already_member') && !!join.groupUrl;
     if (!isMember) {
       await d.postResultCard?.(accountId, joinOnlyReceipt(join), undefined, options.originChatId);
-      return { outcome: 'no_targets', reason: `join_${join.reason ?? join.outcome ?? 'not_completed'}` };
+      return {
+        outcome: 'no_targets',
+        reason: `join_${join.reason ?? join.outcome ?? 'not_completed'}`,
+        joinOutcome: join.outcome ?? 'not_started',
+        ...(join.groupUrl ? { groupUrl: join.groupUrl } : {}),
+      };
+    }
+    const commentGate = options.actionGate?.('comment');
+    if (commentGate && !commentGate.allowed) {
+      return {
+        outcome: 'quota_denied',
+        reason: commentGate.reason ?? 'rule_comment_gate_denied',
+        joinOutcome: join.outcome,
+        groupUrl: join.groupUrl,
+      };
     }
     // 已加入（或已是成员）→ 在该新群里发一条评论。override 容器强制真发；contactInfo 已在 triggerManual 解析一次（gate 同源）。
     // manualOverride 透传 → 群内评论亦跳过评论配额 / 日上限闸（整条链一致，绝不「加了群却被评论配额拦住」）。
@@ -1120,10 +1174,15 @@ export class CommentScheduler {
       force: options.force === true,
       fastReturnToFeed: options.fastReturnToFeed === true,
       approvalMode: options.approvalMode,
+      ...(options.actionGate ? { actionGate: options.actionGate } : {}),
       ...(options.originChatId ? { originChatId: options.originChatId } : {}),
     });
     await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true), undefined, options.originChatId);
-    return comment;
+    return {
+      ...comment,
+      joinOutcome: join.outcome,
+      groupUrl: join.groupUrl,
+    };
   }
 
   /**
