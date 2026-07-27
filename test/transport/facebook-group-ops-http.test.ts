@@ -5,6 +5,7 @@ import type {
   FacebookGroupAccountProgress,
   FacebookGroupJoinRecentScheduledResult,
   FacebookGroupMembershipRow,
+  FacebookRegionCommentTemplateRow,
   FacebookGroupScopedTargetCount,
   FacebookGroupTargetFacets,
   FacebookGroupTargetListResult,
@@ -24,6 +25,8 @@ import {
 const ALL_METHODS = [
   'listTargets',
   'listFacets',
+  'listRegionCommentTemplates',
+  'setRegionCommentTemplates',
   'setEnabled',
   'accountProgress',
   'listAssignments',
@@ -43,6 +46,7 @@ const TARGET: FacebookGroupTargetRow = {
   joinGating: 'instant',
   priority: 2,
   enabled: true,
+  accountScopeMode: 'restricted',
   importBatch: 'batch-1',
   createdAt: '2026-07-26T01:00:00.000Z',
   updatedAt: '2026-07-26T02:00:00.000Z',
@@ -67,7 +71,15 @@ const FACETS: FacebookGroupTargetFacets = {
   regions: [{ region: 'north', parks: ['park-1'] }],
   directions: ['export'],
   accountGroupLabels: ['sales'],
+  globalTargetCount: 0,
   unscopedTargetCount: 0,
+};
+
+const REGION_TEMPLATE: FacebookRegionCommentTemplateRow = {
+  region: 'north',
+  commentTemplates: ['欢迎加入'],
+  updatedAt: '2026-07-26T02:00:00.000Z',
+  updatedBy: 'operator',
 };
 
 const PROGRESS: FacebookGroupAccountProgress = {
@@ -119,6 +131,27 @@ function stubPort(seen: { calls: unknown[] }): FacebookGroupOpsPort {
     listFacets: async () => {
       seen.calls.push({ m: 'listFacets' });
       return FACETS;
+    },
+    listRegionCommentTemplates: async () => {
+      seen.calls.push({ m: 'listRegionCommentTemplates' });
+      return [REGION_TEMPLATE];
+    },
+    setRegionCommentTemplates: async (region, commentTemplates, updatedBy) => {
+      seen.calls.push({
+        m: 'setRegionCommentTemplates',
+        region,
+        commentTemplates,
+        updatedBy,
+      });
+      return {
+        ok: true,
+        row: {
+          ...REGION_TEMPLATE,
+          region,
+          commentTemplates,
+          updatedBy,
+        },
+      };
     },
     setEnabled: async (groupUrl, enabled) => {
       seen.calls.push({ m: 'setEnabled', groupUrl, enabled });
@@ -176,7 +209,7 @@ async function withPortServer(
   }
 }
 
-test('client 只实现收窄后的十个 operation，不可充当完整 facebookGroupTargets', async () => {
+test('client 只实现收窄后的十二个 operation，不可充当完整 facebookGroupTargets', async () => {
   await withPortServer(async (port) => {
     for (const method of ALL_METHODS) {
       assert.equal(typeof port[method], 'function', `missing method: ${method}`);
@@ -193,6 +226,18 @@ test('普通 operation 的参数和结果原样往返，省略可选参数仍保
   await withPortServer(async (port, _raw, seen) => {
     assert.deepEqual(await port.listTargets(), TARGETS);
     assert.deepEqual(await port.listFacets(), FACETS);
+    assert.deepEqual(await port.listRegionCommentTemplates(), [REGION_TEMPLATE]);
+    assert.deepEqual(
+      await port.setRegionCommentTemplates('north', ['模板一', '模板二'], 'admin'),
+      {
+        ok: true,
+        row: {
+          ...REGION_TEMPLATE,
+          commentTemplates: ['模板一', '模板二'],
+          updatedBy: 'admin',
+        },
+      },
+    );
     assert.deepEqual(await port.setEnabled(TARGET.groupUrl, false), {
       ...TARGET,
       enabled: false,
@@ -206,6 +251,13 @@ test('普通 operation 的参数和结果原样往返，省略可选参数仍保
     assert.deepEqual(seen.calls, [
       { m: 'listTargets', options: undefined },
       { m: 'listFacets' },
+      { m: 'listRegionCommentTemplates' },
+      {
+        m: 'setRegionCommentTemplates',
+        region: 'north',
+        commentTemplates: ['模板一', '模板二'],
+        updatedBy: 'admin',
+      },
       { m: 'setEnabled', groupUrl: TARGET.groupUrl, enabled: false },
       { m: 'accountProgress' },
       { m: 'listAssignments', limit: undefined },

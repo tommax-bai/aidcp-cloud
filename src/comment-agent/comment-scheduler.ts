@@ -44,6 +44,7 @@ import {
 } from '../platform/index.js';
 import { validateFacebookComment } from './facebook-comment-validators.js';
 import type { EffectiveFacebookCommentConfig } from '../kernel/facebook-comment-config-types.js';
+import type { ResolveFacebookRegionCommentTemplatesResult } from '../kernel/facebook-group-types.js';
 import type { FacebookCommentAuditRow, FacebookCommentOutcome } from './facebook-comment-audit-store.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
 import type { EdgeTaskPriority } from '../comm/protocol.js';
@@ -266,6 +267,10 @@ export interface CommentSchedulerDeps {
   // ── facebook-scheduled-comment 2.2/2.3：Facebook 定向评论执行（缺省全不注入 → FB 分支继续诚实拒绝，零回归） ──
   /** 读该账号 FB 定向评论配置（关键词 + 正文模式 / 模板；目标群由 joined ledger 另选）。 */
   facebookConfigFor?: (accountId: string) => EffectiveFacebookCommentConfig;
+  /** 账号模板缺失时，按已确定的 canonical 群 URL 解析该群区域的通用模板。 */
+  facebookRegionCommentTemplatesForGroup?: (
+    groupUrl: string,
+  ) => Promise<ResolveFacebookRegionCommentTemplatesResult>;
   /**
    * FB 评论撰写（无人值守，不走人审）：**读了再写**（change facebook-comment-read-before-write）——
    * 按关键词/容器 + **帖子正文（图片帖常空）+ 顶部他人评论** 产草稿，顺着讨论、用**内容语言**写；返回 null=撰写失败。
@@ -806,11 +811,6 @@ export class CommentScheduler {
     const shadow = false;
 
     const cfg = d.facebookConfigFor!(accountId);
-    if (cfg.commentMode === 'template' && cfg.commentTemplates.length === 0) {
-      audit({ accountId, outcome: 'compose_skipped', reason: 'empty_template', shadow, ...(manualTarget ? { container: manualTarget } : {}) });
-      return;
-    }
-
     // 关键词是定位策略而非启用闸：有词走群内搜索；空词直接打开群讨论流第一条可评论帖。
     const keyword = cfg.keywords.length > 0
       ? (cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0] ?? '')
@@ -832,6 +832,24 @@ export class CommentScheduler {
       containerUrl = chosen.url; // 功能主键：边缘据此站内搜（含群 id）
       // 人类可读容器标签：已解析出的群名优先，否则暂用 url（下次搜索会自动回填真名）。审计/回执一律用它、不用裸 id。
       container = chosen.name ?? chosen.url;
+    }
+
+    let effectiveCommentTemplates = cfg.commentTemplates;
+    if (cfg.commentMode === 'template' && effectiveCommentTemplates.length === 0) {
+      const regional = await d.facebookRegionCommentTemplatesForGroup?.(containerUrl)
+        ?? { ok: false as const, reason: 'regional_template_missing' as const };
+      if (!regional.ok) {
+        audit({
+          accountId,
+          outcome: 'compose_skipped',
+          reason: regional.reason,
+          shadow,
+          keyword,
+          container,
+        });
+        return;
+      }
+      effectiveCommentTemplates = regional.commentTemplates;
     }
 
     // ── 读了再写（change facebook-comment-read-before-write）：撰写挪到开帖之后，吃到帖子正文+他人评论+内容语言 ──
@@ -959,7 +977,11 @@ export class CommentScheduler {
 
           // 4) 正文来源：生成评论读了再写；模板评论只选账号模板，不调用 LLM。
           const draft = cfg.commentMode === 'template'
-            ? (cfg.commentTemplates[Math.floor(rand() * cfg.commentTemplates.length)] ?? cfg.commentTemplates[0] ?? null)
+            ? (
+                effectiveCommentTemplates[Math.floor(rand() * effectiveCommentTemplates.length)]
+                ?? effectiveCommentTemplates[0]
+                ?? null
+              )
             : d.facebookCompose
               ? await d.facebookCompose(accountId, { keyword, container, ...(postText ? { postText } : {}), ...(comments.length > 0 ? { comments } : {}) })
               : null;

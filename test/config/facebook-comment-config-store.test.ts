@@ -21,9 +21,10 @@ function fakePool(opts: { accountExists?: boolean; returning?: unknown } = {}): 
           keywords: JSON.parse(String(params[1])),
           containers: JSON.parse(String(params[2])),
           comment_mode: params[3],
-          comment_templates: JSON.parse(String(params[4])),
+          comment_mode_configured: params[4],
+          comment_templates: JSON.parse(String(params[5])),
           updated_at: '2026-07-07T00:00:00.000Z',
-          updated_by: params[5],
+          updated_by: params[6],
         };
         return { rows: [row], rowCount: 1 };
       }
@@ -34,6 +35,7 @@ function fakePool(opts: { accountExists?: boolean; returning?: unknown } = {}): 
           keywords: [],
           containers: JSON.parse(String(params[1])),
           comment_mode: 'generated',
+          comment_mode_configured: true,
           comment_templates: [],
           updated_at: '2026-07-07T00:00:00.000Z',
           updated_by: 'panel:op',
@@ -53,30 +55,33 @@ test('getForAccount: 缺行返回空默认（供面板回显）', () => {
   const row = store.getForAccount('acc-1');
   assert.deepEqual(row, {
     accountId: 'acc-1',
+    commentModeConfigured: false,
     keywords: [],
     containers: [],
-    commentMode: 'generated',
+    commentMode: 'template',
     commentTemplates: [],
     updatedAt: null,
     updatedBy: null,
   });
 });
 
-test('effectiveConfigFor: 空关键词启用首帖模式；模板模式无模板仍不生效；容器不再决定启用', async () => {
+test('effectiveConfigFor: 缺方案默认模板；空关键词是首帖模式，模板可在选群后按区域补齐', async () => {
   const { pool } = fakePool();
   const store = new FacebookCommentConfigStore({ schemaEnsurer: ensureCapabilitySchema, pool });
-  // 生成模式空关键词是合法的“群内首帖”策略；目标群由 joined ledger 运行时选择。
+  // 空关键词是合法的“群内首帖”策略；缺省模板正文在选定 joined 群后按区域解析。
   assert.equal(store.effectiveConfigFor('acc-1').enabled, true);
-  // 只有关键词、无 legacy 容器 → 生成模式仍生效；目标群由 joined ledger 运行时选择。
+  assert.equal(store.effectiveConfigFor('acc-1').commentMode, 'template');
+  // 只有关键词、无 legacy 容器同样生效；关键词只决定群内定位策略。
   await store.setAccount('acc-1', { keywords: ['coffee'], containers: [] }, 'panel:op');
-  const generated = store.effectiveConfigFor('acc-1');
-  assert.equal(generated.enabled, true);
-  assert.deepEqual(generated.keywords, ['coffee']);
-  assert.deepEqual(generated.containers, []);
-  assert.equal(generated.commentMode, 'generated');
+  const defaultTemplate = store.effectiveConfigFor('acc-1');
+  assert.equal(defaultTemplate.enabled, true);
+  assert.deepEqual(defaultTemplate.keywords, ['coffee']);
+  assert.deepEqual(defaultTemplate.containers, []);
+  assert.equal(defaultTemplate.commentMode, 'template');
+  assert.equal(store.getForAccount('acc-1').commentModeConfigured, false);
 
   await store.setAccount('acc-1', { commentMode: 'template', commentTemplates: [] }, 'panel:op');
-  assert.equal(store.effectiveConfigFor('acc-1').enabled, false, '模板模式无模板 → 不生效');
+  assert.equal(store.effectiveConfigFor('acc-1').enabled, true, '账号模板为空时仍需进入区域模板解析');
   await store.setAccount('acc-1', { commentTemplates: ['Looks great'] }, 'panel:op');
   const templated = store.effectiveConfigFor('acc-1');
   assert.equal(templated.enabled, true);
@@ -120,7 +125,8 @@ test('setAccount: mode/templates sanitize（trim/去空串/去重），部分补
   assert.deepEqual(row.commentTemplates, ['hi coffee', 'nice coffee']);
   let ins = calls.find((c) => /INSERT INTO account_facebook_comment_config/.test(c.text))!;
   assert.equal(ins.params[3], 'template');
-  assert.deepEqual(JSON.parse(String(ins.params[4])), ['hi coffee', 'nice coffee']);
+  assert.equal(ins.params[4], true);
+  assert.deepEqual(JSON.parse(String(ins.params[5])), ['hi coffee', 'nice coffee']);
 
   await store.setAccount('acc-1', { keywords: ['tea'] }, 'panel:op');
   row = store.getForAccount('acc-1');

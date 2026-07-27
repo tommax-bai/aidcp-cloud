@@ -1781,6 +1781,14 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
   const facebookGroupOps: FacebookGroupOpsPort = {
     listTargets: (options) => ctx.facebookGroupTargetStore.listTargets(options),
     listFacets: () => ctx.facebookGroupTargetStore.listFacets(),
+    listRegionCommentTemplates: () =>
+      ctx.facebookGroupTargetStore.listRegionCommentTemplates(),
+    setRegionCommentTemplates: (region, commentTemplates, updatedBy) =>
+      ctx.facebookGroupTargetStore.setRegionCommentTemplates(
+        region,
+        commentTemplates,
+        updatedBy,
+      ),
     setEnabled: (groupUrl, enabled) => ctx.facebookGroupTargetStore.setEnabled(groupUrl, enabled),
     accountProgress: () => ctx.facebookGroupTargetStore.accountProgress(),
     listAssignments: (limit) => ctx.facebookGroupMembershipStore.listAssignments(limit),
@@ -6695,6 +6703,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     onTakeoverEnd: onCommentTakeoverEnd,
     // ── Facebook 定向评论：账号配置与结构化审批策略授权，风险/限速/验证继续 fail-closed。 ──
     facebookConfigFor: (accountId) => facebookCommentConfigStore.effectiveConfigFor(accountId),
+    facebookRegionCommentTemplatesForGroup: (groupUrl) =>
+      facebookGroupTargetStore.resolveRegionCommentTemplatesForGroup(groupUrl),
     facebookCompose: async (accountId, { keyword, postText, comments }) => {
       // 读了再写（change facebook-comment-read-before-write）：撰写器吃到帖子正文（图片帖常空）+ 顶部他人评论，
       // 顺着讨论、用**内容语言**写（图片群里内容多是当地语言，而本号 FB 界面可能是中文——绝不跟界面语言）。
@@ -7861,6 +7871,14 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
       : {
           listTargets: (options) => facebookGroupTargetStore.listTargets(options),
           listFacets: () => facebookGroupTargetStore.listFacets(),
+          listRegionCommentTemplates: () =>
+            facebookGroupTargetStore.listRegionCommentTemplates(),
+          setRegionCommentTemplates: (region, commentTemplates, updatedBy) =>
+            facebookGroupTargetStore.setRegionCommentTemplates(
+              region,
+              commentTemplates,
+              updatedBy,
+            ),
           setEnabled: (groupUrl, enabled) =>
             facebookGroupTargetStore.setEnabled(groupUrl, enabled),
           accountProgress: () => facebookGroupTargetStore.accountProgress(),
@@ -8444,14 +8462,28 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             },
             listTargets: (options) => facebookGroupOpsForPanel.listTargets(options),
             listFacets: () => facebookGroupOpsForPanel.listFacets(),
+            listRegionCommentTemplates: () =>
+              facebookGroupOpsForPanel.listRegionCommentTemplates(),
+            setRegionCommentTemplates: (region, commentTemplates, updatedBy) =>
+              facebookGroupOpsForPanel.setRegionCommentTemplates(
+                region,
+                commentTemplates,
+                updatedBy,
+              ),
             setEnabled: (groupUrl, enabled) =>
               facebookGroupOpsForPanel.setEnabled(groupUrl, enabled),
-            replaceTargetScopes: async (groupUrls, accountGroupLabels, updatedBy) => {
+            replaceTargetScopes: async (
+              groupUrls,
+              accountGroupLabels,
+              updatedBy,
+              accountScopeMode = 'restricted',
+            ) => {
               if (mode !== 'api') {
                 return facebookGroupTargetStore.replaceTargetScopes(
                   groupUrls,
                   accountGroupLabels,
                   updatedBy,
+                  accountScopeMode,
                 );
               }
               if (!facebookScopeCommand) {
@@ -8461,6 +8493,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                 commandId: randomUUID(),
                 groupUrls,
                 accountGroupLabels,
+                accountScopeMode,
                 updatedBy,
               });
               if (receipt.outcome === 'collision') {

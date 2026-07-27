@@ -5,7 +5,7 @@
  * 运行时容器来自账号已加入群组账本；legacy containers 仍保留用于回滚 / 旧数据读取。
  *
  * 安全不变量（复刻 QuotaConfigStore / ContentScheduleStore）：
- * - fail-closed：模板模式无模板 → effectiveConfigFor().enabled=false；关键词为空是合法首帖模式。
+ * - 正文来源在选定群后 fail-closed；关键词为空是合法首帖模式，模板缺失则诚实 no-op。
  * - 写库成功才刷内存镜像（避免「镜像已变、库未变」不一致）。
  * - 绝不造幽灵行：setAccount 写前校验 accounts 存在；退役保留账号拒。
  * - 非法值（非字符串数组）整块拒 invalid_value，不静默丢弃。
@@ -33,6 +33,7 @@ export type { FacebookContainer, FacebookCommentMode, EffectiveFacebookCommentCo
 /** 每账号配置行（面板回显用）。keywords 为字符串数组；containers 为 legacy {url,name} 数组。 */
 export interface FacebookCommentConfigRow {
   accountId: string;
+  commentModeConfigured: boolean;
   keywords: string[];
   containers: FacebookContainer[];
   commentMode: FacebookCommentMode;
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS account_facebook_comment_config (
   keywords    JSONB NOT NULL DEFAULT '[]'::jsonb,
   containers  JSONB NOT NULL DEFAULT '[]'::jsonb,
   comment_mode TEXT NOT NULL DEFAULT 'generated',
+  comment_mode_configured BOOLEAN NOT NULL DEFAULT false,
   comment_templates JSONB NOT NULL DEFAULT '[]'::jsonb,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by  TEXT
@@ -86,6 +88,7 @@ interface FbConfigDbRow {
   keywords: unknown;
   containers: unknown;
   comment_mode?: unknown;
+  comment_mode_configured?: unknown;
   comment_templates?: unknown;
   updated_at: Date | string | null;
   updated_by: string | null;
@@ -189,7 +192,7 @@ export class FacebookCommentConfigStore {
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
     await this.schemaEnsurer(this.pool, {
       capability: 'facebook_comment_config',
-      sinceVersion: '0034_facebook_comment_config',
+      sinceVersion: '0090_facebook_comment_mode_configured',
       ddl: [FACEBOOK_COMMENT_CONFIG_SCHEMA_SQL],
     });
     await this.reload();
@@ -202,7 +205,8 @@ export class FacebookCommentConfigStore {
 
   private async reload(): Promise<void> {
     const { rows } = await this.pool.query<FbConfigDbRow>(
-      `SELECT account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by
+      `SELECT account_id, keywords, containers, comment_mode, comment_mode_configured,
+              comment_templates, updated_at, updated_by
        FROM account_facebook_comment_config`,
     );
     const next = new Map<string, FacebookCommentConfigRow>();
@@ -213,6 +217,7 @@ export class FacebookCommentConfigStore {
   private toRow(r: FbConfigDbRow): FacebookCommentConfigRow {
     return {
       accountId: r.account_id,
+      commentModeConfigured: r.comment_mode_configured === true,
       keywords: coerceList(r.keywords),
       containers: coerceContainers(r.containers),
       commentMode: coerceCommentMode(r.comment_mode),
@@ -227,9 +232,10 @@ export class FacebookCommentConfigStore {
     return (
       this.cache.get(accountId) ?? {
         accountId,
+        commentModeConfigured: false,
         keywords: [],
         containers: [],
-        commentMode: 'generated',
+        commentMode: 'template',
         commentTemplates: [],
         updatedAt: null,
         updatedBy: null,
@@ -240,12 +246,11 @@ export class FacebookCommentConfigStore {
   /** 调度器消费点：正文来源 fail-closed；关键词为空是首帖模式，目标群由 joined ledger 另行选择。 */
   effectiveConfigFor(accountId: string): EffectiveFacebookCommentConfig {
     const row = this.getForAccount(accountId);
-    const hasBodySource = row.commentMode === 'generated' || row.commentTemplates.length > 0;
     return {
-      enabled: hasBodySource,
+      enabled: true,
       keywords: row.keywords,
       containers: row.containers,
-      commentMode: row.commentMode,
+      commentMode: row.commentModeConfigured ? row.commentMode : 'template',
       commentTemplates: row.commentTemplates,
     };
   }
@@ -285,6 +290,8 @@ export class FacebookCommentConfigStore {
     const nextKeywords = keywords ?? current.keywords;
     const nextContainers = containers ?? current.containers;
     const nextCommentMode = commentMode ?? current.commentMode;
+    const nextCommentModeConfigured =
+      commentMode === undefined ? current.commentModeConfigured : true;
     const nextCommentTemplates = commentTemplates ?? current.commentTemplates;
 
     const { rows } = await writeWithMirrorBump(
@@ -294,21 +301,25 @@ export class FacebookCommentConfigStore {
       (q) =>
         q.query<FbConfigDbRow>(
       `INSERT INTO account_facebook_comment_config
-         (account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by)
-       VALUES ($1, $2::jsonb, $3::jsonb, $4, $5::jsonb, now(), $6)
+         (account_id, keywords, containers, comment_mode, comment_mode_configured,
+          comment_templates, updated_at, updated_by)
+       VALUES ($1, $2::jsonb, $3::jsonb, $4, $5, $6::jsonb, now(), $7)
        ON CONFLICT (account_id) DO UPDATE
          SET keywords = EXCLUDED.keywords,
              containers = EXCLUDED.containers,
              comment_mode = EXCLUDED.comment_mode,
+             comment_mode_configured = EXCLUDED.comment_mode_configured,
              comment_templates = EXCLUDED.comment_templates,
              updated_at = now(),
              updated_by = EXCLUDED.updated_by
-       RETURNING account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by`,
+       RETURNING account_id, keywords, containers, comment_mode, comment_mode_configured,
+                 comment_templates, updated_at, updated_by`,
       [
         accountId,
         JSON.stringify(nextKeywords),
         JSON.stringify(nextContainers),
         nextCommentMode,
+        nextCommentModeConfigured,
         JSON.stringify(nextCommentTemplates),
         updatedBy,
       ],
@@ -342,7 +353,8 @@ export class FacebookCommentConfigStore {
         (q) =>
           q.query<FbConfigDbRow>(
             `UPDATE account_facebook_comment_config SET containers = $2::jsonb WHERE account_id = $1
-         RETURNING account_id, keywords, containers, comment_mode, comment_templates, updated_at, updated_by`,
+         RETURNING account_id, keywords, containers, comment_mode, comment_mode_configured,
+                   comment_templates, updated_at, updated_by`,
             [accountId, JSON.stringify(nextContainers)],
           ),
       );

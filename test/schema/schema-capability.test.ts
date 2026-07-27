@@ -123,6 +123,34 @@ test('degraded：缺列 / 缺索引 → 抛 schema_incomplete_*，逐条列出�
   assert.deepEqual(missingIndex.ddlExecuted(), []);
 });
 
+test('migrations-only requiredObjects joins the capability probe without adding runtime DDL', async () => {
+  const spec: SchemaCapabilitySpec = {
+    ...SPEC,
+    requiredObjects: {
+      tables: { zz_migration_only: ['id', 'payload'] },
+    },
+  };
+  const missing = stubClient(READY);
+  await assert.rejects(
+    () => ensureCapabilitySchema(missing.client, spec),
+    (err: unknown) => {
+      const e = err as SchemaCapabilityError;
+      assert.equal(e.status, 'missing');
+      assert.deepEqual(e.missing, ['zz_migration_only']);
+      return true;
+    },
+  );
+  assert.deepEqual(missing.ddlExecuted(), []);
+
+  const ready = stubClient({
+    tables: [...READY.tables, 'zz_migration_only'],
+    columns: [...READY.columns, 'zz_migration_only.id', 'zz_migration_only.payload'],
+    indexes: READY.indexes,
+  });
+  assert.equal(await ensureCapabilitySchema(ready.client, spec), 'ready');
+  assert.deepEqual(ready.ddlExecuted(), []);
+});
+
 test('回滚旋钮 AIDCP_SCHEMA_SELF_CREATE=true：确实回到自建（并且只有这一条路径会发 DDL）', async () => {
   const before = process.env.AIDCP_SCHEMA_SELF_CREATE;
   process.env.AIDCP_SCHEMA_SELF_CREATE = 'true';

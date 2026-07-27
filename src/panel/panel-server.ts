@@ -45,6 +45,8 @@ import { isKnownRole } from '../config/role-catalog.js';
 import { isAllowedPlatformCredential } from '../config/platform-credentials.js';
 import {
   FacebookGroupScopeError,
+  type FacebookGroupAccountScopeFilter,
+  type FacebookGroupAccountScopeMode,
   type FacebookGroupMembershipStatus,
   type FacebookGroupTargetInput,
 } from '../kernel/facebook-group-types.js';
@@ -1012,6 +1014,19 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'bad_enabled' });
         return;
       }
+      const accountScopeModeRaw = query.get('accountScopeMode') ?? undefined;
+      const allowedScopeModes = new Set<FacebookGroupAccountScopeFilter>([
+        'global',
+        'restricted',
+        'unscoped',
+      ]);
+      if (
+        accountScopeModeRaw
+        && !allowedScopeModes.has(accountScopeModeRaw as FacebookGroupAccountScopeFilter)
+      ) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_scope_mode' });
+        return;
+      }
       sendJson(
         res,
         200,
@@ -1023,6 +1038,9 @@ function createRequestHandler(
           ...(query.get('region') ? { region: query.get('region') } : {}),
           ...(query.get('park') ? { park: query.get('park') } : {}),
           ...(query.get('direction') ? { direction: query.get('direction') } : {}),
+          ...(accountScopeModeRaw
+            ? { accountScopeMode: accountScopeModeRaw as FacebookGroupAccountScopeFilter }
+            : {}),
           ...(query.get('accountGroupLabel') ? { accountGroupLabel: query.get('accountGroupLabel') } : {}),
         }),
       );
@@ -1034,6 +1052,49 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, await deps.facebookGroupTargets.listFacets());
+      return;
+    }
+    if (method === 'GET' && url === '/api/facebook/groups/comment-templates') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      sendJson(res, 200, {
+        items: await deps.facebookGroupTargets.listRegionCommentTemplates(),
+      });
+      return;
+    }
+    if (method === 'PUT' && url === '/api/facebook/groups/comment-templates') {
+      if (!deps.facebookGroupTargets) {
+        sendJson(res, 503, { error: 'unavailable' });
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const raw = (body ?? {}) as Record<string, unknown>;
+      if (
+        typeof raw.region !== 'string'
+        || !Array.isArray(raw.commentTemplates)
+        || raw.commentTemplates.some((template) => typeof template !== 'string')
+      ) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_templates' });
+        return;
+      }
+      const result = await deps.facebookGroupTargets.setRegionCommentTemplates(
+        raw.region,
+        raw.commentTemplates as string[],
+        verified.payload.sub,
+      );
+      if (!result.ok) {
+        sendJson(res, 400, { error: 'bad_request', reason: result.reason });
+        return;
+      }
+      sendJson(res, 200, result.row);
       return;
     }
     if (method === 'POST' && url === '/api/facebook/groups/import') {
@@ -1064,6 +1125,14 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_account_group' });
         return;
       }
+      if (
+        raw.accountScopeMode !== undefined
+        && raw.accountScopeMode !== 'global'
+        && raw.accountScopeMode !== 'restricted'
+      ) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_scope_mode' });
+        return;
+      }
       try {
         sendJson(res, 200, await deps.facebookGroupTargets.importTargets(
           inputs,
@@ -1071,6 +1140,9 @@ function createRequestHandler(
           {
             ...(raw.accountGroupLabels !== undefined
               ? { accountGroupLabels: raw.accountGroupLabels as string[] }
+              : {}),
+            ...(raw.accountScopeMode !== undefined
+              ? { accountScopeMode: raw.accountScopeMode as FacebookGroupAccountScopeMode }
               : {}),
             updatedBy: verified.payload.sub,
           },
@@ -1101,14 +1173,31 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'no_targets' });
         return;
       }
-      if (!Array.isArray(raw.accountGroupLabels) || raw.accountGroupLabels.some((label) => typeof label !== 'string')) {
+      if (
+        raw.accountScopeMode !== undefined
+        && raw.accountScopeMode !== 'global'
+        && raw.accountScopeMode !== 'restricted'
+      ) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_scope_mode' });
+        return;
+      }
+      if (
+        raw.accountGroupLabels !== undefined
+        && (
+          !Array.isArray(raw.accountGroupLabels)
+          || raw.accountGroupLabels.some((label) => typeof label !== 'string')
+        )
+      ) {
         sendJson(res, 400, { error: 'bad_request', reason: 'invalid_account_group' });
         return;
       }
+      const accountGroupLabels = (raw.accountGroupLabels ?? []) as string[];
+      const accountScopeMode = (raw.accountScopeMode ?? 'restricted') as FacebookGroupAccountScopeMode;
       const result = await deps.facebookGroupTargets.replaceTargetScopes(
         raw.groupUrls as string[],
-        raw.accountGroupLabels as string[],
+        accountGroupLabels,
         verified.payload.sub,
+        accountScopeMode,
       );
       if (!result.ok) {
         sendJson(res, 400, { error: 'bad_request', reason: result.reason });

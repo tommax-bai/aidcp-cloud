@@ -107,8 +107,16 @@ export const REQUIRED_SCHEMA_VERSION = '0076_config_mirror_bump_inbox';
  * 注：`0088_client_environment_proxy_authority`（change cloud-authoritative-environment-proxy）
  * 为 api owner 增加环境原始代理权威；客户鉴权接口缺表时显式返回 schema unavailable，
  * Edge 不会回退到 AdsPower 当前执行副本，故只抬 KNOWN_MAX、不抬 monolith REQUIRED。
+ *
+ * 注：`0089_facebook_global_scope_regional_templates`
+ * 为 automation owner 的 Facebook 群目标增加显式 global/restricted 范围，并持久化区域通用
+ * 评论模板；缺失时相关范围与模板能力在 capability probe 处 fail-closed，故只抬 KNOWN_MAX。
+ *
+ * 注：`0090_facebook_comment_mode_configured`
+ * 为 api owner 的账号 Facebook 评论配置增加独立的方案显式性；历史持久化行标记为显式，
+ * 新行只有明确写入 commentMode 才置位。缺列时评论配置能力在 probe 处 fail-closed。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0088_client_environment_proxy_authority';
+export const KNOWN_MAX_SCHEMA_VERSION = '0090_facebook_comment_mode_configured';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

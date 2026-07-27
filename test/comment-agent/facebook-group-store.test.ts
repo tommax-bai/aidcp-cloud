@@ -11,6 +11,7 @@ import {
   FacebookGroupTargetStore,
   canonicalFacebookGroupUrl,
   normalizeFacebookAccountGroupLabels,
+  normalizeFacebookGroupAccountScopeMode,
 } from '../../src/comment-agent/facebook-group-store.js';
 
 function targetRow(overrides: Partial<Record<string, unknown>> = {}) {
@@ -21,6 +22,7 @@ function targetRow(overrides: Partial<Record<string, unknown>> = {}) {
     park: null,
     direction: null,
     join_gating: 'unknown',
+    account_scope_mode: 'restricted',
     priority: 0,
     enabled: true,
     import_batch: null,
@@ -51,6 +53,13 @@ test('account group scopes trim/dedupe/sort and reject empty or overlong labels'
   assert.deepEqual(normalizeFacebookAccountGroupLabels([' 招聘组 ', '华东组', '招聘组']), ['华东组', '招聘组']);
   assert.equal(normalizeFacebookAccountGroupLabels(['']), null);
   assert.equal(normalizeFacebookAccountGroupLabels(['x'.repeat(65)]), null);
+});
+
+test('account scope mode accepts only explicit restricted/global values', () => {
+  assert.equal(normalizeFacebookGroupAccountScopeMode('restricted'), 'restricted');
+  assert.equal(normalizeFacebookGroupAccountScopeMode('global'), 'global');
+  assert.equal(normalizeFacebookGroupAccountScopeMode('unscoped'), null);
+  assert.equal(normalizeFacebookGroupAccountScopeMode(undefined), null);
 });
 
 test('FacebookGroupTargetStore.importTargets stores metadata and deduplicates canonical URLs before insert', async () => {
@@ -100,6 +109,7 @@ test('FacebookGroupTargetStore.importTargets stores metadata and deduplicates ca
   assert.equal(result.rows[0].park, '同文1工业区');
   assert.equal(result.rows[0].direction, '机械和电气');
   assert.equal(result.rows[0].importBatch, 'batch-1');
+  assert.equal(result.rows[0].accountScopeMode, 'restricted');
   assert.deepEqual(result.rows[0].accountGroupLabels, [], '未携带范围的新目标保持无范围');
 });
 
@@ -231,6 +241,7 @@ test('FacebookGroupTargetStore.replaceTargetScopes bulk-replaces and reads datab
       if (sql.includes('scope_updated_at, t.scope_updated_by')) {
         return { rows: urls.map((group_url) => ({
           group_url,
+          account_scope_mode: 'restricted',
           account_group_labels: ['华东组', '招聘组'],
           scope_updated_at: '2026-07-22T08:00:00.000Z',
           scope_updated_by: 'alice',
@@ -247,7 +258,10 @@ test('FacebookGroupTargetStore.replaceTargetScopes bulk-replaces and reads datab
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.items.length, 2);
-  assert.ok(result.items.every((row) => row.accountGroupLabels.length === 2 && row.updatedBy === 'alice'));
+  assert.ok(result.items.every((row) =>
+    row.accountScopeMode === 'restricted'
+    && row.accountGroupLabels.length === 2
+    && row.updatedBy === 'alice'));
   assert.ok(calls.some((sql) => sql.includes('DELETE FROM facebook_group_target_scope')));
   assert.ok(calls.some((sql) => sql.includes('CROSS JOIN unnest($2::text[])')));
   assert.ok(calls.includes('COMMIT'));
@@ -276,6 +290,58 @@ test('FacebookGroupTargetStore.importTargets explicit empty scopes clears mappin
   assert.deepEqual(result.rows[0].accountGroupLabels, []);
   assert.ok(calls.some((sql) => sql.includes('DELETE FROM facebook_group_target_scope')));
   assert.equal(calls.some((sql) => sql.includes('INSERT INTO facebook_group_target_scope')), false);
+});
+
+test('FacebookGroupTargetStore.replaceTargetScopes global clears mappings and rejects mixed labels', async () => {
+  const groupUrl = 'https://www.facebook.com/groups/group-a';
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const client = {
+    query: async (sql: string, params: unknown[] = []) => {
+      calls.push({ sql, params: [...params] });
+      if (sql.includes('SELECT group_url FROM facebook_group_target')) {
+        return { rows: [{ group_url: groupUrl }] };
+      }
+      if (sql.includes('scope_updated_at, t.scope_updated_by')) {
+        return {
+          rows: [{
+            group_url: groupUrl,
+            account_scope_mode: 'global',
+            account_group_labels: [],
+            scope_updated_at: '2026-07-22T08:00:00.000Z',
+            scope_updated_by: 'alice',
+          }],
+        };
+      }
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const store = new FacebookGroupTargetStore({
+    pool: { connect: async () => client } as unknown as pg.Pool,
+  });
+
+  const result = await store.replaceTargetScopes([groupUrl], [], 'alice', 'global');
+  assert.deepEqual(result, {
+    ok: true,
+    items: [{
+      groupUrl,
+      accountScopeMode: 'global',
+      accountGroupLabels: [],
+      updatedAt: '2026-07-22T08:00:00.000Z',
+      updatedBy: 'alice',
+    }],
+  });
+  assert.ok(calls.some((call) =>
+    call.sql.includes('UPDATE facebook_group_target')
+    && call.params[1] === 'global'));
+  assert.equal(
+    calls.some((call) => call.sql.includes('INSERT INTO facebook_group_target_scope')),
+    false,
+  );
+  assert.deepEqual(
+    await store.replaceTargetScopes([groupUrl], ['华东组'], 'alice', 'global'),
+    { ok: false, reason: 'invalid_scope_combination' },
+  );
 });
 
 test('FacebookGroupTargetStore.listTargets applies metadata filters with existing filters', async () => {
@@ -311,6 +377,7 @@ test('FacebookGroupTargetStore.listTargets applies metadata filters with existin
     park: '周山工业区/VSIP 1',
     direction: '机械和电气',
     accountGroupLabel: '华东组',
+    accountScopeMode: 'restricted',
   });
 
   assert.equal(result.total, 1);
@@ -318,12 +385,13 @@ test('FacebookGroupTargetStore.listTargets applies metadata filters with existin
   assert.equal(result.items[0].park, '周山工业区/VSIP 1');
   assert.equal(result.items[0].direction, '机械和电气');
   assert.deepEqual(result.items[0].accountGroupLabels, ['招聘组', '华东组']);
-  assert.deepEqual(calls[0].params, [true, 'joined', '北宁区域', '周山工业区/VSIP 1', '机械和电气', '华东组']);
-  assert.deepEqual(calls[1].params, [true, 'joined', '北宁区域', '周山工业区/VSIP 1', '机械和电气', '华东组', 50, 10]);
+  assert.deepEqual(calls[0].params, [true, 'joined', '北宁区域', '周山工业区/VSIP 1', '机械和电气', 'restricted', '华东组']);
+  assert.deepEqual(calls[1].params, [true, 'joined', '北宁区域', '周山工业区/VSIP 1', '机械和电气', 'restricted', '华东组', 50, 10]);
   assert.match(calls[1].sql, /t\.region = \$3/);
   assert.match(calls[1].sql, /t\.park = \$4/);
   assert.match(calls[1].sql, /t\.direction = \$5/);
-  assert.match(calls[1].sql, /sf\.account_group_label = \$6/);
+  assert.match(calls[1].sql, /t\.account_scope_mode = \$6/);
+  assert.match(calls[1].sql, /sf\.account_group_label = \$7/);
 });
 
 test('FacebookGroupTargetStore.listFacets groups parks under regions and omits null metadata', async () => {
@@ -345,6 +413,7 @@ test('FacebookGroupTargetStore.listFacets groups parks under regions and omits n
       if (sql.includes('group_label AS account_group_label')) {
         return { rows: [{ account_group_label: '华东组' }, { account_group_label: '招聘组' }] };
       }
+      if (sql.includes(`account_scope_mode = 'global'`)) return { rows: [{ total: '3' }] };
       return { rows: [{ total: '2' }] };
     },
   } as unknown as pg.Pool;
@@ -357,11 +426,88 @@ test('FacebookGroupTargetStore.listFacets groups parks under regions and omits n
     ],
     directions: ['机械和电气', '全国机电'],
     accountGroupLabels: ['华东组', '招聘组'],
+    globalTargetCount: 3,
     unscopedTargetCount: 2,
   });
 });
 
-test('facebook group schemas include one-group-one-account lock, coverage indexes, and audit table', () => {
+test('regional comment templates sanitize writes and resolve only through the target group region', async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const pool = {
+    query: async (sql: string, params: unknown[] = []) => {
+      calls.push({ sql, params: [...params] });
+      if (sql.includes('SELECT 1 FROM facebook_group_target')) return { rows: [{ '?column?': 1 }] };
+      if (sql.includes('INSERT INTO facebook_region_comment_template_config')) {
+        return {
+          rows: [{
+            region: params[0],
+            comment_templates: JSON.parse(String(params[1])),
+            updated_at: '2026-07-27T08:00:00.000Z',
+            updated_by: params[2],
+          }],
+        };
+      }
+      if (sql.includes('LEFT JOIN facebook_region_comment_template_config')) {
+        return {
+          rows: [{
+            region: '河南区域',
+            comment_templates: ['区域欢迎语', '区域备用语'],
+          }],
+        };
+      }
+      return { rows: [] };
+    },
+  } as unknown as pg.Pool;
+  const store = new FacebookGroupTargetStore({ pool });
+
+  const saved = await store.setRegionCommentTemplates(
+    ' 河南区域 ',
+    [' 区域欢迎语 ', '区域欢迎语', '', '区域备用语'],
+    ' panel:alice ',
+  );
+  assert.deepEqual(saved, {
+    ok: true,
+    row: {
+      region: '河南区域',
+      commentTemplates: ['区域欢迎语', '区域备用语'],
+      updatedAt: '2026-07-27T08:00:00.000Z',
+      updatedBy: 'panel:alice',
+    },
+  });
+  assert.deepEqual(
+    await store.resolveRegionCommentTemplatesForGroup('https://m.facebook.com/groups/group-a/posts/42'),
+    {
+      ok: true,
+      region: '河南区域',
+      commentTemplates: ['区域欢迎语', '区域备用语'],
+    },
+  );
+  const resolveCall = calls.find((call) =>
+    call.sql.includes('LEFT JOIN facebook_region_comment_template_config'))!;
+  assert.deepEqual(resolveCall.params, ['https://www.facebook.com/groups/group-a']);
+});
+
+test('regional comment template resolution reports missing group region and missing regional template without fallback', async () => {
+  const responses = [
+    { rows: [{ region: null, comment_templates: null }] },
+    { rows: [{ region: '河南区域', comment_templates: null }] },
+  ];
+  const pool = {
+    query: async () => responses.shift() ?? { rows: [] },
+  } as unknown as pg.Pool;
+  const store = new FacebookGroupTargetStore({ pool });
+
+  assert.deepEqual(
+    await store.resolveRegionCommentTemplatesForGroup('https://www.facebook.com/groups/group-a'),
+    { ok: false, reason: 'missing_group_region' },
+  );
+  assert.deepEqual(
+    await store.resolveRegionCommentTemplatesForGroup('https://www.facebook.com/groups/group-a'),
+    { ok: false, reason: 'regional_template_missing' },
+  );
+});
+
+test('facebook group schemas include explicit scope mode, one-group-one-account lock, and audit table', () => {
   assert.match(FACEBOOK_GROUP_TARGET_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS facebook_group_target/);
   assert.match(FACEBOOK_GROUP_TARGET_SCHEMA_SQL, /region\s+TEXT/);
   assert.match(FACEBOOK_GROUP_TARGET_SCHEMA_SQL, /park\s+TEXT/);
@@ -372,6 +518,7 @@ test('facebook group schemas include one-group-one-account lock, coverage indexe
   assert.match(FACEBOOK_GROUP_TARGET_SCHEMA_SQL, /idx_fb_group_target_direction/);
   assert.match(FACEBOOK_GROUP_TARGET_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS facebook_group_target_scope/);
   assert.match(FACEBOOK_GROUP_TARGET_SCHEMA_SQL, /PRIMARY KEY \(group_url, account_group_label\)/);
+  assert.match(FACEBOOK_GROUP_TARGET_SCHEMA_SQL, /account_scope_mode IN \('restricted','global'\)/);
   assert.match(FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS facebook_group_membership/);
   assert.match(FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL, /UNIQUE \(group_url\)/);
   assert.match(FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL, /idx_fb_group_membership_account_status/);
@@ -381,7 +528,7 @@ test('facebook group schemas include one-group-one-account lock, coverage indexe
   assert.match(FACEBOOK_GROUP_JOIN_AUDIT_SCHEMA_SQL, /trigger_source IN \('scheduled','manual_pool','manual_specific','shadow'\)/);
 });
 
-test('claimNext is scope-bound, fails closed for ungrouped/unmapped accounts, and retains the global atomic group lock', async () => {
+test('claimNext admits global targets independent of labels, keeps restricted matching, and retains the atomic group lock', async () => {
   let capturedSql = '';
   let capturedParams: unknown[] = [];
   const pool = {
@@ -403,8 +550,9 @@ test('claimNext is scope-bound, fails closed for ungrouped/unmapped accounts, an
     /FROM automation_sync_read_consumer_checkpoint apj_checkpoint[\s\S]*apj_checkpoint\.execution_target = \$2/,
     '投影陈旧必须让候选为空（fail-closed），绝不因为投影没跟上就放行',
   );
-  assert.match(capturedSql, /JOIN facebook_group_target_scope s ON s\.account_group_label = a\.group_label/);
-  assert.match(capturedSql, /a\.group_label IS NOT NULL AND btrim\(a\.group_label\) <> ''/);
+  assert.match(capturedSql, /t\.account_scope_mode = 'global'/);
+  assert.match(capturedSql, /t\.account_scope_mode = 'restricted'[\s\S]*s\.account_group_label = a\.group_label/);
+  assert.doesNotMatch(capturedSql, /a\.group_label IS NOT NULL/, '全局目标必须允许账号分组为空');
   assert.match(capturedSql, /NOT EXISTS \(\s*SELECT 1 FROM facebook_group_membership m WHERE m\.group_url = t\.group_url/);
   assert.match(capturedSql, /FOR UPDATE OF t SKIP LOCKED/);
   assert.match(capturedSql, /ON CONFLICT \(group_url\) DO NOTHING/);

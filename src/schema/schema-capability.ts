@@ -98,6 +98,14 @@ export async function ensureCapabilitySchema(
   }
 
   const required = mergeCreatedObjects(spec.ddl);
+  for (const [table, columns] of Object.entries(spec.requiredObjects?.tables ?? {})) {
+    const requiredColumns = required.tables.get(table) ?? new Set<string>();
+    for (const column of columns) requiredColumns.add(column);
+    required.tables.set(table, requiredColumns);
+  }
+  for (const [index, table] of Object.entries(spec.requiredObjects?.indexes ?? {})) {
+    required.indexes.set(index, table);
+  }
   const shape = await probeSchemaShape(client, [...required.tables.keys()]);
   const verdict = classifySchemaCapability(required, shape);
   if (verdict.status !== 'ready') throw new SchemaCapabilityError(spec, verdict);

@@ -16,6 +16,8 @@ import type { InternalHttpClient, InternalHttpServer } from './internal-http.js'
 export const FACEBOOK_GROUP_OPS_ROUTES = {
   listTargets: 'facebook-group-ops/list-targets',
   listFacets: 'facebook-group-ops/list-facets',
+  listRegionCommentTemplates: 'facebook-group-ops/list-region-comment-templates',
+  setRegionCommentTemplates: 'facebook-group-ops/set-region-comment-templates',
   setEnabled: 'facebook-group-ops/set-enabled',
   accountProgress: 'facebook-group-ops/account-progress',
   listAssignments: 'facebook-group-ops/list-assignments',
@@ -38,6 +40,20 @@ export function registerFacebookGroupOpsRoutes(
     return local.listTargets(a.options);
   });
   server.register(FACEBOOK_GROUP_OPS_ROUTES.listFacets, () => local.listFacets());
+  server.register(FACEBOOK_GROUP_OPS_ROUTES.listRegionCommentTemplates, () =>
+    local.listRegionCommentTemplates());
+  server.register(FACEBOOK_GROUP_OPS_ROUTES.setRegionCommentTemplates, (args) => {
+    const a = args as {
+      region: string;
+      commentTemplates: string[];
+      updatedBy: string;
+    };
+    return local.setRegionCommentTemplates(
+      a.region,
+      a.commentTemplates,
+      a.updatedBy,
+    );
+  });
   server.register(FACEBOOK_GROUP_OPS_ROUTES.setEnabled, (args) => {
     const a = args as { groupUrl: string; enabled: boolean };
     return local.setEnabled(a.groupUrl, a.enabled);
@@ -82,6 +98,22 @@ export class FacebookGroupOpsHttpClient implements FacebookGroupOpsPort {
 
   listFacets(): ReturnType<FacebookGroupOpsPort['listFacets']> {
     return this.http.call(FACEBOOK_GROUP_OPS_ROUTES.listFacets, {});
+  }
+
+  listRegionCommentTemplates(): ReturnType<FacebookGroupOpsPort['listRegionCommentTemplates']> {
+    return this.http.call(FACEBOOK_GROUP_OPS_ROUTES.listRegionCommentTemplates, {});
+  }
+
+  setRegionCommentTemplates(
+    region: string,
+    commentTemplates: string[],
+    updatedBy: string,
+  ): ReturnType<FacebookGroupOpsPort['setRegionCommentTemplates']> {
+    return this.http.call(FACEBOOK_GROUP_OPS_ROUTES.setRegionCommentTemplates, {
+      region,
+      commentTemplates,
+      updatedBy,
+    });
   }
 
   setEnabled(

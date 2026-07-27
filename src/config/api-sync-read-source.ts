@@ -284,9 +284,11 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
           keywords: unknown;
           containers: unknown;
           comment_mode: unknown;
+          comment_mode_configured: boolean;
           comment_templates: unknown;
         }>(
-          `SELECT account_id, keywords, containers, comment_mode, comment_templates
+          `SELECT account_id, keywords, containers, comment_mode,
+                  comment_mode_configured, comment_templates
              FROM account_facebook_comment_config
             ORDER BY account_id`,
         );
@@ -296,7 +298,8 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
             keywords: stringList(row.keywords),
             containers: containerList(row.containers),
             commentMode:
-              row.comment_mode === 'templates' ? 'templates' : 'generated',
+              row.comment_mode === 'template' ? 'templates' : 'generated',
+            commentModeConfigured: row.comment_mode_configured === true,
             commentTemplates: stringList(row.comment_templates),
           })),
         };

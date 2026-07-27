@@ -39,6 +39,7 @@ import type {
   PublishStatus,
 } from './publish-pipeline-types.js';
 import type {
+  FacebookGroupAccountScopeMode,
   FacebookGroupImportResult,
   FacebookGroupTargetInput,
   ReplaceFacebookGroupTargetScopesResult,
@@ -479,6 +480,7 @@ export interface FacebookImportTargetsCommand {
   inputs: FacebookGroupTargetInput[];
   importBatch: string | null;
   options?: {
+    accountScopeMode?: FacebookGroupAccountScopeMode;
     accountGroupLabels?: string[];
     updatedBy?: string;
   };
@@ -487,6 +489,7 @@ export interface FacebookImportTargetsCommand {
 export interface FacebookReplaceTargetScopesCommand {
   commandId: string;
   groupUrls: string[];
+  accountScopeMode?: FacebookGroupAccountScopeMode;
   accountGroupLabels: string[];
   updatedBy: string;
 }

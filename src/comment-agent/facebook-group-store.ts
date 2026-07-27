@@ -10,6 +10,7 @@ const { Pool } = pg;
 // （automation 内部消费方、scheduler 等）逐字不变。存储实现（pg 读写、DbRow 映射）留本文件。
 import { FacebookGroupScopeError } from '../kernel/facebook-group-types.js';
 import type {
+  FacebookGroupAccountScopeMode,
   FacebookGroupJoinGating,
   FacebookGroupMembershipStatus,
   FacebookGroupTargetInput,
@@ -22,6 +23,9 @@ import type {
   FacebookGroupTargetListResult,
   FacebookGroupRegionFacet,
   FacebookGroupTargetFacets,
+  FacebookRegionCommentTemplateRow,
+  SetFacebookRegionCommentTemplatesResult,
+  ResolveFacebookRegionCommentTemplatesResult,
   FacebookGroupMembershipRow,
   FacebookGroupJoinAuditOutcome,
   FacebookGroupJoinRecentScheduledResult,
@@ -31,6 +35,7 @@ import type {
 } from '../kernel/facebook-group-types.js';
 export { FacebookGroupScopeError };
 export type {
+  FacebookGroupAccountScopeMode,
   FacebookGroupJoinGating,
   FacebookGroupMembershipStatus,
   FacebookGroupTargetInput,
@@ -43,6 +48,9 @@ export type {
   FacebookGroupTargetListResult,
   FacebookGroupRegionFacet,
   FacebookGroupTargetFacets,
+  FacebookRegionCommentTemplateRow,
+  SetFacebookRegionCommentTemplatesResult,
+  ResolveFacebookRegionCommentTemplatesResult,
   FacebookGroupMembershipRow,
   FacebookGroupJoinAuditOutcome,
   FacebookGroupJoinRecentScheduledResult,
@@ -97,6 +105,7 @@ export interface FacebookGroupJoinAuditRow {
 
 interface TargetDbRow {
   group_url: string;
+  account_scope_mode: FacebookGroupAccountScopeMode;
   group_name: string | null;
   region: string | null;
   park: string | null;
@@ -134,6 +143,13 @@ interface MembershipDbRow {
   comments_total: number | string;
   left_confirmations: number | string;
   updated_at: Date | string;
+}
+
+interface RegionCommentTemplateDbRow {
+  region: string;
+  comment_templates: unknown;
+  updated_at: Date | string;
+  updated_by: string;
 }
 
 function iso(v: Date | string | null): string | null {
@@ -192,6 +208,40 @@ function normalizeMeta(value: string | null | undefined): string | null {
   return v ? v.slice(0, 120) : null;
 }
 
+function normalizeRegionKey(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized && normalized.length <= 120 ? normalized : null;
+}
+
+function sanitizeRegionCommentTemplates(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 100) return null;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== 'string') return null;
+    const normalized = item.trim();
+    if (!normalized) continue;
+    if (normalized.length > 1_000) return null;
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      out.push(normalized);
+    }
+  }
+  return out;
+}
+
+function toRegionCommentTemplateRow(
+  row: RegionCommentTemplateDbRow,
+): FacebookRegionCommentTemplateRow {
+  return {
+    region: row.region,
+    commentTemplates: sanitizeRegionCommentTemplates(row.comment_templates) ?? [],
+    updatedAt: iso(row.updated_at)!,
+    updatedBy: row.updated_by,
+  };
+}
+
 export function normalizeFacebookAccountGroupLabels(values: readonly string[]): string[] | null {
   const normalized = new Set<string>();
   for (const value of values) {
@@ -203,9 +253,16 @@ export function normalizeFacebookAccountGroupLabels(values: readonly string[]): 
   return [...normalized].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
 }
 
+export function normalizeFacebookGroupAccountScopeMode(
+  value: unknown,
+): FacebookGroupAccountScopeMode | null {
+  return value === 'restricted' || value === 'global' ? value : null;
+}
+
 function toTargetRow(r: TargetDbRow): FacebookGroupTargetRow {
   return {
     groupUrl: r.group_url,
+    accountScopeMode: r.account_scope_mode,
     groupName: r.group_name ?? null,
     region: r.region ?? null,
     park: r.park ?? null,
@@ -254,6 +311,8 @@ function toMembershipRow(r: MembershipDbRow): FacebookGroupMembershipRow {
 export const FACEBOOK_GROUP_TARGET_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS facebook_group_target (
   group_url    TEXT PRIMARY KEY,
+  account_scope_mode TEXT NOT NULL DEFAULT 'restricted'
+                     CHECK (account_scope_mode IN ('restricted','global')),
   group_name   TEXT,
   region       TEXT,
   park         TEXT,
@@ -299,6 +358,7 @@ CREATE INDEX IF NOT EXISTS idx_fb_group_target_region_park
 CREATE INDEX IF NOT EXISTS idx_fb_group_target_direction
   ON facebook_group_target (direction)
   WHERE direction IS NOT NULL;
+
 `;
 
 export const FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL = `
@@ -383,15 +443,29 @@ export class FacebookGroupTargetStore {
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
     await ensureCapabilitySchema(this.pool, {
       capability: 'facebook_group_target',
-      sinceVersion: '0067_baseline_facebook_tables',
+      sinceVersion: '0089_facebook_global_scope_regional_templates',
       ddl: [FACEBOOK_GROUP_TARGET_SCHEMA_SQL],
+      requiredObjects: {
+        tables: {
+          facebook_region_comment_template_config: [
+            'region',
+            'comment_templates',
+            'updated_at',
+            'updated_by',
+          ],
+        },
+      },
     });
   }
 
   async importTargets(
     inputs: FacebookGroupTargetInput[],
     importBatch: string | null = null,
-    options: { accountGroupLabels?: string[]; updatedBy?: string } = {},
+    options: {
+      accountScopeMode?: FacebookGroupAccountScopeMode;
+      accountGroupLabels?: string[];
+      updatedBy?: string;
+    } = {},
   ): Promise<FacebookGroupImportResult> {
     let invalid = 0;
     let duplicate = 0;
@@ -413,58 +487,82 @@ export class FacebookGroupTargetStore {
       normalizedInputs.push({ groupUrl, input });
     }
 
-    const requestedLabels = options.accountGroupLabels === undefined
+    const scopeRequested =
+      options.accountScopeMode !== undefined || options.accountGroupLabels !== undefined;
+    const requestedMode = scopeRequested
+      ? normalizeFacebookGroupAccountScopeMode(options.accountScopeMode ?? 'restricted')
+      : undefined;
+    if (scopeRequested && requestedMode === null) {
+      throw new FacebookGroupScopeError('invalid_scope_mode');
+    }
+    const requestedLabels = !scopeRequested
       ? undefined
-      : normalizeFacebookAccountGroupLabels(options.accountGroupLabels);
+      : normalizeFacebookAccountGroupLabels(options.accountGroupLabels ?? []);
     if (requestedLabels === null) throw new FacebookGroupScopeError('invalid_account_group');
+    if (requestedMode === 'global' && requestedLabels && requestedLabels.length > 0) {
+      throw new FacebookGroupScopeError('invalid_scope_combination');
+    }
     const actor = options.updatedBy?.trim() || 'system';
-    const client = requestedLabels === undefined ? null : await this.pool.connect();
+    const client = scopeRequested ? await this.pool.connect() : null;
     const queryable: FacebookGroupStoreQueryable = client ?? this.pool;
     const rows: FacebookGroupTargetRow[] = [];
     try {
-      if (client && requestedLabels !== undefined) {
+      if (client && requestedLabels !== undefined && requestedMode !== undefined) {
         await client.query('BEGIN');
-        await this.assertFacebookAccountGroupLabels(client, requestedLabels);
+        if (requestedMode === 'restricted') {
+          await this.assertFacebookAccountGroupLabels(client, requestedLabels);
+        }
       }
       for (const { groupUrl, input } of normalizedInputs) {
-      const groupName = normalizeName(input.name);
-      const region = normalizeMeta(input.region);
-      const park = normalizeMeta(input.park);
-      const direction = normalizeMeta(input.direction);
-      const { rows: inserted } = await queryable.query<TargetDbRow>(
-        `INSERT INTO facebook_group_target (group_url, group_name, region, park, direction, import_batch)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (group_url) DO NOTHING
-         RETURNING group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
-        [groupUrl, groupName, region, park, direction, importBatch],
-      );
-      if (inserted[0]) {
-        imported++;
-        rows.push(toTargetRow(inserted[0]));
-        continue;
-      }
-      const { rows: changed } = await queryable.query<TargetDbRow>(
-        `UPDATE facebook_group_target
-         SET group_name = COALESCE($2, group_name),
-             region = COALESCE($3, region),
-             park = COALESCE($4, park),
-             direction = COALESCE($5, direction),
-             import_batch = COALESCE($6, import_batch),
-             updated_at = now()
-         WHERE group_url = $1
-         RETURNING group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
-        [groupUrl, groupName, region, park, direction, importBatch],
-      );
-      if (changed[0]) {
-        updated++;
-        rows.push(toTargetRow(changed[0]));
-      } else {
-        duplicate++;
-      }
+        const groupName = normalizeName(input.name);
+        const region = normalizeMeta(input.region);
+        const park = normalizeMeta(input.park);
+        const direction = normalizeMeta(input.direction);
+        const { rows: inserted } = await queryable.query<TargetDbRow>(
+          `INSERT INTO facebook_group_target (group_url, group_name, region, park, direction, import_batch)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (group_url) DO NOTHING
+           RETURNING group_url, account_scope_mode, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
+          [groupUrl, groupName, region, park, direction, importBatch],
+        );
+        if (inserted[0]) {
+          imported++;
+          rows.push(toTargetRow(inserted[0]));
+          continue;
+        }
+        const { rows: changed } = await queryable.query<TargetDbRow>(
+          `UPDATE facebook_group_target
+           SET group_name = COALESCE($2, group_name),
+               region = COALESCE($3, region),
+               park = COALESCE($4, park),
+               direction = COALESCE($5, direction),
+               import_batch = COALESCE($6, import_batch),
+               updated_at = now()
+           WHERE group_url = $1
+           RETURNING group_url, account_scope_mode, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
+          [groupUrl, groupName, region, park, direction, importBatch],
+        );
+        if (changed[0]) {
+          updated++;
+          rows.push(toTargetRow(changed[0]));
+        } else {
+          duplicate++;
+        }
       }
       const groupUrls = rows.map((row) => row.groupUrl);
-      if (requestedLabels !== undefined && groupUrls.length > 0) {
-        await this.replaceScopesInTransaction(queryable, groupUrls, requestedLabels, actor);
+      if (
+        requestedLabels !== undefined
+        && requestedMode !== undefined
+        && requestedMode !== null
+        && groupUrls.length > 0
+      ) {
+        await this.replaceScopesInTransaction(
+          queryable,
+          groupUrls,
+          requestedMode,
+          requestedLabels,
+          actor,
+        );
       }
       const scopes = await this.readScopeLabels(queryable, groupUrls);
       if (client) await client.query('COMMIT');
@@ -473,7 +571,11 @@ export class FacebookGroupTargetStore {
         updated,
         duplicate,
         invalid,
-        rows: rows.map((row) => ({ ...row, accountGroupLabels: scopes.get(row.groupUrl) ?? [] })),
+        rows: rows.map((row) => ({
+          ...row,
+          ...(requestedMode ? { accountScopeMode: requestedMode } : {}),
+          accountGroupLabels: scopes.get(row.groupUrl) ?? [],
+        })),
       };
     } catch (error) {
       if (client) await client.query('ROLLBACK').catch(() => undefined);
@@ -527,6 +629,7 @@ export class FacebookGroupTargetStore {
   private async replaceScopesInTransaction(
     queryable: FacebookGroupStoreQueryable,
     groupUrls: string[],
+    mode: FacebookGroupAccountScopeMode,
     labels: string[],
     updatedBy: string,
   ): Promise<void> {
@@ -534,7 +637,7 @@ export class FacebookGroupTargetStore {
       `DELETE FROM facebook_group_target_scope WHERE group_url = ANY($1::text[])`,
       [groupUrls],
     );
-    if (labels.length > 0) {
+    if (mode === 'restricted' && labels.length > 0) {
       await queryable.query(
         `INSERT INTO facebook_group_target_scope (group_url, account_group_label, updated_at, updated_by)
          SELECT group_url, account_group_label, now(), $3
@@ -545,9 +648,9 @@ export class FacebookGroupTargetStore {
     }
     await queryable.query(
       `UPDATE facebook_group_target
-       SET scope_updated_at = now(), scope_updated_by = $2
+       SET account_scope_mode = $2, scope_updated_at = now(), scope_updated_by = $3
        WHERE group_url = ANY($1::text[])`,
-      [groupUrls, updatedBy],
+      [groupUrls, mode, updatedBy],
     );
   }
 
@@ -575,6 +678,7 @@ export class FacebookGroupTargetStore {
     groupUrlInputs: string[],
     accountGroupLabelInputs: string[],
     updatedBy: string,
+    accountScopeModeInput: FacebookGroupAccountScopeMode = 'restricted',
   ): Promise<ReplaceFacebookGroupTargetScopesResult> {
     if (groupUrlInputs.length === 0) return { ok: false, reason: 'no_targets' };
     const canonicalGroupUrls = groupUrlInputs.map(canonicalFacebookGroupUrl);
@@ -582,31 +686,45 @@ export class FacebookGroupTargetStore {
     const groupUrls = [...new Set(canonicalGroupUrls as string[])];
     const labels = normalizeFacebookAccountGroupLabels(accountGroupLabelInputs);
     if (labels === null) return { ok: false, reason: 'invalid_account_group' };
+    const accountScopeMode = normalizeFacebookGroupAccountScopeMode(accountScopeModeInput);
+    if (accountScopeMode === null) return { ok: false, reason: 'invalid_scope_mode' };
+    if (accountScopeMode === 'global' && labels.length > 0) {
+      return { ok: false, reason: 'invalid_scope_combination' };
+    }
     const actor = updatedBy.trim() || 'system';
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await this.assertFacebookAccountGroupLabels(client, labels);
+      if (accountScopeMode === 'restricted') {
+        await this.assertFacebookAccountGroupLabels(client, labels);
+      }
       const { rows: targets } = await client.query<{ group_url: string }>(
         `SELECT group_url FROM facebook_group_target WHERE group_url = ANY($1::text[]) FOR UPDATE`,
         [groupUrls],
       );
       if (targets.length !== groupUrls.length) throw new FacebookGroupScopeError('invalid_target');
-      await this.replaceScopesInTransaction(client, groupUrls, labels, actor);
+      await this.replaceScopesInTransaction(
+        client,
+        groupUrls,
+        accountScopeMode,
+        labels,
+        actor,
+      );
       const { rows } = await client.query<{
         group_url: string;
+        account_scope_mode: FacebookGroupAccountScopeMode;
         account_group_labels: string[] | null;
         scope_updated_at: Date | string;
         scope_updated_by: string;
       }>(
-        `SELECT t.group_url,
+        `SELECT t.group_url, t.account_scope_mode,
                 COALESCE(array_agg(s.account_group_label ORDER BY s.account_group_label)
                   FILTER (WHERE s.account_group_label IS NOT NULL), ARRAY[]::text[]) AS account_group_labels,
                 t.scope_updated_at, t.scope_updated_by
          FROM facebook_group_target t
          LEFT JOIN facebook_group_target_scope s ON s.group_url = t.group_url
          WHERE t.group_url = ANY($1::text[])
-         GROUP BY t.group_url, t.scope_updated_at, t.scope_updated_by
+         GROUP BY t.group_url, t.account_scope_mode, t.scope_updated_at, t.scope_updated_by
          ORDER BY t.group_url`,
         [groupUrls],
       );
@@ -615,6 +733,7 @@ export class FacebookGroupTargetStore {
         ok: true,
         items: rows.map((row) => ({
           groupUrl: row.group_url,
+          accountScopeMode: row.account_scope_mode,
           accountGroupLabels: row.account_group_labels ?? [],
           updatedAt: iso(row.scope_updated_at)!,
           updatedBy: row.scope_updated_by,
@@ -642,12 +761,12 @@ export class FacebookGroupTargetStore {
       `INSERT INTO facebook_group_target (group_url, enabled)
        VALUES ($1, false)
        ON CONFLICT (group_url) DO NOTHING
-       RETURNING group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
+       RETURNING group_url, account_scope_mode, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
       [groupUrl],
     );
     if (inserted[0]) return toTargetRow(inserted[0]);
     const { rows: existing } = await this.pool.query<TargetDbRow>(
-      `SELECT group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at
+      `SELECT group_url, account_scope_mode, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at
        FROM facebook_group_target WHERE group_url = $1`,
       [groupUrl],
     );
@@ -661,7 +780,7 @@ export class FacebookGroupTargetStore {
       `UPDATE facebook_group_target
        SET enabled = $2, updated_at = now()
        WHERE group_url = $1
-       RETURNING group_url, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
+       RETURNING group_url, account_scope_mode, group_name, region, park, direction, join_gating, priority, enabled, import_batch, created_at, updated_at`,
       [groupUrl, enabled],
     );
     return rows[0] ? toTargetRow(rows[0]) : null;
@@ -708,10 +827,18 @@ export class FacebookGroupTargetStore {
       values.push(direction);
       where.push(`t.direction = $${values.length}`);
     }
+    if (options.accountScopeMode === 'global' || options.accountScopeMode === 'restricted') {
+      values.push(options.accountScopeMode);
+      where.push(`t.account_scope_mode = $${values.length}`);
+    } else if (options.accountScopeMode === 'unscoped') {
+      where.push(`t.account_scope_mode = 'restricted' AND NOT EXISTS (
+        SELECT 1 FROM facebook_group_target_scope su WHERE su.group_url = t.group_url
+      )`);
+    }
     const accountGroupLabel = normalizeMeta(options.accountGroupLabel);
     if (accountGroupLabel) {
       values.push(accountGroupLabel.slice(0, 64));
-      where.push(`EXISTS (
+      where.push(`t.account_scope_mode = 'restricted' AND EXISTS (
         SELECT 1 FROM facebook_group_target_scope sf
         WHERE sf.group_url = t.group_url AND sf.account_group_label = $${values.length}
       )`);
@@ -726,7 +853,7 @@ export class FacebookGroupTargetStore {
     );
     values.push(limit, offset);
     const { rows } = await this.pool.query<TargetListDbRow>(
-      `SELECT t.group_url, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch,
+      `SELECT t.group_url, t.account_scope_mode, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch,
               t.created_at, t.updated_at,
               COALESCE((
                 SELECT array_agg(s.account_group_label ORDER BY s.account_group_label)
@@ -745,7 +872,13 @@ export class FacebookGroupTargetStore {
   }
 
   async listFacets(): Promise<FacebookGroupTargetFacets> {
-    const [{ rows: regionRows }, { rows: directionRows }, { rows: accountGroupRows }, { rows: unscopedRows }] = await Promise.all([
+    const [
+      { rows: regionRows },
+      { rows: directionRows },
+      { rows: accountGroupRows },
+      { rows: globalRows },
+      { rows: unscopedRows },
+    ] = await Promise.all([
       this.pool.query<{ region: string | null; park: string | null }>(
         `SELECT DISTINCT region, park
          FROM facebook_group_target
@@ -771,8 +904,14 @@ export class FacebookGroupTargetStore {
       ),
       this.pool.query<{ total: string }>(
         `SELECT count(*)::text AS total
+         FROM facebook_group_target
+         WHERE account_scope_mode = 'global'`,
+      ),
+      this.pool.query<{ total: string }>(
+        `SELECT count(*)::text AS total
          FROM facebook_group_target t
-         WHERE NOT EXISTS (
+         WHERE t.account_scope_mode = 'restricted'
+           AND NOT EXISTS (
            SELECT 1 FROM facebook_group_target_scope s WHERE s.group_url = t.group_url
          )`,
       ),
@@ -793,8 +932,70 @@ export class FacebookGroupTargetStore {
       })),
       directions: directionRows.map((row) => normalizeMeta(row.direction)).filter((v): v is string => !!v),
       accountGroupLabels: accountGroupRows.map((row) => row.account_group_label),
+      globalTargetCount: Number(globalRows[0]?.total ?? '0'),
       unscopedTargetCount: Number(unscopedRows[0]?.total ?? '0'),
     };
+  }
+
+  async listRegionCommentTemplates(): Promise<FacebookRegionCommentTemplateRow[]> {
+    const { rows } = await this.pool.query<RegionCommentTemplateDbRow>(
+      `SELECT region, comment_templates, updated_at, updated_by
+       FROM facebook_region_comment_template_config
+       ORDER BY region ASC`,
+    );
+    return rows.map(toRegionCommentTemplateRow);
+  }
+
+  async setRegionCommentTemplates(
+    regionInput: unknown,
+    templatesInput: unknown,
+    updatedBy: string,
+  ): Promise<SetFacebookRegionCommentTemplatesResult> {
+    const region = normalizeRegionKey(regionInput);
+    if (!region) return { ok: false, reason: 'invalid_region' };
+    const commentTemplates = sanitizeRegionCommentTemplates(templatesInput);
+    if (commentTemplates === null) return { ok: false, reason: 'invalid_templates' };
+    const exists = await this.pool.query(
+      `SELECT 1 FROM facebook_group_target WHERE region = $1 LIMIT 1`,
+      [region],
+    );
+    if (exists.rows.length === 0) return { ok: false, reason: 'region_not_found' };
+    const { rows } = await this.pool.query<RegionCommentTemplateDbRow>(
+      `INSERT INTO facebook_region_comment_template_config
+         (region, comment_templates, updated_at, updated_by)
+       VALUES ($1, $2::jsonb, now(), $3)
+       ON CONFLICT (region) DO UPDATE
+         SET comment_templates = EXCLUDED.comment_templates,
+             updated_at = now(),
+             updated_by = EXCLUDED.updated_by
+       RETURNING region, comment_templates, updated_at, updated_by`,
+      [region, JSON.stringify(commentTemplates), updatedBy.trim() || 'system'],
+    );
+    return { ok: true, row: toRegionCommentTemplateRow(rows[0]) };
+  }
+
+  async resolveRegionCommentTemplatesForGroup(
+    groupUrlInput: string,
+  ): Promise<ResolveFacebookRegionCommentTemplatesResult> {
+    const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
+    if (!groupUrl) return { ok: false, reason: 'missing_group_region' };
+    const { rows } = await this.pool.query<{
+      region: string | null;
+      comment_templates: unknown;
+    }>(
+      `SELECT t.region, c.comment_templates
+       FROM facebook_group_target t
+       LEFT JOIN facebook_region_comment_template_config c ON c.region = t.region
+       WHERE t.group_url = $1`,
+      [groupUrl],
+    );
+    const region = normalizeRegionKey(rows[0]?.region);
+    if (!region) return { ok: false, reason: 'missing_group_region' };
+    const commentTemplates = sanitizeRegionCommentTemplates(rows[0]?.comment_templates);
+    if (!commentTemplates || commentTemplates.length === 0) {
+      return { ok: false, reason: 'regional_template_missing' };
+    }
+    return { ok: true, region, commentTemplates };
   }
 
   /**
@@ -815,8 +1016,15 @@ export class FacebookGroupTargetStore {
                   )
               )::text AS total
        FROM automation_account_projection a
-       LEFT JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
-       LEFT JOIN facebook_group_target t ON t.group_url = s.group_url
+       LEFT JOIN facebook_group_target t
+         ON t.account_scope_mode = 'global'
+         OR (
+           t.account_scope_mode = 'restricted'
+           AND EXISTS (
+             SELECT 1 FROM facebook_group_target_scope s
+             WHERE s.group_url = t.group_url AND s.account_group_label = a.group_label
+           )
+         )
        WHERE a.account_id = ANY($1::text[]) AND lower(btrim(a.platform)) IN ('facebook','fb')
        GROUP BY a.account_id, a.group_label`,
       [uniqueAccountIds],
@@ -837,10 +1045,17 @@ export class FacebookGroupTargetStore {
   /** 选群守卫：返回非 null 即意味着「可以对这个群下手」，故**挂新鲜期谓词**，陈旧时返 null。 */
   async nextJoinCandidate(accountId: string): Promise<FacebookGroupTargetRow | null> {
     const { rows } = await this.pool.query<TargetDbRow>(
-      `SELECT t.group_url, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch, t.created_at, t.updated_at
+      `SELECT t.group_url, t.account_scope_mode, t.group_name, t.region, t.park, t.direction, t.join_gating, t.priority, t.enabled, t.import_batch, t.created_at, t.updated_at
        FROM automation_account_projection a
-       JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
-       JOIN facebook_group_target t ON t.group_url = s.group_url
+       JOIN facebook_group_target t
+         ON t.account_scope_mode = 'global'
+         OR (
+           t.account_scope_mode = 'restricted'
+           AND EXISTS (
+             SELECT 1 FROM facebook_group_target_scope s
+             WHERE s.group_url = t.group_url AND s.account_group_label = a.group_label
+           )
+         )
        WHERE a.account_id = $1
          AND EXISTS (
            SELECT 1 FROM automation_sync_read_consumer_checkpoint apj_checkpoint
@@ -852,7 +1067,6 @@ export class FacebookGroupTargetStore {
                  floor(extract(epoch FROM now()) * 1000)
          )
          AND lower(btrim(a.platform)) IN ('facebook','fb')
-         AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
          AND t.enabled = true
          AND t.join_gating IN ('unknown','instant')
          AND NOT EXISTS (
@@ -942,8 +1156,15 @@ export class FacebookGroupMembershipStore {
       `WITH candidate AS (
          SELECT t.group_url
          FROM automation_account_projection a
-         JOIN facebook_group_target_scope s ON s.account_group_label = a.group_label
-         JOIN facebook_group_target t ON t.group_url = s.group_url
+         JOIN facebook_group_target t
+           ON t.account_scope_mode = 'global'
+           OR (
+             t.account_scope_mode = 'restricted'
+             AND EXISTS (
+               SELECT 1 FROM facebook_group_target_scope s
+               WHERE s.group_url = t.group_url AND s.account_group_label = a.group_label
+             )
+           )
          WHERE a.account_id = $1
            AND EXISTS (
              SELECT 1 FROM automation_sync_read_consumer_checkpoint apj_checkpoint
@@ -955,7 +1176,6 @@ export class FacebookGroupMembershipStore {
                    floor(extract(epoch FROM now()) * 1000)
            )
            AND lower(btrim(a.platform)) IN ('facebook','fb')
-           AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
            AND t.enabled = true
            AND t.join_gating IN ('unknown','instant')
            AND NOT EXISTS (
@@ -1028,11 +1248,19 @@ export class FacebookGroupMembershipStore {
          AND NOT EXISTS (
            SELECT 1
            FROM automation_account_projection a
-           JOIN facebook_group_target_scope s
-             ON s.group_url = m.group_url AND s.account_group_label = a.group_label
+           JOIN facebook_group_target t ON t.group_url = m.group_url
            WHERE a.account_id = m.account_id
              AND lower(btrim(a.platform)) IN ('facebook','fb')
-             AND a.group_label IS NOT NULL AND btrim(a.group_label) <> ''
+             AND (
+               t.account_scope_mode = 'global'
+               OR (
+                 t.account_scope_mode = 'restricted'
+                 AND EXISTS (
+                   SELECT 1 FROM facebook_group_target_scope s
+                   WHERE s.group_url = m.group_url AND s.account_group_label = a.group_label
+                 )
+               )
+             )
          )`,
       [accountId, groupUrl],
     );

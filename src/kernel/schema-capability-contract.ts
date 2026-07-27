@@ -72,6 +72,14 @@ export interface SchemaCapabilitySpec {
   sinceVersion: string;
   /** 该存储原本会自建的 DDL 段（要求的来源；旋钮打开时也是被执行的那几段） */
   ddl: string[];
+  /**
+   * migrations-only 新对象的显式能力要求。运行时 DDL 棘轮禁止为了新 schema 继续扩张
+   * `src/` 下的自建语句；新对象在 migrations/ 创建，并在这里声明探测所需的表/列。
+   */
+  requiredObjects?: {
+    tables?: Record<string, readonly string[]>;
+    indexes?: Record<string, string>;
+  };
 }
 
 /** 纯判定：给定「要求」与「实测」，返回三态与缺失清单。不连库、可脱库单测。 */

@@ -133,6 +133,7 @@ export type FacebookCommentConfigSnapshot = {
       readonly name?: string;
     }[];
     readonly commentMode: string;
+    readonly commentModeConfigured: boolean;
     readonly commentTemplates: readonly string[];
   }[];
 };
@@ -477,6 +478,7 @@ function isFacebookCommentAccount(value: unknown): boolean {
       'keywords',
       'containers',
       'commentMode',
+      'commentModeConfigured',
       'commentTemplates',
     ]) &&
     isNonEmptyString(value.accountId) &&
@@ -493,6 +495,7 @@ function isFacebookCommentAccount(value: unknown): boolean {
     ) &&
     (value.commentMode === 'generated' ||
       value.commentMode === 'templates') &&
+    typeof value.commentModeConfigured === 'boolean' &&
     Array.isArray(value.commentTemplates) &&
     value.commentTemplates.every(isNonEmptyString)
   );

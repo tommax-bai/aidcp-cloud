@@ -46,6 +46,7 @@ export interface FacebookScopeCommandOwner {
     groupUrls: string[],
     accountGroupLabels: string[],
     updatedBy: string,
+    accountScopeMode?: FacebookReplaceTargetScopesCommand['accountScopeMode'],
   ): Promise<ReplaceFacebookGroupTargetScopesResult>;
 }
 
@@ -150,6 +151,7 @@ export class FacebookScopeCommandReceiver implements FacebookScopeCommandPort {
       input.commandId,
       payloadHash({
         groupUrls: input.groupUrls,
+        accountScopeMode: input.accountScopeMode,
         accountGroupLabels: input.accountGroupLabels,
         updatedBy: input.updatedBy,
       }),
@@ -162,6 +164,7 @@ export class FacebookScopeCommandReceiver implements FacebookScopeCommandPort {
             input.groupUrls,
             input.accountGroupLabels,
             input.updatedBy,
+            input.accountScopeMode ?? 'restricted',
           ),
         ),
       }),

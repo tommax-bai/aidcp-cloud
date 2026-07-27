@@ -11,6 +11,8 @@ import type {
   FacebookGroupAccountProgress,
   FacebookGroupJoinRecentScheduledResult,
   FacebookGroupMembershipRow,
+  FacebookRegionCommentTemplateRow,
+  SetFacebookRegionCommentTemplatesResult,
   FacebookGroupScopedTargetCount,
   FacebookGroupTargetFacets,
   FacebookGroupTargetListOptions,
@@ -21,6 +23,12 @@ import type {
 export interface FacebookGroupOpsPort {
   listTargets(options?: FacebookGroupTargetListOptions): Promise<FacebookGroupTargetListResult>;
   listFacets(): Promise<FacebookGroupTargetFacets>;
+  listRegionCommentTemplates(): Promise<FacebookRegionCommentTemplateRow[]>;
+  setRegionCommentTemplates(
+    region: string,
+    commentTemplates: string[],
+    updatedBy: string,
+  ): Promise<SetFacebookRegionCommentTemplatesResult>;
   setEnabled(groupUrl: string, enabled: boolean): Promise<FacebookGroupTargetRow | null>;
   accountProgress(): Promise<FacebookGroupAccountProgress[]>;
   listAssignments(limit?: number): Promise<FacebookGroupMembershipRow[]>;

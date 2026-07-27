@@ -10,6 +10,8 @@
  */
 
 export type FacebookGroupJoinGating = 'unknown' | 'instant' | 'gated';
+export type FacebookGroupAccountScopeMode = 'restricted' | 'global';
+export type FacebookGroupAccountScopeFilter = FacebookGroupAccountScopeMode | 'unscoped';
 
 export type FacebookGroupMembershipStatus =
   | 'assigned'
@@ -23,7 +25,13 @@ export type FacebookGroupMembershipStatus =
   | 'left';
 
 export class FacebookGroupScopeError extends Error {
-  constructor(readonly reason: 'invalid_target' | 'invalid_account_group') {
+  constructor(
+    readonly reason:
+      | 'invalid_target'
+      | 'invalid_account_group'
+      | 'invalid_scope_mode'
+      | 'invalid_scope_combination',
+  ) {
     super(reason);
     this.name = 'FacebookGroupScopeError';
   }
@@ -39,6 +47,7 @@ export interface FacebookGroupTargetInput {
 
 export interface FacebookGroupTargetRow {
   groupUrl: string;
+  accountScopeMode: FacebookGroupAccountScopeMode;
   groupName: string | null;
   region: string | null;
   park: string | null;
@@ -68,6 +77,7 @@ export interface FacebookGroupTargetListRow extends FacebookGroupTargetRow {
 
 export interface FacebookGroupTargetScopeWriteRow {
   groupUrl: string;
+  accountScopeMode: FacebookGroupAccountScopeMode;
   accountGroupLabels: string[];
   updatedAt: string;
   updatedBy: string;
@@ -75,7 +85,15 @@ export interface FacebookGroupTargetScopeWriteRow {
 
 export type ReplaceFacebookGroupTargetScopesResult =
   | { ok: true; items: FacebookGroupTargetScopeWriteRow[] }
-  | { ok: false; reason: 'no_targets' | 'invalid_target' | 'invalid_account_group' };
+  | {
+      ok: false;
+      reason:
+        | 'no_targets'
+        | 'invalid_target'
+        | 'invalid_account_group'
+        | 'invalid_scope_mode'
+        | 'invalid_scope_combination';
+    };
 
 export interface FacebookGroupTargetListOptions {
   limit?: number;
@@ -85,6 +103,7 @@ export interface FacebookGroupTargetListOptions {
   region?: string | null;
   park?: string | null;
   direction?: string | null;
+  accountScopeMode?: FacebookGroupAccountScopeFilter | null;
   accountGroupLabel?: string | null;
 }
 
@@ -102,8 +121,30 @@ export interface FacebookGroupTargetFacets {
   regions: FacebookGroupRegionFacet[];
   directions: string[];
   accountGroupLabels: string[];
+  globalTargetCount: number;
   unscopedTargetCount: number;
 }
+
+export interface FacebookRegionCommentTemplateRow {
+  region: string;
+  commentTemplates: string[];
+  updatedAt: string;
+  updatedBy: string;
+}
+
+export type SetFacebookRegionCommentTemplatesResult =
+  | { ok: true; row: FacebookRegionCommentTemplateRow }
+  | {
+      ok: false;
+      reason: 'invalid_region' | 'region_not_found' | 'invalid_templates';
+    };
+
+export type ResolveFacebookRegionCommentTemplatesResult =
+  | { ok: true; region: string; commentTemplates: string[] }
+  | {
+      ok: false;
+      reason: 'missing_group_region' | 'regional_template_missing';
+    };
 
 export interface FacebookGroupMembershipRow {
   accountId: string;

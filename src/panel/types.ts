@@ -42,6 +42,9 @@ import type {
   FacebookGroupAccountProgress,
   FacebookGroupImportResult,
   FacebookGroupMembershipRow,
+  FacebookGroupAccountScopeMode,
+  FacebookRegionCommentTemplateRow,
+  SetFacebookRegionCommentTemplatesResult,
   FacebookGroupTargetFacets,
   FacebookGroupTargetInput,
   FacebookGroupTargetListOptions,
@@ -327,15 +330,26 @@ export interface PanelDeps {
     importTargets(
       inputs: FacebookGroupTargetInput[],
       importBatch: string | null,
-      options?: { accountGroupLabels?: string[]; updatedBy?: string },
+      options?: {
+        accountScopeMode?: FacebookGroupAccountScopeMode;
+        accountGroupLabels?: string[];
+        updatedBy?: string;
+      },
     ): Promise<FacebookGroupImportResult>;
     listTargets(options?: FacebookGroupTargetListOptions): Promise<FacebookGroupTargetListResult>;
     listFacets(): Promise<FacebookGroupTargetFacets>;
+    listRegionCommentTemplates(): Promise<FacebookRegionCommentTemplateRow[]>;
+    setRegionCommentTemplates(
+      region: string,
+      commentTemplates: string[],
+      updatedBy: string,
+    ): Promise<SetFacebookRegionCommentTemplatesResult>;
     setEnabled(groupUrl: string, enabled: boolean): Promise<FacebookGroupTargetRow | null>;
     replaceTargetScopes(
       groupUrls: string[],
       accountGroupLabels: string[],
       updatedBy: string,
+      accountScopeMode?: FacebookGroupAccountScopeMode,
     ): Promise<ReplaceFacebookGroupTargetScopesResult>;
     accountProgress(): Promise<FacebookGroupAccountProgress[]>;
     listAssignments(limit?: number): Promise<FacebookGroupMembershipRow[]>;

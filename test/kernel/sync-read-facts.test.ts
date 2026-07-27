@@ -28,6 +28,32 @@ test('gate payload validators reject malformed nested fields instead of acceptin
     false,
   );
   assert.equal(
+    isSyncReadFactPayload('facebook_comment_config', {
+      accounts: [{
+        accountId: 'a',
+        keywords: ['coffee'],
+        containers: [],
+        commentMode: 'templates',
+        commentTemplates: [],
+      }],
+    }),
+    false,
+    '显式方案状态缺失时不得把快照当成完整权威',
+  );
+  assert.equal(
+    isSyncReadFactPayload('facebook_comment_config', {
+      accounts: [{
+        accountId: 'a',
+        keywords: ['coffee'],
+        containers: [],
+        commentMode: 'templates',
+        commentModeConfigured: false,
+        commentTemplates: [],
+      }],
+    }),
+    true,
+  );
+  assert.equal(
     isSyncReadFactPayload('facebook_group_join_automation_config', {
       accounts: [{ accountId: 'a', enabled: 'yes', dailyCap: -1, weekMask: null }],
     }),

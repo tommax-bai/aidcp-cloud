@@ -781,6 +781,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     coverageRelaxed?: boolean;
     commentMode?: 'generated' | 'template';
     commentTemplates?: string[];
+    regionalTemplates?: string[];
+    regionalFailure?: 'missing_group_region' | 'regional_template_missing';
     /** 连接在 trigger 通过后掉线：resolveConnection 首次（trigger 闸）返回连接、其后（真发内）返回 null。 */
     dropAfterTrigger?: boolean;
     /** 边缘回传的真实群名（undefined=默认 PR 群名，null=不回传）。 */
@@ -796,6 +798,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     dedupRecorded: string[];
     resolvedNames: Array<{ url: string; name: string }>;
     composeArgs: Array<{ keyword: string; container: string; postText?: string; comments?: string[] }>;
+    regionResolutionCalls: string[];
   } {
     const audits: Audit[] = [];
     const posted: string[] = [];
@@ -803,6 +806,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     const dedupRecorded: string[] = [];
     const resolvedNames: Array<{ url: string; name: string }> = [];
     const composeArgs: Array<{ keyword: string; container: string; postText?: string; comments?: string[] }> = [];
+    const regionResolutionCalls: string[] = [];
     const seen = new Set(cfg.seen ?? []);
     const bus = new EventBus();
     const candidates = cfg.candidates ?? [PERMALINK];
@@ -881,6 +885,15 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
         commentTemplates: cfg.commentTemplates ?? [],
         ...(cfg.coverageRelaxed ? { relaxed: true } : {}),
       }),
+      facebookRegionCommentTemplatesForGroup: async (groupUrl) => {
+        regionResolutionCalls.push(groupUrl);
+        if (cfg.regionalFailure) return { ok: false, reason: cfg.regionalFailure };
+        return {
+          ok: true,
+          region: '河南区域',
+          commentTemplates: cfg.regionalTemplates ?? ['这家区域咖啡很不错'],
+        };
+      },
       facebookResolveContainerName: async (_acct: string, url: string, name: string) => {
         resolvedNames.push({ url, name });
       },
@@ -893,7 +906,16 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       facebookCommentedToday: async () => 0,
       facebookAudit: (row) => audits.push(row),
     });
-    return { deps, audits, posted, envelopes, dedupRecorded, resolvedNames, composeArgs };
+    return {
+      deps,
+      audits,
+      posted,
+      envelopes,
+      dedupRecorded,
+      resolvedNames,
+      composeArgs,
+      regionResolutionCalls,
+    };
   }
   const tick = () => new Promise((r) => setTimeout(r, 120));
 
@@ -1292,18 +1314,60 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(envelopes.find((e) => e.type === 'interaction.comment')?.payload.text, '这家手冲咖啡很不错');
   });
 
-  it('模板模式：无模板 → compose_skipped(empty_template)，不搜索不提交', async () => {
-    const { deps, audits, posted } = fbFlowDeps({
+  it('显式生成模式保持权威，不读取区域通用模板', async () => {
+    const { deps, audits, regionResolutionCalls } = fbFlowDeps({
       submit: { ok: true },
-      commentMode: 'template',
+      commentMode: 'generated',
       commentTemplates: [],
     });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
-    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
-    assert.equal(audits.at(-1)?.reason, 'empty_template');
-    assert.deepEqual(posted, []);
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.deepEqual(regionResolutionCalls, []);
   });
+
+  it('模板模式：账号无模板 → 按已选群区域使用通用模板，仍走人审和提交', async () => {
+    const { deps, audits, envelopes, regionResolutionCalls } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: [],
+      regionalTemplates: ['这家区域咖啡很不错'],
+    });
+    const approvals: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      approval: {
+        request: async (request) => { approvals.push(request.text); },
+        isApproved: async () => true,
+        timeoutMs: 20,
+        pollMs: 1,
+      },
+    }).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.deepEqual(regionResolutionCalls, ['https://www.facebook.com/groups/1']);
+    assert.deepEqual(approvals, ['这家区域咖啡很不错']);
+    assert.equal(
+      envelopes.find((e) => e.type === 'interaction.comment')?.payload.text,
+      '这家区域咖啡很不错',
+    );
+  });
+
+  for (const reason of ['missing_group_region', 'regional_template_missing'] as const) {
+    it(`模板模式：账号无模板且区域解析为 ${reason} → 诚实停止，不搜索不提交`, async () => {
+      const { deps, audits, posted } = fbFlowDeps({
+        submit: { ok: true },
+        commentMode: 'template',
+        commentTemplates: [],
+        regionalFailure: reason,
+      });
+      await new CommentScheduler(deps).triggerManual('fb-1');
+      await tick();
+      assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+      assert.equal(audits.at(-1)?.reason, reason);
+      assert.deepEqual(posted, []);
+    });
+  }
 
   it('模板模式：模板正文含联系方式 → contains_contact，绝不靠 contact lane 救回', async () => {
     const { deps, audits, posted } = fbFlowDeps({

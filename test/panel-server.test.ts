@@ -1713,6 +1713,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
   let listOptions: unknown = null;
   let importedInputs: unknown = null;
   let scopeWrite: unknown = null;
+  let regionTemplateWrite: unknown = null;
   const groupDeps = {
     ...deps,
     facebookGroupTargets: {
@@ -1730,6 +1731,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
               joinGating: 'unknown',
               priority: 0,
               enabled: true,
+              accountScopeMode: 'restricted',
               importBatch: 'batch-1',
               createdAt: '2026-07-09T00:00:00.000Z',
               updatedAt: '2026-07-09T00:00:00.000Z',
@@ -1749,18 +1751,47 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
         regions: [{ region: '河南区域', parks: ['同文1工业区'] }],
         directions: ['机械和电气'],
         accountGroupLabels: ['华东组', '招聘组'],
+        globalTargetCount: 8,
         unscopedTargetCount: 2,
       }),
+      listRegionCommentTemplates: async () => [{
+        region: '河南区域',
+        commentTemplates: ['区域咖啡欢迎语'],
+        updatedAt: '2026-07-27T08:00:00.000Z',
+        updatedBy: 'alice',
+      }],
+      setRegionCommentTemplates: async (
+        region: string,
+        commentTemplates: string[],
+        updatedBy: string,
+      ) => {
+        regionTemplateWrite = { region, commentTemplates, updatedBy };
+        return {
+          ok: true as const,
+          row: {
+            region,
+            commentTemplates,
+            updatedAt: '2026-07-27T08:10:00.000Z',
+            updatedBy,
+          },
+        };
+      },
       importTargets: async (inputs: unknown, importBatch: string | null, options: unknown) => {
         importedInputs = { inputs, importBatch, options };
         return { imported: 1, updated: 0, duplicate: 0, invalid: 0, rows: [] };
       },
-      replaceTargetScopes: async (groupUrls: string[], accountGroupLabels: string[], updatedBy: string) => {
-        scopeWrite = { groupUrls, accountGroupLabels, updatedBy };
+      replaceTargetScopes: async (
+        groupUrls: string[],
+        accountGroupLabels: string[],
+        updatedBy: string,
+        accountScopeMode = 'restricted',
+      ) => {
+        scopeWrite = { groupUrls, accountGroupLabels, updatedBy, accountScopeMode };
         return {
           ok: true as const,
           items: groupUrls.map((groupUrl) => ({
             groupUrl,
+            accountScopeMode,
             accountGroupLabels,
             updatedAt: '2026-07-22T08:00:00.000Z',
             updatedBy,
@@ -1786,7 +1817,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
     const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
 
     const list = await fetch(
-      `${base}/api/facebook/groups?enabled=true&status=joined&region=${encodeURIComponent('河南区域')}&park=${encodeURIComponent('同文1工业区')}&direction=${encodeURIComponent('机械和电气')}&accountGroupLabel=${encodeURIComponent('华东组')}`,
+      `${base}/api/facebook/groups?enabled=true&status=joined&region=${encodeURIComponent('河南区域')}&park=${encodeURIComponent('同文1工业区')}&direction=${encodeURIComponent('机械和电气')}&accountScopeMode=restricted&accountGroupLabel=${encodeURIComponent('华东组')}`,
       { headers: auth },
     );
     assert.equal(list.status, 200);
@@ -1798,6 +1829,7 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
       region: '河南区域',
       park: '同文1工业区',
       direction: '机械和电气',
+      accountScopeMode: 'restricted',
       accountGroupLabel: '华东组',
     });
 
@@ -1807,7 +1839,33 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
       regions: [{ region: '河南区域', parks: ['同文1工业区'] }],
       directions: ['机械和电气'],
       accountGroupLabels: ['华东组', '招聘组'],
+      globalTargetCount: 8,
       unscopedTargetCount: 2,
+    });
+
+    const templates = await fetch(`${base}/api/facebook/groups/comment-templates`, { headers: auth });
+    assert.equal(templates.status, 200);
+    assert.deepEqual(await templates.json(), {
+      items: [{
+        region: '河南区域',
+        commentTemplates: ['区域咖啡欢迎语'],
+        updatedAt: '2026-07-27T08:00:00.000Z',
+        updatedBy: 'alice',
+      }],
+    });
+    const templateSaved = await fetch(`${base}/api/facebook/groups/comment-templates`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        region: '河南区域',
+        commentTemplates: ['区域咖啡欢迎语', '区域咖啡备用语'],
+      }),
+    });
+    assert.equal(templateSaved.status, 200);
+    assert.deepEqual(regionTemplateWrite, {
+      region: '河南区域',
+      commentTemplates: ['区域咖啡欢迎语', '区域咖啡备用语'],
+      updatedBy: 'alice',
     });
 
     const imported = await fetch(`${base}/api/facebook/groups/import`, {
@@ -1854,11 +1912,39 @@ test('HTTP Facebook group metadata filters, facets, and import validation', asyn
       groupUrls: ['https://www.facebook.com/groups/group-a'],
       accountGroupLabels: ['华东组', '招聘组'],
       updatedBy: 'alice',
+      accountScopeMode: 'restricted',
     });
     assert.deepEqual(await scoped.json(), {
       items: [{
         groupUrl: 'https://www.facebook.com/groups/group-a',
+        accountScopeMode: 'restricted',
         accountGroupLabels: ['华东组', '招聘组'],
+        updatedAt: '2026-07-22T08:00:00.000Z',
+        updatedBy: 'alice',
+      }],
+    });
+
+    const global = await fetch(`${base}/api/facebook/groups/scopes`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        groupUrls: ['https://www.facebook.com/groups/group-a'],
+        accountScopeMode: 'global',
+        accountGroupLabels: [],
+      }),
+    });
+    assert.equal(global.status, 200);
+    assert.deepEqual(scopeWrite, {
+      groupUrls: ['https://www.facebook.com/groups/group-a'],
+      accountGroupLabels: [],
+      updatedBy: 'alice',
+      accountScopeMode: 'global',
+    });
+    assert.deepEqual(await global.json(), {
+      items: [{
+        groupUrl: 'https://www.facebook.com/groups/group-a',
+        accountScopeMode: 'global',
+        accountGroupLabels: [],
         updatedAt: '2026-07-22T08:00:00.000Z',
         updatedBy: 'alice',
       }],
