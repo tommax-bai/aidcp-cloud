@@ -147,6 +147,13 @@ export function commentOutcomeReason(c: FacebookCommentRunResult): string {
     case 'no_targets':
       return '群内无可评论目标';
     case 'no_strong_candidate':
+      if (c.reason === 'timeout') return '群内首帖读取超时，未进入评论';
+      if (c.reason === 'no_candidates') return '有界下滚探测后仍未找到可评论的群内首帖';
+      if (c.reason === 'editor_not_found') return '已找到群内首帖，但评论入口未就绪或不可用';
+      if (c.reason === 'target_context_mismatch') return '已打开群内首帖，但帖子身份或上下文无法唯一确认';
+      if (c.reason === 'all_deduped') return '群内首帖已评论过，本次未重复评论';
+      if (c.reason === 'invalid_target') return '群内首帖链接无效';
+      if (c.reason === 'open_failed' || c.reason === 'nav_error') return '群内首帖打开失败';
       return '群内未找到合适的可评论帖子';
     case 'compose_skipped':
       if (c.reason === 'contact_info_missing') return '未配置联系方式';

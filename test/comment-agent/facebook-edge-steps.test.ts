@@ -159,6 +159,22 @@ describe('buildFacebookEdgeSteps', () => {
     assert.deepEqual(r, { ok: true, permalink, postText: '首帖正文' });
   });
 
+  it('openFirstPost：透传 Native 有界探测的具体失败原因', async () => {
+    const bus = new EventBus();
+    const { pusher } = makePusher((env) => {
+      if (env.type === 'note.open') {
+        bus.emit('action.completed', {
+          action: 'open_note',
+          ok: false,
+          reason: 'no_candidates',
+          ts: 0,
+        } as never);
+      }
+    });
+    const r = await steps(bus, pusher).openFirstPost('https://www.facebook.com/groups/1');
+    assert.deepEqual(r, { ok: false, reason: 'no_candidates' });
+  });
+
   it('openFirstPost：边端回非群帖 permalink 不误认，最终诚实超时', async () => {
     const bus = new EventBus();
     const { pusher } = makePusher((env) => {

@@ -1899,6 +1899,22 @@ describe('join-comment 结果卡不泄露裸群 id/URL', () => {
     assert.match(msg, /管理员批准/);
     assert.match(msg, /未上墙/);
   });
+  it('commentOutcomeReason：首帖打开失败保留具体阶段，不再统一误报为未找到帖子', () => {
+    const cases = [
+      ['timeout', /读取超时/],
+      ['no_candidates', /有界下滚探测后仍未找到/],
+      ['editor_not_found', /评论入口未就绪或不可用/],
+      ['target_context_mismatch', /帖子身份或上下文无法唯一确认/],
+      ['all_deduped', /已评论过/],
+      ['invalid_target', /链接无效/],
+      ['open_failed', /打开失败/],
+    ] as const;
+    for (const [reason, expected] of cases) {
+      const message = commentOutcomeReason({ outcome: 'no_strong_candidate', reason });
+      assert.match(message, expected);
+      assert.doesNotMatch(message, /群内未找到合适的可评论帖子/);
+    }
+  });
   it('joinCommentReceipt：评论撞群参与审批闸 → 黄卡（绝不染绿），说明待管理员批准', () => {
     const r = joinCommentReceipt({ outcome: 'joined' }, { outcome: 'pending_group_approval', container: 'PR Café' }, false);
     assert.equal(r.level, 'warning');
