@@ -349,6 +349,14 @@ export interface RoleDispatcherOptions {
     batchId: string,
   ) => Promise<FacebookRuleJoinContactResult>;
   /**
+   * 规则批次评论段的**有效正文方案**现读（change facebook-rule-mode-without-persona）。
+   * 在调用加群联系评论编排**之前**解析一次：`template`（账号显式模板 / 账号未显式选择的默认模板）
+   * 才允许评论段执行；`generated`（账号**显式**选择生成式）时评论段以具名原因收敛为不可执行。
+   * 未注入 / 读抛错 / 返回 `unavailable`（如配置副本陈旧）→ 视作不可解析：同样不执行评论段，
+   * 也绝不以模板顶替（fail-closed，两个方向都不猜）。
+   */
+  facebookRuleCommentBodyScheme?: (accountId: string) => 'template' | 'generated' | 'unavailable';
+  /**
    * 硬暂停闸（验证码/人工接管）：边缘是否处于硬暂停态。缺省始终 false。
    * 由 server 接线为读 ws-server 的 pausedEdges（isEdgePaused）。通知准入角色据此放弃巡视——
    * 硬暂停期连帧都不发，不该再叠通知巡视。与 browseSuspended（软暂停）正交。
@@ -449,6 +457,19 @@ export interface RoleDispatcherOptions {
    * 讲成一件需要人去补配置的事）。
    */
   personaBinding?: (accountId: string) => PersonaBinding;
+  /**
+   * 会话启动闸的**唯一一处人设豁免**（change facebook-rule-mode-without-persona）：现读该账号的
+   * 权威规则模式配置——已启用 → 未绑人设 MUST NOT 被短路为 `needs_persona_setup`、MUST NOT 告警。
+   * 判据与规则模式裁决同源（同一个按账号读的权威入口），MUST NOT 依赖客户端自报 / 环境变量 / 缓存猜测。
+   *
+   * **fail-closed**：未注入、读抛错、返回非 `true`、或本连接平台未确认为 Facebook → 一律按未豁免
+   * 处理（未绑人设仍被短路）。绑定判据为 `unknown`（人设副本陈旧）时同样不豁免——那是「读不到」
+   * 而不是「确认未绑」，两者不能混为一谈。
+   *
+   * 本豁免**只**解除这一道闸：能不能真的浏览仍由模式裁决决定，未绑人设的账号在非规则模式下
+   * 仍是 `blocked/no_persona`，绝不会让人设浏览闭环空跑。
+   */
+  facebookRuleModeEnabled?: (accountId: string) => boolean;
   /**
    * 配置副本停手闸（change cloud-coupling-phase4-runtime-ports）：由组合根注入 api 侧实现。
    * 未注入 = 恒不停手，逐位等于「未安装新鲜度事实源 → fresh」的既有语义。
@@ -595,6 +616,7 @@ export class RoleDispatcher {
   private readonly updateFacebookRuleBatch?: RoleDispatcherOptions['updateFacebookRuleBatch'];
   private readonly explainRuleJoin: () => ViewQuotaDecision;
   private readonly triggerFacebookRuleJoinContact?: RoleDispatcherOptions['triggerFacebookRuleJoinContact'];
+  private readonly facebookRuleCommentBodyScheme?: RoleDispatcherOptions['facebookRuleCommentBodyScheme'];
   private readonly commentApproval?: CommentApprovalPort;
   private readonly commentAutoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
   private readonly resolveCommentApprovalMode?: RoleDispatcherOptions['resolveCommentApprovalMode'];
@@ -660,6 +682,7 @@ export class RoleDispatcher {
   private notificationTaskEnding = false;
   private pendingNotificationCommands: EdgeCommand[] = [];
   private readonly personaBinding?: (accountId: string) => PersonaBinding;
+  private readonly facebookRuleModeEnabled?: (accountId: string) => boolean;
   private readonly configMirrorGate?: ConfigMirrorGatePort;
   private readonly onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   private readonly isDispatchActive: () => boolean;
@@ -810,6 +833,7 @@ export class RoleDispatcher {
     this.updateFacebookRuleBatch = options.updateFacebookRuleBatch;
     this.explainRuleJoin = options.explainRuleJoin ?? (() => ({ allowed: true }));
     this.triggerFacebookRuleJoinContact = options.triggerFacebookRuleJoinContact;
+    this.facebookRuleCommentBodyScheme = options.facebookRuleCommentBodyScheme;
     this.commentApproval = options.commentApproval;
     this.commentAutoApproveNotify = options.commentAutoApproveNotify;
     this.resolveCommentApprovalMode = options.resolveCommentApprovalMode;
@@ -832,6 +856,7 @@ export class RoleDispatcher {
     this.fireAutoContactComment = options.fireAutoContactComment;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.personaBinding = options.personaBinding;
+    this.facebookRuleModeEnabled = options.facebookRuleModeEnabled;
     this.configMirrorGate = options.configMirrorGate;
     this.onSessionRejected = options.onSessionRejected;
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
@@ -1076,6 +1101,23 @@ export class RoleDispatcher {
     await this.startFacebookRuleJoinContact();
   }
 
+  /**
+   * 规则批次评论段的有效正文方案现读（change facebook-rule-mode-without-persona）。
+   * 未接线 / 读抛错 / 返回非法值 → `unavailable`：既不执行评论段，也绝不以模板顶替（fail-closed）。
+   */
+  private resolveFacebookRuleCommentBodyScheme(): 'template' | 'generated' | 'unavailable' {
+    if (!this.facebookRuleCommentBodyScheme) return 'unavailable';
+    try {
+      const scheme = this.facebookRuleCommentBodyScheme(this.currentAccountId);
+      return scheme === 'template' || scheme === 'generated' ? scheme : 'unavailable';
+    } catch (err) {
+      console.warn(
+        `[facebook-rule] comment body scheme unavailable account=${this.currentAccountId}: ${(err as Error).message}`,
+      );
+      return 'unavailable';
+    }
+  }
+
   private async startFacebookRuleJoinContact(): Promise<void> {
     const pending = this.pendingFacebookRuleBatch;
     if (!pending || pending.joinStarted || !this.updateFacebookRuleBatch) return;
@@ -1101,6 +1143,24 @@ export class RoleDispatcher {
         commentState: 'not_scheduled',
         // 不写 blocker：那一列三阶段共用、后写覆盖先写，写这里会抹掉点赞阶段的抑制原因。
         preserveBlocker: true,
+      });
+      return;
+    }
+    // 评论段的有效正文方案（change facebook-rule-mode-without-persona）：**在调用加群联系评论编排之前**
+    // 解析一次。规则模式的评论段只走模板正文——它是唯一不读人设的正文链路。账号**显式**选了生成式方案时，
+    // 该评论段以稳定具名原因收敛为不可执行：MUST NOT 调用生成器，也 MUST NOT 以模板顶替运营的显式选择。
+    // 浏览与点赞已在本批次前段各自落终态、原样保留，批次如实呈现为部分完成。
+    //
+    // 位置在二级节奏闸**之后**：只点赞的轮次压根不进评论段，在那种轮次上判正文方案会把
+    // 「本轮按节奏不做评论」误报成「正文方案不可执行」，且节奏本身与正文方案无关。
+    const bodyScheme = this.resolveFacebookRuleCommentBodyScheme();
+    if (bodyScheme !== 'template') {
+      await this.finishFacebookRuleBatch({
+        joinState: 'not_started',
+        commentState: 'rejected',
+        blocker: bodyScheme === 'generated'
+          ? 'comment_body_scheme_generated'
+          : 'comment_body_scheme_unavailable',
       });
       return;
     }
@@ -2204,13 +2264,38 @@ export class RoleDispatcher {
     }
     // 人设三态：只有权威的「未绑」才允许 needs_persona_setup。
     const binding = this.personaBinding?.(this.currentAccountId) ?? 'bound';
-    if (binding === 'unbound') return 'needs_persona_setup';
+    // 规则模式豁免（change facebook-rule-mode-without-persona）：平台确认为 Facebook 且权威规则模式
+    // 配置现读为启用时，「确认未绑人设」不再短路——那条路全程不读人设，绑定不是它的前提。
+    // 只豁免 `unbound`：`unknown` 是云端此刻读不到，仍走 persona_unavailable（fail-closed）。
+    if (binding === 'unbound' && !this.facebookRuleModeExemptsPersonaGate()) return 'needs_persona_setup';
     if (binding === 'unknown') return PERSONA_UNAVAILABLE_REASON;
     // 其余闸门镜像陈旧 → 统一停手（不放行新会话）。
     // 这里用**不记账**的纯判据：本方法也服务只读裁决（resumeGateSnapshot，~60s 每跳一次），
     // 只读裁决什么都没拒绝。真正拒绝那一跳的记账在 canStartSession 里落（含人设那一路）。
     if (this.configMirrorGate?.hasStaleGateMirror() ?? false) return CONFIG_MIRROR_STALE_REASON;
     return 'ok';
+  }
+
+  /**
+   * 会话启动闸的规则模式豁免判据（change facebook-rule-mode-without-persona）。
+   *
+   * 三个条件全部成立才豁免：本连接平台**已确认**为 Facebook、权威规则模式配置**现读**为启用、
+   * 且读取本身没有出错。任何一条不成立（含未注入权威入口）都 fail-closed 回到未豁免行为——
+   * MUST NOT 把「读不到配置」猜成「已启用规则模式」。
+   *
+   * 判据只看权威配置，不看客户端自报、不看环境变量、不看任何缓存快照。
+   */
+  private facebookRuleModeExemptsPersonaGate(): boolean {
+    if (this.accountPlatform !== 'facebook') return false; // 平台未确认为 Facebook → 不豁免
+    if (!this.facebookRuleModeEnabled) return false; // 权威入口未接线 → 不豁免
+    try {
+      return this.facebookRuleModeEnabled(this.currentAccountId) === true;
+    } catch (err) {
+      console.warn(
+        `[facebook-rule] session-start exemption unavailable account=${this.currentAccountId}: ${(err as Error).message} → 按未豁免处理`,
+      );
+      return false;
+    }
   }
 
   /** 外部触发会话启动（经启动闸）：供面板恢复调度 / 显式启动用；已在跑则不重复。 */
@@ -3368,6 +3453,20 @@ export class RoleDispatcher {
 
       // Edge 上报可见卡片 → 更新数据并触发评估
       this.eventBus.on('page.cards.arrived', (payload) => {
+        // 规则模式豁免的边界（change facebook-rule-mode-without-persona）：豁免**只**解除会话启动闸。
+        // 会话起来之后每一批卡都现读一次裁决——此刻若不是规则模式（活跃周之外、慢启动接管、裁决权威
+        // 读不到…），而该账号又是权威的「未绑人设」，就 MUST NOT 让人设浏览闭环跑起来：不评估、不下发，
+        // 诚实收尾。这也覆盖会话中途被解绑的账号（原先只会让取值口一路抛错空转）。
+        if (
+          this.personaBinding?.(this.currentAccountId) === 'unbound'
+          && !this.isFacebookRuleMode()
+        ) {
+          console.warn(
+            `[RoleDispatcher] 账号 ${this.currentAccountId} 未绑人设且此刻非规则模式 → 诚实收尾（no_persona_outside_rule_mode）：不评估本批卡、不下发任何指令`,
+          );
+          this.endSession('no_persona_outside_rule_mode');
+          return;
+        }
         if (
           this.accountPlatform === 'facebook'
           && payload.listKind === 'feed'

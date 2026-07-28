@@ -15,7 +15,7 @@ const base = {
 };
 
 describe('facebook rule mode arbitration', () => {
-  it('lets active slow start win before persona admission and rule configuration', () => {
+  it('lets active slow start win before the persona exception and rule configuration', () => {
     assert.deepEqual(
       decideFacebookBrowseMode({
         ...base,
@@ -26,11 +26,17 @@ describe('facebook rule mode arbitration', () => {
     );
   });
 
-  it('fails closed for unknown or conflicting slow-start identity', () => {
-    for (const ineligibleReason of ['binding_unknown', 'binding_conflict'] as const) {
+  it('fails closed for unknown or conflicting slow-start identity, even for an unbound rule-mode account', () => {
+    for (const ineligibleReason of [
+      'binding_unknown',
+      'binding_conflict',
+      'platform_unknown',
+      'platform_unsupported',
+    ] as const) {
       assert.deepEqual(
         decideFacebookBrowseMode({
           ...base,
+          personaBinding: 'unbound',
           slowStart: { state: 'off', ineligibleReason },
         }),
         { mode: 'blocked', blocker: ineligibleReason },
@@ -38,16 +44,39 @@ describe('facebook rule mode arbitration', () => {
     }
   });
 
-  it('allows off and graduated slow start, but retains the bound-persona admission gate', () => {
+  it('allows off and graduated slow start', () => {
     for (const state of ['off', 'graduated']) {
       assert.deepEqual(
         decideFacebookBrowseMode({ ...base, slowStart: { state } }),
         { mode: 'facebook_rule', blocker: null },
       );
     }
+  });
+
+  // change facebook-rule-mode-without-persona：规则模式取消绑定人设入口闸。
+  it('admits an unbound account to rule mode without substituting any persona', () => {
+    for (const personaBinding of ['unbound', 'unknown'] as const) {
+      assert.deepEqual(
+        decideFacebookBrowseMode({ ...base, personaBinding }),
+        { mode: 'facebook_rule', blocker: null },
+      );
+    }
+  });
+
+  it('keeps the persona browse loop gated for an unbound account when rule mode is not admitted', () => {
+    // 规则模式关闭 → 该账号回到人设浏览闭环，人设闸逐字不变。
     assert.deepEqual(
-      decideFacebookBrowseMode({ ...base, personaBinding: 'unbound' }),
+      decideFacebookBrowseMode({ ...base, ruleEnabled: false, personaBinding: 'unbound' }),
       { mode: 'blocked', blocker: 'no_persona' },
+    );
+    // 规则模式开着但不在活跃周 → 同样不是规则模式，仍不得让人设闭环空跑。
+    assert.deepEqual(
+      decideFacebookBrowseMode({ ...base, activeWeek: false, personaBinding: 'unbound' }),
+      { mode: 'blocked', blocker: 'no_persona' },
+    );
+    assert.deepEqual(
+      decideFacebookBrowseMode({ ...base, ruleEnabled: false, personaBinding: 'unknown' }),
+      { mode: 'blocked', blocker: 'persona_unavailable' },
     );
   });
 
@@ -61,7 +90,7 @@ describe('facebook rule mode arbitration', () => {
       { mode: 'persona', blocker: 'outside_active_window' },
     );
     assert.deepEqual(
-      decideFacebookBrowseMode({ ...base, platform: 'xiaohongshu' }),
+      decideFacebookBrowseMode({ ...base, platform: 'xiaohongshu', personaBinding: 'unbound' }),
       { mode: 'unsupported', blocker: 'rule_mode_unsupported' },
     );
   });

@@ -6501,6 +6501,26 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           slowStart: ctx.controller.slowStartView(),
         });
       },
+      // 会话启动闸的规则模式豁免判据（change facebook-rule-mode-without-persona）：与模式裁决**同源**——
+      // 同一个按账号读的权威规则模式入口、同一道副本新鲜度闸。store 未装配 / 副本陈旧 → 返回 false，
+      // 启动闸 fail-closed 回到「未绑人设即短路」的既有行为，绝不把「读不到」猜成「已启用」。
+      facebookRuleModeEnabled: (accountId) => {
+        if (!facebookRuleModeStore) return false;
+        if (configMirrorGate.isStale('content_schedule')) return false;
+        return facebookRuleModeStore.getConfig(accountId).enabled === true;
+      },
+      // 规则批次评论段的有效正文方案（同上 change）：直接取 FB 评论配置的权威有效值——
+      // 显式模板 / 未显式选择（默认模板）→ 'template'；显式生成 → 'generated'。
+      // 该配置副本陈旧时如实报 'unavailable'：评论段不执行，绝不猜成模板、也绝不猜成生成。
+      facebookRuleCommentBodyScheme: (accountId) => {
+        if (configMirrorGate.isStale('facebook_comment_config')) {
+          configMirrorGate.noteStaleRefusal('facebook_comment_config', `facebook_rule_comment_body:${accountId}`);
+          return 'unavailable';
+        }
+        return facebookCommentConfigStore.effectiveConfigFor(accountId).commentMode === 'template'
+          ? 'template'
+          : 'generated';
+      },
       ...(facebookRuleModeStore && facebookRuleModeRuntimeStore
         ? {
             applyFacebookRuleView: (input) => facebookRuleModeRuntimeStore.applyConfirmedView(input),
@@ -6546,6 +6566,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                 // 固定回 verification_ambiguous。自动规则批次带上它 ⇒ 结构上永远不可能报「已评论」：
                 // 每次都按「提交但未确认」记账 → 打去重烧掉目标帖、覆盖冷却不落、当日配额不计，
                 // 同一个群的首帖此后只剩 all_deduped（2026-07-28 真机：评论其实已上墙，FB 活动日志可证）。
+                // 来源标记（change facebook-rule-mode-without-persona）：评论触发口的人设闸按来源 + 有效正文方案
+                // 分流——规则批次的模板正文放行，其余来源与生成式正文逐字保持既有拒绝行为。
+                source: 'facebook_rule_batch',
                 actionGate: (action) => {
                   const decision = (() => {
                     if (!facebookRuleModeStore) {

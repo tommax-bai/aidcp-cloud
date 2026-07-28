@@ -1996,6 +1996,198 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     gate.resolve();
     await tick();
   });
+
+  // ── change facebook-rule-mode-without-persona：评论触发口的人设闸按来源 + 有效正文方案分流 ──
+  const JOINED_GROUP = 'https://www.facebook.com/groups/joined-rule';
+
+  it('规则批次 + 模板正文 + 未绑人设 → 放行，且正文照走校验/人审/提交确认（全程不读人设）', async () => {
+    const { deps, audits, envelopes } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: ['这家手冲咖啡很不错'],
+    });
+    const approvals: string[] = [];
+    let composeCalled = 0;
+    let soulReads = 0;
+    const receipt = await new CommentScheduler({
+      ...deps,
+      personaBinding: () => 'unbound',
+      getSoul: () => { soulReads += 1; throw new Error('no_persona'); },
+      facebookCompose: async () => { composeCalled += 1; return '模型正文不应使用'; },
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED_GROUP }),
+      approval: { request: async (r) => { approvals.push(r.text); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
+      postResultCard: () => {},
+    }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
+    assert.equal(receipt.ok, true, '规则批次的模板正文不因未绑人设被拒');
+    await tick();
+    assert.equal(composeCalled, 0, '模板链路绝不调用生成器');
+    assert.equal(soulReads, 0, '模板链路一次都不读人设');
+    assert.deepEqual(approvals, ['这家手冲咖啡很不错'], '仍走审批策略');
+    assert.equal(audits.at(-1)?.outcome, 'commented', '仍以平台确认为准记真实终态');
+    assert.equal(envelopes.find((e) => e.type === 'interaction.comment')?.payload.text, '这家手冲咖啡很不错');
+  });
+
+  it('规则批次 + 未显式选择正文方案（默认模板）+ 未绑人设 → 放行并用区域通用模板', async () => {
+    const { deps, audits, regionResolutionCalls } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template', // effectiveConfigFor 对「未显式选择」返回的就是 template
+      commentTemplates: [],
+      regionalTemplates: ['这家区域咖啡很不错'],
+    });
+    const receipt = await new CommentScheduler({
+      ...deps,
+      personaBinding: () => 'unbound',
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED_GROUP }),
+      postResultCard: () => {},
+    }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
+    assert.equal(receipt.ok, true);
+    await tick();
+    assert.deepEqual(regionResolutionCalls, [JOINED_GROUP]);
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+  });
+
+  it('规则批次 + 模板方案但区域模板缺失 → 仍按既有具名停止收敛，绝不回落生成器或任意默认文本', async () => {
+    for (const reason of ['missing_group_region', 'regional_template_missing'] as const) {
+      const { deps, audits, posted } = fbFlowDeps({
+        submit: { ok: true },
+        commentMode: 'template',
+        commentTemplates: [],
+        regionalFailure: reason,
+      });
+      let composeCalled = 0;
+      await new CommentScheduler({
+        ...deps,
+        personaBinding: () => 'unbound',
+        facebookCompose: async () => { composeCalled += 1; return '不该被用到'; },
+        facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED_GROUP }),
+        postResultCard: () => {},
+      }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
+      await tick();
+      assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+      assert.equal(audits.at(-1)?.reason, reason);
+      assert.equal(composeCalled, 0);
+      assert.ok(!posted.includes('interaction.comment'));
+    }
+  });
+
+  it('规则批次 + 模板正文含违禁内容 → 确定性校验先拒，绝不提交、绝不报评论成功', async () => {
+    const { deps, audits, posted } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: ['来看看 https://spam.example/promo'],
+    });
+    await new CommentScheduler({
+      ...deps,
+      personaBinding: () => 'unbound',
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED_GROUP }),
+      postResultCard: () => {},
+    }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'contains_url');
+    assert.ok(!posted.includes('interaction.comment'));
+  });
+
+  it('规则批次 + 模板正文 + --contact → 联系方式仍与正文分离注入，人审见合体、提交走 groupChatCode', async () => {
+    const { deps, audits, envelopes } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: ['这家手冲咖啡很不错'],
+    });
+    const approvals: string[] = [];
+    await new CommentScheduler({
+      ...deps,
+      personaBinding: () => 'unbound',
+      getContactInfo: async () => 'LINE ID: abc123',
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED_GROUP }),
+      approval: { request: async (r) => { approvals.push(r.text); }, isApproved: async () => true, timeoutMs: 20, pollMs: 1 },
+      postResultCard: () => {},
+    }).triggerManual('fb-rule', { joinFirst: true, injectContact: true, source: 'facebook_rule_batch' });
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.equal(approvals[0], '这家手冲咖啡很不错\nLINE ID: abc123');
+    const submit = envelopes.find((e) => e.type === 'interaction.comment');
+    assert.equal(submit?.payload.text, '这家手冲咖啡很不错');
+    assert.equal(submit?.payload.groupChatCode, 'LINE ID: abc123');
+  });
+
+  it('规则批次 + 显式生成方案 + 未绑人设 → 逐字保持既有拒绝行为，不接管边端、不调生成器', async () => {
+    const { deps, posted } = fbFlowDeps({ submit: { ok: true }, commentMode: 'generated' });
+    let composeCalled = 0;
+    let joinCalled = 0;
+    const receipt = await new CommentScheduler({
+      ...deps,
+      personaBinding: () => 'unbound',
+      facebookCompose: async () => { composeCalled += 1; return '不该被用到'; },
+      facebookJoinNewGroup: async () => { joinCalled += 1; return { triggered: true, outcome: 'joined', groupUrl: JOINED_GROUP }; },
+      postResultCard: () => {},
+    }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
+    assert.equal(receipt.ok, false);
+    assert.match(receipt.message, /未绑定人设/);
+    await tick();
+    assert.equal(composeCalled, 0);
+    assert.equal(joinCalled, 0);
+    assert.deepEqual(posted, []);
+  });
+
+  it('规则批次 + 模板方案：配置在飞行途中被改成显式生成 → 评论段以具名原因收敛，绝不调生成器', async () => {
+    const { deps, audits, posted } = fbFlowDeps({ submit: { ok: true }, commentMode: 'template', commentTemplates: ['这家手冲咖啡很不错'] });
+    let composeCalled = 0;
+    let reads = 0;
+    const receipt = await new CommentScheduler({
+      ...deps,
+      personaBinding: () => 'unbound',
+      // 触发口读到 template（放行），真发前再读已变成显式 generated。
+      facebookConfigFor: () => {
+        reads += 1;
+        return {
+          enabled: true,
+          keywords: ['咖啡'],
+          containers: [],
+          commentMode: reads === 1 ? 'template' : 'generated',
+          commentTemplates: ['这家手冲咖啡很不错'],
+        };
+      },
+      facebookCompose: async () => { composeCalled += 1; return '不该被用到'; },
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED_GROUP }),
+      postResultCard: () => {},
+    }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
+    assert.equal(receipt.ok, true, '触发口按当时的权威读值放行');
+    await tick();
+    assert.equal(composeCalled, 0, '真发前的方案硬闸挡住生成器');
+    assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
+    assert.equal(audits.at(-1)?.reason, 'comment_body_scheme_generated');
+    assert.ok(!posted.includes('interaction.comment'));
+  });
+
+  it('例外不外溢：同一账号经飞书手工 /comment（无来源标记）触发，未绑人设仍诚实拒绝', async () => {
+    const { deps, posted } = fbFlowDeps({ submit: { ok: true }, commentMode: 'template', commentTemplates: ['这家手冲咖啡很不错'] });
+    const s = new CommentScheduler({ ...deps, personaBinding: () => 'unbound', postResultCard: () => {} });
+    const manual = await s.triggerManual('fb-rule');
+    assert.equal(manual.ok, false);
+    assert.match(manual.message, /未绑定人设/);
+    const manualJoin = await s.triggerManual('fb-rule', { joinFirst: true });
+    assert.equal(manualJoin.ok, false);
+    assert.match(manualJoin.message, /未绑定人设/);
+    // 排期 / 精选定向来源（triggerTargeted）同样不受例外影响。
+    const targeted = await s.triggerTargeted('fb-rule', { noteId: 'n1', title: 't' });
+    assert.equal(targeted.ok, false);
+    assert.equal(targeted.reason, 'needs_persona');
+    await tick();
+    assert.deepEqual(posted, []);
+  });
+
+  it('规则批次但 FB 配置入口未接线 → 方案不可解析，人设闸 fail-closed 照旧拒绝', async () => {
+    const { deps } = fbFlowDeps({ submit: { ok: true }, commentMode: 'template' });
+    const receipt = await new CommentScheduler({
+      ...deps,
+      personaBinding: () => 'unbound',
+      facebookConfigFor: undefined,
+      postResultCard: () => {},
+    }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
+    assert.equal(receipt.ok, false);
+    assert.match(receipt.message, /未绑定人设/);
+  });
 });
 
 // ── change facebook-manual-join-comment：加群/评论结果卡绝不显裸群 id/URL（回执按群名，见 facebook-scheduled-comment 约定）──

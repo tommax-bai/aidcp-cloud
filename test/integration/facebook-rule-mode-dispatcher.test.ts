@@ -70,6 +70,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: true }),
       explainRuleJoin: () => ({ allowed: true }),
+      facebookRuleCommentBodyScheme: () => 'template',
       triggerFacebookRuleJoinContact: async (accountId, batchId) => {
         joinCalls.push({ accountId, batchId });
         return {
@@ -334,6 +335,7 @@ describe('RoleDispatcher facebook rule mode', () => {
         ? { allowed: true }
         : { allowed: false, reason: 'daily_like_quota' },
       explainRuleJoin: () => ({ allowed: true }),
+      facebookRuleCommentBodyScheme: () => 'template',
       triggerFacebookRuleJoinContact: async () => {
         joinCalls += 1;
         return {
@@ -428,6 +430,212 @@ describe('RoleDispatcher facebook rule mode', () => {
       );
       dispatcher.endSession();
     }
+  });
+
+  // ── change facebook-rule-mode-without-persona ────────────────────────────────────────────
+  it('runs the whole rule batch for an account with no persona at all (never resolves one)', async () => {
+    const commands: EdgeCommand[] = [];
+    const patches: Array<Record<string, unknown>> = [];
+    const joinCalls: string[] = [];
+    let soulReads = 0;
+    const dispatcher = new RoleDispatcher({
+      // 未绑人设账号：解析器诚实抛「无人设」。规则模式这条路一次都不该读它。
+      getSoul: () => { soulReads += 1; throw new Error('no_persona'); },
+      llm: { complete: async () => { throw new Error('rule mode must not call the persona LLM'); } },
+      sendCommand: (command) => { commands.push(command); },
+      accountPlatform: 'facebook',
+      personaBinding: () => 'unbound',
+      facebookRuleModeEnabled: () => true,
+      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
+      updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
+      explainInteract: () => ({ allowed: true }),
+      explainRuleJoin: () => ({ allowed: true }),
+      facebookRuleCommentBodyScheme: () => 'template',
+      triggerFacebookRuleJoinContact: async (accountId) => {
+        joinCalls.push(accountId);
+        return {
+          started: true,
+          onTerminal: Promise.resolve({
+            joinState: 'confirmed' as FacebookRuleActionState,
+            commentState: 'confirmed' as FacebookRuleActionState,
+          }),
+        };
+      },
+    });
+    dispatcher.setCurrentAccountId('fb-no-persona');
+    dispatcher.setup();
+    // 未绑人设 + 规则模式启用 → 启动闸豁免，会话正常起。
+    dispatcher.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'fb-no-persona', ts: 1 });
+    assert.equal(dispatcher.active, true, '未绑人设 + 规则模式启用 → 会话正常启动');
+
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-no-persona',
+      noteId: 'https://www.facebook.com/posts/post-10',
+      sourceDedupeKey: 'receipt-10',
+      source: 'detail',
+      occurredAt: Date.now(),
+    });
+    await waitForAsyncChain();
+    assert.equal(commands.some((command) => command.action === 'like'), true, '固定点赞意图照常下发');
+    dispatcher.bus.emit('action.completed', { action: 'like', ok: true, ts: Date.now() });
+    await waitForAsyncChain();
+
+    assert.deepEqual(joinCalls, ['fb-no-persona']);
+    assert.ok(patches.some((patch) =>
+      patch.joinState === 'confirmed' && patch.commentState === 'confirmed' && patch.terminal === true,
+    ));
+    assert.equal(soulReads, 0, '规则模式全程不读人设，也不回落任何替代人设');
+    dispatcher.endSession();
+  });
+
+  // 正文方案闸只挂在**真正会走到评论的那一轮**（周期第 2 位）上，所以以下几例一律用 joinRound。
+  it('makes the comment leg unexecutable for an explicit generated body scheme and keeps the like outcome', async () => {
+    const patches: Array<Record<string, unknown>> = [];
+    let joinCalls = 0;
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm: { complete: async () => '{"verdict":"skip"}' },
+      sendCommand: () => {},
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
+      updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
+      explainInteract: () => ({ allowed: true }),
+      explainRuleJoin: () => ({ allowed: true }),
+      facebookRuleCommentBodyScheme: () => 'generated',
+      triggerFacebookRuleJoinContact: async () => {
+        joinCalls += 1;
+        return { started: true, onTerminal: Promise.resolve({ joinState: 'confirmed' as FacebookRuleActionState, commentState: 'confirmed' as FacebookRuleActionState }) };
+      },
+    });
+    dispatcher.setCurrentAccountId('fb-generated');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-generated',
+      noteId: 'https://www.facebook.com/posts/post-10',
+      sourceDedupeKey: 'receipt-10',
+      source: 'detail',
+      occurredAt: Date.now(),
+    });
+    await waitForAsyncChain();
+    dispatcher.bus.emit('action.completed', { action: 'like', ok: true, ts: Date.now() });
+    await waitForAsyncChain();
+
+    assert.equal(joinCalls, 0, '显式生成方案 → 绝不调用加群联系评论编排（也就绝不调用生成器）');
+    assert.ok(
+      patches.some((patch) => patch.likeState === 'confirmed'),
+      '点赞结果原样保留（批次如实呈现为部分完成）',
+    );
+    assert.ok(
+      patches.some((patch) =>
+        patch.joinState === 'not_started'
+        && patch.commentState === 'rejected'
+        && patch.terminal === true
+        && patch.blocker === 'comment_body_scheme_generated',
+      ),
+      '评论段以稳定具名原因收敛为不可执行',
+    );
+    dispatcher.endSession();
+  });
+
+  it('fails closed with its own named reason when the body scheme cannot be resolved', async () => {
+    for (const [scheme, expectedBlocker] of [
+      [undefined, 'comment_body_scheme_unavailable'],
+      ['unavailable' as const, 'comment_body_scheme_unavailable'],
+    ] as const) {
+      const patches: Array<Record<string, unknown>> = [];
+      let joinCalls = 0;
+      const dispatcher = new RoleDispatcher({
+        soul,
+        llm: { complete: async () => '{"verdict":"skip"}' },
+        sendCommand: () => {},
+        accountPlatform: 'facebook',
+        facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+        applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
+        updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
+        explainInteract: () => ({ allowed: true }),
+        explainRuleJoin: () => ({ allowed: true }),
+        ...(scheme ? { facebookRuleCommentBodyScheme: () => scheme } : {}),
+        triggerFacebookRuleJoinContact: async () => {
+          joinCalls += 1;
+          return { started: true, onTerminal: Promise.resolve({ joinState: 'confirmed' as FacebookRuleActionState, commentState: 'confirmed' as FacebookRuleActionState }) };
+        },
+      });
+      dispatcher.setCurrentAccountId('fb-unknown-scheme');
+      dispatcher.setup();
+      dispatcher.startSession();
+      dispatcher.bus.emit('facebook.rule.view.confirmed', {
+        accountId: 'fb-unknown-scheme',
+        noteId: 'https://www.facebook.com/posts/post-10',
+        sourceDedupeKey: 'receipt-10',
+        source: 'detail',
+        occurredAt: Date.now(),
+      });
+      await waitForAsyncChain();
+      dispatcher.bus.emit('action.completed', { action: 'like', ok: true, ts: Date.now() });
+      await waitForAsyncChain();
+
+      assert.equal(joinCalls, 0, '方案不可解析 → 不执行评论段，也绝不以模板顶替');
+      assert.ok(patches.some((patch) =>
+        patch.commentState === 'rejected' && patch.terminal === true && patch.blocker === expectedBlocker,
+      ));
+      dispatcher.endSession();
+    }
+  });
+
+  it('never consults the body scheme on a like-only round and keeps its not_scheduled terminal', async () => {
+    const patches: Array<Record<string, unknown>> = [];
+    let schemeReads = 0;
+    let joinCalls = 0;
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm: { complete: async () => '{"verdict":"skip"}' },
+      sendCommand: () => {},
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: likeOnlyRound }),
+      updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
+      explainInteract: () => ({ allowed: true }),
+      explainRuleJoin: () => ({ allowed: true }),
+      // 显式生成方案，但本轮按节奏根本没有评论段：闸不得在这里判、更不得把节奏收尾改写成正文方案原因。
+      facebookRuleCommentBodyScheme: () => { schemeReads += 1; return 'generated'; },
+      triggerFacebookRuleJoinContact: async () => {
+        joinCalls += 1;
+        return { started: true, onTerminal: Promise.resolve({ joinState: 'confirmed' as FacebookRuleActionState, commentState: 'confirmed' as FacebookRuleActionState }) };
+      },
+    });
+    dispatcher.setCurrentAccountId('fb-like-only');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-like-only',
+      noteId: 'https://www.facebook.com/posts/post-10',
+      sourceDedupeKey: 'receipt-10',
+      source: 'detail',
+      occurredAt: Date.now(),
+    });
+    await waitForAsyncChain();
+    dispatcher.bus.emit('action.completed', { action: 'like', ok: true, ts: Date.now() });
+    await waitForAsyncChain();
+
+    assert.equal(schemeReads, 0, '只点赞的轮次不进评论段 → 正文方案一次都不该被读');
+    assert.equal(joinCalls, 0);
+    assert.ok(
+      patches.some((patch) =>
+        patch.joinState === 'not_scheduled'
+        && patch.commentState === 'not_scheduled'
+        && patch.terminal === true,
+      ),
+      '按节奏正常收尾，仍是 not_scheduled，而不是正文方案不可执行',
+    );
+    assert.equal(
+      patches.some((patch) => typeof patch.blocker === 'string' && patch.blocker.startsWith('comment_body_scheme')),
+      false,
+      '绝不把「本轮按节奏不做评论」误报成「正文方案不可执行」',
+    );
+    dispatcher.endSession();
   });
 
   it('reconciles an in-flight like as ambiguous at a session/reconnect boundary without replay', async () => {

@@ -455,6 +455,26 @@ export class CommentScheduler {
     return this.running.has(accountId);
   }
 
+  /**
+   * 该账号 Facebook 评论的**有效正文方案**现读（change facebook-rule-mode-without-persona）。
+   *
+   * 口径与 `facebook-global-group-regional-comment-templates` 一致，直接取权威入口的有效值：
+   * 账号显式模板 → `template`；账号未显式选择 → 既有默认即 `template`（区域通用模板兜底在正文解析处）；
+   * 账号**显式**选择生成式 → `generated`。
+   * 未接线 / 读抛错 → `unavailable`：不可解析即不豁免人设闸（fail-closed），绝不猜成模板。
+   */
+  private effectiveFacebookBodyScheme(accountId: string): 'template' | 'generated' | 'unavailable' {
+    if (!this.deps.facebookConfigFor) return 'unavailable';
+    try {
+      return this.deps.facebookConfigFor(accountId).commentMode === 'template' ? 'template' : 'generated';
+    } catch (err) {
+      (this.deps.logger ?? console).warn(
+        `[comment-scheduler] FB 有效正文方案读取失败 account=${accountId}：${(err as Error).message}`,
+      );
+      return 'unavailable';
+    }
+  }
+
   /** 飞书 /comment 触发：返回「触发态」结构化回执；最终结果异步补发结果卡片。 */
   async triggerManual(
     accountId: string,
@@ -480,16 +500,26 @@ export class CommentScheduler {
       onResult?: (result: CommentTerminalObservation) => Promise<void> | void;
       /** Rule-batch-only just-in-time ownership/risk gate, re-read before join and before comment submit. */
       actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
+      /**
+       * 触发来源（change facebook-rule-mode-without-persona）。人设闸按**来源 + 有效正文方案**分流：
+       * 只有 `facebook_rule_batch` 且该账号有效正文方案为模板时才免人设——那条链路取模板文本、
+       * 不构造撰写 prompt、不做人设口吻改写。其余来源（飞书手工 /comment、排期评论、mandatory 评论…）
+       * 与生成式正文逐字保持既有拒绝行为。缺省 = 既有来源。
+       */
+      source?: 'facebook_rule_batch';
     },
   ): Promise<CommentCommandReceipt> {
     if (!accountId || accountId === 'default') {
       return { ok: false, level: 'error', title: '按需评论触发失败', message: '未解析到有效账号（绝不回落 default）' };
     }
     const binding = this.deps.personaBinding?.(accountId) ?? 'bound';
-    if (binding === 'unbound') {
+    // 人设闸的**唯一豁免**：规则批次 + 有效正文方案为模板。两个条件都由本方法现读，缺一即不豁免。
+    const personaExempt = options?.source === 'facebook_rule_batch'
+      && this.effectiveFacebookBodyScheme(accountId) === 'template';
+    if (!personaExempt && binding === 'unbound') {
       return { ok: false, level: 'warning', title: '未触发按需评论', message: '该账号未绑定人设——请先到后台「人设」页设置；未绑人设不启动评论任务，绝不以默认人设代评。' };
     }
-    if (binding === 'unknown') {
+    if (!personaExempt && binding === 'unknown') {
       // 人设副本陈旧：MUST NOT 说「未绑定人设」——那是对运营的错误指认，会让人去补一份早就存在的配置。
       return { ok: false, level: 'warning', title: '未触发按需评论', message: '云端暂时读不到该账号的人设配置（配置副本陈旧），本次不发；稍后自动恢复，无需改配置。' };
     }
@@ -594,6 +624,7 @@ export class CommentScheduler {
           approvalMode,
           ...(options?.actionGate ? { actionGate: options.actionGate } : {}),
           ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
+          ...(options?.source ? { source: options.source } : {}),
         })
           .then((result) => options?.onResult?.(result))
           .catch(async (err) => {
@@ -849,6 +880,8 @@ export class CommentScheduler {
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
       actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
+      /** 触发来源；`facebook_rule_batch` 时评论段只允许模板正文。 */
+      source?: 'facebook_rule_batch';
     } = {},
   ): Promise<FacebookCommentRunResult> {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
@@ -902,6 +935,8 @@ export class CommentScheduler {
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
       actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
+      /** 触发来源；`facebook_rule_batch` 时评论段只允许模板正文。 */
+      source?: 'facebook_rule_batch';
     },
     audit: (row: FacebookCommentAuditRow) => void,
   ): Promise<void> {
@@ -915,6 +950,13 @@ export class CommentScheduler {
     const keyword = cfg.keywords.length > 0
       ? (cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0] ?? '')
       : '';
+    // 规则批次的正文方案硬闸（change facebook-rule-mode-without-persona）：只有模板这条链路不读人设。
+    // 触发口已预解析过一次；这里在做任何浏览/撰写之前**再现读一次**，杜绝配置在飞行途中被改成显式生成后
+    // 仍走到生成器。收敛为稳定具名原因，绝不以模板顶替运营的显式选择。
+    if (options.source === 'facebook_rule_batch' && cfg.commentMode !== 'template') {
+      audit({ accountId, outcome: 'compose_skipped', reason: 'comment_body_scheme_generated', shadow, keyword });
+      return;
+    }
     let containerUrl: string;
     let container: string;
     let coverageCfg: FacebookCoverageCommentConfig | undefined;
@@ -1196,6 +1238,8 @@ export class CommentScheduler {
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
       actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
+      /** 触发来源；`facebook_rule_batch` 时评论段只允许模板正文（见 runFacebookTargetedTaskBody 的方案硬闸）。 */
+      source?: 'facebook_rule_batch';
     } = {},
   ): Promise<FacebookCommentRunResult> {
     const d = this.deps;
@@ -1258,6 +1302,7 @@ export class CommentScheduler {
       approvalMode: options.approvalMode,
       ...(options.actionGate ? { actionGate: options.actionGate } : {}),
       ...(options.originChatId ? { originChatId: options.originChatId } : {}),
+      ...(options.source ? { source: options.source } : {}),
     });
     // 结果卡按**实际**注入值渲染（comment.contactIncluded），不按请求意图——
     // 用意图渲染会对一条降级发出的普通评论宣称「带联系方式（服务器已确认）」，

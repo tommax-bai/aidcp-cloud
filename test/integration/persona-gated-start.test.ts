@@ -182,3 +182,118 @@ test('全局调度关闭：未绑人设账号登录也不采真名（运营显�
   assert.equal(commands.length, 0, '调度全局停 → 连启动期昵称采集也不驱动');
   d.endSession();
 });
+
+// ─── change facebook-rule-mode-without-persona：启动闸的唯一一处人设豁免 ───────────────────
+
+function makeFb(opts: {
+  personaBinding?: (a: string) => PersonaBinding;
+  facebookRuleModeEnabled?: (a: string) => boolean;
+  platform?: 'facebook' | 'xiaohongshu';
+}): { d: RoleDispatcher; rejected: { accountId: string; reason: string }[] } {
+  const rejected: { accountId: string; reason: string }[] = [];
+  const d = new RoleDispatcher({
+    getSoul: () => { throw new Error('no_persona'); }, // 未绑人设：解析器诚实抛，绝不返回替代人设
+    llm: { complete: async () => '-1' },
+    sendCommand: () => {},
+    accountPlatform: opts.platform ?? 'facebook',
+    personaBinding: opts.personaBinding,
+    ...(opts.facebookRuleModeEnabled ? { facebookRuleModeEnabled: opts.facebookRuleModeEnabled } : {}),
+    // 未绑人设账号在规则模式下才能真的浏览；此处只验启动闸，模式裁决固定为规则模式。
+    facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+    onSessionRejected: (accountId, reason) => { rejected.push({ accountId, reason }); },
+  });
+  d.setup();
+  return { d, rejected };
+}
+
+test('未绑人设 + Facebook + 规则模式启用 → 正常起会话：不短路、不置 needs_persona_setup、不告警', () => {
+  const { d, rejected } = makeFb({
+    personaBinding: () => 'unbound',
+    facebookRuleModeEnabled: () => true,
+  });
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'fb-rule', ts: 1 });
+  assert.equal(d.active, true, '规则模式豁免 → 会话正常启动');
+  assert.deepEqual(rejected, [], '不置 needs_persona_setup、不发运营告警');
+  d.endSession();
+});
+
+test('未绑人设 + 规则模式关闭 → 仍短路为 needs_persona_setup（例外只在规则模式成立）', () => {
+  const { d, rejected } = makeFb({
+    personaBinding: () => 'unbound',
+    facebookRuleModeEnabled: () => false,
+  });
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'fb-off', ts: 1 });
+  assert.equal(d.active, false);
+  assert.deepEqual(rejected, [{ accountId: 'fb-off', reason: 'needs_persona_setup' }]);
+  d.endSession();
+});
+
+test('规则模式配置读失败 / 未接线 → fail-closed，未绑人设仍被短路（绝不猜成已启用）', () => {
+  const throwing = makeFb({
+    personaBinding: () => 'unbound',
+    facebookRuleModeEnabled: () => { throw new Error('mirror unavailable'); },
+  });
+  throwing.d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'fb-throw', ts: 1 });
+  assert.equal(throwing.d.active, false);
+  assert.deepEqual(throwing.rejected, [{ accountId: 'fb-throw', reason: 'needs_persona_setup' }]);
+  throwing.d.endSession();
+
+  const unwired = makeFb({ personaBinding: () => 'unbound' }); // 权威入口未注入
+  unwired.d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'fb-unwired', ts: 1 });
+  assert.equal(unwired.d.active, false);
+  assert.deepEqual(unwired.rejected, [{ accountId: 'fb-unwired', reason: 'needs_persona_setup' }]);
+  unwired.d.endSession();
+});
+
+test('平台未确认为 Facebook → 不豁免，未绑人设仍被短路（例外不外溢到其它平台）', () => {
+  const { d, rejected } = makeFb({
+    personaBinding: () => 'unbound',
+    facebookRuleModeEnabled: () => true,
+    platform: 'xiaohongshu',
+  });
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'xhs-rule', ts: 1 });
+  assert.equal(d.active, false);
+  assert.deepEqual(rejected, [{ accountId: 'xhs-rule', reason: 'needs_persona_setup' }]);
+  d.endSession();
+});
+
+test('豁免只解除启动闸：会话中途裁决不再是规则模式 → 未绑人设账号不评估、不下发，诚实收尾', () => {
+  const commands: { action: string }[] = [];
+  let mode: 'facebook_rule' | 'slow_start' = 'facebook_rule';
+  const d = new RoleDispatcher({
+    getSoul: () => { throw new Error('no_persona'); },
+    llm: { complete: async () => { throw new Error('persona loop must not run'); } },
+    sendCommand: (c) => commands.push(c),
+    accountPlatform: 'facebook',
+    personaBinding: () => 'unbound',
+    facebookRuleModeEnabled: () => true,
+    facebookRuleModeDecision: () => mode === 'facebook_rule'
+      ? { mode: 'facebook_rule', blocker: null }
+      : { mode: 'slow_start', blocker: 'slow_start_active' },
+  });
+  d.setup();
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'fb-rule', ts: 1 });
+  assert.equal(d.active, true, '规则模式豁免 → 会话起来了');
+  // 慢启动接管（或落到活跃周之外）→ 此刻不是规则模式；未绑人设的账号绝不接着跑人设浏览闭环。
+  mode = 'slow_start';
+  commands.length = 0;
+  d.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: 'x', likeCount: 1, collectCount: 1, noteId: 'https://www.facebook.com/posts/p1' }],
+    listKind: 'feed',
+    ts: 2,
+  });
+  assert.equal(commands.length, 0, '非规则模式 + 未绑人设 → 不下发任何浏览指令');
+  assert.equal(d.active, false, '诚实收尾，不留一个空转会话');
+  d.endSession();
+});
+
+test('绑定不可解析（人设副本陈旧）+ 规则模式启用 → 仍走 persona_unavailable，不被豁免、也不误报未绑', () => {
+  const { d, rejected } = makeFb({
+    personaBinding: () => 'unknown',
+    facebookRuleModeEnabled: () => true,
+  });
+  d.bus.emit('edge.hello', { edgeId: 'e1', accountId: 'fb-stale', ts: 1 });
+  assert.equal(d.active, false);
+  assert.deepEqual(rejected, [{ accountId: 'fb-stale', reason: 'persona_unavailable' }]);
+  d.endSession();
+});
