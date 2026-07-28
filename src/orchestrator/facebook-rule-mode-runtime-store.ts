@@ -4,7 +4,9 @@ import type { DeploymentTarget } from '../deployment-target.js';
 import {
   FACEBOOK_RULE_DEFINITION_ID,
   FACEBOOK_RULE_DEFINITION_VERSION,
+  FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
   FACEBOOK_RULE_VIEW_THRESHOLD,
+  facebookRuleRoundIncludesJoin,
   type ApplyFacebookRuleViewResult,
   type FacebookRuleActionState,
   type FacebookRuleModeBatchView,
@@ -90,9 +92,11 @@ export interface FacebookRuleModeRuntimeStoreOptions {
 }
 
 function batchFromDb(row: BatchDbRow): FacebookRuleModeBatchView {
+  const sequence = Number(row.sequence);
   return {
     batchId: row.batch_id,
-    sequence: Number(row.sequence),
+    sequence,
+    includesJoin: facebookRuleRoundIncludesJoin(sequence),
     triggerContentKey: row.trigger_content_key,
     likeState: row.like_state,
     joinState: row.join_state,
@@ -153,9 +157,10 @@ export class FacebookRuleModeRuntimeStore {
     const [progress, batch] = await Promise.all([
       this.runtimePool.query<{
         view_count: number | string;
+        collecting_sequence: number | string;
         updated_at: Date | string;
       }>(
-        `SELECT view_count, updated_at
+        `SELECT view_count, collecting_sequence, updated_at
            FROM facebook_rule_progress
           WHERE account_id=$1 AND execution_target=$2
             AND definition_id=$3 AND definition_version=$4`,
@@ -183,9 +188,14 @@ export class FacebookRuleModeRuntimeStore {
       ),
     ]);
     const progressRow = progress.rows[0];
+    // 无进度行 ⇒ 该账号还没开始收集，下一轮就是第 1 轮（与 progress.collecting_sequence 的 DEFAULT 1 一致）。
+    const collectingSequence = Number(progressRow?.collecting_sequence ?? 1);
     return {
       viewCount: Number(progressRow?.view_count ?? 0),
       threshold: FACEBOOK_RULE_VIEW_THRESHOLD,
+      joinEveryNRounds: FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
+      collectingSequence,
+      collectingRoundIncludesJoin: facebookRuleRoundIncludesJoin(collectingSequence),
       currentBatch: batch.rows[0] ? batchFromDb(batch.rows[0]) : null,
       updatedAt: progressRow?.updated_at
         ? new Date(progressRow.updated_at).toISOString()

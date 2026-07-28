@@ -90,9 +90,15 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!api.includes('0083_automation_sync_read_consumer_checkpoint'));
   assert.ok(automation.includes('0083_automation_sync_read_consumer_checkpoint'));
   assert.ok(!automation.includes('0082_api_sync_read_consumer_checkpoint'));
+  // 两级节奏的 CHECK 放宽同样必须落在各自属主：config 归 api、三张运行时表归 automation。
+  // 合成一条跨属主迁移在拆库后无处可跑。
+  assert.ok(api.includes('0094_facebook_rule_two_tier_config'));
+  assert.ok(!api.includes('0095_facebook_rule_two_tier_runtime'));
+  assert.ok(automation.includes('0095_facebook_rule_two_tier_runtime'));
+  assert.ok(!automation.includes('0094_facebook_rule_two_tier_config'));
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0093_facebook_rule_mode_runtime',
+    '0095_facebook_rule_two_tier_runtime',
   );
 });
 

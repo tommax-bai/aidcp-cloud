@@ -1576,6 +1576,7 @@ function makeFacebookRuleModeDep(options: {
     enabled: false,
     definitionId: FACEBOOK_RULE_DEFINITION_ID,
     definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+    definitionMismatch: false,
     updatedAt: null,
     updatedBy: null,
   });
@@ -2375,6 +2376,7 @@ test('规则模式读：必须登录；已绑定 Facebook 环境离线可读且�
     enabled: true,
     definitionId: FACEBOOK_RULE_DEFINITION_ID,
     definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+    definitionMismatch: false,
     updatedAt: '2026-07-28T08:00:00.000Z',
     updatedBy: 'panel:admin',
   });

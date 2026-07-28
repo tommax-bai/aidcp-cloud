@@ -20,7 +20,9 @@ import {
 export {
   FACEBOOK_RULE_DEFINITION_ID,
   FACEBOOK_RULE_DEFINITION_VERSION,
+  FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
   FACEBOOK_RULE_VIEW_THRESHOLD,
+  facebookRuleRoundIncludesJoin,
 } from '../kernel/facebook-rule-mode-types.js';
 export type {
   ApplyFacebookRuleViewResult,
@@ -69,12 +71,14 @@ export interface FacebookRuleModeStoreOptions {
   mirrorVersionBumper?: MirrorVersionBumper;
 }
 
+/** 缺行 = 未配置 = 关。此时没有任何持久定义身份，如实报当前代码定义且不算漂移。 */
 function defaultConfig(accountId: string): FacebookRuleModeConfig {
   return {
     accountId,
     enabled: false,
     definitionId: FACEBOOK_RULE_DEFINITION_ID,
     definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+    definitionMismatch: false,
     updatedAt: null,
     updatedBy: null,
   };
@@ -196,12 +200,32 @@ export class FacebookRuleModeStore {
     await this.ownedPool?.end();
   }
 
+  /**
+   * 回读 MUST 用库里的定义身份，MUST NOT 用代码常量顶替。
+   *
+   * 顶替过一次的后果（change facebook-rule-mode-two-tier-cadence 修）：节奏一换定义号，所有存量行
+   * 都会在 API / 后台 / 客户端被谎报成新定义，而 config 表没有 execution_target、DEV 与 OL 又共库
+   * ——单侧部署就会出现「同一账号两套节奏各自跑」且没有任何机械手段能发现。
+   */
   private configFromDb(row: ConfigDbRow): FacebookRuleModeConfig {
+    const definitionId = row.definition_id;
+    const definitionVersion = Number(row.definition_version);
+    const definitionMismatch =
+      definitionId !== FACEBOOK_RULE_DEFINITION_ID
+      || definitionVersion !== FACEBOOK_RULE_DEFINITION_VERSION;
+    if (definitionMismatch) {
+      console.warn(
+        `[facebook-rule] stored definition mismatch account=${row.account_id} `
+        + `stored=${definitionId}@${definitionVersion} `
+        + `current=${FACEBOOK_RULE_DEFINITION_ID}@${FACEBOOK_RULE_DEFINITION_VERSION}`,
+      );
+    }
     return {
       accountId: row.account_id,
       enabled: row.enabled === true,
-      definitionId: FACEBOOK_RULE_DEFINITION_ID,
-      definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+      definitionId,
+      definitionVersion,
+      definitionMismatch,
       updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
       updatedBy: row.updated_by ?? null,
     };

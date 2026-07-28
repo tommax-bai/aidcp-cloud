@@ -9,6 +9,12 @@ import { RiskController } from '../src/risk/index.js';
 import { TokenRevocationStore } from '../src/panel/revocation.js';
 import { FacebookPublishMediaError } from '../src/publish-agent/facebook-publish-media-store.js';
 import { isFacebookPublishMediaError } from '../src/kernel/facebook-publish-media-types.js';
+import {
+  FACEBOOK_RULE_DEFINITION_ID,
+  FACEBOOK_RULE_DEFINITION_VERSION,
+  FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
+  FACEBOOK_RULE_VIEW_THRESHOLD,
+} from '../src/kernel/facebook-rule-mode-types.js';
 import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
 
 /**
@@ -150,14 +156,18 @@ test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非
     config: {
       accountId,
       enabled,
-      definitionId: 'facebook_browse_10_like_1_join_contact_1' as const,
-      definitionVersion: 1 as const,
+      definitionId: FACEBOOK_RULE_DEFINITION_ID,
+      definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+      definitionMismatch: false,
       updatedAt: enabled ? '2026-07-27T00:00:00.000Z' : null,
       updatedBy: enabled ? 'panel:alice' : null,
     },
     runtime: {
       viewCount: 0,
-      threshold: 10 as const,
+      threshold: FACEBOOK_RULE_VIEW_THRESHOLD,
+      joinEveryNRounds: FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
+      collectingSequence: 1,
+      collectingRoundIncludesJoin: false,
       currentBatch: null,
       updatedAt: null,
     },

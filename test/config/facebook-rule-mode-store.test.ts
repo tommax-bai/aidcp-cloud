@@ -4,6 +4,7 @@ import type pg from 'pg';
 import {
   FACEBOOK_RULE_DEFINITION_ID,
   FACEBOOK_RULE_DEFINITION_VERSION,
+  FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
   FACEBOOK_RULE_VIEW_THRESHOLD,
   FacebookRuleModeStore,
 } from '../../src/config/facebook-rule-mode-store.js';
@@ -210,10 +211,16 @@ function memoryDatabase(accounts: Record<string, string>) {
       }
       return { rows: [], rowCount: 1 };
     }
-    if (sql.startsWith('SELECT view_count, updated_at FROM facebook_rule_progress')) {
+    if (sql.startsWith('SELECT view_count, collecting_sequence, updated_at FROM facebook_rule_progress')) {
       const row = progress.get(progressKey(String(params[0]), String(params[1])));
       return {
-        rows: row ? [{ view_count: row.viewCount, updated_at: row.updatedAt }] : [],
+        rows: row
+          ? [{
+            view_count: row.viewCount,
+            collecting_sequence: row.sequence,
+            updated_at: row.updatedAt,
+          }]
+          : [],
         rowCount: row ? 1 : 0,
       };
     }
@@ -383,66 +390,115 @@ describe('FacebookRuleModeStore config authority', () => {
 });
 
 describe('FacebookRuleModeStore durable cadence', () => {
-  it('resumes at 7/10, dedupes content and receipts, then atomically creates one tenth-view batch', async () => {
+  it('resumes at 3/5, dedupes content and receipts, then atomically creates one fifth-view round', async () => {
     const db = memoryDatabase({ 'fb-1': 'facebook' });
     const first = store(db.pool, 'dev');
     await first.init();
-    for (let i = 1; i <= 7; i += 1) assert.equal((await apply(first, i)).kind, 'counted');
-    assert.equal((await first.getView('fb-1')).runtime.viewCount, 7);
+    for (let i = 1; i <= 3; i += 1) assert.equal((await apply(first, i)).kind, 'counted');
+    assert.equal((await first.getView('fb-1')).runtime.viewCount, 3);
 
     const restarted = store(db.pool, 'dev');
     await restarted.init();
-    assert.equal((await restarted.getView('fb-1')).runtime.viewCount, 7);
-    assert.deepEqual(await apply(restarted, 7, { sourceDedupeKey: 'replayed-other-receipt' }), {
+    assert.equal((await restarted.getView('fb-1')).runtime.viewCount, 3);
+    assert.deepEqual(await apply(restarted, 3, { sourceDedupeKey: 'replayed-other-receipt' }), {
       kind: 'duplicate',
-      viewCount: 7,
+      viewCount: 3,
     });
-    assert.deepEqual(await apply(restarted, 8, { sourceDedupeKey: 'receipt-7' }), {
+    assert.deepEqual(await apply(restarted, 4, { sourceDedupeKey: 'receipt-3' }), {
       kind: 'duplicate',
-      viewCount: 7,
+      viewCount: 3,
     });
-    assert.equal((await apply(restarted, 8)).kind, 'counted');
-    assert.equal((await apply(restarted, 9)).kind, 'counted');
+    assert.equal((await apply(restarted, 4)).kind, 'counted');
 
-    const tenthRace = await Promise.all([
-      apply(restarted, 10),
-      apply(restarted, 10, { sourceDedupeKey: 'receipt-10-replay' }),
-      apply(restarted, 11),
+    const fifthRace = await Promise.all([
+      apply(restarted, 5),
+      apply(restarted, 5, { sourceDedupeKey: 'receipt-5-replay' }),
+      apply(restarted, 6),
     ]);
-    assert.equal(tenthRace.filter((result) => result.kind === 'batch_created').length, 1);
+    assert.equal(fifthRace.filter((result) => result.kind === 'batch_created').length, 1);
     assert.equal(db.batches.size, 1);
     const view = await restarted.getView('fb-1');
     assert.equal(view.runtime.viewCount, 0);
-    assert.equal(view.runtime.currentBatch?.triggerContentKey, 'post-10');
+    assert.equal(view.runtime.currentBatch?.triggerContentKey, 'post-5');
     assert.equal(view.runtime.currentBatch?.sequence, 1);
-    assert.equal(FACEBOOK_RULE_VIEW_THRESHOLD, 10);
+    assert.equal(FACEBOOK_RULE_VIEW_THRESHOLD, 5);
+    assert.equal(FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS, 2);
   });
 
-  it('holds collection while a batch is active, clears without debt at terminal, and isolates dev from ol', async () => {
+  it('marks round 1 like-only and round 2 as the join round, and projects both cadence tiers', async () => {
+    const db = memoryDatabase({ 'fb-1': 'facebook' });
+    const dev = store(db.pool, 'dev');
+    await dev.init();
+
+    // 尚未开始收集：下一轮就是第 1 轮，不含加群。
+    const fresh = await dev.getView('fb-1');
+    assert.equal(fresh.runtime.threshold, 5);
+    assert.equal(fresh.runtime.joinEveryNRounds, 2);
+    assert.equal(fresh.runtime.collectingSequence, 1);
+    assert.equal(fresh.runtime.collectingRoundIncludesJoin, false);
+
+    let created;
+    for (let i = 1; i <= 5; i += 1) created = await apply(dev, i);
+    if (created?.kind !== 'batch_created') throw new Error('expected round 1');
+    assert.equal(created.batch.sequence, 1);
+    assert.equal(created.batch.includesJoin, false, '周期第 1 位只点赞');
+
+    // 只点赞的轮次以 not_scheduled 终结（调度器写入的形状），随后收集第 2 轮。
+    await dev.updateBatch(created.batch.batchId, {
+      likeState: 'confirmed',
+      joinState: 'not_scheduled',
+      commentState: 'not_scheduled',
+      terminal: true,
+    });
+    const afterRound1 = await dev.getView('fb-1');
+    assert.equal(afterRound1.runtime.collectingSequence, 2);
+    assert.equal(afterRound1.runtime.collectingRoundIncludesJoin, true, '下一轮含加群');
+    assert.equal(afterRound1.runtime.currentBatch?.includesJoin, false);
+    assert.equal(afterRound1.runtime.currentBatch?.joinState, 'not_scheduled');
+
+    let second;
+    for (let i = 6; i <= 10; i += 1) second = await apply(dev, i);
+    if (second?.kind !== 'batch_created') throw new Error('expected round 2');
+    assert.equal(second.batch.sequence, 2);
+    assert.equal(second.batch.includesJoin, true, '周期第 2 位才加群');
+    // 加群频率仍是每 10 条确认浏览一次，与单轴旧节奏逐位相等。
+  });
+
+  it('holds collection while a round is active, clears without debt at terminal, and isolates dev from ol', async () => {
     const db = memoryDatabase({ 'fb-1': 'facebook' });
     const dev = store(db.pool, 'dev');
     const ol = store(db.pool, 'ol');
     await dev.init();
     await ol.init();
     let created;
-    for (let i = 1; i <= 10; i += 1) created = await apply(dev, i);
+    for (let i = 1; i <= 5; i += 1) created = await apply(dev, i);
     assert.equal(created?.kind, 'batch_created');
-    assert.equal((await apply(dev, 11)).kind, 'batch_active');
+    assert.equal((await apply(dev, 6)).kind, 'batch_active');
 
     assert.equal((await apply(ol, 1)).kind, 'counted');
     assert.equal((await ol.getView('fb-1')).runtime.viewCount, 1);
     assert.equal((await dev.getView('fb-1')).runtime.viewCount, 0);
 
     if (created?.kind !== 'batch_created') throw new Error('expected batch');
+    // 点赞阶段先写入抑制原因……
     await dev.updateBatch(created.batch.batchId, {
       likeState: 'risk_suppressed',
-      joinState: 'risk_suppressed',
-      commentState: 'not_started',
-      terminal: true,
-      blocker: 'risk_suppressed',
+      blocker: 'daily_like_quota',
     });
-    assert.deepEqual(await apply(dev, 11), { kind: 'counted', viewCount: 1 });
+    // ……只点赞的轮次终结时**省略** blocker 键，存储层 MUST 原样保留它。
+    // blocker 是三阶段共用一列、写入语义后写覆盖先写，补写任何值都会抹掉「点赞为什么被抑制」。
+    await dev.updateBatch(created.batch.batchId, {
+      joinState: 'not_scheduled',
+      commentState: 'not_scheduled',
+      terminal: true,
+    });
+    assert.deepEqual(await apply(dev, 6), { kind: 'counted', viewCount: 1 });
     assert.equal(db.batches.get(created.batch.batchId)?.like_state, 'risk_suppressed');
+    assert.equal(
+      db.batches.get(created.batch.batchId)?.blocker,
+      'daily_like_quota',
+      '省略 blocker 键时 MUST 保留点赞阶段的抑制原因',
+    );
   });
 
   it('recovers dispatched work after restart as honest terminal ambiguity without replay', async () => {
@@ -450,7 +506,7 @@ describe('FacebookRuleModeStore durable cadence', () => {
     const first = store(db.pool, 'dev');
     await first.init();
     let created;
-    for (let i = 1; i <= 10; i += 1) created = await apply(first, i);
+    for (let i = 1; i <= 5; i += 1) created = await apply(first, i);
     if (created?.kind !== 'batch_created') throw new Error('expected batch');
     await first.updateBatch(created.batch.batchId, {
       likeState: 'dispatched',
@@ -466,6 +522,29 @@ describe('FacebookRuleModeStore durable cadence', () => {
     assert.equal(recovered?.joinState, 'ambiguous');
     assert.equal(recovered?.commentState, 'submitted_unknown');
     assert.equal(recovered?.blocker, 'recovered_after_restart');
-    assert.deepEqual(await apply(restarted, 11), { kind: 'counted', viewCount: 1 });
+    assert.deepEqual(await apply(restarted, 6), { kind: 'counted', viewCount: 1 });
+  });
+
+  it('leaves not_scheduled untouched during restart recovery', async () => {
+    const db = memoryDatabase({ 'fb-1': 'facebook' });
+    const first = store(db.pool, 'dev');
+    await first.init();
+    let created;
+    for (let i = 1; i <= 5; i += 1) created = await apply(first, i);
+    if (created?.kind !== 'batch_created') throw new Error('expected batch');
+    // 只点赞的轮次已终结：恢复只扫 terminal=false，MUST NOT 把 not_scheduled 改写成失败态。
+    await first.updateBatch(created.batch.batchId, {
+      likeState: 'confirmed',
+      joinState: 'not_scheduled',
+      commentState: 'not_scheduled',
+      terminal: true,
+    });
+
+    const restarted = store(db.pool, 'dev');
+    await restarted.init();
+    const after = (await restarted.getView('fb-1')).runtime.currentBatch;
+    assert.equal(after?.joinState, 'not_scheduled');
+    assert.equal(after?.commentState, 'not_scheduled');
+    assert.notEqual(after?.blocker, 'recovered_after_restart');
   });
 });

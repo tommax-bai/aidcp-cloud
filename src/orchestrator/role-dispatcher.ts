@@ -759,6 +759,10 @@ export class RoleDispatcher {
   private facebookRuleViewChain: Promise<void> = Promise.resolve();
   private pendingFacebookRuleBatch: {
     batchId: string;
+    /** 轮次序号（1 起、稠密），二级节奏判据的输入。 */
+    sequence: number;
+    /** 本轮是否包含加群联系评论（由 sequence 派生，建轮次时定死、不随后续状态变化）。 */
+    includesJoin: boolean;
     noteId: string;
     source: 'detail' | 'reels' | 'feed_video';
     joinStarted: boolean;
@@ -963,6 +967,8 @@ export class RoleDispatcher {
     }
     this.pendingFacebookRuleBatch = {
       batchId: applied.batch.batchId,
+      sequence: applied.batch.sequence,
+      includesJoin: applied.batch.includesJoin,
       noteId: payload.noteId,
       source: payload.source,
       joinStarted: false,
@@ -1083,6 +1089,21 @@ export class RoleDispatcher {
       });
       return;
     }
+    // 二级节奏闸。判据内移到这个唯一入口（点赞各终态出口全汇入此处的幂等守卫），
+    // 所以 attemptFacebookRuleLike / finishFacebookRuleLike 的五个调用点一处不用改。
+    //
+    // 只点赞的轮次 MUST 走到这条终结：批次不终结 ⇒ progress.active_batch_id 永不清空 ⇒
+    // applyConfirmedView 恒返回 batch_active 且在写 view fact **之前**短路 ⇒ 该账号后续浏览
+    // 全部被丢弃，点赞与加群双双永久停摆。那是活锁，不是精度问题。
+    if (!pending.includesJoin) {
+      await this.finishFacebookRuleBatch({
+        joinState: 'not_scheduled',
+        commentState: 'not_scheduled',
+        // 不写 blocker：那一列三阶段共用、后写覆盖先写，写这里会抹掉点赞阶段的抑制原因。
+        preserveBlocker: true,
+      });
+      return;
+    }
     const joinRisk = this.explainRuleJoin();
     if (!joinRisk.allowed) {
       await this.finishFacebookRuleBatch({
@@ -1134,6 +1155,12 @@ export class RoleDispatcher {
     joinState: FacebookRuleActionState;
     commentState: FacebookRuleActionState;
     blocker?: string;
+    /**
+     * 不动 blocker 列，保留点赞阶段已写入的值。
+     * blocker 是三阶段共用一列、写入语义是后写覆盖先写；只点赞的轮次在这里补写任何值都会
+     * 抹掉「点赞为什么被抑制」这条唯一记录。
+     */
+    preserveBlocker?: boolean;
   }): Promise<void> {
     const pending = this.pendingFacebookRuleBatch;
     if (!pending || !this.updateFacebookRuleBatch) return;
@@ -1141,11 +1168,15 @@ export class RoleDispatcher {
       joinState: result.joinState,
       commentState: result.commentState,
       terminal: true,
-      blocker: result.blocker ?? null,
+      // 省略 blocker 键 ⇒ 存储层的 CASE 判据落到「不改」分支（见 updateBatch 的 hasOwnProperty）。
+      ...(result.preserveBlocker ? {} : { blocker: result.blocker ?? null }),
     });
     this.pendingFacebookRuleBatch = null;
+    // 只点赞的轮次是按节奏正常收尾，不是「终止」——续跑理由要如实区分，别让日志读成异常。
     const continuationReason =
-      result.commentState === 'confirmed' ? 'rule_batch_complete' : 'rule_batch_terminal';
+      result.commentState === 'confirmed' ? 'rule_batch_complete'
+        : result.commentState === 'not_scheduled' ? 'rule_round_like_only'
+          : 'rule_batch_terminal';
     if (pending.joinContactStarted) {
       // 既有 join-contact 编排以 fastReturnToFeed=true 收尾；此时页面已回列表，
       // 再走 detail 的 interaction.skipped 会多发一次 back、误离开 Feed。

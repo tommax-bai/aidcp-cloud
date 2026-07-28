@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0093_facebook_rule_mode_runtime';
+export const REQUIRED_SCHEMA_VERSION = '0095_facebook_rule_two_tier_runtime';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -122,9 +122,15 @@ export const REQUIRED_SCHEMA_VERSION = '0093_facebook_rule_mode_runtime';
  *
  * `0092_facebook_rule_mode_config` 与 `0093_facebook_rule_mode_runtime` 分属 api/automation，
  * 分别增加账号开关和 target-scoped 规则进度/批次。新 store 不保留运行时 DDL，启动必须先
- * 通过精确 schema probe；缺迁移时该固定规则能力不可工作，故 REQUIRED 与 KNOWN_MAX 抬到 0093。
+ * 通过精确 schema probe；缺迁移时该固定规则能力不可工作。
+ *
+ * `0094_facebook_rule_two_tier_config` 与 `0095_facebook_rule_two_tier_runtime`（同样分属
+ * api/automation）把 0092/0093 钉死的定义号 / 定义版本 CHECK 放宽为「新旧都接受」，并给 batch
+ * 三个动作状态列加上 `not_scheduled`。两条都是**硬依赖**：代码常量已切到两级节奏定义
+ * （`facebook_browse_5_like_1_join_contact_every_2@2`），缺这两条迁移时任何配置写入与进度写入
+ * 都会被旧 CHECK 以 23514 拒绝，规则模式整体不可工作，故 REQUIRED 与 KNOWN_MAX 抬到 0095。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0093_facebook_rule_mode_runtime';
+export const KNOWN_MAX_SCHEMA_VERSION = '0095_facebook_rule_two_tier_runtime';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 
