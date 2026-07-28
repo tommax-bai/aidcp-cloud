@@ -258,9 +258,15 @@ describe('CommentScheduler.triggerManual', () => {
       baseDeps({
         getPlatform: () => 'facebook',
         getContactInfo: async () => null,
-        facebookConfigFor: async () => ({ keywords: ['k'], commentMode: 'template', commentTemplates: ['你好'] }),
-        facebookJoinNewGroup: async () => { joined.push('acc-1'); return { outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }; },
-      } as Partial<CommentSchedulerDeps>),
+        facebookConfigFor: () => ({
+          enabled: true,
+          keywords: ['k'],
+          containers: [{ url: 'https://www.facebook.com/groups/1' }],
+          commentMode: 'template' as const,
+          commentTemplates: ['你好'],
+        }),
+        facebookJoinNewGroup: async () => { joined.push('acc-1'); return { triggered: true, outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }; },
+      }),
     );
     const r = await s.triggerManual('acc-1', {
       injectContact: true,
@@ -286,9 +292,15 @@ describe('CommentScheduler.triggerManual', () => {
         getPlatform: () => 'facebook',
         getContactInfo: async () => null,
         resolveApprovalMode: async (_accountId, sourceMode) => { sources.push(sourceMode); return sourceMode; },
-        facebookConfigFor: async () => ({ keywords: ['k'], commentMode: 'template', commentTemplates: ['你好'] }),
-        facebookJoinNewGroup: async () => ({ outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }),
-      } as Partial<CommentSchedulerDeps>),
+        facebookConfigFor: () => ({
+          enabled: true,
+          keywords: ['k'],
+          containers: [{ url: 'https://www.facebook.com/groups/1' }],
+          commentMode: 'template' as const,
+          commentTemplates: ['你好'],
+        }),
+        facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }),
+      }),
     );
     const r = await s.triggerManual('acc-1', {
       injectContact: true,
@@ -308,9 +320,15 @@ describe('CommentScheduler.triggerManual', () => {
         getPlatform: () => 'facebook',
         getContactInfo: async () => 'wx: abc',
         resolveApprovalMode: async (_accountId, sourceMode) => { sources.push(sourceMode); return sourceMode; },
-        facebookConfigFor: async () => ({ keywords: ['k'], commentMode: 'template', commentTemplates: ['你好'] }),
-        facebookJoinNewGroup: async () => ({ outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }),
-      } as Partial<CommentSchedulerDeps>),
+        facebookConfigFor: () => ({
+          enabled: true,
+          keywords: ['k'],
+          containers: [{ url: 'https://www.facebook.com/groups/1' }],
+          commentMode: 'template' as const,
+          commentTemplates: ['你好'],
+        }),
+        facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }),
+      }),
     );
     const r = await s.triggerManual('acc-1', {
       injectContact: true,
