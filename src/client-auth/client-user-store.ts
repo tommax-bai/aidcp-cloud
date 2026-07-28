@@ -52,6 +52,10 @@ import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 import { resolveAccountDisplayName } from '../account-display-name.js';
 import { isMirrorStale } from '../config-mirror-freshness.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from '../config/mirror-version-store.js';
+import {
+  FACEBOOK_RULE_DEFINITION_ID,
+  FACEBOOK_RULE_DEFINITION_VERSION,
+} from '../kernel/facebook-rule-mode-types.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import type { ClientEnvAutomationReader, OffboardProjection } from '../kernel/client-env-automation-types.js';
 import type { OffboardCleanupGrantOperations } from '../kernel/offboard-cleanup-grant-types.js';
@@ -96,6 +100,41 @@ export type EnvironmentSlowStartRecord =
       ok: true;
       envKey: string;
       slowStartSince: number | null;
+      binding: 'binding_unknown' | 'binding_conflict';
+    }
+  | { ok: false; reason: 'environment_not_owned' | 'binding_unavailable' };
+
+/**
+ * 账号 → 唯一绑定环境的**反查**结果（change environment-level-rule-mode-and-approval）。
+ *
+ * 环境到账号结构上一对一（环境记录只有一个账号字段），账号到环境在库层没有唯一约束，所以这个方向
+ * **必然可能失败**。三种失败逐一具名，MUST NOT 合并成一个「没有」：
+ *   binding_unknown       该账号今天不绑在任何环境上；
+ *   binding_conflict      同一账号出现在多个环境，或它所在环境归属多个客户（跨客户争用）；
+ *   binding_unavailable   绑定副本陈旧 / 环境注册表读不到——**不是「没配置」**。
+ * 调用方 MUST 按各自的收紧方向 fail-closed（规则模式=不启用；审批策略=`source_rules`）。
+ */
+export type EnvironmentKeyForAccount =
+  | { ok: true; envKey: string }
+  | { ok: false; reason: 'binding_unknown' | 'binding_conflict' | 'binding_unavailable' };
+
+/**
+ * 环境级配置写入的定位结果：ownership 已核过，平台取自**环境自己的权威字段**，绑定三态只作如实标注。
+ * 未绑定账号的环境仍 `ok: true`——环境配置不以「此刻有没有执行对象」为前置。
+ */
+export type OwnedEnvironmentRecord =
+  | {
+      ok: true;
+      envKey: string;
+      /** client_environments.platform 原值（未登记为 null）；平台判定由调用方按各自口径归一。 */
+      platform: string | null;
+      binding: 'bound';
+      accountId: string;
+    }
+  | {
+      ok: true;
+      envKey: string;
+      platform: string | null;
       binding: 'binding_unknown' | 'binding_conflict';
     }
   | { ok: false; reason: 'environment_not_owned' | 'binding_unavailable' };
@@ -482,6 +521,8 @@ export type CompleteProvisioningIntentResult =
   | { ok: true; environment: ClientEnvScopeRow; idempotent: boolean }
   | { ok: false; reason: 'disabled' | 'invalid_intent' | 'intent_expired' | 'intent_target_mismatch' |
       'invalid_environment' | 'invalid_proxy_authority' | 'proxy_authority_mismatch' |
+      /** 慢启动与规则模式开启意图同时为真：互斥，整请求拒绝，MUST NOT 静默取其一。 */
+      'conflicting_run_mode' |
       'environment_already_registered' | 'env_already_assigned' | 'schema_unavailable' };
 
 /**
@@ -736,6 +777,16 @@ export class ClientUserStore {
   /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
   private environmentSlowStartByAccount = new Map<string, number | null>();
   private ambiguousEnvironmentAccounts = new Set<string>();
+  /**
+   * 账号 → 唯一绑定环境的同步反查镜像（change environment-level-rule-mode-and-approval）。
+   *
+   * 与上面两个字段**同一次刷新**产出，不新增热路径查询。故意与 `environmentSlowStartByAccount`
+   * 分开存：慢启动那份的歧义判据只看「同一账号出现在几个环境」，本份还要把**跨客户争用**（同一环境
+   * 归属多个客户）算作歧义。合并会顺手改掉慢启动的既有语义，那不在本变更范围内。
+   */
+  private environmentKeyByAccount = new Map<string, string>();
+  /** 反查歧义账号（多环境或跨客户争用）。命中即 fail-closed，MUST NOT 任取一个环境。 */
+  private ambiguousEnvironmentKeyAccounts = new Set<string>();
 
   private readonly schemaEnsurer: SchemaEnsurer;
 
@@ -1096,15 +1147,23 @@ export class ClientUserStore {
    * 重建环境配置→当前账号的同步镜像。一个账号异常出现在多个环境时不任取一行；该账号无显式环境 anchor。
    */
   async refreshEnvironmentSlowStartMirror(): Promise<void> {
+    // owner_count：该环境被几个客户归属。account→env 反查把「>1」算作争用（跨客户争用），
+    // 与读侧 contendedAcrossCustomersSql 同源；慢启动那份镜像的判据保持原样，不受此列影响。
     const { rows } = await this.pool.query<{
       env_key: string;
       account_id: string;
       slow_start_since: Date | null;
-    }>(`SELECT env_key, account_id, slow_start_since
-          FROM client_environments
-         WHERE account_id IS NOT NULL
-         ORDER BY account_id, env_key`);
-    const grouped = new Map<string, { envKey: string; since: number | null }[]>();
+      owner_count: number | string;
+    }>(`SELECT e.env_key,
+               e.account_id,
+               e.slow_start_since,
+               (SELECT count(DISTINCT s.user_id)
+                  FROM client_env_scope s
+                 WHERE s.env_key = e.env_key AND s.source = 'admin') AS owner_count
+          FROM client_environments e
+         WHERE e.account_id IS NOT NULL
+         ORDER BY e.account_id, e.env_key`);
+    const grouped = new Map<string, { envKey: string; since: number | null; ownerCount: number }[]>();
     for (const row of rows) {
       const accountId = String(row.account_id ?? '').trim();
       if (!accountId || accountId === RETIRED_ACCOUNT_ID) continue;
@@ -1112,23 +1171,39 @@ export class ClientUserStore {
       entries.push({
         envKey: row.env_key,
         since: row.slow_start_since ? row.slow_start_since.getTime() : null,
+        ownerCount: Number(row.owner_count ?? 0),
       });
       grouped.set(accountId, entries);
     }
     const next = new Map<string, number | null>();
     const ambiguous = new Set<string>();
+    const envKeys = new Map<string, string>();
+    const ambiguousEnvKeys = new Set<string>();
     for (const [accountId, entries] of grouped) {
       if (entries.length === 1) {
         next.set(accountId, entries[0].since);
+        // 唯一环境仍可能被多个客户同时归属 —— 那是跨客户争用，配置反查 MUST NOT 认它。
+        if (entries[0].ownerCount > 1) {
+          ambiguousEnvKeys.add(accountId);
+          console.warn(
+            `[client-env] 环境配置反查跨客户争用：账号 ${accountId} 所在环境 ${entries[0].envKey}`
+            + ` 同时归属 ${entries[0].ownerCount} 个客户，拒绝解析出环境`,
+          );
+        } else {
+          envKeys.set(accountId, entries[0].envKey);
+        }
         continue;
       }
       ambiguous.add(accountId);
+      ambiguousEnvKeys.add(accountId);
       console.warn(
         `[client-env] 环境级慢启动绑定歧义：账号 ${accountId} 同时出现在 ${entries.length} 个环境，拒绝任取配置`,
       );
     }
     this.environmentSlowStartByAccount = next;
     this.ambiguousEnvironmentAccounts = ambiguous;
+    this.environmentKeyByAccount = envKeys;
+    this.ambiguousEnvironmentKeyAccounts = ambiguousEnvKeys;
   }
 
   /**
@@ -1146,6 +1221,83 @@ export class ClientUserStore {
 
   hasAmbiguousEnvironmentBinding(accountId: string): boolean {
     return this.ambiguousEnvironmentAccounts.has(accountId);
+  }
+
+  /**
+   * 账号 → 唯一绑定环境的同步反查（change environment-level-rule-mode-and-approval）。零 IO：
+   * 走与慢启动锚点**同一次刷新**产出的镜像，热路径不新增按请求查询。
+   *
+   * 副本陈旧 → `binding_unavailable`，**不是** `binding_unknown`：跨进程副本下「副本里没有这个账号」
+   * ≠「库里它真的没绑环境」。把未知当「没配置」，等于让一个规则模式环境静默按普通模式跑、
+   * 或让一个全局免审环境静默退回人审又反过来——两个方向都必须由调用方按自己的收紧方向处置，
+   * 而不是在这里替它们猜。
+   */
+  resolveEnvironmentKeyForAccount(accountId: string): EnvironmentKeyForAccount {
+    const account = (accountId ?? '').trim();
+    if (!account || account === RETIRED_ACCOUNT_ID) {
+      return { ok: false, reason: 'binding_unknown' };
+    }
+    if (isMirrorStale('client_environment_slow_start')) {
+      return { ok: false, reason: 'binding_unavailable' };
+    }
+    if (this.ambiguousEnvironmentKeyAccounts.has(account)) {
+      return { ok: false, reason: 'binding_conflict' };
+    }
+    const envKey = this.environmentKeyByAccount.get(account);
+    return envKey ? { ok: true, envKey } : { ok: false, reason: 'binding_unknown' };
+  }
+
+  /**
+   * 环境级配置的**定位读**：核 ownership、取环境自己的权威平台、如实报绑定三态。
+   *
+   * 与 `getEnvironmentSlowStart` 同一 SQL 形状（同一 ownership 权威范围、同一争用判据），差别只在
+   * 取回的是 `platform` 而不是慢启动锚点。它 MUST NOT 以「有没有绑定账号」为前置：环境配置写的是
+   * 环境，未绑定环境同样可读可写，只是回包要如实标注当前没有执行对象。
+   */
+  async getOwnedEnvironment(userId: string, envKey: string): Promise<OwnedEnvironmentRecord> {
+    const key = (envKey ?? '').trim();
+    if (!userId || !key) return { ok: false, reason: 'environment_not_owned' };
+    try {
+      const { rows } = await this.pool.query<{
+        owned: boolean;
+        platform: string | null;
+        bound_account: string | null;
+        account_exists: boolean;
+        contended: boolean;
+        duplicate_count: number | string;
+      }>(
+        `SELECT
+           EXISTS(SELECT 1 FROM client_env_scope s
+                   WHERE s.user_id=$1 AND s.env_key=$2 AND s.source='admin') AS owned,
+           e.platform,
+           e.account_id AS bound_account,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN EXISTS(SELECT 1 FROM accounts a WHERE a.account_id=e.account_id)
+                ELSE false END AS account_exists,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN ${contendedAcrossCustomersSql('e.account_id', '$1')}
+                ELSE false END AS contended,
+           CASE WHEN e.account_id IS NOT NULL
+                THEN (SELECT count(*) FROM client_environments e3 WHERE e3.account_id=e.account_id)
+                ELSE 0 END AS duplicate_count
+         FROM (SELECT $2::text AS env_key) k
+         LEFT JOIN client_environments e ON e.env_key=k.env_key`,
+        [userId, key],
+      );
+      const row = rows[0];
+      if (!row?.owned) return { ok: false, reason: 'environment_not_owned' };
+      const platform = row.platform ?? null;
+      if (row.contended || Number(row.duplicate_count) > 1) {
+        return { ok: true, envKey: key, platform, binding: 'binding_conflict' };
+      }
+      if (!row.bound_account || !row.account_exists) {
+        return { ok: true, envKey: key, platform, binding: 'binding_unknown' };
+      }
+      return { ok: true, envKey: key, platform, binding: 'bound', accountId: row.bound_account };
+    } catch (err) {
+      if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
+      throw err;
+    }
   }
 
   /**
@@ -1532,6 +1684,10 @@ export class ClientUserStore {
       label?: string | null;
       platform?: string | null;
       slowStartEnabled?: boolean;
+      /** Facebook 专属创建意图：环境规则模式（change environment-level-rule-mode-and-approval）。 */
+      facebookRuleModeEnabled?: boolean;
+      /** Facebook 专属创建意图：环境评论审批覆盖模式。省略 = 不写策略行（= 按来源规则）。 */
+      commentApprovalMode?: string;
       proxyAuthority: unknown;
     },
   ): Promise<CompleteProvisioningIntentResult> {
@@ -1550,8 +1706,23 @@ export class ClientUserStore {
       return { ok: false, reason: 'invalid_environment' };
     }
     if (!proxyAuthority) return { ok: false, reason: 'invalid_proxy_authority' };
-    if (input.slowStartEnabled === true && platform !== 'facebook') {
+    // 三条创建意图闸，全部**先于任何写入**判定，任一不过整请求拒绝、不部分登记环境：
+    //   ① 三个 Facebook 专属字段只在 platform=facebook 时接受；
+    //   ② 审批模式只接受两个枚举值；
+    //   ③ 慢启动与规则模式不得同时为真——同时提交 MUST fail-closed，MUST NOT 静默取其一。
+    const facebookOnlyIntent = input.slowStartEnabled === true
+      || input.facebookRuleModeEnabled === true
+      || input.commentApprovalMode !== undefined;
+    if (facebookOnlyIntent && platform !== 'facebook') {
       return { ok: false, reason: 'invalid_environment' };
+    }
+    if (input.commentApprovalMode !== undefined
+        && input.commentApprovalMode !== 'source_rules'
+        && input.commentApprovalMode !== 'auto_approve_all') {
+      return { ok: false, reason: 'invalid_environment' };
+    }
+    if (input.slowStartEnabled === true && input.facebookRuleModeEnabled === true) {
+      return { ok: false, reason: 'conflicting_run_mode' };
     }
     const slowStartSince = input.slowStartEnabled === true
       ? new Date(shanghaiDayStartMs(Date.now()))
@@ -1643,6 +1814,34 @@ export class ClientUserStore {
          VALUES ($1,$2,$3,$4,$5,$6,$7,1,'provisioning',$8,now())`,
         [envKey, proxyAuthority.state, ...proxyValues, userId],
       );
+      // 创建当刻的两项环境配置（change environment-level-rule-mode-and-approval）：与环境登记、
+      // 归属、intent 完成态**同一事务**。省略意图时一行都不写——「没有行」本身就是
+      // 「规则模式关 / 按来源规则」的权威表达，写一行 false 反而会把「未配置」伪装成「配置过」。
+      if (input.facebookRuleModeEnabled === true) {
+        await client.query(
+          `INSERT INTO facebook_rule_mode_environment_config
+             (env_key,enabled,definition_id,definition_version,updated_at,updated_by)
+           VALUES ($1,true,$2,$3,now(),$4)
+           ON CONFLICT (env_key) DO NOTHING`,
+          [
+            envKey,
+            FACEBOOK_RULE_DEFINITION_ID,
+            FACEBOOK_RULE_DEFINITION_VERSION,
+            `client-provision:${intentId}`,
+          ],
+        );
+        // 规则模式配置落库 = content_schedule 这份配置镜像变了；同事务推进版本，
+        // 否则另一进程到重启前都把这个新环境当「没开规则模式」。
+        await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+      }
+      if (input.commentApprovalMode !== undefined) {
+        await client.query(
+          `INSERT INTO environment_comment_approval_policy (env_key,mode,updated_by,updated_at)
+           VALUES ($1,$2,$3,now())
+           ON CONFLICT (env_key) DO NOTHING`,
+          [envKey, input.commentApprovalMode, `client-provision:${intentId}`],
+        );
+      }
       // 新环境带 slow_start_since 落库 = 慢启动锚点这个**闸门镜像**变了：同事务推进版本，
       // 否则另一 target 的进程到重启前都把这个新号当「未开启慢启动」= 满配额跑。
       await this.mirrorVersionBumper?.bumpInTx(client, 'client_environment_slow_start');
@@ -1665,6 +1864,9 @@ export class ClientUserStore {
       this.mirrorVersionBumper?.notifyAfterCommit?.(
         'client_environment_slow_start',
       );
+      if (input.facebookRuleModeEnabled === true) {
+        this.mirrorVersionBumper?.notifyAfterCommit?.('content_schedule');
+      }
       const row = assigned.rows[0];
       return { ok: true, idempotent: false, environment: { envKey: row.env_key, label: row.label,
         platform: row.platform, source: 'admin', assignedAt: row.assigned_at.getTime() } };

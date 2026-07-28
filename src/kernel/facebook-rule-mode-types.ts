@@ -61,7 +61,12 @@ export type FacebookRuleActionState =
   | 'confirmed_without_contact';
 
 export interface FacebookRuleModeConfig {
-  accountId: string;
+  /**
+   * 配置的权威主键（change environment-level-rule-mode-and-approval）：**环境**，不是账号。
+   * 按账号读时若反查不出唯一环境，这里是 `null` 且 `enabled=false` —— 那是 fail-closed 的
+   * 「不启用」，MUST NOT 被读成「某个环境把它配置成了关」。
+   */
+  envKey: string | null;
   enabled: boolean;
   /** 库中持久化的定义号原值。MUST NOT 用代码常量顶替——顶替会把存量旧定义行谎报成当前定义。 */
   definitionId: string;
@@ -118,7 +123,12 @@ export type SetFacebookRuleModeResult =
   | {
       ok: false;
       reason:
-        | 'account_not_found'
+        /** 目标环境不存在，或按账号寻址时该账号今天不绑在任何环境上。 */
+        | 'environment_not_found'
+        /** 按账号寻址时该账号落在多个环境或跨客户争用——MUST NOT 任取一个写。 */
+        | 'environment_conflict'
+        /** 绑定副本陈旧 / 环境注册表读不到：**不是**「没配置」，调用方 MUST 报不可用。 */
+        | 'environment_unavailable'
         | 'unsupported_platform'
         | 'invalid_value'
         | 'no_valid_fields';

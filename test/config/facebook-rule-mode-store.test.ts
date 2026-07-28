@@ -35,9 +35,13 @@ interface BatchRow {
   updated_at: Date;
 }
 
+/**
+ * `accounts` 入参今天表达的是「环境 → 平台」（change environment-level-rule-mode-and-approval：
+ * 配置以环境为键、平台取自 client_environments）。键沿用账号名以减少无关改动，语义已改。
+ */
 function memoryDatabase(accounts: Record<string, string>) {
   const configs = new Map<string, {
-    account_id: string;
+    env_key: string;
     enabled: boolean;
     definition_id: string;
     definition_version: number;
@@ -63,23 +67,23 @@ function memoryDatabase(accounts: Record<string, string>) {
     const sql = text.replace(/\s+/g, ' ').trim();
     if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [], rowCount: 0 };
 
-    if (sql.startsWith('SELECT account_id, enabled, definition_id')) {
+    if (sql.startsWith('SELECT env_key, enabled, definition_id')) {
       return { rows: [...configs.values()], rowCount: configs.size };
     }
-    if (sql.startsWith('SELECT platform FROM accounts')) {
+    if (sql.startsWith('SELECT platform FROM client_environments')) {
       const platform = accounts[String(params[0])];
       return { rows: platform === undefined ? [] : [{ platform }], rowCount: platform === undefined ? 0 : 1 };
     }
-    if (sql.startsWith('INSERT INTO facebook_rule_mode_config')) {
+    if (sql.startsWith('INSERT INTO facebook_rule_mode_environment_config')) {
       const row = {
-        account_id: String(params[0]),
+        env_key: String(params[0]),
         enabled: params[1] === true,
         definition_id: String(params[2]),
         definition_version: Number(params[3]),
         updated_at: new Date(),
         updated_by: String(params[4]),
       };
-      configs.set(row.account_id, row);
+      configs.set(row.env_key, row);
       return { rows: [row], rowCount: 1 };
     }
     if (sql.startsWith('UPDATE facebook_rule_batch SET like_state=CASE')) {
@@ -256,8 +260,8 @@ function memoryDatabase(accounts: Record<string, string>) {
 }
 
 const schemaColumns: Record<string, string[]> = {
-  facebook_rule_mode_config: [
-    'account_id', 'enabled', 'definition_id', 'definition_version', 'updated_at', 'updated_by',
+  facebook_rule_mode_environment_config: [
+    'env_key', 'enabled', 'definition_id', 'definition_version', 'updated_at', 'updated_by',
   ],
   facebook_rule_progress: [
     'account_id', 'execution_target', 'definition_id', 'definition_version',
@@ -283,8 +287,23 @@ const readySchema: SchemaProber = async (_client, tables) => ({
     : []),
 });
 
+/**
+ * 反查桩：账号 `fb-1` 唯一绑定环境 `env-fb-1`；`ambiguous` 落多环境；`orphan` 无绑定；
+ * `stale` 模拟绑定副本陈旧。三个失败方向都必须 fail-closed 成「未启用」。
+ */
+const testEnvironmentResolver = (accountId: string) => {
+  if (accountId === 'ambiguous') return { ok: false as const, reason: 'binding_conflict' as const };
+  if (accountId === 'orphan') return { ok: false as const, reason: 'binding_unknown' as const };
+  if (accountId === 'stale') return { ok: false as const, reason: 'binding_unavailable' as const };
+  return { ok: true as const, envKey: `env-${accountId}` };
+};
+
 function store(pool: pg.Pool, target: 'dev' | 'ol') {
-  const configStore = new FacebookRuleModeStore({ pool, schemaProber: readySchema });
+  const configStore = new FacebookRuleModeStore({
+    pool,
+    schemaProber: readySchema,
+    environmentResolver: testEnvironmentResolver,
+  });
   const runtimeStore = new FacebookRuleModeRuntimeStore({
     pool,
     executionTarget: target,
@@ -296,6 +315,10 @@ function store(pool: pg.Pool, target: 'dev' | 'ol') {
       await runtimeStore.init();
     },
     getConfig: (accountId: string) => configStore.getConfig(accountId),
+    resolveEnvironmentBlocker: (accountId: string) => configStore.resolveEnvironmentBlocker(accountId),
+    getConfigForEnv: (envKey: string) => configStore.getConfigForEnv(envKey),
+    setEnvironment: (envKey: string, patch: { enabled?: boolean }, updatedBy: string) =>
+      configStore.setEnvironment(envKey, patch, updatedBy),
     setAccount: (
       accountId: string,
       patch: { enabled?: boolean },
@@ -334,15 +357,16 @@ async function apply(
 }
 
 describe('FacebookRuleModeStore config authority', () => {
-  it('defaults disabled, persists audit readback, and rejects missing or non-Facebook accounts', async () => {
-    const db = memoryDatabase({ 'fb-1': 'facebook', 'xhs-1': 'xiaohongshu' });
+  it('defaults disabled, persists audit readback, and rejects missing or non-Facebook environments', async () => {
+    const db = memoryDatabase({ 'env-fb-1': 'facebook', 'env-xhs-1': 'xiaohongshu' });
     const targetStore = store(db.pool, 'dev');
     await targetStore.init();
 
     assert.equal((await targetStore.getView('fb-1')).config.enabled, false);
+    // 账号寻址：反查得到环境后仍要求那个环境已登记且是 Facebook。
     assert.deepEqual(await targetStore.setAccount('missing', { enabled: true }, 'panel:alice'), {
       ok: false,
-      reason: 'account_not_found',
+      reason: 'environment_not_found',
     });
     assert.deepEqual(await targetStore.setAccount('xhs-1', { enabled: true }, 'panel:alice'), {
       ok: false,
@@ -351,12 +375,68 @@ describe('FacebookRuleModeStore config authority', () => {
     const written = await targetStore.setAccount('fb-1', { enabled: true }, 'panel:alice');
     assert.equal(written.ok, true);
     assert.equal((await targetStore.getView('fb-1')).config.updatedBy, 'panel:alice');
-    assert.equal(db.configs.get('fb-1')?.definition_id, FACEBOOK_RULE_DEFINITION_ID);
-    assert.equal(db.configs.get('fb-1')?.definition_version, FACEBOOK_RULE_DEFINITION_VERSION);
+    assert.equal((await targetStore.getView('fb-1')).config.envKey, 'env-fb-1');
+    assert.equal(db.configs.get('env-fb-1')?.definition_id, FACEBOOK_RULE_DEFINITION_ID);
+    assert.equal(db.configs.get('env-fb-1')?.definition_version, FACEBOOK_RULE_DEFINITION_VERSION);
+  });
+
+  it('按账号读经「账号 → 唯一绑定环境 → 环境配置」解析，三种反查失败一律 fail-closed 未启用', async () => {
+    const db = memoryDatabase({ 'env-fb-1': 'facebook' });
+    const targetStore = store(db.pool, 'dev');
+    await targetStore.init();
+    assert.equal((await targetStore.setAccount('fb-1', { enabled: true }, 'panel:alice')).ok, true);
+
+    // 唯一绑定：读到环境上的真配置。
+    assert.equal(targetStore.getConfig('fb-1').enabled, true);
+    assert.equal(targetStore.getConfig('fb-1').envKey, 'env-fb-1');
+
+    // 三个失败方向都必须是「不启用」+ 具名 blocker，MUST NOT 回落任何账号键存量值。
+    for (const [accountId, blocker] of [
+      ['ambiguous', 'rule_environment_binding_conflict'],
+      ['orphan', 'rule_environment_binding_unknown'],
+      ['stale', 'rule_environment_binding_unavailable'],
+    ] as const) {
+      const config = targetStore.getConfig(accountId);
+      assert.equal(config.enabled, false, accountId);
+      assert.equal(config.envKey, null, accountId);
+      assert.equal(targetStore.resolveEnvironmentBlocker(accountId), blocker);
+    }
+    assert.equal(targetStore.resolveEnvironmentBlocker('fb-1'), null);
+  });
+
+  it('未接反查端口时按账号读一律未启用，MUST NOT 因为没接线就放行', async () => {
+    const db = memoryDatabase({ 'env-fb-1': 'facebook' });
+    const unwired = new FacebookRuleModeStore({ pool: db.pool, schemaProber: readySchema });
+    await unwired.init();
+    assert.equal((await unwired.setEnvironment('env-fb-1', { enabled: true }, 'panel:alice')).ok, true);
+    assert.equal(unwired.getConfigForEnv('env-fb-1').enabled, true, '环境直读不受反查端口影响');
+    assert.equal(unwired.getConfig('fb-1').enabled, false);
+    assert.equal(unwired.resolveEnvironmentBlocker('fb-1'), 'rule_environment_binding_unavailable');
+  });
+
+  it('换绑：配置留在环境上，新账号按同一环境配置被接纳，旧账号不再受它管辖', async () => {
+    const db = memoryDatabase({ 'env-shared': 'facebook' });
+    let boundAccount = 'acct-a';
+    const rebindable = new FacebookRuleModeStore({
+      pool: db.pool,
+      schemaProber: readySchema,
+      environmentResolver: (accountId) => (accountId === boundAccount
+        ? { ok: true as const, envKey: 'env-shared' }
+        : { ok: false as const, reason: 'binding_unknown' as const }),
+    });
+    await rebindable.init();
+    assert.equal((await rebindable.setEnvironment('env-shared', { enabled: true }, 'panel:alice')).ok, true);
+    assert.equal(rebindable.getConfig('acct-a').enabled, true);
+
+    boundAccount = 'acct-b';
+    const before = { ...rebindable.getConfigForEnv('env-shared') };
+    assert.equal(rebindable.getConfig('acct-b').enabled, true, '新账号继承环境配置，无需重设');
+    assert.equal(rebindable.getConfig('acct-a').enabled, false, '旧账号不再受该环境配置管辖');
+    assert.deepEqual(rebindable.getConfigForEnv('env-shared'), before, '环境配置逐位不变');
   });
 
   it('fails closed with the exact migration version when schema capability is missing', async () => {
-    const db = memoryDatabase({ 'fb-1': 'facebook' });
+    const db = memoryDatabase({ 'env-fb-1': 'facebook' });
     const targetStore = new FacebookRuleModeStore({
       pool: db.pool,
       schemaProber: async () => ({
@@ -367,16 +447,17 @@ describe('FacebookRuleModeStore config authority', () => {
     });
     await assert.rejects(
       () => targetStore.init(),
-      /schema_missing_facebook_rule_mode_config_run_0092_facebook_rule_mode_config/,
+      /schema_missing_facebook_rule_mode_config_run_0094_environment_level_rule_mode_and_approval/,
     );
   });
 
   it('bumps the shared content-schedule mirror in the same config transaction', async () => {
-    const db = memoryDatabase({ 'fb-1': 'facebook' });
+    const db = memoryDatabase({ 'env-fb-1': 'facebook' });
     const bumped: string[] = [];
     const targetStore = new FacebookRuleModeStore({
       pool: db.pool,
       schemaProber: readySchema,
+      environmentResolver: testEnvironmentResolver,
       mirrorVersionBumper: {
         bumpDomain: 'api',
         bumpInTx: async (_client, mirrorKey) => { bumped.push(mirrorKey); },
@@ -499,6 +580,40 @@ describe('FacebookRuleModeStore durable cadence', () => {
       'daily_like_quota',
       '省略 blocker 键时 MUST 保留点赞阶段的抑制原因',
     );
+  });
+
+  /**
+   * change environment-level-rule-mode-and-approval：进度 / 浏览去重 / 批次终态**继续按账号存续**。
+   * 两条不变量：换绑后新账号从零收集、不继承旧账号的去重集合；进度读写不经环境反查，
+   * 反查失败也照常工作（否则一次绑定歧义会把已经跑到 7/10 的账号进度也一起弄丢）。
+   */
+  it('进度与去重按账号存续：换绑后新账号从零收集，且不依赖环境反查成功', async () => {
+    const db = memoryDatabase({ 'env-shared': 'facebook' });
+    const target = store(db.pool, 'dev');
+    await target.init();
+
+    for (let i = 1; i <= 7; i += 1) {
+      assert.equal((await apply(target, i, { accountId: 'acct-a' })).kind, 'counted');
+    }
+    assert.equal((await target.getView('acct-a')).runtime.viewCount, 7);
+
+    // 环境换绑到 acct-b：新账号从 0/10 开始。
+    assert.equal((await target.getView('acct-b')).runtime.viewCount, 0);
+    // 旧账号看过的内容对新账号 MUST NOT 算已看过（去重集合不跨账号继承）。
+    assert.deepEqual(
+      await apply(target, 3, { accountId: 'acct-b', sourceDedupeKey: 'b-receipt-3' }),
+      { kind: 'counted', viewCount: 1 },
+    );
+    // 旧账号自己的进度逐位不变。
+    assert.equal((await target.getView('acct-a')).runtime.viewCount, 7);
+
+    // 反查失败（绑定歧义）时进度照常推进：进度读的是账号键，MUST NOT 依赖环境解析成功。
+    assert.equal(
+      (await apply(target, 1, { accountId: 'ambiguous', sourceDedupeKey: 'amb-1' })).kind,
+      'counted',
+    );
+    assert.equal((await target.getView('ambiguous')).runtime.viewCount, 1);
+    assert.equal((await target.getView('ambiguous')).config.enabled, false, '配置仍 fail-closed 未启用');
   });
 
   it('recovers dispatched work after restart as honest terminal ambiguity without replay', async () => {
