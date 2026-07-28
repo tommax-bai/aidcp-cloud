@@ -171,6 +171,7 @@ test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非
       currentBatch: null,
       updatedAt: null,
     },
+    contactFallback: 'not_pending' as const,
   });
   const facebookRuleMode: NonNullable<PanelDeps['facebookRuleMode']> = {
     get: async (accountId) => view(accountId),

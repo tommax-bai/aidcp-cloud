@@ -52,7 +52,13 @@ export type FacebookRuleActionState =
    * MUST NOT 用 not_started / structural_skip 代替——那两个表示「本该做却没起来 / 目标结构上做不到」，
    * 与「节奏规定本轮不做」是不同事实，混用会让后台把一半轮次显示成两个假失败。
    */
-  | 'not_scheduled';
+  | 'not_scheduled'
+  /**
+   * 评论已确认上墙，但**不带联系方式**——账号没配联系方式、按显式声明降级发的普通评论
+   * （change facebook-rule-comment-plain-fallback）。
+   * MUST NOT 记成 confirmed：那会让后台与客户端认为联系方式已经发出去了。
+   */
+  | 'confirmed_without_contact';
 
 export interface FacebookRuleModeConfig {
   accountId: string;
@@ -93,9 +99,18 @@ export interface FacebookRuleModeRuntimeView {
   updatedAt: string | null;
 }
 
+/**
+ * 该账号的加群联系评论会不会降级为普通评论（change facebook-rule-comment-plain-fallback）。
+ * 读时由服务端真值派生，MUST NOT 当成配置值缓存——账号随时可能补上联系方式。
+ * `unknown` 是诚实的第三态：读不到联系方式就说读不到，MUST NOT 猜成 `not_pending`
+ * （那会让运营以为一切正常，而实际发出去的是不带联系方式的评论）。
+ */
+export type FacebookRuleContactFallbackState = 'not_pending' | 'pending' | 'unknown';
+
 export interface FacebookRuleModeView {
   config: FacebookRuleModeConfig;
   runtime: FacebookRuleModeRuntimeView;
+  contactFallback: FacebookRuleContactFallbackState;
 }
 
 export type SetFacebookRuleModeResult =

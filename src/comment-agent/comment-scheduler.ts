@@ -76,6 +76,38 @@ export interface FacebookCommentRunResult {
   /** join-then-comment 调用的独立加群终态；普通评论省略。 */
   joinOutcome?: string;
   groupUrl?: string;
+  /**
+   * 本次**实际**是否注入了联系方式。MUST NOT 用请求意图（injectContact）代替它对外表述——
+   * 允许降级之后两者可以不一致，任何按意图渲染的地方都会对一条不带码的评论宣称「带联系方式」。
+   */
+  contactIncluded?: boolean;
+  /** 本次是「要求带联系方式但账号没配、按显式声明降级发出的普通评论」。 */
+  contactFallbackApplied?: boolean;
+}
+
+/**
+ * 本次评论的联系方式**实际**处置（change facebook-rule-comment-plain-fallback）。
+ *
+ * 拆这个类型的理由：原来「要不要带」和「实际带没带」共用一个布尔，所以只要允许两者不一致，
+ * 所有按它渲染的回执都会说谎。把实际值做成独立事实后，`injected` 结构上保证 contactInfo 非空，
+ * 「解析出来没有」这条路只能由调用方显式声明的降级承接，不存在第三种默认。
+ */
+export type ContactResolution =
+  /** 本次本就不要求带联系方式（普通评论）。 */
+  | { kind: 'not_requested' }
+  /** 要求带且拿到了；contactInfo 恒非空。 */
+  | { kind: 'injected'; contactInfo: string }
+  /** 要求带但账号没配，且调用方**显式**声明允许降级 → 发一条不带联系方式的普通评论。 */
+  | { kind: 'fallback_plain' };
+
+/** 缺联系方式时的处置声明。不传 = fail-closed（默认安全侧）。 */
+export interface ContactFallbackDeclaration {
+  kind: 'plain';
+  /**
+   * 降级产出归属**普通评论**车道的审批模式。必填不是形式：降级发的是一条普通评论正文，
+   * 沿用联系评论车道的授权等于把「对带码模板评论的免审」外溢到一条从未为该车道授权的正文。
+   */
+  approvalMode: ContentScheduleApprovalMode;
 }
 
 /** Stable terminal observation used by queued delegated tasks; only verified `commented` is a success. */
@@ -180,17 +212,27 @@ export function commentOutcomeReason(c: FacebookCommentRunResult): string {
 export function joinCommentReceipt(
   join: { outcome?: string; groupUrl?: string },
   comment: FacebookCommentRunResult,
+  /**
+   * 本次**实际**是否带了联系方式。MUST NOT 传请求意图——降级后会对一条不带码的评论渲染
+   * 「已发出一条带联系方式的评论（服务器已确认）」，而同一次动作的人审卡上运营刚看过不带码的正文，
+   * 两张卡自相矛盾比单张卡说谎更难排查。
+   */
   withContact: boolean,
 ): CommentResultReceipt {
   // 群名优先用评论侧回填的真名；裸 URL / 缺失 → 中性占位（回执绝不显裸群 id/URL）。join.groupUrl 恒为裸链接故不入回执。
   const groupLabel = humanGroupLabel(comment.container);
   const joinedWord = join.outcome === 'already_member' ? '（已是该群成员）' : '已加入新群';
   if (comment.outcome === 'commented') {
+    const contactPhrase = withContact
+      ? '带联系方式的'
+      : comment.contactFallbackApplied
+        ? '**不带**联系方式的（该账号未配联系方式，已按设置降级为普通评论）'
+        : '';
     return {
       ok: true,
       level: 'success',
       title: '加群 + 评论成功',
-      message: `${joinedWord}「${groupLabel}」，并已在群内发出一条${withContact ? '带联系方式的' : ''}评论（服务器已确认）。`,
+      message: `${joinedWord}「${groupLabel}」，并已在群内发出一条${contactPhrase}评论（服务器已确认）。`,
     };
   }
   return {
@@ -425,6 +467,13 @@ export class CommentScheduler {
       force?: boolean;
       fastReturnToFeed?: boolean;
       approvalMode?: ContentScheduleApprovalMode;
+      /**
+       * 缺联系方式时允许降级为不带联系方式的普通评论（change facebook-rule-comment-plain-fallback）。
+       * **不传 = fail-closed**，这是六个入口共用同一道闸的默认安全侧：飞书手动 `--contact`、内容排期、
+       * 精选定向、引流热帖、委托任务都 MUST NOT 传它——运营显式要求带码却发出不带码的，正是那条保证的判例本身。
+       * 当前**唯一**获授权的调用方是 Facebook 规则模式的加群联系评论。
+       */
+      contactFallback?: ContactFallbackDeclaration;
       /** 命令来源会话（change unify-card-routing-origin-then-team）：审批卡 / 终态卡回下命令的会话；缺省 → 账号团队群 → 默认群。 */
       originChatId?: string;
       /** Async terminal observation. Existing callers may omit it; queued tasks use it for honest accounting. */
@@ -444,12 +493,21 @@ export class CommentScheduler {
       // 人设副本陈旧：MUST NOT 说「未绑定人设」——那是对运营的错误指认，会让人去补一份早就存在的配置。
       return { ok: false, level: 'warning', title: '未触发按需评论', message: '云端暂时读不到该账号的人设配置（配置副本陈旧），本次不发；稍后自动恢复，无需改配置。' };
     }
-    // 联系方式闸（change account-group-chat-injection）：--contact 时**解析一次**——缺联系方式 fail-closed（本次不发，
-    // 绝不静默降级成无联系方式评论，镜像上面的 isPersonaBound 闸）；有则用同一个已解析值注入（gate 与注入同源，无 TOCTOU）。
-    let contactInfo: string | null = null;
+    // 联系方式闸（change account-group-chat-injection）：--contact 时**解析一次**（gate 与注入同源，无 TOCTOU）。
+    // 缺联系方式默认 fail-closed（本次不发，绝不静默降级成无联系方式评论，镜像上面的 isPersonaBound 闸）。
+    // 唯一例外是调用方**显式**声明 contactFallback（change facebook-rule-comment-plain-fallback）：
+    // 那是「具名放弃」、不是默认行为——共用这道闸的另外五个入口一个都不传它。
+    let contact: ContactResolution = { kind: 'not_requested' };
     if (options?.injectContact) {
-      contactInfo = this.deps.getContactInfo ? await this.deps.getContactInfo(accountId) : null;
-      if (!contactInfo) {
+      const resolved = this.deps.getContactInfo ? await this.deps.getContactInfo(accountId) : null;
+      if (resolved) {
+        contact = { kind: 'injected', contactInfo: resolved };
+      } else if (options.contactFallback?.kind === 'plain') {
+        contact = { kind: 'fallback_plain' };
+        (this.deps.logger ?? console).log?.(
+          `[comment-scheduler] 缺联系方式，按调用方显式声明降级为普通评论 account=${accountId}`,
+        );
+      } else {
         return {
           ok: false,
           level: 'warning',
@@ -477,7 +535,12 @@ export class CommentScheduler {
         message: `该账号平台暂不支持评论调度：${(err as Error).message}`,
       };
     }
-    const approvalMode = await this.effectiveApprovalMode(accountId, options?.approvalMode ?? 'review');
+    // 审批来源车道跟着**实际**处置走：降级产出是一条普通评论正文，MUST NOT 沿用联系评论车道的授权
+    // （两者是两个独立配置，运营可以只给前者免审）。账号级全局免审仍按同一函数施加，语义不变。
+    const approvalSourceMode = contact.kind === 'fallback_plain' && options?.contactFallback
+      ? options.contactFallback.approvalMode
+      : options?.approvalMode ?? 'review';
+    const approvalMode = await this.effectiveApprovalMode(accountId, approvalSourceMode);
 
     // 加群评论（change facebook-manual-join-comment）：--join 仅 Facebook 有效。非 FB 账号诚实拒——绝不静默降级成普通评论。
     if (options?.joinFirst && platformProfile.platform !== 'facebook') {
@@ -523,8 +586,7 @@ export class CommentScheduler {
         }
         this.running.add(accountId);
         void this.runFacebookJoinThenComment(accountId, {
-          injectContact: options?.injectContact,
-          contactInfo,
+          contact,
           ...(targetedUrl ? { joinGroupUrl: targetedUrl } : {}),
           manualOverride: options?.manualOverride === true,
           force: options?.force === true,
@@ -552,9 +614,14 @@ export class CommentScheduler {
           message: `已触发 Facebook 加群 + 评论：${
             targetedUrl ? '加入指定群' : '先加入一个新群'
           }，加入成功（或已是成员）后在该群里发一条评论${
-            options?.injectContact
+            contact.kind === 'injected'
               ? approvalMode === 'auto_approve' ? '（带联系方式，全局免审）' : '（带联系方式，走飞书人审）'
-              : ''
+              : contact.kind === 'fallback_plain'
+                // 按**实际**处置渲染。用请求意图渲染的话，这里会对一条不带码的评论宣称「带联系方式」。
+                ? approvalMode === 'auto_approve'
+                  ? '（该账号未配联系方式，已按设置降级为不带联系方式的普通评论，全局免审）'
+                  : '（该账号未配联系方式，已按设置降级为不带联系方式的普通评论，走飞书人审）'
+                : ''
           }${options?.force ? '（--force：跳过相关性/去重）' : ''}；结果稍后回报。`,
         };
       }
@@ -562,8 +629,7 @@ export class CommentScheduler {
       // 手动 /comment（本方法为飞书手动出口）：manualOverride 透传到评论体 → 真发路径跳过评论配额 / 日上限闸。
       // 自动排期评论走独立入口（triggerTargeted / ContentScheduler），不带此旗标、配额照旧。
       void this.runFacebookTargetedTask(accountId, {
-        injectContact: options?.injectContact,
-        contactInfo,
+        contact,
         manualOverride: options?.manualOverride === true,
         force: options?.force === true,
         fastReturnToFeed: options?.fastReturnToFeed === true,
@@ -590,7 +656,7 @@ export class CommentScheduler {
       accountId,
       bus,
       edgeId,
-      contactInfo,
+      contact.kind === 'injected' ? contact.contactInfo : null,
       platformProfile,
       options?.priority ?? 'human',
       options?.force === true,
@@ -651,10 +717,12 @@ export class CommentScheduler {
     if (binding === 'unknown') {
       return { ok: false, level: 'warning', title: '未触发定向评论', message: '云端暂时读不到该账号的人设配置（配置副本陈旧），本次不发；稍后自动恢复，无需改配置。', reason: PERSONA_UNAVAILABLE_REASON };
     }
-    let contactInfo: string | null = null;
+    // 定向评论（精选定向 / 引流热帖）**不**提供降级：这条链路始终 fail-closed，
+    // change facebook-rule-comment-plain-fallback 的具名例外只授予规则模式的加群联系评论。
+    let contact: ContactResolution = { kind: 'not_requested' };
     if (options?.injectContact) {
-      contactInfo = this.deps.getContactInfo ? await this.deps.getContactInfo(accountId) : null;
-      if (!contactInfo) {
+      const resolved = this.deps.getContactInfo ? await this.deps.getContactInfo(accountId) : null;
+      if (!resolved) {
         return {
           ok: false,
           level: 'warning',
@@ -663,6 +731,7 @@ export class CommentScheduler {
           reason: 'contact_info_missing',
         };
       }
+      contact = { kind: 'injected', contactInfo: resolved };
     }
     // 去重前置：已评过该笔记 → 诚实拒绝，不发起边端任务（PG 出错按未评处理，与 /comment 去重同容错取向）。
     // 位置铁律：这个 await 必须排在下面的单飞闸「has→add」之前——否则闸的检查与置位被 await 切开、
@@ -710,8 +779,7 @@ export class CommentScheduler {
       }
       this.running.add(accountId);
       void this.runFacebookTargetedTask(accountId, {
-        injectContact: options?.injectContact,
-        contactInfo,
+        contact,
         approvalMode,
         ...(options?.originChatId ? { originChatId: options.originChatId } : {}),
       })
@@ -730,7 +798,7 @@ export class CommentScheduler {
       conn.bus,
       conn.edgeId,
       { ...target, currentNote: options?.currentNote },
-      contactInfo,
+      contact.kind === 'injected' ? contact.contactInfo : null,
       platformProfile,
       options?.priority ?? 'human',
       options?.onResult,
@@ -771,8 +839,8 @@ export class CommentScheduler {
   private async runFacebookTargetedTask(
     accountId: string,
     options: {
-      injectContact?: boolean;
-      contactInfo?: string | null;
+      /** 本次联系方式的**实际**处置。缺省视为「本就不要求带」。 */
+      contact?: ContactResolution;
       overrideContainerUrl?: string;
       manualOverride?: boolean;
       force?: boolean;
@@ -786,11 +854,16 @@ export class CommentScheduler {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
     // 合并结果卡取用；body 内所有 return; 保持 void 语义不动（普通 /comment / 排期路径零回归、只是丢弃返回值）。
     let last: FacebookCommentRunResult = { outcome: 'no_targets' };
+    // 「实际带没带 / 是否降级」在这里统一盖章，而不是逐个 audit 调用点自己带：
+    // 这条链上有十几处 audit()，逐点带必然漏，而漏掉的那点正好会让回执按请求意图去猜。
+    const resolution: ContactResolution = options.contact ?? { kind: 'not_requested' };
     const audit = (row: FacebookCommentAuditRow) => {
       last = {
         outcome: row.outcome,
         ...(row.reason ? { reason: row.reason } : {}),
         ...(row.container ? { container: row.container } : last.container ? { container: last.container } : {}),
+        contactIncluded: resolution.kind === 'injected',
+        ...(resolution.kind === 'fallback_plain' ? { contactFallbackApplied: true } : {}),
       };
       try {
         this.deps.facebookAudit?.(row);
@@ -806,7 +879,12 @@ export class CommentScheduler {
       (this.deps.logger ?? console).warn?.(
         `[comment-scheduler] FB 评论任务异常 account=${accountId}：${(err as Error).message}`,
       );
-      last = { outcome: 'submit_failed', reason: 'exception' };
+      last = {
+        outcome: 'submit_failed',
+        reason: 'exception',
+        contactIncluded: resolution.kind === 'injected',
+        ...(resolution.kind === 'fallback_plain' ? { contactFallbackApplied: true } : {}),
+      };
     }
     return last;
   }
@@ -814,8 +892,8 @@ export class CommentScheduler {
   private async runFacebookTargetedTaskBody(
     accountId: string,
     options: {
-      injectContact?: boolean;
-      contactInfo?: string | null;
+      /** 本次联系方式的**实际**处置。缺省视为「本就不要求带」。 */
+      contact?: ContactResolution;
       overrideContainerUrl?: string;
       manualOverride?: boolean;
       force?: boolean;
@@ -1027,16 +1105,12 @@ export class CommentScheduler {
             return;
           }
 
-          // 4a) 联系方式 fail-closed：--contact 但账号没配联系方式 → 诚实退，绝不发无码评论。
+          // 4a) 联系方式取值：处置已在触发闸处一次性解析完（gate 与注入同源、无 TOCTOU）。
+          // `injected` 由类型保证 contactInfo 非空，所以这里不再需要第二处 fail-closed——
+          // 「解析出来没有」那条路只能由调用方显式声明的降级承接，不存在静默的第三种默认。
+          const contact: ContactResolution = options.contact ?? { kind: 'not_requested' };
+          const contactInfo: string | null = contact.kind === 'injected' ? contact.contactInfo : null;
           let groupChatCode: string | undefined;
-          let contactInfo: string | null = null;
-          if (options.injectContact) {
-            contactInfo = options.contactInfo ?? null;
-            if (!contactInfo) {
-              audit({ accountId, outcome: 'compose_skipped', reason: 'contact_info_missing', shadow, keyword, container, textLength: v.text.length });
-              return;
-            }
-          }
 
           // 5) 结构化账号/来源审批策略是唯一审批授权；未接线/超时/拒绝均不提交。
           const approved = await this.approveFacebookComment(accountId, {
@@ -1112,8 +1186,8 @@ export class CommentScheduler {
   private async runFacebookJoinThenComment(
     accountId: string,
     options: {
-      injectContact?: boolean;
-      contactInfo?: string | null;
+      /** 本次联系方式的**实际**处置。缺省视为「本就不要求带」。 */
+      contact?: ContactResolution;
       joinGroupUrl?: string;
       manualOverride?: boolean;
       force?: boolean;
@@ -1176,8 +1250,7 @@ export class CommentScheduler {
     // 已加入（或已是成员）→ 在该新群里发一条评论。override 容器强制真发；contactInfo 已在 triggerManual 解析一次（gate 同源）。
     // manualOverride 透传 → 群内评论亦跳过评论配额 / 日上限闸（整条链一致，绝不「加了群却被评论配额拦住」）。
     const comment = await this.runFacebookTargetedTask(accountId, {
-      injectContact: options.injectContact,
-      contactInfo: options.contactInfo ?? null,
+      contact: options.contact,
       overrideContainerUrl: join.groupUrl,
       manualOverride: options.manualOverride === true,
       force: options.force === true,
@@ -1186,7 +1259,10 @@ export class CommentScheduler {
       ...(options.actionGate ? { actionGate: options.actionGate } : {}),
       ...(options.originChatId ? { originChatId: options.originChatId } : {}),
     });
-    await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, options.injectContact === true), undefined, options.originChatId);
+    // 结果卡按**实际**注入值渲染（comment.contactIncluded），不按请求意图——
+    // 用意图渲染会对一条降级发出的普通评论宣称「带联系方式（服务器已确认）」，
+    // 而运营刚在人审卡上看过不带码的正文，两张卡自相矛盾。
+    await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, comment.contactIncluded === true), undefined, options.originChatId);
     return {
       ...comment,
       joinOutcome: join.outcome,

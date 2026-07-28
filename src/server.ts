@@ -590,6 +590,7 @@ import {
 import { FacebookRuleModeRuntimeStore } from './orchestrator/facebook-rule-mode-runtime-store.js';
 import type {
   FacebookRuleActionState,
+  FacebookRuleContactFallbackState,
   FacebookRuleModeView,
 } from './kernel/facebook-rule-mode-types.js';
 import { decideFacebookBrowseMode } from './orchestrator/facebook-rule-mode.js';
@@ -4293,6 +4294,22 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       loadScopes: (accountIds) => facebookGroupTargetStore.scopedTargetCountsForAccounts(accountIds),
       loadRecentResults: (accountIds) => facebookGroupJoinAuditStore.latestScheduledResults(accountIds),
     });
+  /**
+   * 读时派生「这个账号的加群联系评论会不会降级」（change facebook-rule-comment-plain-fallback）。
+   * MUST NOT 缓存成配置值：账号随时可能补上联系方式。读不到就如实报 unknown，绝不猜成「不会降级」。
+   */
+  const resolveRuleContactFallback = async (
+    accountId: string,
+  ): Promise<FacebookRuleContactFallbackState> => {
+    if (!accountStore?.getContactInfo) return 'unknown';
+    try {
+      const contact = await accountStore.getContactInfo(accountId);
+      return contact ? 'not_pending' : 'pending';
+    } catch (err) {
+      console.warn(`[facebook-rule] 联系方式读取失败 account=${accountId}: ${(err as Error).message}`);
+      return 'unknown';
+    }
+  };
     if (!facebookRuleModeStore || !facebookRuleModeRuntimeStore) return projected;
     if (configMirrorGate.isStale('content_schedule')) {
       console.warn('[facebook-rule] catalog projection unavailable: content_schedule mirror stale');
@@ -4305,7 +4322,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           Promise.all([
             Promise.resolve(facebookRuleModeStore.getConfig(row.accountId)),
             facebookRuleModeRuntimeStore.getRuntimeView(row.accountId),
-          ]).then(([config, runtime]): FacebookRuleModeView => ({ config, runtime })),
+            resolveRuleContactFallback(row.accountId),
+          ]).then(([config, runtime, contactFallback]): FacebookRuleModeView => ({
+            config,
+            runtime,
+            contactFallback,
+          })),
           resolveController(row.accountId),
         ]);
         const decision = decideFacebookBrowseMode({
@@ -6498,15 +6520,25 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               }>((resolve) => {
                 resolveTerminal = resolve;
               });
+              const schedule = contentScheduleStore.effectiveScheduleFor(accountId);
               const approvalMode =
-                contentScheduleStore.effectiveScheduleFor(accountId).contactCommentMode === 'auto_approve'
-                  ? 'auto_approve'
-                  : 'review';
+                schedule.contactCommentMode === 'auto_approve' ? 'auto_approve' : 'review';
+              // 降级产出走**普通评论**车道的审批配置（change facebook-rule-comment-plain-fallback）。
+              // 两者是两个独立字段，运营可以只给联系评论免审；沿用它等于把「对带码模板评论的免审」
+              // 外溢到一条从未为该车道授权的普通评论正文。
+              const fallbackApprovalMode =
+                schedule.commentMode === 'auto_approve' ? 'auto_approve' : 'review';
               const receipt = await commentScheduler.triggerManual(accountId, {
                 injectContact: true,
                 joinFirst: true,
                 priority: 'automatic',
                 approvalMode,
+                // 规则模式是**唯一**获授权传这个的调用方：账号没配联系方式时不再整段停住，
+                // 而是发一条不带联系方式的普通评论。这条放弃了 group-chat-injection 与
+                // facebook-group-comment-coverage 两份已上线规格的 fail-closed 保证，由运营显式裁定。
+                // 注意它带来的行为扩张：闸原本在**加群之前**，所以这类账号此前连加群命令都没下发过；
+                // 降级后加群会真实执行并消耗其风控日配额与会话预算。
+                contactFallback: { kind: 'plain', approvalMode: fallbackApprovalMode },
                 manualOverride: false,
                 force: false,
                 // 绝不给自动路径开快返（spec facebook-scheduled-comment「Facebook manual comment fast return」：
@@ -6555,7 +6587,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                             : 'failed';
                   const commentState =
                     result.outcome === 'commented'
-                      ? 'confirmed'
+                      // 降级发出的普通评论 MUST NOT 被投影成「联系评论已确认」——
+                      // 后台与客户端会据此认为联系方式已经发出去了。
+                      ? result.contactFallbackApplied === true
+                        ? 'confirmed_without_contact'
+                        : 'confirmed'
                       : result.outcome === 'verification_ambiguous'
                         ? 'submitted_unknown'
                         : result.outcome === 'pending_group_approval'
@@ -8636,6 +8672,12 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                 get: async (accountId) => ({
                   config: facebookRuleModeStore.getConfig(accountId),
                   runtime: await facebookRuleModeRuntimeStore.getRuntimeView(accountId),
+                  contactFallback: accountStore?.getContactInfo
+                    ? await accountStore.getContactInfo(accountId).then(
+                      (contact) => (contact ? 'not_pending' as const : 'pending' as const),
+                      () => 'unknown' as const,
+                    )
+                    : 'unknown' as const,
                 }),
                 set: (accountId, patch, updatedBy) =>
                   facebookRuleModeStore.setAccount(accountId, patch, updatedBy),

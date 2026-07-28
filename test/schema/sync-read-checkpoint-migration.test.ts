@@ -96,9 +96,12 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!api.includes('0095_facebook_rule_two_tier_runtime'));
   assert.ok(automation.includes('0095_facebook_rule_two_tier_runtime'));
   assert.ok(!automation.includes('0094_facebook_rule_two_tier_config'));
+  // 降级终态只动 automation 属主的 batch 表。
+  assert.ok(automation.includes('0096_facebook_rule_fallback_comment_state'));
+  assert.ok(!api.includes('0096_facebook_rule_fallback_comment_state'));
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0095_facebook_rule_two_tier_runtime',
+    '0096_facebook_rule_fallback_comment_state',
   );
 });
 

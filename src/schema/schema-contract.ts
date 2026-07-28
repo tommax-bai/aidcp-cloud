@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0095_facebook_rule_two_tier_runtime';
+export const REQUIRED_SCHEMA_VERSION = '0096_facebook_rule_fallback_comment_state';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -128,9 +128,13 @@ export const REQUIRED_SCHEMA_VERSION = '0095_facebook_rule_two_tier_runtime';
  * api/automation）把 0092/0093 钉死的定义号 / 定义版本 CHECK 放宽为「新旧都接受」，并给 batch
  * 三个动作状态列加上 `not_scheduled`。两条都是**硬依赖**：代码常量已切到两级节奏定义
  * （`facebook_browse_5_like_1_join_contact_every_2@2`），缺这两条迁移时任何配置写入与进度写入
- * 都会被旧 CHECK 以 23514 拒绝，规则模式整体不可工作，故 REQUIRED 与 KNOWN_MAX 抬到 0095。
+ * 都会被旧 CHECK 以 23514 拒绝，规则模式整体不可工作。
+ *
+ * `0096_facebook_rule_fallback_comment_state`（automation）再放宽一次 batch 三个动作状态列的 CHECK，
+ * 容纳 `confirmed_without_contact`——账号缺联系方式时降级发出的普通评论。同样是硬依赖：缺它时该终态
+ * 写不进去，规则轮次终结失败，故 REQUIRED 与 KNOWN_MAX 抬到 0096。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0095_facebook_rule_two_tier_runtime';
+export const KNOWN_MAX_SCHEMA_VERSION = '0096_facebook_rule_fallback_comment_state';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

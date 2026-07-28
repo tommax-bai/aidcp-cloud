@@ -235,6 +235,94 @@ describe('CommentScheduler.triggerManual', () => {
     assert.equal(takeovers, 0);
   });
 
+  // ── change facebook-rule-comment-plain-fallback：缺联系方式的**范围化**降级 ──
+  //
+  // 默认仍是 fail-closed（上面两条用例守着）。只有调用方**显式**声明 contactFallback 才降级，
+  // 且当前唯一获授权的调用方是 Facebook 规则模式的加群联系评论。
+
+  it('未声明 contactFallback 的调用方 MUST 保持 fail-closed（默认安全侧不因新能力而松动）', async () => {
+    // 六个入口共用同一道闸。这条锁住「默认值」本身——任何人把默认改成降级都会打红。
+    let takeovers = 0;
+    const s = new CommentScheduler(
+      baseDeps({ getPlatform: () => 'facebook', getContactInfo: async () => null, onTakeoverStart: () => { takeovers += 1; } }),
+    );
+    const r = await s.triggerManual('acc-1', { injectContact: true, joinFirst: true });
+    assert.equal(r.ok, false);
+    assert.match(r.message, /联系方式/);
+    assert.equal(takeovers, 0, '未声明降级时 MUST NOT 接管边端——连加群都不该发生');
+  });
+
+  it('显式声明 contactFallback 后缺联系方式 → 降级发普通评论，且触发回执按实际值说「不带联系方式」', async () => {
+    const joined: string[] = [];
+    const s = new CommentScheduler(
+      baseDeps({
+        getPlatform: () => 'facebook',
+        getContactInfo: async () => null,
+        facebookConfigFor: async () => ({ keywords: ['k'], commentMode: 'template', commentTemplates: ['你好'] }),
+        facebookJoinNewGroup: async () => { joined.push('acc-1'); return { outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }; },
+      } as Partial<CommentSchedulerDeps>),
+    );
+    const r = await s.triggerManual('acc-1', {
+      injectContact: true,
+      joinFirst: true,
+      contactFallback: { kind: 'plain', approvalMode: 'review' },
+    });
+    assert.equal(r.ok, true, '声明降级后 MUST 继续，而不是整段停住');
+    assert.match(r.message, /未配联系方式/, '回执 MUST 说清本次为什么不带联系方式');
+    assert.match(r.message, /降级/);
+    assert.doesNotMatch(
+      r.message,
+      /（带联系方式/,
+      '回执 MUST NOT 按请求意图宣称带了联系方式——那是对运营说谎',
+    );
+  });
+
+  it('降级产出走**普通评论**车道的审批模式，MUST NOT 继承联系评论车道的免审', async () => {
+    // 运营给的是「联系评论免审」，授权对象是带码的模板评论。把它外溢到一条从未为该车道
+    // 授权的普通评论正文，就是授权外溢——这条用最容易出事的组合锁住：联系评论免审、普通评论需人审。
+    const sources: Array<string | undefined> = [];
+    const s = new CommentScheduler(
+      baseDeps({
+        getPlatform: () => 'facebook',
+        getContactInfo: async () => null,
+        resolveApprovalMode: async (_accountId, sourceMode) => { sources.push(sourceMode); return sourceMode; },
+        facebookConfigFor: async () => ({ keywords: ['k'], commentMode: 'template', commentTemplates: ['你好'] }),
+        facebookJoinNewGroup: async () => ({ outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }),
+      } as Partial<CommentSchedulerDeps>),
+    );
+    const r = await s.triggerManual('acc-1', {
+      injectContact: true,
+      joinFirst: true,
+      approvalMode: 'auto_approve',                                   // 联系评论车道：免审
+      contactFallback: { kind: 'plain', approvalMode: 'review' },      // 普通评论车道：需人审
+    });
+    assert.equal(r.ok, true);
+    assert.deepEqual(sources, ['review'], '降级后 MUST 用普通评论车道的来源模式解析审批');
+    assert.match(r.message, /人审/, '回执也要如实说这条要走人审');
+  });
+
+  it('有联系方式时声明 contactFallback 不改变任何行为（降级只在缺联系方式时生效）', async () => {
+    const sources: Array<string | undefined> = [];
+    const s = new CommentScheduler(
+      baseDeps({
+        getPlatform: () => 'facebook',
+        getContactInfo: async () => 'wx: abc',
+        resolveApprovalMode: async (_accountId, sourceMode) => { sources.push(sourceMode); return sourceMode; },
+        facebookConfigFor: async () => ({ keywords: ['k'], commentMode: 'template', commentTemplates: ['你好'] }),
+        facebookJoinNewGroup: async () => ({ outcome: 'joined', groupUrl: 'https://www.facebook.com/groups/1' }),
+      } as Partial<CommentSchedulerDeps>),
+    );
+    const r = await s.triggerManual('acc-1', {
+      injectContact: true,
+      joinFirst: true,
+      approvalMode: 'auto_approve',
+      contactFallback: { kind: 'plain', approvalMode: 'review' },
+    });
+    assert.equal(r.ok, true);
+    assert.deepEqual(sources, ['auto_approve'], '拿得到联系方式时 MUST 走联系评论车道，与改造前一致');
+    assert.match(r.message, /带联系方式/);
+  });
+
   it('--contact + 有联系方式 → 触发成功，且联系方式注入到人审卡文本（端到端，审=发）', async () => {
     const bus = new EventBus();
     const cardDone = deferred<void>();
