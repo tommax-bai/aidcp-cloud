@@ -78,6 +78,9 @@ test('同源同格：slowStartView().day 与 clamp 实际生效的天数逐格�
       assert.equal(view.day, day, `投影天数应为 ${day}`);
       assert.equal(c.effectiveQuotas().day.view, Math.min(deriveWindowQuotas('normal').day.view, cap!.view),
         `第 ${day} 天 clamp 必须按同一天的曲线生效`);
+      if (day === 1) {
+        assert.equal(c.effectiveQuotas().minute.view, 2, '环境级 FB 慢启动 D1 view=20/day 应按 /10 得到 2/minute');
+      }
     }
   }
   // 关（slow_start_since = NULL）→ off，且不 clamp。

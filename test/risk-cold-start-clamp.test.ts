@@ -123,9 +123,22 @@ test('Facebook 曲线比小红书更保守（opt-in）：FB Day1 只浏览+极�
     coldStartRampEnabled: true,
   });
   assert.equal(fb.effectiveQuotas().day.like, 2); // FB Day1 like≤2 < 小红书 3
+  assert.equal(fb.effectiveQuotas().minute.view, 2, 'FB Day1 view=20/day 经 /10 派生为 2/minute');
   assert.ok(fb.effectiveQuotas().day.like < xhs.effectiveQuotas().day.like);
   assert.equal(fb.effectiveQuotas().day.comment, 0);
   assert.equal(fb.effectiveQuotas().day.publish, 0);
+});
+
+test('每日配额按 /10 派生分钟窗，并保留零值、突发硬上限、小时与每日窗口', () => {
+  const fbDay1 = coldStartDailyCap(0, 'facebook')!;
+  const derived = deriveWindowQuotasFromDaily(fbDay1);
+  assert.equal(derived.minute.view, 2, 'view=20/day → ceil(20/10)=2/minute');
+  assert.equal(derived.minute.comment, 0, 'daily=0 的动作仍为 0/minute');
+  assert.equal(derived.hour.view, 5, '小时窗仍沿用 ceil(20/4)=5');
+  assert.equal(derived.day.view, 20, '每日窗原值不变');
+
+  const capped = deriveWindowQuotasFromDaily({ ...fbDay1, view: 1_000 });
+  assert.equal(capped.minute.view, 8, '高日配额仍受 view 分钟突发硬上限 8 夹逼');
 });
 
 test('Facebook Day5 才放开少量发布/加组（opt-in）', () => {

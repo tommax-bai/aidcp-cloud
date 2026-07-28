@@ -70,7 +70,7 @@ export const HOUR_BURST_CAP: ActionQuota = {
 
 export function deriveWindowQuotasFromDaily(day: ActionQuota): WindowQuotas {
   return {
-    minute: mapQuota(day, (action, daily) => daily <= 0 ? 0 : Math.max(1, Math.min(MINUTE_BURST_CAP[action], Math.ceil(daily / 20)))),
+    minute: mapQuota(day, (action, daily) => daily <= 0 ? 0 : Math.max(1, Math.min(MINUTE_BURST_CAP[action], Math.ceil(daily / 10)))),
     hour: mapQuota(day, (action, daily) => daily <= 0 ? 0 : Math.max(1, Math.min(HOUR_BURST_CAP[action], Math.ceil(daily / 4)))),
     day: { ...day },
   };

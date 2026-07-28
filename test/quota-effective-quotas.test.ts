@@ -56,11 +56,11 @@ test('warned/restricted/frozen use conservative baseline through provider', () =
   assert.equal(restricted.effectiveQuotas().day.view, deriveWindowQuotas('conservative').day.view);
 });
 
-test('warned scaled quotas round up and keep sparse interaction minute windows nonzero', () => {
+test('warned scaled quotas round up under /10 derivation and keep sparse interaction minute windows nonzero', () => {
   const warned = new RiskController({ initialState: state('warned', 'normal') });
   const quotas = warned.effectiveQuotas();
 
-  assert.equal(quotas.minute.like, 1);
+  assert.equal(quotas.minute.like, 2);
   assert.equal(quotas.minute.collect, 1);
   assert.equal(quotas.minute.comment, 1);
   assert.equal(quotas.minute.follow, 1);
