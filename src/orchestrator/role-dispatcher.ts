@@ -323,7 +323,11 @@ export interface RoleDispatcherOptions {
   explainView?: () => ViewQuotaDecision;
   /** Facebook 规则模式的权威现读；缺省 persona，确保旧装配零回归。 */
   facebookRuleModeDecision?: (accountId: string) => FacebookRuleModeDecision;
-  /** 已确认 view 的持久化计数与 10 条原子成批。缺失时规则模式 fail-closed。 */
+  /**
+   * 已确认 view 的持久化计数与**按云端权威规则节奏**的原子成批。缺失时规则模式 fail-closed。
+   * 刻意不写具体条数：节奏（每轮多少条确认浏览、每几轮含一次加群联系评论）由云端权威规则定义决定，
+   * 编排侧只消费成批结果，MUST NOT 内置或推断任何节奏数字。
+   */
   applyFacebookRuleView?: (input: {
     accountId: string;
     contentKey: string;
