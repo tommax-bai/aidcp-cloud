@@ -2084,11 +2084,15 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     }
   });
 
-  it('规则批次 + 模板正文含违禁内容 → 确定性校验先拒，绝不提交、绝不报评论成功', async () => {
+  it('规则批次 + 模板正文超长 → 结构校验先拒，绝不提交、绝不报评论成功', async () => {
+    // change facebook-comment-template-blocks：内容政策闸（链接/联系方式/@/垃圾短语/相关性）只管无人值守
+    // 生成文；运营手写模板不再受审（用户 2026-07-28 定案）。结构闸对模板照旧——这里改用超长正文，
+    // 守住本条本来要守的不变量「校验先拒、绝不提交、绝不报成功」。超长是物理约束而非政策：
+    // 边端拟人逐字输入跑在有界的平台步预算里，超长正文的结局是打字超时而不是评论发出去。
     const { deps, audits, posted } = fbFlowDeps({
       submit: { ok: true },
       commentMode: 'template',
-      commentTemplates: ['来看看 https://spam.example/promo'],
+      commentTemplates: ['招'.repeat(501)],
     });
     await new CommentScheduler({
       ...deps,
@@ -2098,8 +2102,25 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
-    assert.equal(audits.at(-1)?.reason, 'contains_url');
+    assert.equal(audits.at(-1)?.reason, 'too_long');
     assert.ok(!posted.includes('interaction.comment'));
+  });
+
+  it('规则批次 + 模板正文带链接/联系方式 → 照发（运营手写、内容归其负责）', async () => {
+    const { deps, audits, posted } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'template',
+      commentTemplates: ['来看看 https://spam.example/promo 电话 0335 610 868'],
+    });
+    await new CommentScheduler({
+      ...deps,
+      personaBinding: () => 'unbound',
+      facebookJoinNewGroup: async () => ({ triggered: true, outcome: 'joined', groupUrl: JOINED_GROUP }),
+      postResultCard: () => {},
+    }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.ok(posted.includes('interaction.comment'));
   });
 
   it('规则批次 + 模板正文 + --contact → 联系方式仍与正文分离注入，人审见合体、提交走 groupChatCode', async () => {
