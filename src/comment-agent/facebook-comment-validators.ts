@@ -33,6 +33,18 @@ export interface FacebookCommentValidationContext {
    * 评论与全部关键词零 token 重叠 → weak_relevance。不提供则跳过（确定性上无法判定相关性）。
    */
   targetKeywords?: string[];
+  /**
+   * 正文由**运营手写**（模板模式），而非无人值守的模型生成。
+   *
+   * 内容政策类校验（链接 / 联系方式 / @提及 / 垃圾短语 / 相关性）存在的理由是：无人值守生成文没有
+   * 可负责的人类作者，只能靠确定性规则兜住。模板的作者就是运营本人、内容归其负责——拿这套规则去审
+   * 运营自己的投放素材，只会把合法素材拒掉（2026-07-28 真机：自带电话的招聘模板恒判 contains_contact、
+   * 永远发不出去）。用户 2026-07-28 定案：模板内容不再由系统审查，联系方式与正文并存由人工保证。
+   *
+   * **结构类校验（空 / 无实义 / 过短 / 过长）对模板照旧全部执行**：过长不是政策而是物理约束——
+   * 边端按拟人节奏逐字输入、跑在有界的平台步预算里，超长正文的结局是打字超时而不是评论发出去。
+   */
+  operatorAuthored?: boolean;
 }
 
 export type FacebookCommentValidation =
@@ -111,6 +123,10 @@ export function validateFacebookComment(
   if (signal === 0) return { ok: false, reason: 'low_signal' };
   if (signal < minSignal) return { ok: false, reason: 'too_short' };
   if (text.length > maxLength) return { ok: false, reason: 'too_long' };
+
+  // 到此为止是**结构类**校验（空 / 无实义 / 过短 / 过长），任何来源的正文都要过。
+  // 以下是**内容政策类**校验，只针对无人值守的模型生成文；运营手写模板由其作者负责，不在此受审。
+  if (ctx.operatorAuthored === true) return { ok: true, text };
 
   if (URL_RE.test(text) || BARE_DOMAIN_RE.test(text)) return { ok: false, reason: 'contains_url' };
   if (EMAIL_RE.test(text) || PHONE_RE.test(text) || IM_CONTACT_RE.test(text))

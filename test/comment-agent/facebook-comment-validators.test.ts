@@ -95,3 +95,41 @@ describe('validateFacebookComment: reject matrix (facebook-scheduled-comment 3.2
     assert.ok(!('text' in r), '拒绝结果不得携带可发文本（只拒不修）');
   });
 });
+
+describe('validateFacebookComment: 运营手写模板只过结构闸（facebook-comment-template-blocks）', () => {
+  // 真机 2026-07-28：运营配的招聘广告模板自带电话，被 contains_contact 恒拒 → 整段广告永远发不出去。
+  // 用户定案：模板内容由人工负责，联系方式与正文并存由人工保证。
+  const AD = [
+    'TUYỂN DỤNG NHÂN VIÊN SẢN XUẤT LUXSHARE',
+    '📍 Làm việc tại: Nhà máy sản xuất linh kiện điện tử LUXSHARE',
+    '👉 Lương cơ bản: 5.700.000 VNĐ',
+    '📞 Liên hệ: 0335 610 868',
+  ].join('\n');
+
+  it('模板正文：电话 / 链接 / @提及 / 营销词都放行', () => {
+    assert.equal(validateFacebookComment(AD, { operatorAuthored: true }).ok, true);
+    assert.equal(validateFacebookComment('联系我 13800138000', { operatorAuthored: true }).ok, true);
+    assert.equal(validateFacebookComment('详情见 www.example.com', { operatorAuthored: true }).ok, true);
+    assert.equal(validateFacebookComment('@某人 有兴趣吗', { operatorAuthored: true }).ok, true);
+    assert.equal(validateFacebookComment('限时 招聘，加微信详聊', { operatorAuthored: true }).ok, true);
+  });
+
+  it('模板正文：与目标关键词零重叠也不判 weak_relevance', () => {
+    assert.equal(
+      validateFacebookComment(AD, { operatorAuthored: true, targetKeywords: ['咖啡', '烘焙'] }).ok,
+      true,
+    );
+  });
+
+  it('生成式正文：同样内容仍全部拒绝（内容闸一条不放）', () => {
+    assert.equal(reject(AD), 'contains_contact');
+    assert.equal(reject('详情见 www.example.com'), 'contains_url');
+    assert.equal(reject('@某人 有兴趣吗'), 'contains_mention');
+  });
+
+  it('模板正文：结构闸照旧执行（空 / 过短 / 过长）', () => {
+    assert.equal(reject('', { operatorAuthored: true }), 'empty');
+    assert.equal(reject('a', { operatorAuthored: true }), 'too_short');
+    assert.equal(reject('好'.repeat(501), { operatorAuthored: true }), 'too_long');
+  });
+});

@@ -1130,7 +1130,11 @@ export class CommentScheduler {
           const relevanceCtx = options.force || !keyword
             ? []
             : [keyword, ...(postText ? [postText] : []), ...comments].filter(Boolean);
-          const v = validateFacebookComment(draft, { targetKeywords: relevanceCtx });
+          // 模板模式的正文是运营手写的投放素材，作者是人不是模型 → 只过结构闸（空/无实义/过短/过长），
+          // 不过内容政策闸（链接/联系方式/@/垃圾短语/相关性）。用户 2026-07-28 定案：模板内容由人工负责，
+          // 联系方式与正文并存由人工保证。生成式路径逐字不变、五条内容闸照旧全执行。
+          const operatorAuthored = cfg.commentMode === 'template';
+          const v = validateFacebookComment(draft, { targetKeywords: relevanceCtx, operatorAuthored });
           if (!v.ok) {
             audit({ accountId, outcome: 'compose_skipped', reason: v.reason, shadow, keyword, container, textLength: draft.length });
             return;

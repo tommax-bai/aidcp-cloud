@@ -1493,13 +1493,30 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     });
   }
 
-  it('模板模式：模板正文含联系方式 → contains_contact，绝不靠 contact lane 救回', async () => {
+  it('模板模式：模板正文含联系方式照发（运营手写、内容归其负责）', async () => {
+    // change facebook-comment-template-blocks：内容政策闸是给无人值守生成文设的——作者是模型、没有能负责的人。
+    // 模板的作者是运营本人。2026-07-28 真机：自带电话的招聘模板恒判 contains_contact、整段广告永远发不出去。
+    // 用户定案：模板内容不再由系统审查，联系方式与正文并存由人工保证。生成式路径五条内容闸一条不放（见下条）。
     const { deps, audits, posted } = fbFlowDeps({
       submit: { ok: true },
       commentMode: 'template',
       commentTemplates: ['LINE ID: abc123'],
     });
     await new CommentScheduler(deps).triggerManual('fb-1');
+    await tick();
+    assert.equal(audits.at(-1)?.outcome, 'commented');
+    assert.ok(posted.includes('interaction.comment'));
+  });
+
+  it('生成模式：正文含联系方式仍 contains_contact，绝不靠 contact lane 救回', async () => {
+    const { deps, audits, posted } = fbFlowDeps({
+      submit: { ok: true },
+      commentMode: 'generated',
+    });
+    await new CommentScheduler({
+      ...deps,
+      facebookCompose: async () => 'LINE ID: abc123',
+    }).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'contains_contact');
