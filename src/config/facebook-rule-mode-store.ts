@@ -39,7 +39,7 @@ const { Pool } = pg;
 /**
  * schema 要求（change environment-level-rule-mode-and-approval）：探测的是**环境键表**。
  *
- * 缺表时 init 带 `0094` 这个 version id fail-closed，而不是退回读账号键旧表——回落等于把
+ * 缺表时 init 带 `0096` 这个 version id fail-closed，而不是退回读账号键旧表——回落等于把
  * 「配置跟账号走」这条已被否决的语义偷偷放回来，且回滚到旧代码时没有任何告警。
  * 旧表 `facebook_rule_mode_config` 刻意**不在要求集合里**：它自此不参与运行时读写与判定，只作可回滚数据。
  */
@@ -152,7 +152,7 @@ export class FacebookRuleModeStore {
       throw new SchemaCapabilityError(
         {
           capability: 'facebook_rule_mode_config',
-          sinceVersion: '0094_environment_level_rule_mode_and_approval',
+          sinceVersion: '0096_environment_level_rule_mode_and_approval',
           ddl: [],
         },
         verdict,

@@ -227,9 +227,16 @@ export interface ClientEnvironmentRiskState {
 
 export interface ClientFacebookRuleModeConfig {
   enabled: boolean;
+  /** 权威行里持久化的定义身份原值，**不是**本构建的定义常量。 */
   definitionId: FacebookRuleModeConfig['definitionId'];
   definitionVersion: FacebookRuleModeConfig['definitionVersion'];
   updatedAt: string | null;
+  /**
+   * 具名投影问题；`null` = 无问题。
+   * `stored_definition_mismatch` = 该行存的定义身份不是本构建的当前定义，它的节奏不可按当前定义解读。
+   * MUST NOT 用「顶替成当前定义并不报」来消掉这个值。
+   */
+  problem: 'stored_definition_mismatch' | null;
 }
 
 /**
@@ -599,12 +606,20 @@ async function resolveOwnedFacebookEnvironment(
   return { envKey: owned.envKey, binding: owned.binding };
 }
 
+/**
+ * 客户投影**如实带出行里存的定义身份**，并在它与本构建的定义常量不一致时具名报出。
+ *
+ * MUST NOT 用编译期常量顶替存量行的定义身份：配置表没有部署目标维度、dev 与 ol 又共库，
+ * 单侧部署会让一批行停在旧定义；顶替之后客户端读到的是「当前定义」，两套节奏各自在跑却没有
+ * 任何机械手段能发现。具名问题让这件事在回包里就暴露，而不是等到行为对不上再去猜。
+ */
 function projectClientFacebookRuleMode(config: FacebookRuleModeConfig): ClientFacebookRuleModeConfig {
   return {
     enabled: config.enabled,
     definitionId: config.definitionId,
     definitionVersion: config.definitionVersion,
     updatedAt: config.updatedAt,
+    problem: config.definitionMismatch ? 'stored_definition_mismatch' : null,
   };
 }
 

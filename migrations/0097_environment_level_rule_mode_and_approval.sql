@@ -37,15 +37,26 @@
 -- **按设计保持账号键，本文件一个字都不动它们**：配置回答「这个环境要不要跑规则」，进度回答
 -- 「这个账号已经做到哪」，换账号后新账号从零收集才是真实语义。
 
+-- 定义身份的 DEFAULT / CHECK 逐条对齐账号键旧表被 0094_facebook_rule_two_tier_config 改成的现状：
+-- DEFAULT 跟当前定义（两级节奏 `facebook_browse_5_like_1_join_contact_every_2`@2），CHECK 新旧都接受。
+--
+-- 为什么 CHECK MUST NOT 只钉当前定义：下面的回填**原样拷贝**旧表的定义身份，而旧表里同时可能存在
+-- 已被 0094 迁到 v2 的行与（回滚 / 补跑次序不同的库上）仍停在 v1 的行。只允许一个值时，必有一批
+-- 在 INSERT 时被 23514 拒绝、整条迁移失败。反过来若先拷贝再统一改写成当前定义，又会把「这一行原本
+-- 处在哪套节奏」这条事实抹掉，让旧定义的存量行被谎报成当前定义。接受新旧两值 + 回读如实带出，
+-- 才能让定义漂移在读回时被具名报出来，而不是被悄悄抹平。
 CREATE TABLE IF NOT EXISTS facebook_rule_mode_environment_config (
   env_key             TEXT PRIMARY KEY REFERENCES client_environments(env_key) ON DELETE CASCADE,
   enabled             BOOLEAN NOT NULL DEFAULT false,
-  definition_id       TEXT NOT NULL DEFAULT 'facebook_browse_10_like_1_join_contact_1',
-  definition_version  INTEGER NOT NULL DEFAULT 1,
+  definition_id       TEXT NOT NULL DEFAULT 'facebook_browse_5_like_1_join_contact_every_2',
+  definition_version  INTEGER NOT NULL DEFAULT 2,
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by          TEXT,
-  CHECK (definition_id = 'facebook_browse_10_like_1_join_contact_1'),
-  CHECK (definition_version = 1)
+  CHECK (definition_id IN (
+    'facebook_browse_10_like_1_join_contact_1',
+    'facebook_browse_5_like_1_join_contact_every_2'
+  )),
+  CHECK (definition_version IN (1, 2))
 );
 
 CREATE TABLE IF NOT EXISTS environment_comment_approval_policy (
@@ -168,7 +179,7 @@ BEGIN
     FROM facebook_rule_mode_config WHERE env_backfill_skip_reason IS NOT NULL;
   SELECT count(*) INTO approval_skipped
     FROM account_comment_approval_policy WHERE env_backfill_skip_reason IS NOT NULL;
-  RAISE NOTICE '[0094] facebook_rule_mode_config 未回填 % 行；account_comment_approval_policy 未回填 % 行。'
+  RAISE NOTICE '[0097] facebook_rule_mode_config 未回填 % 行；account_comment_approval_policy 未回填 % 行。'
     ' 按 env_backfill_skip_reason 查具名原因（environment_missing / binding_conflict / cross_customer_contention）。',
     rule_skipped, approval_skipped;
 END

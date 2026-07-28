@@ -27,6 +27,8 @@ import type { ClientEnvironmentScheduleView } from '../src/client-auth/client-en
 import {
   FACEBOOK_RULE_DEFINITION_ID,
   FACEBOOK_RULE_DEFINITION_VERSION,
+  FACEBOOK_RULE_LEGACY_DEFINITION_ID,
+  FACEBOOK_RULE_LEGACY_DEFINITION_VERSION,
   type FacebookRuleModeConfig,
 } from '../src/kernel/facebook-rule-mode-types.js';
 
@@ -2728,10 +2730,56 @@ test('规则模式读：必须登录；已绑定 Facebook 环境离线可读且�
         definitionId: FACEBOOK_RULE_DEFINITION_ID,
         definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
         updatedAt: '2026-07-28T08:00:00.000Z',
+        problem: null,
       });
       assert.equal(edgeLookupCalls, 0, '纯 Cloud 配置读不得要求活 Edge');
       assert.deepEqual(calls, [{ action: 'get', envKey: 'p1' }]);
       assert.equal(body.data.binding, 'bound');
+    },
+  );
+});
+
+test('规则模式读：存量行的定义身份如实带出并具名报出不一致，MUST NOT 谎报成当前定义', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep, configs } = makeFacebookRuleModeDep();
+  // 库里停在上一版定义（dev 与 ol 共用配置表、单侧部署就会出现这种行）。
+  configs.set('p1', {
+    envKey: 'p1',
+    enabled: true,
+    definitionId: FACEBOOK_RULE_LEGACY_DEFINITION_ID,
+    definitionVersion: FACEBOOK_RULE_LEGACY_DEFINITION_VERSION,
+    definitionMismatch: true,
+    updatedAt: '2026-07-27T08:00:00.000Z',
+    updatedBy: 'panel:admin',
+  });
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookRuleMode: dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/facebook-rule-mode`, { headers });
+      assert.equal(res.status, 200);
+      const body = await res.json() as {
+        data: { facebookRuleMode: Record<string, unknown> };
+      };
+      assert.deepEqual(body.data.facebookRuleMode, {
+        enabled: true,
+        definitionId: FACEBOOK_RULE_LEGACY_DEFINITION_ID,
+        definitionVersion: FACEBOOK_RULE_LEGACY_DEFINITION_VERSION,
+        updatedAt: '2026-07-27T08:00:00.000Z',
+        problem: 'stored_definition_mismatch',
+      });
+      assert.notEqual(
+        body.data.facebookRuleMode.definitionId,
+        FACEBOOK_RULE_DEFINITION_ID,
+        '回读 MUST NOT 用编译期定义常量顶替库里存的定义身份',
+      );
     },
   );
 });

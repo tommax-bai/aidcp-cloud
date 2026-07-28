@@ -134,10 +134,10 @@ export class ApprovalPolicyStore {
   async init(): Promise<void> {
     // DDL 单一所有者（change cloud-schema-migration-executor 任务 5.x）：只探测、不建表。
     // 探不到即带 version id 明确报错并 fail-closed；MUST NOT 在这里把表建出来继续跑。
-    // requiredObjects：环境键表由 migrations/0094 建，运行时 DDL 棘轮禁止在 src/ 里再写一段建表。
+    // requiredObjects：环境键表由 migrations/0096 建，运行时 DDL 棘轮禁止在 src/ 里再写一段建表。
     await this.schemaEnsurer(this.pool, {
       capability: 'approval_policy',
-      sinceVersion: '0094_environment_level_rule_mode_and_approval',
+      sinceVersion: '0096_environment_level_rule_mode_and_approval',
       ddl: [APPROVAL_POLICY_SCHEMA_SQL],
       requiredObjects: {
         tables: {

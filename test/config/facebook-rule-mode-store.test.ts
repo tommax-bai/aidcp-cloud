@@ -8,6 +8,10 @@ import {
   FACEBOOK_RULE_VIEW_THRESHOLD,
   FacebookRuleModeStore,
 } from '../../src/config/facebook-rule-mode-store.js';
+import {
+  FACEBOOK_RULE_LEGACY_DEFINITION_ID,
+  FACEBOOK_RULE_LEGACY_DEFINITION_VERSION,
+} from '../../src/kernel/facebook-rule-mode-types.js';
 import { FacebookRuleModeRuntimeStore } from '../../src/orchestrator/facebook-rule-mode-runtime-store.js';
 import type { SchemaProber } from '../../src/kernel/schema-capability-contract.js';
 
@@ -435,6 +439,40 @@ describe('FacebookRuleModeStore config authority', () => {
     assert.deepEqual(rebindable.getConfigForEnv('env-shared'), before, '环境配置逐位不变');
   });
 
+  it('存量行的定义身份原样回读并标出不一致，MUST NOT 用编译期常量顶替', async () => {
+    const db = memoryDatabase({ 'env-fb-1': 'facebook' });
+    // 库里停在上一版定义：配置表没有部署目标维度、dev 与 ol 共库，单侧部署必然出现这种行。
+    db.configs.set('env-fb-1', {
+      env_key: 'env-fb-1',
+      enabled: true,
+      definition_id: FACEBOOK_RULE_LEGACY_DEFINITION_ID,
+      definition_version: FACEBOOK_RULE_LEGACY_DEFINITION_VERSION,
+      updated_at: new Date('2026-07-27T08:00:00.000Z'),
+      updated_by: 'panel:admin',
+    });
+    const targetStore = store(db.pool, 'dev');
+    await targetStore.init();
+
+    for (const config of [targetStore.getConfigForEnv('env-fb-1'), targetStore.getConfig('fb-1')]) {
+      assert.equal(config.definitionId, FACEBOOK_RULE_LEGACY_DEFINITION_ID);
+      assert.equal(config.definitionVersion, FACEBOOK_RULE_LEGACY_DEFINITION_VERSION);
+      assert.notEqual(config.definitionId, FACEBOOK_RULE_DEFINITION_ID, '不得顶替成当前定义号');
+      assert.notEqual(config.definitionVersion, FACEBOOK_RULE_DEFINITION_VERSION, '不得顶替成当前定义版本');
+      assert.equal(config.definitionMismatch, true, '不一致必须具名报出，不能静默');
+      assert.equal(config.enabled, true, '定义漂移不改写开关本身');
+    }
+
+    // 缺行 = 未配置：没有持久定义身份可报，如实报当前定义且不算漂移。
+    const absent = targetStore.getConfigForEnv('env-none');
+    assert.equal(absent.definitionId, FACEBOOK_RULE_DEFINITION_ID);
+    assert.equal(absent.definitionMismatch, false);
+
+    // 写入按当前定义落库，写后回读随之变成一致（漂移只描述存量行，不是永久标记）。
+    assert.equal((await targetStore.setEnvironment('env-fb-1', { enabled: true }, 'panel:alice')).ok, true);
+    assert.equal(targetStore.getConfigForEnv('env-fb-1').definitionId, FACEBOOK_RULE_DEFINITION_ID);
+    assert.equal(targetStore.getConfigForEnv('env-fb-1').definitionMismatch, false);
+  });
+
   it('fails closed with the exact migration version when schema capability is missing', async () => {
     const db = memoryDatabase({ 'env-fb-1': 'facebook' });
     const targetStore = new FacebookRuleModeStore({
@@ -447,7 +485,7 @@ describe('FacebookRuleModeStore config authority', () => {
     });
     await assert.rejects(
       () => targetStore.init(),
-      /schema_missing_facebook_rule_mode_config_run_0094_environment_level_rule_mode_and_approval/,
+      /schema_missing_facebook_rule_mode_config_run_0096_environment_level_rule_mode_and_approval/,
     );
   });
 
@@ -585,19 +623,22 @@ describe('FacebookRuleModeStore durable cadence', () => {
   /**
    * change environment-level-rule-mode-and-approval：进度 / 浏览去重 / 批次终态**继续按账号存续**。
    * 两条不变量：换绑后新账号从零收集、不继承旧账号的去重集合；进度读写不经环境反查，
-   * 反查失败也照常工作（否则一次绑定歧义会把已经跑到 7/10 的账号进度也一起弄丢）。
+   * 反查失败也照常工作（否则一次绑定歧义会把已经收集到一半的账号进度也一起弄丢）。
    */
   it('进度与去重按账号存续：换绑后新账号从零收集，且不依赖环境反查成功', async () => {
     const db = memoryDatabase({ 'env-shared': 'facebook' });
     const target = store(db.pool, 'dev');
     await target.init();
 
-    for (let i = 1; i <= 7; i += 1) {
+    // 收集到不足一轮的位置。用阈值派生而不写死条数：换节奏时这条用例不会静默失真。
+    const partial = FACEBOOK_RULE_VIEW_THRESHOLD - 2;
+    assert.ok(partial >= 1, '阈值必须留得下「收集到一半」这个中间态');
+    for (let i = 1; i <= partial; i += 1) {
       assert.equal((await apply(target, i, { accountId: 'acct-a' })).kind, 'counted');
     }
-    assert.equal((await target.getView('acct-a')).runtime.viewCount, 7);
+    assert.equal((await target.getView('acct-a')).runtime.viewCount, partial);
 
-    // 环境换绑到 acct-b：新账号从 0/10 开始。
+    // 环境换绑到 acct-b：新账号从零开始收集。
     assert.equal((await target.getView('acct-b')).runtime.viewCount, 0);
     // 旧账号看过的内容对新账号 MUST NOT 算已看过（去重集合不跨账号继承）。
     assert.deepEqual(
@@ -605,7 +646,7 @@ describe('FacebookRuleModeStore durable cadence', () => {
       { kind: 'counted', viewCount: 1 },
     );
     // 旧账号自己的进度逐位不变。
-    assert.equal((await target.getView('acct-a')).runtime.viewCount, 7);
+    assert.equal((await target.getView('acct-a')).runtime.viewCount, partial);
 
     // 反查失败（绑定歧义）时进度照常推进：进度读的是账号键，MUST NOT 依赖环境解析成功。
     assert.equal(
