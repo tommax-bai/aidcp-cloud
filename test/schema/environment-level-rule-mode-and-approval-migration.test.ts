@@ -18,7 +18,7 @@ import {
 } from '../../src/kernel/facebook-rule-mode-types.js';
 
 const MIGRATION = new URL(
-  '../../migrations/0096_environment_level_rule_mode_and_approval.sql',
+  '../../migrations/0097_environment_level_rule_mode_and_approval.sql',
   import.meta.url,
 );
 
@@ -32,7 +32,7 @@ function stripSqlComments(sql: string): string {
   return sql.split('\n').map((line) => line.replace(/--.*$/, '')).join('\n');
 }
 
-test('0096 是 expand：建环境键表 + 加跳过原因列，不删旧账号键表也不加 NOT NULL', async () => {
+test('0097 是 expand：建环境键表 + 加跳过原因列，不删旧账号键表也不加 NOT NULL', async () => {
   const raw = await readFile(MIGRATION, 'utf8');
   assert.match(raw, /aidcp:kind=expand/);
   assert.match(raw, /aidcp:objects=table:facebook_rule_mode_environment_config,table:environment_comment_approval_policy/);
@@ -54,7 +54,7 @@ test('0096 是 expand：建环境键表 + 加跳过原因列，不删旧账号�
   }
 });
 
-test('0096 新表的定义身份与账号键旧表逐条对齐：DEFAULT 跟当前定义、CHECK 新旧都接受', async () => {
+test('0097 新表的定义身份与账号键旧表逐条对齐：DEFAULT 跟当前定义、CHECK 新旧都接受', async () => {
   const [sql, accountKeyed] = await Promise.all([
     readFile(MIGRATION, 'utf8').then(stripSqlComments),
     readFile(ACCOUNT_KEYED_TWO_TIER, 'utf8').then(stripSqlComments),
@@ -103,7 +103,7 @@ test('0096 新表的定义身份与账号键旧表逐条对齐：DEFAULT 跟当�
   );
 });
 
-test('0096 回填只认唯一绑定：多环境与跨客户争用都不回填', async () => {
+test('0097 回填只认唯一绑定：多环境与跨客户争用都不回填', async () => {
   const sql = stripSqlComments(await readFile(MIGRATION, 'utf8'));
   // 绑定判据：环境个数与归属客户数都按 DISTINCT 计（避免一对多把计数放大成假冲突）。
   const bindings = sql.match(/WITH bindings AS \([\s\S]*?\)\n/g) ?? [];
@@ -120,7 +120,7 @@ test('0096 回填只认唯一绑定：多环境与跨客户争用都不回填', 
   assert.match(sql, /INSERT INTO environment_comment_approval_policy[\s\S]*?ON CONFLICT \(env_key\) DO NOTHING;/);
 });
 
-test('0096 跳过的行写具名原因，三种判据齐全且可被查询出来', async () => {
+test('0097 跳过的行写具名原因，三种判据齐全且可被查询出来', async () => {
   const sql = stripSqlComments(await readFile(MIGRATION, 'utf8'));
   for (const table of ['facebook_rule_mode_config', 'account_comment_approval_policy']) {
     const updates = sql.match(
@@ -132,10 +132,10 @@ test('0096 跳过的行写具名原因，三种判据齐全且可被查询出来
     assert.match(updates![0], /WHEN b\.owner_count > 1\s+THEN 'cross_customer_contention'/);
   }
   // 跳过条数必须被喊出来，MUST NOT 静默。
-  assert.match(sql, /RAISE NOTICE '\[0096\][\s\S]*?未回填 % 行/);
+  assert.match(sql, /RAISE NOTICE '\[0097\][\s\S]*?未回填 % 行/);
 });
 
-test('0096 一个字都不碰进度 / 浏览去重 / 批次终态三张账号键表', async () => {
+test('0097 一个字都不碰进度 / 浏览去重 / 批次终态三张账号键表', async () => {
   const raw = await readFile(MIGRATION, 'utf8');
   const sql = stripSqlComments(raw);
   for (const table of ['facebook_rule_progress', 'facebook_rule_view_fact', 'facebook_rule_batch']) {

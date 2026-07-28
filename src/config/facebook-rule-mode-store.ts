@@ -152,7 +152,7 @@ export class FacebookRuleModeStore {
       throw new SchemaCapabilityError(
         {
           capability: 'facebook_rule_mode_config',
-          sinceVersion: '0096_environment_level_rule_mode_and_approval',
+          sinceVersion: '0097_environment_level_rule_mode_and_approval',
           ddl: [],
         },
         verdict,

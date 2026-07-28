@@ -485,7 +485,7 @@ describe('FacebookRuleModeStore config authority', () => {
     });
     await assert.rejects(
       () => targetStore.init(),
-      /schema_missing_facebook_rule_mode_config_run_0096_environment_level_rule_mode_and_approval/,
+      /schema_missing_facebook_rule_mode_config_run_0097_environment_level_rule_mode_and_approval/,
     );
   });
 

@@ -137,7 +137,7 @@ export class ApprovalPolicyStore {
     // requiredObjects：环境键表由 migrations/0096 建，运行时 DDL 棘轮禁止在 src/ 里再写一段建表。
     await this.schemaEnsurer(this.pool, {
       capability: 'approval_policy',
-      sinceVersion: '0096_environment_level_rule_mode_and_approval',
+      sinceVersion: '0097_environment_level_rule_mode_and_approval',
       ddl: [APPROVAL_POLICY_SCHEMA_SQL],
       requiredObjects: {
         tables: {
