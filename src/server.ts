@@ -6509,7 +6509,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                 approvalMode,
                 manualOverride: false,
                 force: false,
-                fastReturnToFeed: true,
+                // 绝不给自动路径开快返（spec facebook-scheduled-comment「Facebook manual comment fast return」：
+                // when and only when 手动 --feed）。快返 = 回车后 500ms 直接导航回首页、跳过就地确认循环、
+                // 固定回 verification_ambiguous。自动规则批次带上它 ⇒ 结构上永远不可能报「已评论」：
+                // 每次都按「提交但未确认」记账 → 打去重烧掉目标帖、覆盖冷却不落、当日配额不计，
+                // 同一个群的首帖此后只剩 all_deduped（2026-07-28 真机：评论其实已上墙，FB 活动日志可证）。
                 actionGate: (action) => {
                   const decision = (() => {
                     if (!facebookRuleModeStore) {
