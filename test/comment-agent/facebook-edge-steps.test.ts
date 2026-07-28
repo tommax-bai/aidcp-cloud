@@ -7,6 +7,7 @@ import {
   facebookCommentSubmitTimeoutMs,
   FACEBOOK_STEP_TIMEOUT_MS,
   FACEBOOK_OPEN_STEP_TIMEOUT_MS,
+  FACEBOOK_FIRST_POST_OPEN_STEP_TIMEOUT_MS,
   FACEBOOK_COMMENT_SUBMIT_BASE_MS,
   FACEBOOK_COMMENT_SUBMIT_PER_CHAR_MS,
   FACEBOOK_COMMENT_SUBMIT_MAX_MS,
@@ -370,6 +371,22 @@ describe('开帖步超时上界（change fb-comment-open-hydration-window）', (
 
   it('搜索步不跟着放宽：仍用固定 28s（其探测在催拉循环内、预算未变）', () => {
     assert.equal(FACEBOOK_STEP_TIMEOUT_MS, 28_000);
+  });
+
+  it('首帖开帖另有上界：容得下边端 90s 原子上限，且按 URL 开帖预算不动', () => {
+    // 首帖那条在边端是一串串行有界窗（就绪 8s + 首探 ~2s + 四轮下滚 ~12s + 可选二次导航就绪 8s +
+    // 绑定 12s + 身份回读 20s ≈ 62s），外层原子上限因此抬到 90s。云端沿用 45s 会在边端答话前先掐断，
+    // 把一个具名失败改判成 timeout —— 那正是本 change 要消除的那类信息损失。
+    const EDGE_FIRST_POST_CEILING_MS = 90_000;
+    assert.ok(
+      FACEBOOK_FIRST_POST_OPEN_STEP_TIMEOUT_MS >= EDGE_FIRST_POST_CEILING_MS,
+      `首帖开帖步 ${FACEBOOK_FIRST_POST_OPEN_STEP_TIMEOUT_MS}ms 必须 >= 边端原子上限 ${EDGE_FIRST_POST_CEILING_MS}ms`,
+    );
+    assert.ok(
+      FACEBOOK_FIRST_POST_OPEN_STEP_TIMEOUT_MS > FACEBOOK_OPEN_STEP_TIMEOUT_MS,
+      '首帖与按 URL 开帖是两条预算，前者必须更宽',
+    );
+    assert.equal(FACEBOOK_OPEN_STEP_TIMEOUT_MS, 45_000, '按 URL 开帖预算未变，不得跟着放宽');
   });
 
   it('显式注入 stepTimeoutMs 时开帖步按注入值走（测试可快速验超时，不被 45s 默认拖死）', async () => {

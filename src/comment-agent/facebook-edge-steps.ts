@@ -36,6 +36,22 @@ const DEFAULT_MAX_CANDIDATES = 8;
 export const FACEBOOK_OPEN_STEP_TIMEOUT_MS = 45_000;
 
 /**
+ * **空关键词首帖开帖步**的超时（change restore-facebook-post-join-comment-continuity）。
+ *
+ * 首帖开帖与按 URL 开帖是两条预算完全不同的路径，不能共用一个上界。首帖那条在边端是一串**串行**
+ * 有界窗口：群页导航后就绪 8s + 首次探测约 2s + 四轮下滚约 12s + 可选固链导航后就绪 8s +
+ * 评论框绑定 12s + 身份回读 20s ≈ 62s，外层 Native 原子上限因此抬到 90s
+ *（`aidcp-edge/src/native-page-engine/browse-session.ts`）。
+ *
+ * 沿用本文件既有的推导形状：**云端 = 边端原子上限 + 传输余量**，故 105s。仍在评论 keep-open 租约
+ *（6min）与会话空转看门狗内，绝不无界等待；超上限仍诚实 `timeout`。
+ *
+ * 按 URL 开帖（关键词搜索路径）预算未变，继续用 `FACEBOOK_OPEN_STEP_TIMEOUT_MS`（45s）——它的内层
+ * 窗口本次没有放宽，跟着放宽只会推迟一个诚实失败的暴露。
+ */
+export const FACEBOOK_FIRST_POST_OPEN_STEP_TIMEOUT_MS = 105_000;
+
+/**
  * Facebook 评论提交步的**长度感知超时**（change facebook-join-comment-resilience，P0-1）。
  * 边端提交 = 逐字拟人输入（text.length × median ~110ms）+ Enter + 等待（waitAfterSubmit 4s）+ reload +
  * 等待（waitAfterReload 5s）+ own-identity 收窄校验。长评论在慢网下整段耗时会超过固定 28s 步超时 →
@@ -201,6 +217,9 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
   // 开帖步专用上界（边端先答，见 FACEBOOK_OPEN_STEP_TIMEOUT_MS）。与上一行同形：显式注入优先（测试用小值快速验超时），
   // 未注入才取 45s 默认——生产未注入（server.ts 不传 stepTimeoutMs），故实际取 45s。
   const openTimeout = deps.stepTimeoutMs ?? FACEBOOK_OPEN_STEP_TIMEOUT_MS;
+  // 首帖开帖是另一条预算（见 FACEBOOK_FIRST_POST_OPEN_STEP_TIMEOUT_MS）：边端串行窗口更长，
+  // 沿用 45s 会在边端答话前先掐断，把具名失败改判成 timeout。显式注入仍优先（测试用小值）。
+  const firstPostOpenTimeout = deps.stepTimeoutMs ?? FACEBOOK_FIRST_POST_OPEN_STEP_TIMEOUT_MS;
   const maxCandidates = deps.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
   const log = deps.logger ?? console;
   const push = (env: unknown): number => deps.pusher.pushToEdges(env, deps.edgeId);
@@ -301,7 +320,7 @@ export function buildFacebookEdgeSteps(deps: FacebookEdgeStepsDeps): {
             },
           },
         ],
-        openTimeout,
+        firstPostOpenTimeout,
         () => push(makeEnvelope('note.open', randomUUID(), Date.now(), {
           selection: 'first_commentable_group_post',
           container,

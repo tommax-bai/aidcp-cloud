@@ -227,6 +227,16 @@ const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [] };
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
 const VIEW_QUOTA_WAKE_GRACE_MS = 250;
 const FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS = 2;
+/**
+ * 一场之内允许「已在 Reels epoch 却又收到普通 Feed 决定性空/到底证据」而重开 epoch 的次数上限
+ *（change restore-facebook-post-join-comment-continuity）。
+ *
+ * 原先这个次数是 0——解回可授权态的唯一路径是「非空普通 Feed 权威回归」，而首页恒空的账号
+ * 永远等不到它，被送回首页即钉死。放开成无上限又会在「首页空、Reels 也空」时来回弹，
+ * 故取一个小的有界值：既破死锁，又保留原来的「重复空态不刷屏导航」意图。
+ * 用尽后不再重开，交由滚动无目标分支诚实终止本场。
+ */
+const FACEBOOK_REELS_REENTRY_MAX_PER_SESSION = 2;
 /** 评论角色单次 LLM 硬 deadline；不沿用面向慢 thinking 角色的全局 180s。 */
 export const DEFAULT_COMMENT_LLM_TIMEOUT_MS = 30_000;
 /** 整条评论子链的安全兜底；局部 LLM / 人审超时应更早结束。 */
@@ -678,6 +688,8 @@ export class RoleDispatcher {
   private reelsFallbackState: 'idle' | 'pending' | 'confirmed' = 'idle';
   /** pending 期间已真正下发的有界恢复次数；被调度/配额闸抑制不消耗次数。 */
   private reelsFallbackRecoveryAttempts = 0;
+  /** 本场已用掉的 Reels epoch 重开次数（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。 */
+  private reelsReentryCount = 0;
   private readonly isHardPaused: (edgeId?: string) => boolean;
   private readonly edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
   private currentEdgeId?: string;
@@ -2382,6 +2394,7 @@ export class RoleDispatcher {
     this.setupEdgeEventSubscriptions();
     this.sessionActive = true;
     this.sessionStartedAt = this.clock();
+    this.reelsReentryCount = 0; // 重开次数按**场**计（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。
     // 按当前账号刷新单场预算 + 快照（热加载：会话开始即取最新配置）。
     this.budget = this.freshBudget();
     this.budgetInit = { ...this.budget };
@@ -2475,6 +2488,7 @@ export class RoleDispatcher {
     this.setupEdgeEventSubscriptions();
     this.sessionActive = true;
     this.sessionStartedAt = this.clock();
+    this.reelsReentryCount = 0; // 重开次数按**场**计（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。
     // 会话启动现问一次 view 配额（change session-start-quota-honest-sleep）：被拒即当场休眠。
     // 🔴 为什么在 feed.entered 之前：EventBus 进程内同步派发，下游角色链可能在这次 emit 内同步走到
     //    sendCommand ⇒ 刹车装在 emit 之后 = 首批命令从休眠闸底下漏出，且间歇、测试可全绿（同族判例：
@@ -3767,6 +3781,51 @@ export class RoleDispatcher {
         if (payload.reason === 'feed_exhausted' && this.canRefresh() && this.sessionActive) {
           console.log('[RoleDispatcher] feed_exhausted → 立即刷新换新批（避免 idle 空转）');
           this.sendCommand({ action: 'refresh', reason: 'feed_exhausted_refresh', params: { thinkMs: this.thinkNow() } });
+          return;
+        }
+        // 滚动「无目标」必须有处置（change restore-facebook-post-join-comment-continuity）：
+        // 此前 Reels 恢复分支只认 pending 态、feed_continuation_unconfirmed / feed_exhausted 各有自己的分支、
+        // 而下方的通用兜底把 scroll 明确排除在外——于是 confirmed 态账号收到 scroll:no_target 时**一条分支都不命中**：
+        // 既不发命令也不判终态。真机实测由此零命令悬停 60s，直到冷待机重启才终结。
+        // 处置口径：普通 Feed 滚不出任何目标 = 与「确认到底」同等决定性 ⇒ 开启新的 Reels epoch；
+        // 授权确实发不出去（非 Facebook / 已在 pending / 被闸抑制）则诚实结束本场，绝不留悬停。
+        // 只收窄到 Facebook：证据全部来自 Facebook 会话，且小红书侧另有在途 change 正在重整其滚动语义，
+        // 不在本次顺手改它的行为。
+        if (
+          payload.action === 'scroll'
+          && payload.ok === false
+          && typeof payload.reason === 'string'
+          && payload.reason.startsWith('no_target')
+          && this.accountPlatform === 'facebook'
+          && this.sessionActive
+        ) {
+          // 死锁出口（change restore-facebook-post-join-comment-continuity）：把「已确认」解回可授权态
+          // 的唯一路径原本是「非空普通 Feed 权威回归」。首页恒空的账号正是因为首页出不来内容才被切到
+          // Reels，一旦被任何命令送回首页（例如批次收尾那条不带任务标识的滚动），这个条件永远不成立。
+          //
+          // 解锁证据只用**这一条**滚动无目标回执，不用 feed.empty.confirmed：后者在 Reels 期间到达时
+          // 多半是切面之前的迟到旧报告，拿它解锁会把「陈旧空态」误当成「回到空首页」（既有用例正是
+          // 为此立的）。滚动回执是当下这一跳的结果，才是真证据。重开按场有界，防两个空面之间来回弹。
+          if (this.reelsFallbackState === 'confirmed') {
+            if (this.reelsReentryCount < FACEBOOK_REELS_REENTRY_MAX_PER_SESSION) {
+              this.reelsReentryCount += 1;
+              console.log(
+                `[RoleDispatcher] Facebook 已在 Reels epoch 却在普通 Feed 滚不出目标 → 解回可授权态重开`
+                + `（${this.reelsReentryCount}/${FACEBOOK_REELS_REENTRY_MAX_PER_SESSION}）`,
+              );
+              this.resetFacebookReelsFallback();
+            } else {
+              console.warn(
+                `[RoleDispatcher] Facebook 重开 Reels epoch 次数已用尽`
+                + `（${this.reelsReentryCount}/${FACEBOOK_REELS_REENTRY_MAX_PER_SESSION}）→ 不再重开`,
+              );
+            }
+          }
+          if (this.authorizeFacebookReelsFallback('feed_exhausted')) return;
+          console.warn(
+            `[RoleDispatcher] Facebook 滚动无目标且无法给出下一步（reason=${payload.reason}）→ 诚实结束本场，绝不无命令悬停`,
+          );
+          this.endSession('scroll_no_target_without_next_step');
           return;
         }
         // 信息流就地互动目标已从 DOM 消失（change platform-browse-protocol）：no_target(stale) 视快照过期 ⇒ 重扫换批重选，
