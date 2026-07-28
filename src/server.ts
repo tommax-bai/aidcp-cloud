@@ -8922,6 +8922,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           // 对外客户管理（change edge-client-customer-auth）：内部 JWT 保护的 /api/client-users*。同一 store 实例
           // 亦供客户鉴权服务做 auth/scope 读（单实例共享池）。绝不回传 key/hash。
           clientUsers: clientUserStore,
+          slowStartDisabled: process.env.AIDCP_SLOW_START_DISABLED === 'true',
           onClientOffboardCreated: async (offboard) => {
             // 同上：尚未物化的离场没有可派发的账号，等对账循环补。
             if (!offboard.accountId) return;

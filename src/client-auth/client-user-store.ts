@@ -374,6 +374,10 @@ export interface ClientEnvironmentView {
   environmentName: string;
   label: string | null;
   platform: string | null;
+  slowStart: {
+    enabled: boolean;
+    since: number | null;
+  };
   assignees: ClientEnvAssignee[];
   assigneeCount: number;
   cleanup: ClientCleanupReceipt | null;
@@ -401,6 +405,21 @@ export interface ClientEnvironmentView {
     deletedAt: number | null;
   };
 }
+
+export type SetAdminEnvironmentSlowStartResult =
+  | {
+      ok: true;
+      envKey: string;
+      slowStart: ClientEnvironmentView['slowStart'];
+    }
+  | {
+      ok: false;
+      reason:
+        | 'environment_not_found'
+        | 'environment_not_active'
+        | 'platform_unsupported'
+        | 'environment_unavailable';
+    };
 
 export interface ClientEnvironmentSummary {
   activeCount: number;
@@ -1212,6 +1231,66 @@ export class ClientUserStore {
       return this.getEnvironmentSlowStart(userId, key);
     } catch (err) {
       if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
+      throw err;
+    }
+  }
+
+  async setAdminEnvironmentSlowStart(
+    envKey: string,
+    enabled: boolean,
+    now: number,
+  ): Promise<SetAdminEnvironmentSlowStartResult> {
+    const key = (envKey ?? '').trim();
+    if (!key) return { ok: false, reason: 'environment_not_found' };
+    const value = new Date(shanghaiDayStartMs(now));
+    try {
+      const result = await writeWithMirrorBump(
+        this.pool,
+        this.mirrorVersionBumper,
+        'client_environment_slow_start',
+        (q) =>
+          q.query<{ slow_start_since: Date | null }>(
+            `UPDATE client_environments
+                SET slow_start_since=CASE
+                      WHEN $2 THEN COALESCE(slow_start_since, $3)
+                      ELSE NULL
+                    END,
+                    slow_start_initialized=true,
+                    updated_at=now()
+              WHERE env_key=$1
+                AND lifecycle_state='active'
+                AND platform='facebook'
+          RETURNING slow_start_since`,
+            [key, enabled, value],
+          ),
+      );
+      const written = result.rows[0];
+      if (!written) {
+        const { rows } = await this.pool.query<{
+          lifecycle_state: string | null;
+          platform: string | null;
+        }>(
+          `SELECT lifecycle_state, platform
+             FROM client_environments
+            WHERE env_key=$1`,
+          [key],
+        );
+        const current = rows[0];
+        if (!current) return { ok: false, reason: 'environment_not_found' };
+        if (current.lifecycle_state !== 'active') {
+          return { ok: false, reason: 'environment_not_active' };
+        }
+        return { ok: false, reason: 'platform_unsupported' };
+      }
+      await this.refreshEnvironmentSlowStartMirror();
+      const since = written.slow_start_since?.getTime() ?? null;
+      return {
+        ok: true,
+        envKey: key,
+        slowStart: { enabled: since !== null, since },
+      };
+    } catch (err) {
+      if (isMissingTable(err)) return { ok: false, reason: 'environment_unavailable' };
       throw err;
     }
   }
@@ -2298,6 +2377,7 @@ export class ClientUserStore {
         account_operator_alias: string | null;
         account_platform: string | null;
         group_label: string | null;
+        slow_start_since: Date | null;
         binding_observed_at: Date | null;
         lifecycle_state: ClientEnvironmentView['lifecycle']['state'] | null;
         deleted_at: Date | null;
@@ -2341,6 +2421,7 @@ export class ClientUserStore {
                 max(e.account_id) AS account_id,max(a.label) AS account_label,max(a.nickname) AS account_nickname,
                 max(a.operator_alias) AS account_operator_alias,max(a.platform) AS account_platform,
                 max(a.group_label) AS group_label,
+                max(e.slow_start_since) AS slow_start_since,
                 max(e.binding_observed_at) AS binding_observed_at,
                 COALESCE(max(e.lifecycle_state), 'active') AS lifecycle_state,max(e.deleted_at) AS deleted_at,
                 d.request_id,d.requested_by AS deletion_requested_by,d.requested_at AS deletion_requested_at,
@@ -2401,6 +2482,10 @@ export class ClientUserStore {
           environmentName: r.environment_name ?? r.env_key,
           label: r.label,
           platform: r.platform,
+          slowStart: {
+            enabled: r.slow_start_since !== null && r.slow_start_since !== undefined,
+            since: r.slow_start_since?.getTime() ?? null,
+          },
           assignees,
           assigneeCount: assignees.length,
           cleanup,

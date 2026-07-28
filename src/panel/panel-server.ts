@@ -396,6 +396,16 @@ function createRequestHandler(
   config: PanelConfig,
 ): (req: http.IncomingMessage, res: http.ServerResponse) => void {
   const logger = config.logger ?? console;
+  const listPanelEnvironments = async () => {
+    const environments = await deps.clientUsers!.listAllEnvironments();
+    return environments.map((environment) => ({
+      ...environment,
+      slowStart: {
+        ...environment.slowStart,
+        globallyDisabled: deps.slowStartDisabled ?? false,
+      },
+    }));
+  };
 
   // 账号存在性校验（change console-cloud-panel-hardening #28）：pause/resume/风控写端点的底层是
   // ON CONFLICT INSERT，对不存在账号会凭空造幽灵行并「假成功」（违背「绝不静默假成功」红线）。
@@ -773,17 +783,55 @@ function createRequestHandler(
         sendJson(res, 503, { error: 'client_users_unavailable' });
         return;
       }
-      sendJson(res, 200, { environments: await deps.clientUsers.listAllEnvironments() });
+      sendJson(res, 200, { environments: await listPanelEnvironments() });
       return;
     }
 
-    // 环境资产只读管理：历史 lifecycle 如实返回，但 Cloud 不提供环境删除写面。
+    // 环境资产管理：历史 lifecycle 如实返回；慢启动只写 active Facebook 环境的同一环境级事实。
     if (method === 'GET' && url === '/api/environments') {
       if (!deps.clientUsers) {
         sendJson(res, 503, { error: 'client_users_unavailable' });
         return;
       }
-      sendJson(res, 200, { environments: await deps.clientUsers.listAllEnvironments(), asOf: Date.now() });
+      sendJson(res, 200, { environments: await listPanelEnvironments(), asOf: Date.now() });
+      return;
+    }
+    const slowStartMatch = url.match(/^\/api\/environments\/([^/]+)\/slow-start$/);
+    if (method === 'PUT' && slowStartMatch) {
+      if (!deps.clientUsers) {
+        sendJson(res, 503, { error: 'client_users_unavailable' });
+        return;
+      }
+      let envKey: string;
+      let body: unknown;
+      try {
+        envKey = decodeURIComponent(slowStartMatch[1]);
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!isRecord(body) || !hasExactlyKeys(body, ['enabled']) || typeof body.enabled !== 'boolean') {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      const result = await deps.clientUsers.setAdminEnvironmentSlowStart(envKey, body.enabled, Date.now());
+      if (!result.ok) {
+        const status = result.reason === 'environment_not_found'
+          ? 404
+          : result.reason === 'environment_unavailable'
+            ? 503
+            : 409;
+        sendJson(res, status, { error: result.reason });
+        return;
+      }
+      sendJson(res, 200, {
+        envKey: result.envKey,
+        slowStart: {
+          ...result.slowStart,
+          globallyDisabled: deps.slowStartDisabled ?? false,
+        },
+      });
       return;
     }
 

@@ -522,6 +522,8 @@ export interface PanelDeps {
    * 同一 store 实例亦供客户鉴权服务做 auth/scope 读（单实例共享 PG 池）。
   */
   clientUsers?: ClientUserStore;
+  /** Cloud 全局慢启动停用闸的启动真态；仅用于 Panel 诚实投影，不替代环境配置。 */
+  slowStartDisabled?: boolean;
   onClientOffboardCreated?: (offboard: import('../client-auth/client-user-store.js').ClientOffboardView) => Promise<void>;
 }
 

@@ -252,11 +252,13 @@ test('Facebook 规则模式 API 未接 authority 时返回 unavailable，不伪�
   }
 });
 
-test('环境管理 API 展示资产/账号摘要，旧删除路径保持不可用', async () => {
+test('环境管理 API 展示资产/账号摘要并按环境写慢启动，旧删除路径保持不可用', async () => {
+  const writes: Array<{ envKey: string; enabled: boolean; now: number }> = [];
   const clientUsers = {
     async listAllEnvironments() {
       return [{
         envKey: 'profile-1', environmentName: '环境一', label: '环境一', platform: 'xiaohongshu',
+        slowStart: { enabled: true, since: 123 },
         assignees: [{ userId: 'u1', name: '客户甲' }], assigneeCount: 1, cleanup: null,
         account: { accountId: 'default', label: 'default', nickname: null, operatorAlias: null,
           displayName: 'default', platform: 'xiaohongshu', groupLabel: '一组', riskStatus: 'normal',
@@ -269,8 +271,17 @@ test('环境管理 API 展示资产/账号摘要，旧删除路径保持不可�
     async environmentSummariesByAccount() {
       return { default: { activeCount: 1, deletingCount: 0, onlineCount: 0 } };
     },
+    async setAdminEnvironmentSlowStart(envKey: string, enabled: boolean, now: number) {
+      writes.push({ envKey, enabled, now });
+      if (envKey === 'unsupported') return { ok: false as const, reason: 'platform_unsupported' as const };
+      return {
+        ok: true as const,
+        envKey,
+        slowStart: { enabled, since: enabled ? 456 : null },
+      };
+    },
   };
-  const environmentDeps = { ...deps, clientUsers } as unknown as PanelDeps;
+  const environmentDeps = { ...deps, clientUsers, slowStartDisabled: true } as unknown as PanelDeps;
   const h = await startPanelApi(environmentDeps, makeConfig());
   assert.equal(h.started, true);
   const base = `http://127.0.0.1:${h.port}`;
@@ -283,11 +294,43 @@ test('环境管理 API 展示资产/账号摘要，旧删除路径保持不可�
     const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
     const environments = await fetch(`${base}/api/environments`, { headers: auth });
     assert.equal(environments.status, 200);
-    assert.equal(((await environments.json()) as { environments: Array<{ environmentName: string }> })
-      .environments[0]?.environmentName, '环境一');
+    const environmentBody = (await environments.json()) as {
+      environments: Array<{
+        environmentName: string;
+        slowStart: { enabled: boolean; since: number | null; globallyDisabled: boolean };
+      }>;
+    };
+    assert.equal(environmentBody.environments[0]?.environmentName, '环境一');
+    assert.deepEqual(environmentBody.environments[0]?.slowStart, {
+      enabled: true, since: 123, globallyDisabled: true,
+    });
     const accounts = await fetch(`${base}/api/accounts`, { headers: auth });
     assert.deepEqual(((await accounts.json()) as { accounts: Array<{ environmentSummary: unknown }> })
       .accounts[0]?.environmentSummary, { activeCount: 1, deletingCount: 0, onlineCount: 0 });
+
+    const update = await fetch(`${base}/api/environments/profile-1/slow-start`, {
+      method: 'PUT', headers: auth, body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(update.status, 200);
+    assert.deepEqual(await update.json(), {
+      envKey: 'profile-1',
+      slowStart: { enabled: false, since: null, globallyDisabled: true },
+    });
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]?.envKey, 'profile-1');
+    assert.equal(writes[0]?.enabled, false);
+
+    const invalid = await fetch(`${base}/api/environments/profile-1/slow-start`, {
+      method: 'PUT', headers: auth, body: JSON.stringify({ enabled: true, accountId: 'default' }),
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal(writes.length, 1, '额外选择器必须在触达 store 前拒绝');
+
+    const unsupported = await fetch(`${base}/api/environments/unsupported/slow-start`, {
+      method: 'PUT', headers: auth, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(unsupported.status, 409);
+    assert.deepEqual(await unsupported.json(), { error: 'platform_unsupported' });
 
     const removed = await fetch(`${base}/api/environments/profile-1/deletion`, {
       method: 'POST', headers: auth,

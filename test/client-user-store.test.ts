@@ -79,11 +79,16 @@ test('normalizeEnvironmentProxyAuthority accepts explicit states and rejects mal
 });
 
 test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度', async () => {
+  const slowStartSince = new Date('2026-07-28T00:00:00+08:00');
   const pool = fakePool((sql) => {
     assert.match(sql, /FROM client_env_scope/); // 命中聚合 SELECT
     return {
       rows: [
-        { env_key: 'p1', label: '大白', platform: 'xiaohongshu', assignees: [{ userId: 'u1', name: 'A' }] },
+        {
+          env_key: 'p1', label: '大白', platform: 'xiaohongshu',
+          slow_start_since: slowStartSince,
+          assignees: [{ userId: 'u1', name: 'A' }],
+        },
         {
           env_key: 'p2',
           label: null,
@@ -101,6 +106,7 @@ test('listAllEnvironments: 行映射为视图，assigneeCount = assignees 长度
     environmentName: 'p1',
     label: '大白',
     platform: 'xiaohongshu',
+    slowStart: { enabled: true, since: slowStartSince.getTime() },
     assignees: [{ userId: 'u1', name: 'A' }],
     assigneeCount: 1,
     cleanup: null,
@@ -1067,6 +1073,74 @@ test('setEnvironmentSlowStart: ownership-scoped 环境单写，上海日起点�
   assert.equal((write.params?.[2] as Date).getTime(), aligned);
   assert.match(write.sql, /slow_start_initialized=true/);
   assert.doesNotMatch(write.sql, /UPDATE accounts/);
+});
+
+test('setAdminEnvironmentSlowStart: active Facebook 环境幂等开启保留起点，关闭清空并刷新镜像', async () => {
+  const firstNow = Date.parse('2026-07-24T16:30:00+08:00');
+  const laterNow = Date.parse('2026-07-28T10:00:00+08:00');
+  let stored: Date | null = null;
+  let mirrorRefreshes = 0;
+  const pool = fakePool((sql, params) => {
+    if (/UPDATE client_environments/.test(sql)) {
+      assert.match(sql, /COALESCE\(slow_start_since, \$3\)/);
+      assert.match(sql, /lifecycle_state='active'/);
+      assert.match(sql, /platform='facebook'/);
+      const enabled = params?.[1] as boolean;
+      if (enabled) stored ??= params?.[2] as Date;
+      else stored = null;
+      return { rows: [{ slow_start_since: stored }] };
+    }
+    if (/SELECT env_key, account_id, slow_start_since/.test(sql)) {
+      mirrorRefreshes += 1;
+      return { rows: [] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+
+  const enabled = await store.setAdminEnvironmentSlowStart('fb-env', true, firstNow);
+  const originalSince = shanghaiDayStartMs(firstNow);
+  assert.deepEqual(enabled, {
+    ok: true,
+    envKey: 'fb-env',
+    slowStart: { enabled: true, since: originalSince },
+  });
+  assert.equal((stored as Date | null)?.getTime(), originalSince);
+
+  const repeated = await store.setAdminEnvironmentSlowStart('fb-env', true, laterNow);
+  assert.deepEqual(repeated, enabled);
+  assert.equal((stored as Date | null)?.getTime(), originalSince, '重复开启不得重置第 1 天起点');
+
+  assert.deepEqual(await store.setAdminEnvironmentSlowStart('fb-env', false, laterNow), {
+    ok: true,
+    envKey: 'fb-env',
+    slowStart: { enabled: false, since: null },
+  });
+  assert.equal(stored, null);
+  assert.equal(mirrorRefreshes, 3);
+});
+
+test('setAdminEnvironmentSlowStart: 不存在、非 active 与非 Facebook 目标具名拒绝且不刷新镜像', async () => {
+  const cases = [
+    { row: undefined, reason: 'environment_not_found' },
+    { row: { lifecycle_state: 'deleted', platform: 'facebook' }, reason: 'environment_not_active' },
+    { row: { lifecycle_state: 'active', platform: 'xiaohongshu' }, reason: 'platform_unsupported' },
+  ] as const;
+  for (const item of cases) {
+    let refreshAttempted = false;
+    const pool = fakePool((sql) => {
+      if (/UPDATE client_environments/.test(sql)) return { rows: [] };
+      if (/SELECT lifecycle_state, platform/.test(sql)) return { rows: item.row ? [item.row] : [] };
+      if (/SELECT env_key, account_id, slow_start_since/.test(sql)) refreshAttempted = true;
+      return { rows: [] };
+    });
+    const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+    assert.deepEqual(
+      await store.setAdminEnvironmentSlowStart('target-env', true, Date.now()),
+      { ok: false, reason: item.reason },
+    );
+    assert.equal(refreshAttempted, false);
+  }
 });
 
 test('environment slow-start mirror: 换绑即时移除旧账号；重复绑定不任取并标记歧义', async () => {
