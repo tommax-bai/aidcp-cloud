@@ -99,9 +99,13 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   // 降级终态只动 automation 属主的 batch 表。
   assert.ok(automation.includes('0096_facebook_rule_fallback_comment_state'));
   assert.ok(!api.includes('0096_facebook_rule_fallback_comment_state'));
+  // 环境键配置只动 api 属主的两张配置表。
+  assert.ok(api.includes('0097_environment_level_rule_mode_and_approval'));
+  assert.ok(!automation.includes('0097_environment_level_rule_mode_and_approval'));
+  // 每加一条迁移都要在这里同步抬（change environment-level-rule-mode-and-approval → 0097）。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0096_facebook_rule_fallback_comment_state',
+    '0097_environment_level_rule_mode_and_approval',
   );
 });
 

@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0096_facebook_rule_fallback_comment_state';
+export const REQUIRED_SCHEMA_VERSION = '0097_environment_level_rule_mode_and_approval';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -133,8 +133,13 @@ export const REQUIRED_SCHEMA_VERSION = '0096_facebook_rule_fallback_comment_stat
  * `0096_facebook_rule_fallback_comment_state`（automation）再放宽一次 batch 三个动作状态列的 CHECK，
  * 容纳 `confirmed_without_contact`——账号缺联系方式时降级发出的普通评论。同样是硬依赖：缺它时该终态
  * 写不进去，规则轮次终结失败，故 REQUIRED 与 KNOWN_MAX 抬到 0096。
+ *
+ * 注：`0097_environment_level_rule_mode_and_approval`（change environment-level-rule-mode-and-approval）
+ * 给规则模式配置与评论审批覆盖策略加环境键并回填。两个存储的 schema probe **都显式要求 env_key**：
+ * 缺列时它们在 init 处带 version id fail-closed（规则模式=不启用、审批=按来源规则），而不是回落读旧账号列
+ * ——回落等于把「设置跟账号走」这条已被否决的语义偷偷放回来。故 REQUIRED 与 KNOWN_MAX 一并抬到 0097。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0096_facebook_rule_fallback_comment_state';
+export const KNOWN_MAX_SCHEMA_VERSION = '0097_environment_level_rule_mode_and_approval';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 
