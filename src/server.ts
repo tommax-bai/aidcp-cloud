@@ -9164,6 +9164,14 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               }
             },
           },
+          facebookRuleMode: facebookRuleModeStore
+            ? {
+                platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
+                getForAccount: async (accountId) => facebookRuleModeStore.getConfig(accountId),
+                setForAccount: (accountId, enabled, updatedBy) =>
+                  facebookRuleModeStore.setAccount(accountId, { enabled }, updatedBy),
+              }
+            : undefined,
           environmentRisk: {
             platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
             viewForAccount: async (accountId) => {

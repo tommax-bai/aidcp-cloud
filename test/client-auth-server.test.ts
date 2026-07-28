@@ -24,6 +24,11 @@ import type { UiDailyUsagePayload, UiSlowStartPayload } from '../src/comm/protoc
 import type { PendingPublishPreview } from '../src/publish-agent/publish-log-store.js';
 import type { DraftRefinementJob } from '../src/publish-agent/draft-refinement.js';
 import type { ClientEnvironmentScheduleView } from '../src/client-auth/client-environment-schedule.js';
+import {
+  FACEBOOK_RULE_DEFINITION_ID,
+  FACEBOOK_RULE_DEFINITION_VERSION,
+  type FacebookRuleModeConfig,
+} from '../src/kernel/facebook-rule-mode-types.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
@@ -1559,6 +1564,47 @@ function makeSlowStartDep(opts: {
   return { dep, views };
 }
 
+function makeFacebookRuleModeDep(options: {
+  platform?: string;
+  getError?: boolean;
+  setReason?: 'account_not_found' | 'unsupported_platform' | 'invalid_value' | 'no_valid_fields';
+} = {}) {
+  const configs = new Map<string, FacebookRuleModeConfig>();
+  const calls: Array<Record<string, unknown>> = [];
+  const defaultConfig = (accountId: string): FacebookRuleModeConfig => ({
+    accountId,
+    enabled: false,
+    definitionId: FACEBOOK_RULE_DEFINITION_ID,
+    definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+    updatedAt: null,
+    updatedBy: null,
+  });
+  const dep: NonNullable<ClientAuthDeps['facebookRuleMode']> = {
+    platformForAccount(accountId) {
+      calls.push({ action: 'platform', accountId });
+      return options.platform ?? 'facebook';
+    },
+    async getForAccount(accountId) {
+      calls.push({ action: 'get', accountId });
+      if (options.getError) throw new Error('test_get_unavailable');
+      return configs.get(accountId) ?? defaultConfig(accountId);
+    },
+    async setForAccount(accountId, enabled, updatedBy) {
+      calls.push({ action: 'set', accountId, enabled, updatedBy });
+      if (options.setReason) return { ok: false as const, reason: options.setReason };
+      const row: FacebookRuleModeConfig = {
+        ...defaultConfig(accountId),
+        enabled,
+        updatedAt: '2026-07-28T08:00:00.000Z',
+        updatedBy,
+      };
+      configs.set(accountId, row);
+      return { ok: true as const, row };
+    },
+  };
+  return { dep, configs, calls };
+}
+
 /** 建一个拥有环境 p1 的已登录客户（p2 归属他人 u2，用于非所有者 fail-closed）。 */
 function ownerOfP1(): ReturnType<typeof makeFakeStore> {
   const fx = makeFakeStore();
@@ -2314,6 +2360,252 @@ test('慢启动读：controller 取用失败（viewForAccount 返回 null）→ 
       const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
       const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
       assert.equal(res.status, 503);
+    },
+  );
+});
+
+// ── Facebook 规则模式客户开关：envKey 作用域、Cloud 单写、离线可用 ─────────────
+
+test('规则模式读：必须登录；已绑定 Facebook 环境离线可读且只回最小投影', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep, configs, calls } = makeFacebookRuleModeDep();
+  configs.set(ACCT_P1, {
+    accountId: ACCT_P1,
+    enabled: true,
+    definitionId: FACEBOOK_RULE_DEFINITION_ID,
+    definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+    updatedAt: '2026-07-28T08:00:00.000Z',
+    updatedBy: 'panel:admin',
+  });
+  let edgeLookupCalls = 0;
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookRuleMode: dep,
+      resolveEdgeIdForAccount: () => {
+        edgeLookupCalls += 1;
+        return null;
+      },
+    },
+    baseConfig(0),
+    async (base) => {
+      assert.equal((await fetch(`${base}/environments/p1/facebook-rule-mode`)).status, 401);
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/facebook-rule-mode`, { headers });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.doesNotMatch(text, new RegExp(ACCT_P1));
+      assert.doesNotMatch(text, /updatedBy|panel:admin/);
+      const body = JSON.parse(text) as { data: { envKey: string; facebookRuleMode: Record<string, unknown> } };
+      assert.equal(body.data.envKey, 'p1');
+      assert.deepEqual(body.data.facebookRuleMode, {
+        enabled: true,
+        definitionId: FACEBOOK_RULE_DEFINITION_ID,
+        definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+        updatedAt: '2026-07-28T08:00:00.000Z',
+      });
+      assert.equal(edgeLookupCalls, 0, '纯 Cloud 配置读不得要求活 Edge');
+      assert.deepEqual(calls, [
+        { action: 'platform', accountId: ACCT_P1 },
+        { action: 'get', accountId: ACCT_P1 },
+      ]);
+    },
+  );
+});
+
+test('规则模式写：只接受 enabled，写后回读 Cloud 真态且不要求环境内核在线', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep, calls } = makeFacebookRuleModeDep();
+  let edgeLookupCalls = 0;
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookRuleMode: dep,
+      resolveEdgeIdForAccount: () => {
+        edgeLookupCalls += 1;
+        return null;
+      },
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/facebook-rule-mode`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ enabled: true }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json() as {
+        data: { envKey: string; facebookRuleMode: { enabled: boolean; updatedAt: string | null } };
+      };
+      assert.equal(body.data.envKey, 'p1');
+      assert.equal(body.data.facebookRuleMode.enabled, true);
+      assert.equal(body.data.facebookRuleMode.updatedAt, '2026-07-28T08:00:00.000Z');
+      assert.equal(edgeLookupCalls, 0, 'Cloud 配置写不得碰活 Edge 佐证');
+      assert.deepEqual(calls, [
+        { action: 'platform', accountId: ACCT_P1 },
+        { action: 'set', accountId: ACCT_P1, enabled: true, updatedBy: 'client:u1' },
+        { action: 'get', accountId: ACCT_P1 },
+      ]);
+    },
+  );
+});
+
+test('规则模式写：夹带账号、规则或空字段整块拒绝且不调用 store', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep, calls } = makeFacebookRuleModeDep();
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), facebookRuleMode: dep },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const invalidBodies: unknown[] = [
+        {},
+        { enabled: 'true' },
+        { enabled: true, accountId: ACCT_P1 },
+        { enabled: true, definitionVersion: 2 },
+      ];
+      for (const body of invalidBodies) {
+        const res = await fetch(`${base}/environments/p1/facebook-rule-mode`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify(body),
+        });
+        assert.equal(res.status, 422);
+        assert.equal((await res.json() as { error: string }).error, 'validation_failed');
+      }
+      assert.equal(calls.length, 0, '坏 body 必须先于归属/store 解析被拒绝');
+    },
+  );
+});
+
+test('规则模式读写：非所有者、未绑定、绑定冲突与绑定服务失败分别诚实拒绝', async () => {
+  const cases: Array<{
+    name: string;
+    setup(fx: ReturnType<typeof ownerOfP1>): string;
+    expectedStatus: number;
+    expectedError: string;
+  }> = [
+    {
+      name: 'environment_not_owned',
+      setup(fx) {
+        fx.bindings.set('p2', ACCT_P1);
+        return 'p2';
+      },
+      expectedStatus: 403,
+      expectedError: 'environment_not_owned',
+    },
+    {
+      name: 'binding_unknown',
+      setup() {
+        return 'p1';
+      },
+      expectedStatus: 409,
+      expectedError: 'binding_unknown',
+    },
+    {
+      name: 'binding_conflict',
+      setup(fx) {
+        fx.bindings.set('p1', ACCT_P1);
+        fx.bindings.set('p2', ACCT_P1);
+        return 'p1';
+      },
+      expectedStatus: 409,
+      expectedError: 'binding_conflict',
+    },
+    {
+      name: 'binding_unavailable',
+      setup(fx) {
+        (fx.store as unknown as { resolveBoundAccountForEnv: unknown }).resolveBoundAccountForEnv =
+          async () => ({ ok: false as const, reason: 'binding_unavailable' as const });
+        return 'p1';
+      },
+      expectedStatus: 503,
+      expectedError: 'binding_unavailable',
+    },
+  ];
+
+  for (const item of cases) {
+    const fx = ownerOfP1();
+    const envKey = item.setup(fx);
+    const { dep, calls } = makeFacebookRuleModeDep();
+    await withServer(
+      { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter(), facebookRuleMode: dep },
+      baseConfig(0),
+      async (base) => {
+        const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+        const res = await fetch(`${base}/environments/${envKey}/facebook-rule-mode`, { headers });
+        assert.equal(res.status, item.expectedStatus, item.name);
+        const text = await res.text();
+        assert.equal((JSON.parse(text) as { error: string }).error, item.expectedError);
+        assert.doesNotMatch(text, new RegExp(ACCT_P1));
+        assert.equal(calls.length, 0, `${item.name} 不得触达规则 store`);
+      },
+    );
+  }
+});
+
+test('规则模式读写：非 Facebook、组合根缺失与 store 失败均 fail-closed', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookRuleMode: makeFacebookRuleModeDep({ platform: 'xiaohongshu' }).dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      assert.equal((await fetch(`${base}/environments/p1/facebook-rule-mode`, { headers })).status, 409);
+    },
+  );
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      assert.equal((await fetch(`${base}/environments/p1/facebook-rule-mode`, { headers })).status, 503);
+    },
+  );
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookRuleMode: makeFacebookRuleModeDep({ getError: true }).dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      assert.equal((await fetch(`${base}/environments/p1/facebook-rule-mode`, { headers })).status, 503);
+    },
+  );
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookRuleMode: makeFacebookRuleModeDep({ setReason: 'account_not_found' }).dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/facebook-rule-mode`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ enabled: true }),
+      });
+      assert.equal(res.status, 409);
+      assert.equal((await res.json() as { error: string }).error, 'account_not_found');
     },
   );
 });

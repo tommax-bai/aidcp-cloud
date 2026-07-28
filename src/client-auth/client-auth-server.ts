@@ -60,6 +60,10 @@ import {
   type ClientPublishQueueView,
 } from './client-publish-queue.js';
 import type { ClientEnvironmentScheduleView } from './client-environment-schedule.js';
+import type {
+  FacebookRuleModeConfig,
+  SetFacebookRuleModeResult,
+} from '../kernel/facebook-rule-mode-types.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
@@ -136,6 +140,16 @@ export interface ClientAuthDeps {
       { slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> } | null
     >;
   };
+  /** 客户环境的 Facebook 规则模式：账号键只由 Cloud 持久绑定解析，响应使用最小投影。 */
+  facebookRuleMode?: {
+    platformForAccount(accountId: string): string | undefined;
+    getForAccount(accountId: string): Promise<FacebookRuleModeConfig>;
+    setForAccount(
+      accountId: string,
+      enabled: boolean,
+      updatedBy: string,
+    ): Promise<SetFacebookRuleModeResult>;
+  };
   /** 客户环境风险读/恢复：accountId 只在 Cloud 内部流转，HTTP DTO 永不暴露。 */
   environmentRisk?: {
     platformForAccount(accountId: string): string | undefined;
@@ -176,6 +190,13 @@ export interface ClientEnvironmentRiskState {
   status: RiskStatus;
   statusSince: number;
   updatedAt: number;
+}
+
+export interface ClientFacebookRuleModeConfig {
+  enabled: boolean;
+  definitionId: FacebookRuleModeConfig['definitionId'];
+  definitionVersion: FacebookRuleModeConfig['definitionVersion'];
+  updatedAt: string | null;
 }
 
 export type ClientEnvironmentRiskRecoveryOutcome =
@@ -502,6 +523,31 @@ async function resolveOwnedFacebookRiskAccount(
     return null;
   }
   return bound.accountId;
+}
+
+async function resolveOwnedFacebookRuleModeAccount(
+  deps: ClientAuthDeps,
+  res: http.ServerResponse,
+  userId: string,
+  envKey: string,
+): Promise<{ envKey: string; accountId: string } | null> {
+  const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
+  if (!bound) return null;
+  const platform = deps.facebookRuleMode?.platformForAccount(bound.accountId)?.trim().toLowerCase();
+  if (platform !== 'facebook') {
+    sendJson(res, 409, { error: 'unsupported_platform' });
+    return null;
+  }
+  return bound;
+}
+
+function projectClientFacebookRuleMode(config: FacebookRuleModeConfig): ClientFacebookRuleModeConfig {
+  return {
+    enabled: config.enabled,
+    definitionId: config.definitionId,
+    definitionVersion: config.definitionVersion,
+    updatedAt: config.updatedAt,
+  };
 }
 
 function sendEnvironmentRiskRecoveryOutcome(
@@ -1587,6 +1633,87 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         data: { envKey: bound.envKey, ...view },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
+      return;
+    }
+
+    // Facebook 规则模式是账号级 Cloud 配置，但客户只按自己拥有的 envKey 操作：
+    // ownership + 唯一持久绑定 + 平台均由 Cloud 解析，客户端永不提交 accountId。
+    // 这条纯 Cloud 配置链不依赖 Edge / 浏览器在线；未绑定则诚实拒绝，不另造环境影子配置。
+    const facebookRuleModeMatch = /^\/environments\/([^/]+)\/facebook-rule-mode$/.exec(url);
+    if ((method === 'GET' || method === 'PUT') && facebookRuleModeMatch) {
+      if (!deps.facebookRuleMode) {
+        sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(facebookRuleModeMatch[1]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+
+      let enabled: boolean | undefined;
+      if (method === 'PUT') {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const keys = Object.keys(body as object);
+        enabled = (body as { enabled?: unknown }).enabled as boolean | undefined;
+        if (keys.length !== 1 || keys[0] !== 'enabled' || typeof enabled !== 'boolean') {
+          sendJson(res, 422, {
+            error: 'validation_failed',
+            reason: 'only_enabled_boolean_accepted',
+          });
+          return;
+        }
+      }
+
+      const bound = await resolveOwnedFacebookRuleModeAccount(deps, res, userId, envKey);
+      if (!bound) return;
+
+      try {
+        if (method === 'PUT') {
+          const result = await deps.facebookRuleMode.setForAccount(
+            bound.accountId,
+            enabled!,
+            `client:${userId}`,
+          );
+          if (!result.ok) {
+            if (result.reason === 'unsupported_platform') {
+              sendJson(res, 409, { error: 'unsupported_platform' });
+            } else if (result.reason === 'account_not_found') {
+              sendJson(res, 409, { error: 'account_not_found' });
+            } else {
+              sendJson(res, 422, { error: 'validation_failed', reason: result.reason });
+            }
+            return;
+          }
+        }
+        const config = await deps.facebookRuleMode.getForAccount(bound.accountId);
+        sendJson(res, 200, {
+          data: {
+            envKey: bound.envKey,
+            facebookRuleMode: projectClientFacebookRuleMode(config),
+          },
+          meta: { requestId: randomUUID(), asOf: Date.now() },
+        });
+      } catch (error) {
+        logger.warn('[client-auth] Facebook rule mode unavailable', {
+          userId,
+          envKey: bound.envKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
+      }
       return;
     }
 
