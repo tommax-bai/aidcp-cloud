@@ -45,3 +45,18 @@ ALTER TABLE facebook_rule_mode_config
   ALTER COLUMN definition_id SET DEFAULT 'facebook_browse_5_like_1_join_contact_every_2';
 ALTER TABLE facebook_rule_mode_config
   ALTER COLUMN definition_version SET DEFAULT 2;
+
+-- 存量配置行随定义身份一起迁移（README §5 判定：数据回填属 expand）。
+--
+-- 为什么必须回填：DEV 实测有 22 行配置、21 行已开启。开关（enabled）表达的是「这个账号要不要跑
+-- 规则模式」，与节奏版本无关；不迁移的话这些行会停在旧定义，而运行时按新定义跑，配置权威与实际
+-- 行为长期对不上，运营还得逐个重开一次开关。
+--
+-- 只迁配置，**不迁**进度 / 去重事实 / 批次三张运行时表：那三张答的是「这个账号在这套节奏下做到
+-- 哪了」，换节奏后从零重新收集才是正确语义。旧定义下的运行时行原样留作历史，新定义查不到它们；
+-- 其中残留的非终态批次由存储层的重启恢复统一终结（该恢复按部署目标扫描、不按定义号）。
+UPDATE facebook_rule_mode_config
+   SET definition_id = 'facebook_browse_5_like_1_join_contact_every_2',
+       definition_version = 2
+ WHERE definition_id = 'facebook_browse_10_like_1_join_contact_1'
+    OR definition_version = 1;
