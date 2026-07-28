@@ -847,8 +847,10 @@ export class DefaultMessageHandler implements MessageHandler {
         }
         if (emitActionCompleted) this.bus(session).emit('action.completed', { ...result, ts: this.clock() });
         // 真实发生的动作 → 驱动 RiskController 按账号计数（record 订在 interaction.occurred）。
-        // 判据分两轴（change fb-join-quota-counts-attempts）：
-        //   · like/collect/follow/comment/comment_like —— ok=true 才算真实互动（already_followed 是良性 no-op，不计）。
+        // 判据分三轴（change fb-join-quota-counts-attempts）：
+        //   · like/collect/follow/comment_like —— ok=true 才算真实互动（already_followed 是良性 no-op，不计）。
+        //   · comment —— ok=true 或 verification_ambiguous（提交已派发但未确认）消耗一次配额；明确待审批/
+        //     已拒绝不计。计入用量不把 ambiguous 染成成功，action.completed 仍按原终态下游处理。
         //   · join_group —— 配额是**风控预算**，计的是「真的抵达 Facebook 的入群动作」，故判据是 clicked 而非 ok：
         //     clicked=true 是边缘**事后回执**说它在真实页面上点了（既成事实）；ok 只是平台对我们**已做之事**的回答
         //     （批了 / 待管理员审批 / 要答题），MUST NOT 决定这次动作算不算数。于是点了但待审批（ok:false,
@@ -860,9 +862,15 @@ export class DefaultMessageHandler implements MessageHandler {
         //   record 已改为无条件写入既成事实（change risk-record-actuated-facts），账号被限 / 配额已耗尽
         //   时它照样记下（只是返回 false 表示「超策略」）。此前它会在那两种情况下静默丢弃，那是本闸
         //   上一层的同一个病：拿「该不该」去回答「有没有」。
+        const commentSubmittedUnknown =
+          result.action === 'comment' && result.reason === 'verification_ambiguous';
+        const commentKnownNotLive =
+          result.action === 'comment'
+          && (result.reason === 'pending_group_approval' || result.reason === 'comment_rejected');
         if (
-          (result.ok || result.action === 'join_group') &&
+          (result.ok || result.action === 'join_group' || commentSubmittedUnknown) &&
           (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment' || result.action === 'comment_like' || result.action === 'join_group') &&
+          !commentKnownNotLive &&
           result.reason !== 'already_followed' &&
           (result.action !== 'join_group' || (result.clicked === true && result.reason !== 'already_member' && result.reason !== 'observation_only'))
         ) {
@@ -875,8 +883,12 @@ export class DefaultMessageHandler implements MessageHandler {
               ? this.attributeNoteScopedNoteId(session, result, readSurface)
               : session.currentNoteId;
           // 展示账本目标 id（change interaction-feed-enrichment）：关注按作者（currentAuthorId），其余按笔记。
+          // verification_ambiguous 只消费用量，不是平台确认成功；不带 targetId，避免下游 interaction_feed
+          // 把一条 unknown 评论展示成已完成互动。
           const targetId =
-            result.action === 'follow'
+            commentSubmittedUnknown
+              ? undefined
+              : result.action === 'follow'
               ? session.currentAuthorId
               : result.action === 'join_group'
                 ? undefined

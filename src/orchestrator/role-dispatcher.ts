@@ -3723,7 +3723,8 @@ export class RoleDispatcher {
         if (payload.action === 'comment_like' && payload.ok === true) {
           this.consumeBudget('comment_like');
         }
-        // 评论回执：真发成功才扣额（对齐 follow）；无论成功/失败都 emit comment.done 触发「是否进主页评估」
+        // 评论回执：确认成功或已派发未确认都扣额；后者只表示消耗了一次潜在平台写入，仍按 unknown/
+        // comment.done.ok=false 报告。无论成功/失败都 emit comment.done 触发「是否进主页评估」
         // （评论支线唯一出口、每篇只一次），失败不死锁、不兜底滑动（否则把详情页滚走）。
         if (payload.action === 'comment' && this.pendingComment) {
           const pc = this.pendingComment;
@@ -3740,7 +3741,7 @@ export class RoleDispatcher {
           } else {
             this.reportMandatoryCommentOutcome(pc, 'failed', payload.reason ?? 'edge_failed');
           }
-          if (payload.ok === true && !pendingApproval) this.consumeBudget('comment');
+          if ((payload.ok === true || ambiguous) && !pendingApproval) this.consumeBudget('comment');
           this.eventBus.emit('comment.done', {
             noteId: pc.noteId,
             sourcePageType: pc.sourcePageType,

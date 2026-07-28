@@ -222,6 +222,21 @@ test('边缘重发同一信封：outbox 只留一行，计数只增一次', asyn
   assert.equal(controllers.get('acc-1')!.counts().day.like, 1);
 });
 
+test('重复的 submitted-unknown comment dedupe key 只消耗一次评论用量', async () => {
+  const db = new FakeDatabase();
+  const outbox = new FakeOutbox(db);
+  const { accounting, controllers } = makeAccounting(outbox);
+  await accounting.start();
+
+  await accounting.record({ accountId: 'acc-fb', action: 'comment', dedupeKey: 'ambiguous-1:comment' });
+  await accounting.record({ accountId: 'acc-fb', action: 'comment', dedupeKey: 'ambiguous-1:comment' });
+  accounting.stop();
+
+  assert.equal(db.rows.length, 1);
+  assert.equal(db.counters.filter((row) => row.action === 'comment').length, 1);
+  assert.equal(controllers.get('acc-fb')?.counts().day.comment, 1);
+});
+
 test('同一 outbox 行 apply 两次：risk_counters 只增一行（exactly-once 由唯一约束担保）', async () => {
   const db = new FakeDatabase();
   const outbox = new FakeOutbox(db);

@@ -91,6 +91,32 @@ describe('mandatory auto_approve comment terminal outcomes', () => {
     dispatcher.endSession('test');
   });
 
+  it('verification_ambiguous 消耗一次本轮评论预算，但终态仍为 unknown 且不染绿', () => {
+    const { dispatcher, outcomes } = makeDispatcher();
+    const done: CommentDonePayload[] = [];
+    dispatcher.bus.on('comment.done', (payload) => { done.push(payload); });
+    approve(dispatcher);
+
+    dispatcher.bus.emit('action.completed', {
+      action: 'comment',
+      ok: false,
+      reason: 'verification_ambiguous',
+      ts: Date.now(),
+    });
+    dispatcher.bus.emit('action.completed', {
+      action: 'comment',
+      ok: false,
+      reason: 'verification_ambiguous',
+      ts: Date.now(),
+    });
+
+    assert.equal(dispatcher.sessionUsageSnapshot().totals.comments, 1, '重复终态不重复消耗本轮预算');
+    assert.deepEqual(outcomes.map((o) => o.outcome), ['unknown']);
+    assert.equal(done[0]?.ok, false);
+    assert.equal(done[0]?.reason, 'verification_ambiguous');
+    dispatcher.endSession('test');
+  });
+
   it('预授权后最终风控拒绝 → 不下发评论并回 failed 的精确原因', () => {
     const { dispatcher, commands, outcomes } = makeDispatcher({ risk: { allowed: false, reason: 'quota:minute' } });
     approve(dispatcher);
