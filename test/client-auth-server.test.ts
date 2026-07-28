@@ -47,8 +47,13 @@ function makeFakeStore(): {
   registered: Set<string>;
   /** envKey → 绑定的真实平台账号 id（change curated-envkey-account-binding）。 */
   bindings: Map<string, string>;
+  /** envKey → 环境权威平台覆盖（change environment-level-rule-mode-and-approval）。 */
+  envPlatforms: Map<string, string | null>;
   /** envKey → 环境级慢启动起点。 */
   slowStarts: Map<string, number | null>;
+  /** 创建当刻落库的环境规则模式 / 审批覆盖（change environment-level-rule-mode-and-approval）。 */
+  provisionedRuleModes: Map<string, boolean>;
+  provisionedApprovalModes: Map<string, string>;
   slowStartWrites: { envKey: string; enabled: boolean }[];
   proxyAuthorities: Map<string, EnvironmentProxyAuthorityRecord>;
   cleanupGrants: Map<string, { edgeId: string; jtiHash: string; expiresAt: number; used: boolean }>;
@@ -58,7 +63,12 @@ function makeFakeStore(): {
   const offboards = new Map<string, ClientOffboardView>();
   const registered = new Set<string>();
   const bindings = new Map<string, string>();
+  /** envKey → 环境权威平台覆盖（未设即取 client_env_scope 行上的 platform）。 */
+  const envPlatforms = new Map<string, string | null>();
   const slowStarts = new Map<string, number | null>();
+  /** 创建当刻写下的两项环境配置（change environment-level-rule-mode-and-approval）。 */
+  const provisionedRuleModes = new Map<string, boolean>();
+  const provisionedApprovalModes = new Map<string, string>();
   const slowStartWrites: { envKey: string; enabled: boolean }[] = [];
   const proxyAuthorities = new Map<string, EnvironmentProxyAuthorityRecord>();
   const cleanupGrants = new Map<string, { edgeId: string; jtiHash: string; expiresAt: number; used: boolean }>();
@@ -110,6 +120,23 @@ function makeFakeStore(): {
       if (!bound) return { ok: false as const, reason: 'binding_unknown' as const };
       if (contendedAcrossCustomers(bound, userId)) return { ok: false as const, reason: 'binding_conflict' as const };
       return { ok: true as const, accountId: bound };
+    },
+    /**
+     * 环境级配置定位（change environment-level-rule-mode-and-approval）：只核 ownership 与
+     * **环境自己的平台**，不要求存在账号绑定；绑定三态如实带出。
+     */
+    async getOwnedEnvironment(userId: string, envKey: string) {
+      const key = (envKey ?? '').trim();
+      const row = (scope.get(userId) ?? []).find((item) => item.envKey === key);
+      if (!key || !row) return { ok: false as const, reason: 'environment_not_owned' as const };
+      const platform = envPlatforms.has(key) ? envPlatforms.get(key)! : (row.platform ?? null);
+      const bound = bindings.get(key);
+      if (!bound) return { ok: true as const, envKey: key, platform, binding: 'binding_unknown' as const };
+      const duplicates = [...bindings.values()].filter((accountId) => accountId === bound).length;
+      if (duplicates > 1 || contendedAcrossCustomers(bound, userId)) {
+        return { ok: true as const, envKey: key, platform, binding: 'binding_conflict' as const };
+      }
+      return { ok: true as const, envKey: key, platform, binding: 'bound' as const, accountId: bound };
     },
     async getEnvironmentSlowStart(userId: string, envKey: string) {
       const key = (envKey ?? '').trim();
@@ -185,7 +212,8 @@ function makeFakeStore(): {
     },
     async completeProvisioningIntent(userId: string, input: {
       intentId: string; proof: string; envKey: string; label?: string | null; platform?: string | null;
-      slowStartEnabled?: boolean; proxyAuthority: EnvironmentProxyAuthorityValue;
+      slowStartEnabled?: boolean; facebookRuleModeEnabled?: boolean; commentApprovalMode?: string;
+      proxyAuthority: EnvironmentProxyAuthorityValue;
     }) {
       const intent = intents.get(input.intentId);
       if (!intent || intent.userId !== userId || intent.proof !== input.proof) {
@@ -194,8 +222,15 @@ function makeFakeStore(): {
       if (intent.envKey && intent.envKey !== input.envKey) {
         return { ok: false as const, reason: 'intent_target_mismatch' as const };
       }
-      if (input.slowStartEnabled === true && input.platform !== 'facebook') {
+      // 三条创建意图闸与真 store 同口径（change environment-level-rule-mode-and-approval）。
+      const facebookOnlyIntent = input.slowStartEnabled === true
+        || input.facebookRuleModeEnabled === true
+        || input.commentApprovalMode !== undefined;
+      if (facebookOnlyIntent && input.platform !== 'facebook') {
         return { ok: false as const, reason: 'invalid_environment' as const };
+      }
+      if (input.slowStartEnabled === true && input.facebookRuleModeEnabled === true) {
+        return { ok: false as const, reason: 'conflicting_run_mode' as const };
       }
       if (intent.envKey === input.envKey) {
         const existingAuthority = proxyAuthorities.get(input.envKey);
@@ -215,6 +250,10 @@ function makeFakeStore(): {
         platform: input.platform ?? null, source: 'admin', assignedAt: Date.now() };
       scope.set(userId, [...(scope.get(userId) ?? []), environment]);
       slowStarts.set(input.envKey, input.slowStartEnabled === true ? Date.now() : null);
+      if (input.facebookRuleModeEnabled === true) provisionedRuleModes.set(input.envKey, true);
+      if (input.commentApprovalMode !== undefined) {
+        provisionedApprovalModes.set(input.envKey, input.commentApprovalMode);
+      }
       proxyAuthorities.set(input.envKey, {
         envKey: input.envKey,
         authority: input.proxyAuthority,
@@ -269,7 +308,10 @@ function makeFakeStore(): {
     offboards,
     registered,
     bindings,
+    envPlatforms,
     slowStarts,
+    provisionedRuleModes,
+    provisionedApprovalModes,
     slowStartWrites,
     proxyAuthorities,
     cleanupGrants,
@@ -822,6 +864,282 @@ test('官方新建 intent 可原子完成当前客户归属，重试幂等且旧
       });
       assert.equal(attach.status, 403);
       assert.deepEqual(await attach.json(), { error: 'forbidden', reason: 'environment_assignment_admin_only' });
+    },
+  );
+});
+
+/**
+ * change environment-level-rule-mode-and-approval —— 归属完成接口的线上契约扩展。
+ * 白名单只多两个可选键；平台门禁、枚举合法与互斥都在注册环境前判定。
+ */
+test('归属完成：两个新可选字段落到环境上；白名单外的键、非法枚举与互斥意图整请求拒绝', async () => {
+  const fx = makeFakeStore();
+  fx.users.set('alice', { userId: 'user-a', key: 'ck_alice', status: 'enabled' });
+  await withServer(
+    { store: fx.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const login = await (await fetch(`${base}/login`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'alice', key: 'ck_alice' }) })).json() as { token: string };
+      const headers = { authorization: `Bearer ${login.token}`, 'content-type': 'application/json' };
+      const newIntent = async () => (await (await fetch(`${base}/environment-provisioning/intents`, {
+        method: 'POST', headers, body: '{}',
+      })).json()) as { data: { intentId: string; proof: string } };
+
+      // 规则 + 免审：都落到环境上，慢启动保持关闭（三选一互斥的「规则」分支）。
+      const ruleIntent = await newIntent();
+      const ruleRun = await fetch(`${base}/environment-provisioning/complete`, {
+        method: 'POST', headers, body: JSON.stringify({
+          intentId: ruleIntent.data.intentId, proof: ruleIntent.data.proof,
+          envKey: 'fb-rule', label: '', platform: 'facebook',
+          facebookRuleModeEnabled: true, commentApprovalMode: 'auto_approve_all',
+          proxyAuthority: { state: 'no_proxy' },
+        }),
+      });
+      assert.equal(ruleRun.status, 201);
+      assert.equal(fx.provisionedRuleModes.get('fb-rule'), true);
+      assert.equal(fx.provisionedApprovalModes.get('fb-rule'), 'auto_approve_all');
+      assert.equal(fx.slowStarts.get('fb-rule'), null, '选规则时 MUST NOT 同时开慢启动');
+
+      // 互斥：同时提交慢启动与规则模式 → 整请求拒绝，环境不登记。
+      const clash = await newIntent();
+      const clashed = await fetch(`${base}/environment-provisioning/complete`, {
+        method: 'POST', headers, body: JSON.stringify({
+          intentId: clash.data.intentId, proof: clash.data.proof,
+          envKey: 'fb-clash', label: '', platform: 'facebook',
+          slowStartEnabled: true, facebookRuleModeEnabled: true,
+          proxyAuthority: { state: 'no_proxy' },
+        }),
+      });
+      assert.equal(clashed.status, 400);
+      assert.equal(((await clashed.json()) as { error: string }).error, 'conflicting_run_mode');
+      assert.equal(fx.registered.has('fb-clash'), false);
+
+      // 非 Facebook 平台携带任一新字段 → 注册前拒绝。
+      for (const extra of [{ facebookRuleModeEnabled: true }, { commentApprovalMode: 'auto_approve_all' }]) {
+        const intent = await newIntent();
+        const res = await fetch(`${base}/environment-provisioning/complete`, {
+          method: 'POST', headers, body: JSON.stringify({
+            intentId: intent.data.intentId, proof: intent.data.proof,
+            envKey: 'xhs-reject', label: '', platform: 'xiaohongshu',
+            ...extra, proxyAuthority: { state: 'no_proxy' },
+          }),
+        });
+        assert.equal(res.status, 400);
+        assert.equal(fx.registered.has('xhs-reject'), false);
+      }
+
+      // 非法枚举 / 非布尔 / 白名单之外的键：一律整块拒绝且不写入。
+      const badBodies: Record<string, unknown>[] = [
+        { commentApprovalMode: 'auto_approve' },
+        { facebookRuleModeEnabled: 'true' },
+        { commentApprovalMode: 'auto_approve_all', accountId: 'acct-1' },
+      ];
+      for (const extra of badBodies) {
+        const intent = await newIntent();
+        const res = await fetch(`${base}/environment-provisioning/complete`, {
+          method: 'POST', headers, body: JSON.stringify({
+            intentId: intent.data.intentId, proof: intent.data.proof,
+            envKey: 'fb-bad', label: '', platform: 'facebook',
+            ...extra, proxyAuthority: { state: 'no_proxy' },
+          }),
+        });
+        assert.equal(res.status, 400, JSON.stringify(extra));
+        assert.equal(fx.registered.has('fb-bad'), false, JSON.stringify(extra));
+      }
+
+      // 省略两个字段的旧客户端请求继续成功，一项配置都不写。
+      const legacy = await newIntent();
+      const legacyRun = await fetch(`${base}/environment-provisioning/complete`, {
+        method: 'POST', headers, body: JSON.stringify({
+          intentId: legacy.data.intentId, proof: legacy.data.proof,
+          envKey: 'fb-legacy', label: '', platform: 'facebook',
+          proxyAuthority: { state: 'no_proxy' },
+        }),
+      });
+      assert.equal(legacyRun.status, 201);
+      assert.equal(fx.provisionedRuleModes.has('fb-legacy'), false);
+      assert.equal(fx.provisionedApprovalModes.has('fb-legacy'), false);
+    },
+  );
+});
+
+// ── 客户对自有环境的评论审批覆盖（全局免审）读写 ─────────────────────────────
+
+/** 环境评论审批策略假体：只按 (userId, envKey) 归属判定，绝不接受账号选择器。 */
+function makeCommentApprovalDep(options: { unavailable?: boolean } = {}) {
+  const rows = new Map<string, { mode: 'source_rules' | 'auto_approve_all'; updatedBy: string; updatedAt: number }>();
+  const calls: Array<Record<string, unknown>> = [];
+  const owned = (userId: string, envKey: string) => userId === 'u1' && envKey === 'p1';
+  const project = (envKey: string, boundAccountId: string | null) => {
+    const row = rows.get(envKey);
+    return {
+      envKey,
+      mode: row?.mode ?? ('source_rules' as const),
+      configured: row != null,
+      updatedBy: row?.updatedBy ?? null,
+      updatedAt: row?.updatedAt ?? null,
+      boundAccountId,
+    };
+  };
+  const dep: NonNullable<ClientAuthDeps['commentApprovalPolicy']> = {
+    async getForOwnedEnv(userId, envKey) {
+      calls.push({ action: 'get', userId, envKey });
+      if (options.unavailable) return { ok: false as const, reason: 'policy_unavailable' as const };
+      if (!owned(userId, envKey)) return { ok: false as const, reason: 'environment_not_owned' as const };
+      return { ok: true as const, row: project(envKey, null) };
+    },
+    async setForOwnedEnv(userId, envKey, mode, updatedBy) {
+      calls.push({ action: 'set', userId, envKey, mode, updatedBy });
+      if (options.unavailable) return { ok: false as const, reason: 'policy_unavailable' as const };
+      if (!owned(userId, envKey)) return { ok: false as const, reason: 'environment_not_owned' as const };
+      rows.set(envKey, { mode, updatedBy, updatedAt: 1_700_000_000_000 });
+      return { ok: true as const, row: project(envKey, null) };
+    },
+  };
+  return { dep, rows, calls };
+}
+
+test('免审写：未绑定账号也能保存，回包标注没有执行对象且署名与管理员可区分', async () => {
+  const fx = ownerOfP1();
+  const { dep, rows, calls } = makeCommentApprovalDep();
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      commentApprovalPolicy: dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      assert.equal((await fetch(`${base}/environments/p1/comment-approval`)).status, 401);
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/comment-approval`, {
+        method: 'PUT', headers, body: JSON.stringify({ mode: 'auto_approve_all' }),
+      });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      const body = JSON.parse(text) as {
+        data: { envKey: string; commentApproval: Record<string, unknown> };
+      };
+      assert.equal(body.data.envKey, 'p1');
+      assert.deepEqual(body.data.commentApproval, {
+        mode: 'auto_approve_all',
+        configured: true,
+        updatedAt: 1_700_000_000_000,
+        hasExecutionTarget: false,
+      });
+      assert.doesNotMatch(text, new RegExp(ACCT_P1));
+      assert.doesNotMatch(text, /updatedBy/, '回包 MUST NOT 泄露内部操作人');
+      assert.equal(rows.get('p1')?.updatedBy, 'client:u1', '客户署名 MUST NOT 复用管理员的 panel: 前缀');
+      assert.deepEqual(calls, [
+        { action: 'set', userId: 'u1', envKey: 'p1', mode: 'auto_approve_all', updatedBy: 'client:u1' },
+      ]);
+
+      // 读回同一真态；同样不带账号身份。
+      const read = await fetch(`${base}/environments/p1/comment-approval`, { headers });
+      assert.equal(read.status, 200);
+      assert.equal(
+        ((await read.json()) as { data: { commentApproval: { mode: string } } }).data.commentApproval.mode,
+        'auto_approve_all',
+      );
+    },
+  );
+});
+
+test('免审写：夹带账号选择器或任何其它键整块拒绝，且先于归属解析', async () => {
+  const fx = ownerOfP1();
+  const { dep, calls } = makeCommentApprovalDep();
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      commentApprovalPolicy: dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const badBodies: unknown[] = [
+        {},
+        { mode: 'auto_approve' },
+        { mode: 'auto_approve_all', accountId: ACCT_P1 },
+        { mode: 'auto_approve_all', updatedBy: 'panel:admin' },
+        { accountId: ACCT_P1 },
+      ];
+      for (const body of badBodies) {
+        const res = await fetch(`${base}/environments/p1/comment-approval`, {
+          method: 'PUT', headers, body: JSON.stringify(body),
+        });
+        assert.equal(res.status, 422, JSON.stringify(body));
+        assert.equal((await res.json() as { error: string }).error, 'validation_failed');
+      }
+      // 非所有者环境也用坏 body 打一次：同样 422，MUST NOT 因归属差异漏出状态码侧信道。
+      const leak = await fetch(`${base}/environments/p2/comment-approval`, {
+        method: 'PUT', headers, body: JSON.stringify({ mode: 'auto_approve_all', accountId: ACCT_P1 }),
+      });
+      assert.equal(leak.status, 422);
+      assert.equal(calls.length, 0, '坏 body MUST 先于归属/store 解析被拒绝');
+    },
+  );
+});
+
+test('免审读写：非所有者 fail-closed 且不泄露策略；策略不可读返回 503 而非「按来源规则」', async () => {
+  const fx = ownerOfP1();
+  const { dep, calls } = makeCommentApprovalDep();
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      commentApprovalPolicy: dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      for (const init of [
+        { headers },
+        { method: 'PUT', headers, body: JSON.stringify({ mode: 'auto_approve_all' }) },
+      ]) {
+        const res = await fetch(`${base}/environments/p2/comment-approval`, init as RequestInit);
+        assert.equal(res.status, 404);
+        const text = await res.text();
+        assert.equal((JSON.parse(text) as { error: string }).error, 'environment_not_found');
+        assert.doesNotMatch(text, /source_rules|auto_approve_all/, '非所有者 MUST NOT 看到现有策略');
+        assert.doesNotMatch(text, new RegExp(ACCT_P1));
+      }
+      assert.equal(calls.filter((call) => call.action === 'set').length, 1,
+        '非所有者的写请求打到 store 也必须被 store 的同语句 ownership 挡住');
+    },
+  );
+
+  const unavailable = ownerOfP1();
+  await withServer(
+    {
+      store: unavailable.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      commentApprovalPolicy: makeCommentApprovalDep({ unavailable: true }).dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(unavailable, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/comment-approval`, { headers });
+      assert.equal(res.status, 503);
+      const text = await res.text();
+      assert.equal((JSON.parse(text) as { error: string }).error, 'comment_approval_policy_unavailable');
+      assert.doesNotMatch(text, /source_rules/, '读不到 MUST NOT 伪装成「按来源规则」');
+    },
+  );
+
+  // 组合根未接线时诚实 503，MUST NOT 假装成「未配置 = 按来源规则」。
+  const unwired = ownerOfP1();
+  await withServer(
+    { store: unwired.store, revocation: new TokenRevocationStore(), rateLimiter: new LoginRateLimiter() },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(unwired, {} as ClientAuthDeps, base);
+      assert.equal((await fetch(`${base}/environments/p1/comment-approval`, { headers })).status, 503);
     },
   );
 });
@@ -1564,15 +1882,19 @@ function makeSlowStartDep(opts: {
   return { dep, views };
 }
 
+/**
+ * 规则模式配置假体（change environment-level-rule-mode-and-approval：**环境键**）。
+ * 平台判定已经上移到 store.getOwnedEnvironment，本假体不再提供 platformForAccount。
+ */
 function makeFacebookRuleModeDep(options: {
-  platform?: string;
   getError?: boolean;
-  setReason?: 'account_not_found' | 'unsupported_platform' | 'invalid_value' | 'no_valid_fields';
+  setReason?: 'environment_not_found' | 'environment_conflict' | 'environment_unavailable'
+    | 'unsupported_platform' | 'invalid_value' | 'no_valid_fields';
 } = {}) {
   const configs = new Map<string, FacebookRuleModeConfig>();
   const calls: Array<Record<string, unknown>> = [];
-  const defaultConfig = (accountId: string): FacebookRuleModeConfig => ({
-    accountId,
+  const defaultConfig = (envKey: string): FacebookRuleModeConfig => ({
+    envKey,
     enabled: false,
     definitionId: FACEBOOK_RULE_DEFINITION_ID,
     definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
@@ -1581,25 +1903,21 @@ function makeFacebookRuleModeDep(options: {
     updatedBy: null,
   });
   const dep: NonNullable<ClientAuthDeps['facebookRuleMode']> = {
-    platformForAccount(accountId) {
-      calls.push({ action: 'platform', accountId });
-      return options.platform ?? 'facebook';
-    },
-    async getForAccount(accountId) {
-      calls.push({ action: 'get', accountId });
+    async getForEnv(envKey) {
+      calls.push({ action: 'get', envKey });
       if (options.getError) throw new Error('test_get_unavailable');
-      return configs.get(accountId) ?? defaultConfig(accountId);
+      return configs.get(envKey) ?? defaultConfig(envKey);
     },
-    async setForAccount(accountId, enabled, updatedBy) {
-      calls.push({ action: 'set', accountId, enabled, updatedBy });
+    async setForEnv(envKey, enabled, updatedBy) {
+      calls.push({ action: 'set', envKey, enabled, updatedBy });
       if (options.setReason) return { ok: false as const, reason: options.setReason };
       const row: FacebookRuleModeConfig = {
-        ...defaultConfig(accountId),
+        ...defaultConfig(envKey),
         enabled,
         updatedAt: '2026-07-28T08:00:00.000Z',
         updatedBy,
       };
-      configs.set(accountId, row);
+      configs.set(envKey, row);
       return { ok: true as const, row };
     },
   };
@@ -2371,8 +2689,8 @@ test('规则模式读：必须登录；已绑定 Facebook 环境离线可读且�
   const fx = ownerOfP1();
   fx.bindings.set('p1', ACCT_P1);
   const { dep, configs, calls } = makeFacebookRuleModeDep();
-  configs.set(ACCT_P1, {
-    accountId: ACCT_P1,
+  configs.set('p1', {
+    envKey: 'p1',
     enabled: true,
     definitionId: FACEBOOK_RULE_DEFINITION_ID,
     definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
@@ -2401,7 +2719,9 @@ test('规则模式读：必须登录；已绑定 Facebook 环境离线可读且�
       const text = await res.text();
       assert.doesNotMatch(text, new RegExp(ACCT_P1));
       assert.doesNotMatch(text, /updatedBy|panel:admin/);
-      const body = JSON.parse(text) as { data: { envKey: string; facebookRuleMode: Record<string, unknown> } };
+      const body = JSON.parse(text) as {
+        data: { envKey: string; binding: string; facebookRuleMode: Record<string, unknown> };
+      };
       assert.equal(body.data.envKey, 'p1');
       assert.deepEqual(body.data.facebookRuleMode, {
         enabled: true,
@@ -2410,10 +2730,8 @@ test('规则模式读：必须登录；已绑定 Facebook 环境离线可读且�
         updatedAt: '2026-07-28T08:00:00.000Z',
       });
       assert.equal(edgeLookupCalls, 0, '纯 Cloud 配置读不得要求活 Edge');
-      assert.deepEqual(calls, [
-        { action: 'platform', accountId: ACCT_P1 },
-        { action: 'get', accountId: ACCT_P1 },
-      ]);
+      assert.deepEqual(calls, [{ action: 'get', envKey: 'p1' }]);
+      assert.equal(body.data.binding, 'bound');
     },
   );
 });
@@ -2451,9 +2769,8 @@ test('规则模式写：只接受 enabled，写后回读 Cloud 真态且不要�
       assert.equal(body.data.facebookRuleMode.updatedAt, '2026-07-28T08:00:00.000Z');
       assert.equal(edgeLookupCalls, 0, 'Cloud 配置写不得碰活 Edge 佐证');
       assert.deepEqual(calls, [
-        { action: 'platform', accountId: ACCT_P1 },
-        { action: 'set', accountId: ACCT_P1, enabled: true, updatedBy: 'client:u1' },
-        { action: 'get', accountId: ACCT_P1 },
+        { action: 'set', envKey: 'p1', enabled: true, updatedBy: 'client:u1' },
+        { action: 'get', envKey: 'p1' },
       ]);
     },
   );
@@ -2488,8 +2805,10 @@ test('规则模式写：夹带账号、规则或空字段整块拒绝且不调�
   );
 });
 
-test('规则模式读写：非所有者、未绑定、绑定冲突与绑定服务失败分别诚实拒绝', async () => {
-  const cases: Array<{
+test('规则模式读写：非所有者与注册表不可读 fail-closed；未绑定 / 绑定冲突仍可配置但如实标注', async () => {
+  // change environment-level-rule-mode-and-approval：环境配置不以「此刻有没有执行对象」为前置。
+  // 只有 ownership 与注册表可读这两件事失败才拒绝；绑定三态只影响回包的诚实标注。
+  const rejections: Array<{
     name: string;
     setup(fx: ReturnType<typeof ownerOfP1>): string;
     expectedStatus: number;
@@ -2505,27 +2824,9 @@ test('规则模式读写：非所有者、未绑定、绑定冲突与绑定服�
       expectedError: 'environment_not_owned',
     },
     {
-      name: 'binding_unknown',
-      setup() {
-        return 'p1';
-      },
-      expectedStatus: 409,
-      expectedError: 'binding_unknown',
-    },
-    {
-      name: 'binding_conflict',
-      setup(fx) {
-        fx.bindings.set('p1', ACCT_P1);
-        fx.bindings.set('p2', ACCT_P1);
-        return 'p1';
-      },
-      expectedStatus: 409,
-      expectedError: 'binding_conflict',
-    },
-    {
       name: 'binding_unavailable',
       setup(fx) {
-        (fx.store as unknown as { resolveBoundAccountForEnv: unknown }).resolveBoundAccountForEnv =
+        (fx.store as unknown as { getOwnedEnvironment: unknown }).getOwnedEnvironment =
           async () => ({ ok: false as const, reason: 'binding_unavailable' as const });
         return 'p1';
       },
@@ -2534,7 +2835,7 @@ test('规则模式读写：非所有者、未绑定、绑定冲突与绑定服�
     },
   ];
 
-  for (const item of cases) {
+  for (const item of rejections) {
     const fx = ownerOfP1();
     const envKey = item.setup(fx);
     const { dep, calls } = makeFacebookRuleModeDep();
@@ -2552,21 +2853,78 @@ test('规则模式读写：非所有者、未绑定、绑定冲突与绑定服�
       },
     );
   }
+
+  // 未绑定账号的自有环境：写入照常落库，回包标注 binding_unknown，且绝不出现账号身份。
+  const unbound = ownerOfP1();
+  const unboundDep = makeFacebookRuleModeDep();
+  await withServer(
+    {
+      store: unbound.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookRuleMode: unboundDep.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(unbound, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/facebook-rule-mode`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ enabled: true }),
+      });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      const body = JSON.parse(text) as {
+        data: { envKey: string; binding: string; facebookRuleMode: { enabled: boolean } };
+      };
+      assert.equal(body.data.binding, 'binding_unknown');
+      assert.equal(body.data.facebookRuleMode.enabled, true);
+      assert.doesNotMatch(text, /accountId/);
+      assert.equal(unboundDep.configs.get('p1')?.enabled, true);
+    },
+  );
+
+  // 绑定冲突：配置仍属于环境、仍可读写，但回包 MUST 标注冲突而不是假装有唯一执行对象。
+  const conflicted = ownerOfP1();
+  conflicted.bindings.set('p1', ACCT_P1);
+  conflicted.bindings.set('p2', ACCT_P1);
+  const conflictedDep = makeFacebookRuleModeDep();
+  await withServer(
+    {
+      store: conflicted.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookRuleMode: conflictedDep.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(conflicted, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/facebook-rule-mode`, { headers });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.equal((JSON.parse(text) as { data: { binding: string } }).data.binding, 'binding_conflict');
+      assert.doesNotMatch(text, new RegExp(ACCT_P1));
+    },
+  );
 });
 
 test('规则模式读写：非 Facebook、组合根缺失与 store 失败均 fail-closed', async () => {
   const fx = ownerOfP1();
   fx.bindings.set('p1', ACCT_P1);
+  // 平台判据取**环境自己的权威字段**（change environment-level-rule-mode-and-approval），不再经账号。
+  const nonFacebook = ownerOfP1();
+  nonFacebook.bindings.set('p1', ACCT_P1);
+  nonFacebook.envPlatforms.set('p1', 'xiaohongshu');
   await withServer(
     {
-      store: fx.store,
+      store: nonFacebook.store,
       revocation: new TokenRevocationStore(),
       rateLimiter: new LoginRateLimiter(),
-      facebookRuleMode: makeFacebookRuleModeDep({ platform: 'xiaohongshu' }).dep,
+      facebookRuleMode: makeFacebookRuleModeDep().dep,
     },
     baseConfig(0),
     async (base) => {
-      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const headers = await loggedIn(nonFacebook, {} as ClientAuthDeps, base);
       assert.equal((await fetch(`${base}/environments/p1/facebook-rule-mode`, { headers })).status, 409);
     },
   );
@@ -2596,7 +2954,7 @@ test('规则模式读写：非 Facebook、组合根缺失与 store 失败均 fai
       store: fx.store,
       revocation: new TokenRevocationStore(),
       rateLimiter: new LoginRateLimiter(),
-      facebookRuleMode: makeFacebookRuleModeDep({ setReason: 'account_not_found' }).dep,
+      facebookRuleMode: makeFacebookRuleModeDep({ setReason: 'environment_not_found' }).dep,
     },
     baseConfig(0),
     async (base) => {
@@ -2606,8 +2964,8 @@ test('规则模式读写：非 Facebook、组合根缺失与 store 失败均 fai
         headers,
         body: JSON.stringify({ enabled: true }),
       });
-      assert.equal(res.status, 409);
-      assert.equal((await res.json() as { error: string }).error, 'account_not_found');
+      assert.equal(res.status, 404);
+      assert.equal((await res.json() as { error: string }).error, 'environment_not_found');
     },
   );
 });

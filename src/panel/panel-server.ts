@@ -2029,9 +2029,18 @@ function createRequestHandler(
         { ...(raw.enabled === undefined ? {} : { enabled: raw.enabled }) },
         `panel:${verified.payload.sub}`,
       );
+      // change environment-level-rule-mode-and-approval：写入口按**环境**定位（store 内先把账号
+      // 解析成它唯一绑定的环境），解析不出唯一环境即具名拒绝，MUST NOT 退回写账号键旧行。
       if (!result.ok) {
-        if (result.reason === 'account_not_found') sendJson(res, 404, { error: 'account_not_found' });
-        else sendJson(res, 400, { error: 'bad_request', reason: result.reason });
+        if (result.reason === 'environment_not_found') {
+          sendJson(res, 404, { error: 'environment_not_found' });
+        } else if (result.reason === 'environment_conflict') {
+          sendJson(res, 409, { error: 'environment_conflict' });
+        } else if (result.reason === 'environment_unavailable') {
+          sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
+        } else {
+          sendJson(res, 400, { error: 'bad_request', reason: result.reason });
+        }
         return;
       }
       sendJson(res, 200, await deps.facebookRuleMode.get(accountId));

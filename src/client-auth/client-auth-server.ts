@@ -68,6 +68,24 @@ import type {
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
 
+/**
+ * 环境评论审批覆盖的读写结果（结构上与 ApprovalPolicyStore 的同名判别式一致；此处**刻意重声明**，
+ * 让 client-auth 只依赖形状、不依赖具体存储实现）。
+ */
+export type EnvironmentCommentApprovalPolicyResult =
+  | {
+      ok: true;
+      row: {
+        envKey: string;
+        mode: 'source_rules' | 'auto_approve_all';
+        configured: boolean;
+        updatedBy: string | null;
+        updatedAt: number | null;
+        boundAccountId: string | null;
+      };
+    }
+  | { ok: false; reason: 'invalid_mode' | 'environment_not_owned' | 'policy_unavailable' };
+
 export interface ClientAuthDeps {
   store: ClientUserStore;
   revocation: TokenRevocationStore;
@@ -140,15 +158,30 @@ export interface ClientAuthDeps {
       { slowStart: UiSlowStartPayload; dayQuotas: Record<string, number> } | null
     >;
   };
-  /** 客户环境的 Facebook 规则模式：账号键只由 Cloud 持久绑定解析，响应使用最小投影。 */
+  /**
+   * 客户环境的 Facebook 规则模式（change environment-level-rule-mode-and-approval：改为**环境键**）。
+   * 平台由环境自己的权威字段判定，读写都不依赖账号绑定；响应使用最小投影，永不含 accountId。
+   */
   facebookRuleMode?: {
-    platformForAccount(accountId: string): string | undefined;
-    getForAccount(accountId: string): Promise<FacebookRuleModeConfig>;
-    setForAccount(
-      accountId: string,
+    getForEnv(envKey: string): Promise<FacebookRuleModeConfig>;
+    setForEnv(
+      envKey: string,
       enabled: boolean,
       updatedBy: string,
     ): Promise<SetFacebookRuleModeResult>;
+  };
+  /**
+   * 客户对**自有环境**的评论审批覆盖读写（change environment-level-rule-mode-and-approval）。
+   * ownership 与写入同一条语句；客户来源署名与后台管理员可区分（`client:<userId>` vs `panel:<sub>`）。
+   */
+  commentApprovalPolicy?: {
+    getForOwnedEnv(userId: string, envKey: string): Promise<EnvironmentCommentApprovalPolicyResult>;
+    setForOwnedEnv(
+      userId: string,
+      envKey: string,
+      mode: 'source_rules' | 'auto_approve_all',
+      updatedBy: string,
+    ): Promise<EnvironmentCommentApprovalPolicyResult>;
   };
   /** 客户环境风险读/恢复：accountId 只在 Cloud 内部流转，HTTP DTO 永不暴露。 */
   environmentRisk?: {
@@ -197,6 +230,18 @@ export interface ClientFacebookRuleModeConfig {
   definitionId: FacebookRuleModeConfig['definitionId'];
   definitionVersion: FacebookRuleModeConfig['definitionVersion'];
   updatedAt: string | null;
+}
+
+/**
+ * 客户可见的环境评论审批覆盖投影（change environment-level-rule-mode-and-approval）。
+ * **不含 accountId**：读写两个方向都 MUST NOT 泄露该环境的账号身份。
+ * `hasExecutionTarget=false` 即「当前没有执行对象」的如实标注，MUST NOT 编造绑定或生效评论行为。
+ */
+export interface ClientCommentApprovalPolicy {
+  mode: 'source_rules' | 'auto_approve_all';
+  configured: boolean;
+  updatedAt: number | null;
+  hasExecutionTarget: boolean;
 }
 
 export type ClientEnvironmentRiskRecoveryOutcome =
@@ -525,20 +570,33 @@ async function resolveOwnedFacebookRiskAccount(
   return bound.accountId;
 }
 
-async function resolveOwnedFacebookRuleModeAccount(
+/**
+ * 环境级 Facebook 配置的定位（change environment-level-rule-mode-and-approval）：
+ * 只核 ownership 与**环境自己的权威平台**，**不要求存在账号绑定**——未绑定环境同样可预设配置。
+ * 绑定三态原样带出，供回包如实标注「当前有没有执行对象」。
+ */
+async function resolveOwnedFacebookEnvironment(
   deps: ClientAuthDeps,
   res: http.ServerResponse,
   userId: string,
   envKey: string,
-): Promise<{ envKey: string; accountId: string } | null> {
-  const bound = await resolveOwnedBoundAccount(deps, res, userId, envKey);
-  if (!bound) return null;
-  const platform = deps.facebookRuleMode?.platformForAccount(bound.accountId)?.trim().toLowerCase();
-  if (platform !== 'facebook') {
+): Promise<{ envKey: string; binding: 'bound' | 'binding_unknown' | 'binding_conflict' } | null> {
+  const normalizedEnvKey = (envKey ?? '').trim();
+  if (!normalizedEnvKey || normalizedEnvKey.length > 256
+      || /[\u0000-\u001f\u007f]/.test(normalizedEnvKey)) {
+    sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+    return null;
+  }
+  const owned = await deps.store.getOwnedEnvironment(userId, normalizedEnvKey);
+  if (!owned.ok) {
+    sendBindingFailure(res, owned.reason);
+    return null;
+  }
+  if ((owned.platform ?? '').trim().toLowerCase() !== 'facebook') {
     sendJson(res, 409, { error: 'unsupported_platform' });
     return null;
   }
-  return bound;
+  return { envKey: owned.envKey, binding: owned.binding };
 }
 
 function projectClientFacebookRuleMode(config: FacebookRuleModeConfig): ClientFacebookRuleModeConfig {
@@ -1636,9 +1694,10 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       return;
     }
 
-    // Facebook 规则模式是账号级 Cloud 配置，但客户只按自己拥有的 envKey 操作：
-    // ownership + 唯一持久绑定 + 平台均由 Cloud 解析，客户端永不提交 accountId。
-    // 这条纯 Cloud 配置链不依赖 Edge / 浏览器在线；未绑定则诚实拒绝，不另造环境影子配置。
+    // Facebook 规则模式是**环境级** Cloud 配置（change environment-level-rule-mode-and-approval）：
+    // 客户只提交自己拥有的 envKey，ownership 与环境权威平台由 Cloud 解析，客户端永不提交 accountId。
+    // 这条纯 Cloud 配置链不依赖 Edge / 浏览器在线，也**不再依赖账号绑定**——环境是稳定的产品对象，
+    // 客户在批量创建那一刻还没有账号就要能预设；回包如实标注当前有没有执行对象，不编造绑定或进度。
     const facebookRuleModeMatch = /^\/environments\/([^/]+)\/facebook-rule-mode$/.exec(url);
     if ((method === 'GET' || method === 'PUT') && facebookRuleModeMatch) {
       if (!deps.facebookRuleMode) {
@@ -1677,43 +1736,129 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         }
       }
 
-      const bound = await resolveOwnedFacebookRuleModeAccount(deps, res, userId, envKey);
-      if (!bound) return;
+      const owned = await resolveOwnedFacebookEnvironment(deps, res, userId, envKey);
+      if (!owned) return;
 
       try {
         if (method === 'PUT') {
-          const result = await deps.facebookRuleMode.setForAccount(
-            bound.accountId,
+          const result = await deps.facebookRuleMode.setForEnv(
+            owned.envKey,
             enabled!,
             `client:${userId}`,
           );
           if (!result.ok) {
             if (result.reason === 'unsupported_platform') {
               sendJson(res, 409, { error: 'unsupported_platform' });
-            } else if (result.reason === 'account_not_found') {
-              sendJson(res, 409, { error: 'account_not_found' });
+            } else if (result.reason === 'environment_not_found') {
+              sendJson(res, 404, { error: 'environment_not_found' });
+            } else if (result.reason === 'environment_unavailable') {
+              sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
             } else {
               sendJson(res, 422, { error: 'validation_failed', reason: result.reason });
             }
             return;
           }
         }
-        const config = await deps.facebookRuleMode.getForAccount(bound.accountId);
+        const config = await deps.facebookRuleMode.getForEnv(owned.envKey);
         sendJson(res, 200, {
           data: {
-            envKey: bound.envKey,
+            envKey: owned.envKey,
             facebookRuleMode: projectClientFacebookRuleMode(config),
+            // 配置已保存 ≠ 此刻有东西在跑。绑定三态如实回传，MUST NOT 伪造执行对象或进度。
+            binding: owned.binding,
           },
           meta: { requestId: randomUUID(), asOf: Date.now() },
         });
       } catch (error) {
         logger.warn('[client-auth] Facebook rule mode unavailable', {
           userId,
-          envKey: bound.envKey,
+          envKey: owned.envKey,
           error: error instanceof Error ? error.message : String(error),
         });
         sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
       }
+      return;
+    }
+
+    // 客户对**自有环境**的评论审批覆盖（全局免审）读写。
+    // change environment-level-rule-mode-and-approval 把这项配置的写入口从「只接受受内部 JWT 守护的
+    // 后台请求」放宽为「后台内部通道 + 客户对自有环境的 customer-auth 通道」。放宽是扩权动作，四条收口：
+    //   ① 归属：逐请求校验 env ownership，与写入同一条语句；非所有者 fail-closed，且不泄露该环境的
+    //      账号身份或现有策略（404 与「有环境但没配置」在回包上不可区分）；
+    //   ② 入参：只接受模式枚举，夹带 accountId / updatedBy 或任何其它键整块拒绝（先于归属解析判定，
+    //      避免坏 body 因 ownership 差异漏出状态码侧信道）；
+    //   ③ 审计：署名 `client:<userId>`，与后台的 `panel:<sub>` 可区分，MUST NOT 复用管理员署名；
+    //   ④ 不扩安全闸：免审只免第二次人工按钮，不绕风险、配额、去重、目标复核、平台确认与真实终态记录。
+    // 该路由不依赖环境↔账号绑定、账号是否存在、边缘活会话或浏览器是否运行；未绑定环境同样可保存可读取。
+    const commentApprovalMatch = /^\/environments\/([^/]+)\/comment-approval$/.exec(url);
+    if ((method === 'GET' || method === 'PUT') && commentApprovalMatch) {
+      if (!deps.commentApprovalPolicy) {
+        sendJson(res, 503, { error: 'comment_approval_policy_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(commentApprovalMatch[1]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      if (!envKey || envKey.length > 256 || /[\u0000-\u001f\u007f]/.test(envKey)) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+
+      let mode: 'source_rules' | 'auto_approve_all' | undefined;
+      if (method === 'PUT') {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const keys = Object.keys(body as object);
+        const rawMode = (body as { mode?: unknown }).mode;
+        if (keys.length !== 1 || keys[0] !== 'mode'
+            || (rawMode !== 'source_rules' && rawMode !== 'auto_approve_all')) {
+          sendJson(res, 422, { error: 'validation_failed', reason: 'only_mode_enum_accepted' });
+          return;
+        }
+        mode = rawMode;
+      }
+
+      const result = method === 'PUT'
+        ? await deps.commentApprovalPolicy.setForOwnedEnv(userId, envKey, mode!, `client:${userId}`)
+        : await deps.commentApprovalPolicy.getForOwnedEnv(userId, envKey);
+      if (!result.ok) {
+        if (result.reason === 'environment_not_owned') {
+          sendJson(res, 404, { error: 'environment_not_found' });
+        } else if (result.reason === 'invalid_mode') {
+          sendJson(res, 422, { error: 'validation_failed', reason: 'only_mode_enum_accepted' });
+        } else {
+          // 注册表 / 策略表不可达 MUST NOT 伪装成「按来源规则」，也 MUST NOT 把「没写成」说成已保存。
+          sendJson(res, 503, { error: 'comment_approval_policy_unavailable' });
+        }
+        return;
+      }
+      sendJson(res, 200, {
+        data: {
+          envKey: result.row.envKey,
+          commentApproval: {
+            mode: result.row.mode,
+            configured: result.row.configured,
+            updatedAt: result.row.updatedAt,
+            // 云端环境写入成功即为配置已保存；这里只如实回答「现在有没有执行对象」，
+            // MUST NOT 引入「已保存 / 待下发边缘」二态。
+            hasExecutionTarget: result.row.boundAccountId != null,
+          } satisfies ClientCommentApprovalPolicy,
+        },
+        meta: { requestId: randomUUID(), asOf: Date.now() },
+      });
       return;
     }
 
@@ -2120,8 +2265,15 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       const raw = body as Record<string, unknown>;
+      // 白名单严格：夹带任何一个白名单之外的键 MUST 整块拒绝且不写入（既有行为，本变更只加两个可选键）。
+      // 新增的两个 Facebook 专属创建意图（change environment-level-rule-mode-and-approval）：
+      //   facebookRuleModeEnabled  运行方式 = 规则；
+      //   commentApprovalMode      全局免审覆盖（source_rules|auto_approve_all）。
+      // 平台门禁、枚举合法性与「慢启动 ∧ 规则模式」互斥都在 store 里**先于注册环境**判定，
+      // 保证拒绝时环境、归属与 intent 均不发生部分写入。
       const allowed = new Set([
         'intentId', 'proof', 'envKey', 'label', 'platform', 'slowStartEnabled', 'proxyAuthority',
+        'facebookRuleModeEnabled', 'commentApprovalMode',
       ]);
       const proxyAuthority = normalizeEnvironmentProxyAuthority(raw.proxyAuthority);
       if (Object.keys(raw).some((key) => !allowed.has(key)) ||
@@ -2129,6 +2281,11 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           typeof raw.envKey !== 'string' || (raw.label != null && typeof raw.label !== 'string') ||
           typeof raw.platform !== 'string' ||
           (raw.slowStartEnabled !== undefined && typeof raw.slowStartEnabled !== 'boolean') ||
+          (raw.facebookRuleModeEnabled !== undefined
+            && typeof raw.facebookRuleModeEnabled !== 'boolean') ||
+          (raw.commentApprovalMode !== undefined
+            && raw.commentApprovalMode !== 'source_rules'
+            && raw.commentApprovalMode !== 'auto_approve_all') ||
           !proxyAuthority) {
         sendJson(res, 400, { error: 'bad_request' });
         return;
@@ -2140,6 +2297,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         label: raw.label as string | null | undefined,
         platform: raw.platform,
         slowStartEnabled: raw.slowStartEnabled as boolean | undefined,
+        facebookRuleModeEnabled: raw.facebookRuleModeEnabled as boolean | undefined,
+        commentApprovalMode: raw.commentApprovalMode as string | undefined,
         proxyAuthority,
       });
       if (!result.ok) {
@@ -2147,7 +2306,8 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           result.reason === 'schema_unavailable' ? 503 :
           result.reason === 'invalid_intent' ? 404 :
               result.reason === 'intent_expired' ? 410 :
-              result.reason === 'invalid_environment' || result.reason === 'invalid_proxy_authority' ? 400 : 409;
+              result.reason === 'invalid_environment' || result.reason === 'invalid_proxy_authority'
+                || result.reason === 'conflicting_run_mode' ? 400 : 409;
         sendJson(res, status, { error: result.reason });
         return;
       }

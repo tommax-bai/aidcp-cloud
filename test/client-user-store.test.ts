@@ -809,6 +809,243 @@ test('completeProvisioningIntent rejects non-Facebook slow start before PostgreS
   assert.deepEqual(result, { ok: false, reason: 'invalid_environment' });
 });
 
+/**
+ * change environment-level-rule-mode-and-approval —— 归属完成接口的两个新创建意图。
+ * 三条闸（平台门禁 / 枚举合法 / 互斥）MUST 都在**注册环境之前**判定，拒绝时一条 SQL 都不发。
+ */
+function provisioningClient(calls: { sql: string; params?: unknown[] }[], proofHash: string) {
+  return {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (/SELECT status FROM client_users/.test(sql)) return { rows: [{ status: 'enabled' }] };
+      if (/FROM client_env_provisioning_intents/.test(sql)) return { rows: [{
+        proof_hash: proofHash,
+        state: 'pending',
+        expires_at: new Date(Date.now() + 60_000),
+        completed_env_key: null,
+        completed_at: null,
+      }] };
+      if (/INSERT INTO client_environments/.test(sql)) return { rows: [{ env_key: 'fb-new' }] };
+      if (/INSERT INTO client_env_scope/.test(sql)) return { rows: [{
+        env_key: 'fb-new', label: 'FB new', platform: 'facebook', assigned_at: new Date(),
+      }] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+}
+
+test('创建意图：规则模式 + 免审与环境登记、归属、intent 完成态同一事务落库，且慢启动保持 NULL', async () => {
+  const intentId = '11111111-1111-4111-8111-111111111111';
+  const proof = 'A'.repeat(43);
+  const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const bumps: string[] = [];
+  const pool = { connect: async () => provisioningClient(calls, proofHash) } as unknown as pg.Pool;
+  const result = await new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    mirrorVersionBumper: {
+      bumpDomain: 'api',
+      bumpInTx: async (_client, mirrorKey: string) => { bumps.push(mirrorKey); },
+    },
+  }).completeProvisioningIntent('user-a', {
+    intentId, proof, envKey: 'fb-new', label: 'FB new', platform: 'facebook',
+    facebookRuleModeEnabled: true,
+    commentApprovalMode: 'auto_approve_all',
+    proxyAuthority: { state: 'no_proxy' },
+  });
+  assert.equal(result.ok, true);
+
+  const envInsert = calls.find((call) => /INSERT INTO client_environments/.test(call.sql))!;
+  assert.equal(envInsert.params?.[3], null, '未提交慢启动意图时 slow_start_since MUST 保持 NULL');
+
+  const ruleInsert = calls.find(
+    (call) => /INSERT INTO facebook_rule_mode_environment_config/.test(call.sql),
+  )!;
+  assert.equal(ruleInsert.params?.[0], 'fb-new');
+  assert.match(ruleInsert.sql, /VALUES \(\$1,true,/);
+  assert.equal(ruleInsert.params?.[3], `client-provision:${intentId}`);
+
+  const approvalInsert = calls.find(
+    (call) => /INSERT INTO environment_comment_approval_policy/.test(call.sql),
+  )!;
+  assert.deepEqual(approvalInsert.params, ['fb-new', 'auto_approve_all', `client-provision:${intentId}`]);
+
+  // 两条写都排在 COMMIT 之前 = 同一事务。
+  const commitIndex = calls.findIndex((call) => call.sql === 'COMMIT');
+  assert.ok(calls.indexOf(ruleInsert) < commitIndex);
+  assert.ok(calls.indexOf(approvalInsert) < commitIndex);
+  assert.ok(bumps.includes('content_schedule'), '规则模式落库必须同事务推进配置镜像版本');
+});
+
+test('创建意图：省略两个字段的旧客户端请求保持兼容，一行配置都不写', async () => {
+  const intentId = '11111111-1111-4111-8111-111111111111';
+  const proof = 'A'.repeat(43);
+  const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const pool = { connect: async () => provisioningClient(calls, proofHash) } as unknown as pg.Pool;
+  const result = await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool })
+    .completeProvisioningIntent('user-a', {
+      intentId, proof, envKey: 'fb-new', label: 'FB new', platform: 'facebook',
+      proxyAuthority: { state: 'no_proxy' },
+    });
+  assert.equal(result.ok, true);
+  assert.equal(
+    calls.some((call) => /INSERT INTO facebook_rule_mode_environment_config/.test(call.sql)),
+    false,
+    '不写一行 enabled=false 的配置：「没有行」才是「未配置」的权威表达',
+  );
+  assert.equal(
+    calls.some((call) => /INSERT INTO environment_comment_approval_policy/.test(call.sql)),
+    false,
+  );
+});
+
+test('创建意图：慢启动与规则模式同时为真整请求拒绝，MUST NOT 静默取其一', async () => {
+  const pool = { connect: async () => assert.fail('互斥意图 MUST 在触库前被拒绝') } as unknown as pg.Pool;
+  assert.deepEqual(
+    await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool })
+      .completeProvisioningIntent('user-a', {
+        intentId: '11111111-1111-4111-8111-111111111111',
+        proof: 'A'.repeat(43),
+        envKey: 'fb-new',
+        platform: 'facebook',
+        slowStartEnabled: true,
+        facebookRuleModeEnabled: true,
+        proxyAuthority: { state: 'no_proxy' },
+      }),
+    { ok: false, reason: 'conflicting_run_mode' },
+  );
+});
+
+test('创建意图：非 Facebook 平台携带规则模式或免审字段整请求拒绝', async () => {
+  const pool = { connect: async () => assert.fail('非 Facebook 意图 MUST 在触库前被拒绝') } as unknown as pg.Pool;
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const base = {
+    intentId: '11111111-1111-4111-8111-111111111111',
+    proof: 'A'.repeat(43),
+    envKey: 'xhs-new',
+    platform: 'xiaohongshu',
+    proxyAuthority: { state: 'no_proxy' } as unknown,
+  };
+  assert.deepEqual(
+    await store.completeProvisioningIntent('user-a', { ...base, facebookRuleModeEnabled: true }),
+    { ok: false, reason: 'invalid_environment' },
+  );
+  assert.deepEqual(
+    await store.completeProvisioningIntent('user-a', { ...base, commentApprovalMode: 'auto_approve_all' }),
+    { ok: false, reason: 'invalid_environment' },
+  );
+});
+
+test('创建意图：非法审批枚举在触库前拒绝', async () => {
+  const pool = { connect: async () => assert.fail('非法枚举 MUST 在触库前被拒绝') } as unknown as pg.Pool;
+  assert.deepEqual(
+    await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool })
+      .completeProvisioningIntent('user-a', {
+        intentId: '11111111-1111-4111-8111-111111111111',
+        proof: 'A'.repeat(43),
+        envKey: 'fb-new',
+        platform: 'facebook',
+        commentApprovalMode: 'auto_approve',
+        proxyAuthority: { state: 'no_proxy' },
+      }),
+    { ok: false, reason: 'invalid_environment' },
+  );
+});
+
+test('创建意图：已完成 intent 的幂等重试只回既成归属，MUST NOT 二次写配置', async () => {
+  const intentId = '11111111-1111-4111-8111-111111111111';
+  const proof = 'A'.repeat(43);
+  const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const client = {
+    query: async (sql: string, params?: unknown[]) => {
+      calls.push({ sql, params });
+      if (/SELECT status FROM client_users/.test(sql)) return { rows: [{ status: 'enabled' }] };
+      if (/FROM client_env_provisioning_intents/.test(sql)) return { rows: [{
+        proof_hash: proofHash,
+        state: 'completed',
+        expires_at: new Date(Date.now() + 60_000),
+        completed_env_key: 'fb-new',
+        completed_at: new Date(),
+      }] };
+      if (/FROM client_env_scope/.test(sql)) return { rows: [{
+        env_key: 'fb-new', label: 'FB new', platform: 'facebook', assigned_at: new Date(0),
+      }] };
+      if (/FROM client_environment_proxy_authorities/.test(sql)) return { rows: [{
+        env_key: 'fb-new', state: 'no_proxy', proxy_type: null, proxy_host: null, proxy_port: null,
+        proxy_user: null, proxy_password: null, revision: 1, source: 'provisioning', updated_at: new Date(0),
+      }] };
+      return { rows: [] };
+    },
+    release() {},
+  };
+  const pool = { connect: async () => client } as unknown as pg.Pool;
+  const result = await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool })
+    .completeProvisioningIntent('user-a', {
+      intentId, proof, envKey: 'fb-new', platform: 'facebook',
+      facebookRuleModeEnabled: true,
+      commentApprovalMode: 'auto_approve_all',
+      proxyAuthority: { state: 'no_proxy' },
+    });
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.idempotent, true);
+  // 运营在首次完成后手动改过配置时，陈旧重试 MUST NOT 把它复原成创建时的值。
+  for (const table of [
+    'facebook_rule_mode_environment_config',
+    'environment_comment_approval_policy',
+    'client_environments',
+  ]) {
+    assert.equal(
+      calls.some((call) => new RegExp(`INSERT INTO ${table}`).test(call.sql)),
+      false,
+      `${table} MUST NOT 被幂等重试再写一次`,
+    );
+  }
+});
+
+/**
+ * 账号 → 唯一绑定环境的反查镜像（本 change 新增）。三条判据：
+ * 唯一绑定才解析得出；多环境 = 绑定冲突；同一环境归属多客户 = 跨客户争用。
+ * 慢启动那份镜像的语义**逐位不变**（它只看环境个数），本 change 不动它。
+ */
+test('账号→环境反查：唯一绑定解析成功，多环境与跨客户争用都 fail-closed', async () => {
+  const pool = fakePool((sql) => {
+    if (/FROM client_environments e/.test(sql) && /owner_count/.test(sql)) {
+      return { rows: [
+        { env_key: 'env-solo', account_id: 'acct-solo', slow_start_since: null, owner_count: 1 },
+        { env_key: 'env-a', account_id: 'acct-dup', slow_start_since: null, owner_count: 1 },
+        { env_key: 'env-b', account_id: 'acct-dup', slow_start_since: null, owner_count: 1 },
+        { env_key: 'env-shared', account_id: 'acct-contended', slow_start_since: null, owner_count: 2 },
+      ] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  await store.refreshEnvironmentSlowStartMirror();
+
+  assert.deepEqual(store.resolveEnvironmentKeyForAccount('acct-solo'), { ok: true, envKey: 'env-solo' });
+  assert.deepEqual(
+    store.resolveEnvironmentKeyForAccount('acct-dup'),
+    { ok: false, reason: 'binding_conflict' },
+  );
+  assert.deepEqual(
+    store.resolveEnvironmentKeyForAccount('acct-contended'),
+    { ok: false, reason: 'binding_conflict' },
+    '跨客户争用 MUST 与多环境同一收紧方向，MUST NOT 任取那唯一一个环境',
+  );
+  assert.deepEqual(
+    store.resolveEnvironmentKeyForAccount('acct-unbound'),
+    { ok: false, reason: 'binding_unknown' },
+  );
+
+  // 慢启动那份镜像只看环境个数：跨客户争用的账号在它眼里仍是唯一绑定（既有语义，本 change 不改）。
+  assert.equal(store.hasAmbiguousEnvironmentBinding('acct-dup'), true);
+  assert.equal(store.hasAmbiguousEnvironmentBinding('acct-contended'), false);
+});
+
 test('listEnvScope ignores client self-claims and revoked assignments', async () => {
   const pool = fakePool((sql) => {
     assert.match(sql, /s\.user_id = \$1 AND s\.source = 'admin'/);
@@ -916,7 +1153,7 @@ test('registerEnvironments: 带真实 accountId 走事务、无冲突则写绑�
   // 事务包裹（不牵连握手由调用侧 fire-and-forget 保证；此处锁 BEGIN/COMMIT 成对）。
   assert.equal(calls[0].sql, 'BEGIN');
   assert.equal(calls.some((call) => call.sql === 'COMMIT'), true);
-  assert.match(calls.at(-1)!.sql, /SELECT env_key, account_id, slow_start_since/,
+  assert.match(calls.at(-1)!.sql, /SELECT e\.env_key/,
     '绑定提交后必须刷新环境慢启动镜像');
 });
 
@@ -1031,7 +1268,7 @@ test('migrateEnvironmentSlowStartFromAccounts: COPY-on-null 后刷新同步镜�
     query: async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
       if (/UPDATE client_environments e/.test(sql)) return { rows: [{ env_key: 'fb-env' }], rowCount: 1 };
-      if (/SELECT env_key, account_id, slow_start_since/.test(sql)) {
+      if (/SELECT e\.env_key/.test(sql)) {
         return { rows: [{ env_key: 'fb-env', account_id: 'acct-a', slow_start_since: since }] };
       }
       return { rows: [], rowCount: 0 };
@@ -1056,7 +1293,7 @@ test('setEnvironmentSlowStart: ownership-scoped 环境单写，上海日起点�
     query: async (sql: string, params?: unknown[]) => {
       calls.push({ sql, params });
       if (/UPDATE client_environments e/.test(sql)) return { rows: [{ env_key: 'fb-env' }], rowCount: 1 };
-      if (/SELECT env_key, account_id, slow_start_since/.test(sql)) return { rows: [] };
+      if (/SELECT e\.env_key/.test(sql)) return { rows: [] };
       if (/AS owned/.test(sql)) return { rows: [{
         owned: true, slow_start_since: new Date(aligned), bound_account: null,
         account_exists: false, contended: false, duplicate_count: 0,
@@ -1090,7 +1327,7 @@ test('setAdminEnvironmentSlowStart: active Facebook 环境幂等开启保留起�
       else stored = null;
       return { rows: [{ slow_start_since: stored }] };
     }
-    if (/SELECT env_key, account_id, slow_start_since/.test(sql)) {
+    if (/SELECT e\.env_key/.test(sql)) {
       mirrorRefreshes += 1;
       return { rows: [] };
     }
@@ -1131,7 +1368,7 @@ test('setAdminEnvironmentSlowStart: 不存在、非 active 与非 Facebook 目�
     const pool = fakePool((sql) => {
       if (/UPDATE client_environments/.test(sql)) return { rows: [] };
       if (/SELECT lifecycle_state, platform/.test(sql)) return { rows: item.row ? [item.row] : [] };
-      if (/SELECT env_key, account_id, slow_start_since/.test(sql)) refreshAttempted = true;
+      if (/SELECT e\.env_key/.test(sql)) refreshAttempted = true;
       return { rows: [] };
     });
     const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });

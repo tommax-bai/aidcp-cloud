@@ -154,7 +154,7 @@ test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非
   const writes: Array<{ accountId: string; patch: { enabled?: boolean }; updatedBy: string }> = [];
   const view = (accountId: string) => ({
     config: {
-      accountId,
+      envKey: accountId === 'missing' ? null : `env-of-${accountId}`,
       enabled,
       definitionId: FACEBOOK_RULE_DEFINITION_ID,
       definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
@@ -177,7 +177,10 @@ test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非
     get: async (accountId) => view(accountId),
     set: async (accountId, patch, updatedBy) => {
       writes.push({ accountId, patch, updatedBy });
-      if (accountId === 'missing') return { ok: false, reason: 'account_not_found' };
+      // change environment-level-rule-mode-and-approval：写入口按环境定位，
+      // 账号反查不出唯一环境时是 environment_not_found / environment_conflict，不再是 account_not_found。
+      if (accountId === 'missing') return { ok: false, reason: 'environment_not_found' };
+      if (accountId === 'ambiguous') return { ok: false, reason: 'environment_conflict' };
       if (accountId === 'xhs-1') return { ok: false, reason: 'unsupported_platform' };
       if (patch.enabled === undefined) return { ok: false, reason: 'no_valid_fields' };
       enabled = patch.enabled;
@@ -237,6 +240,16 @@ test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非
       body: JSON.stringify({ enabled: true }),
     });
     assert.equal(missing.status, 404);
+    assert.equal(((await missing.json()) as { error: string }).error, 'environment_not_found');
+
+    // 反查歧义（多环境 / 跨客户争用）MUST 具名拒绝：既不写、也不假装成功。
+    const ambiguous = await fetch(`${base}/api/accounts/ambiguous/facebook-rule-mode`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(ambiguous.status, 409);
+    assert.equal(((await ambiguous.json()) as { error: string }).error, 'environment_conflict');
   } finally {
     await h.close();
   }

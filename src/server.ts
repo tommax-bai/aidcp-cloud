@@ -2233,6 +2233,13 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     cleanupGrantOps: offboardCleanupGrantOps,
     ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
   });
+  // change environment-level-rule-mode-and-approval：规则模式配置以环境为键，运行期裁决按当前绑定
+  // 账号反查环境。反查复用慢启动那次建立的环境↔账号镜像的**同一次刷新**，热路径零 IO、不新增查询。
+  // 这里做后绑定而不是构造参数：两个 store 的构造次序固定（配置层在 ClientUserStore 之前），
+  // 而反查必须走同一个 ClientUserStore 实例，MUST NOT 另开一份会各自陈旧的副本。
+  facebookRuleModeStore?.bindEnvironmentResolver(
+    (accountId) => clientUserStore.resolveEnvironmentKeyForAccount(accountId),
+  );
   try {
     await mirrorVersionStore.init();
     await modelConfigStore.init();
@@ -4045,12 +4052,17 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       return 'review';
     }
     try {
-      const accountMode: AccountCommentApprovalMode =
+      // change environment-level-rule-mode-and-approval：策略的权威主键是**环境**。
+      // 这个入口的签名刻意不变（另有 HTTP 端口按同一形状代理），内部已升级为
+      // 「执行账号 → 唯一绑定环境 → 环境策略」。反查得不到唯一环境——绑定未知、绑定冲突、
+      // 跨客户争用或环境注册表不可读——一律回落 `source_rules`（即沿用来源模式），
+      // MUST NOT 沿用任何账号键存量值扩权。
+      const environmentMode: AccountCommentApprovalMode =
         await policy.getAccountCommentMode(accountId);
-      return accountMode === 'auto_approve_all' ? 'auto_approve' : sourceMode;
+      return environmentMode === 'auto_approve_all' ? 'auto_approve' : sourceMode;
     } catch (error) {
       console.warn(
-        `[approval-policy] 评论策略读取失败，fail-closed 为 review account=${accountId} sourceMode=${sourceMode}: ${(error as Error).message}`,
+        `[approval-policy] 环境评论策略读取失败，fail-closed 为 review account=${accountId} sourceMode=${sourceMode}: ${(error as Error).message}`,
       );
       return 'review';
     }
@@ -6492,14 +6504,23 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           configMirrorGate.noteStaleRefusal('content_schedule', `facebook_rule_mode:${accountId}`);
           return { mode: 'blocked', blocker: 'rule_projection_unavailable' };
         }
+        // change environment-level-rule-mode-and-approval：配置在环境上，getConfig 内部按当前绑定
+        // 账号反查环境；反查不出唯一环境（绑定未知 / 绑定冲突 / 跨客户争用 / 绑定副本陈旧）时它已经
+        // fail-closed 成 enabled=false，MUST NOT 回落任何账号键存量值。
+        const environmentBlocker = facebookRuleModeStore.resolveEnvironmentBlocker(accountId);
         const config = facebookRuleModeStore.getConfig(accountId);
-        return decideFacebookBrowseMode({
+        const decision = decideFacebookBrowseMode({
           platform: ctx.platform,
           ruleEnabled: config.enabled,
           activeWeek: isWeekActiveAt(contentScheduleStore.effectiveActiveWeekMaskFor(accountId), new Date()),
           personaBinding: personaStore.bindingFor(accountId),
           slowStart: ctx.controller.slowStartView(),
         });
+        // 反查失败只影响「跑不跑规则」，MUST NOT 升级成「整个账号停手」——那不是收紧，是误伤。
+        // 这里只在裁决本身没有别的原因时，把**为什么没跑规则**具名说出来。
+        return environmentBlocker && decision.blocker === null
+          ? { ...decision, blocker: environmentBlocker }
+          : decision;
       },
       // 会话启动闸的规则模式豁免判据（change facebook-rule-mode-without-persona）：与模式裁决**同源**——
       // 同一个按账号读的权威规则模式入口、同一道副本新鲜度闸。store 未装配 / 副本陈旧 → 返回 false，
@@ -6574,8 +6595,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                     if (!facebookRuleModeStore) {
                       return { mode: 'blocked' as const, blocker: 'rule_runtime_unavailable' };
                     }
+                    // 同上：配置按「账号 → 唯一绑定环境」解析，反查失败已 fail-closed 成未启用；
+                    // 这里把具名 blocker 带出来，让拒绝理由不是笼统的 persona。
+                    const environmentBlocker =
+                      facebookRuleModeStore.resolveEnvironmentBlocker(accountId);
                     const config = facebookRuleModeStore.getConfig(accountId);
-                    return decideFacebookBrowseMode({
+                    const resolved = decideFacebookBrowseMode({
                       platform: ctx.platform,
                       ruleEnabled: config.enabled,
                       activeWeek: isWeekActiveAt(
@@ -6585,6 +6610,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                       personaBinding: personaStore.bindingFor(accountId),
                       slowStart: ctx.controller.slowStartView(),
                     });
+                    return environmentBlocker && resolved.blocker === null
+                      ? { ...resolved, blocker: environmentBlocker }
+                      : resolved;
                   })();
                   if (decision.mode !== 'facebook_rule') {
                     return { allowed: false, reason: decision.blocker ?? decision.mode };
@@ -9234,12 +9262,22 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               }
             },
           },
+          // change environment-level-rule-mode-and-approval：规则模式配置改为环境键，
+          // 平台校验取 client_environments.platform（store 内做），故不再需要 platformForAccount。
           facebookRuleMode: facebookRuleModeStore
             ? {
-                platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
-                getForAccount: async (accountId) => facebookRuleModeStore.getConfig(accountId),
-                setForAccount: (accountId, enabled, updatedBy) =>
-                  facebookRuleModeStore.setAccount(accountId, { enabled }, updatedBy),
+                getForEnv: async (envKey) => facebookRuleModeStore.getConfigForEnv(envKey),
+                setForEnv: (envKey, enabled, updatedBy) =>
+                  facebookRuleModeStore.setEnvironment(envKey, { enabled }, updatedBy),
+              }
+            : undefined,
+          // 客户对自有环境的评论审批覆盖：ownership 与写入同一条 SQL，署名 client:<userId>。
+          commentApprovalPolicy: approvalPolicyStore
+            ? {
+                getForOwnedEnv: (uid, envKey) =>
+                  approvalPolicyStore!.getOwnedEnvironmentCommentPolicy(uid, envKey),
+                setForOwnedEnv: (uid, envKey, mode, updatedBy) =>
+                  approvalPolicyStore!.setOwnedEnvironmentCommentMode(uid, envKey, mode, updatedBy),
               }
             : undefined,
           environmentRisk: {
