@@ -289,7 +289,12 @@ test('风控事实持久入队失败时 Facebook 规则浏览事实不发射、�
       content: 'safe body',
       likeCount: 0,
       collectCount: 0,
-    }), { sessionId: 'fb-failed', accountId: 'acc-fb', platform: 'facebook' }),
+    }), {
+      sessionId: 'fb-failed',
+      edgeId: 'edge-fb-failed',
+      accountId: 'acc-fb',
+      platform: 'facebook',
+    }),
     /outbox unavailable/,
   );
   assert.deepEqual(ruleViews, []);

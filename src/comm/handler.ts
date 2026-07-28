@@ -369,12 +369,35 @@ export class DefaultMessageHandler implements MessageHandler {
   /**
    * 把一次「边缘已确认真实发生」的动作同步提交进记账 outbox（change risk-state-cross-process-integrity）。
    * 缺 accountId → 不入队（与既有 honest-fail 一致：绝不把脏流量记到退役键名下）。
+   * 已有 accountId 但缺 edgeId → 抛错停止推进，绝不生成跨环境可碰撞的残缺键。
    * 漏斗未注入 → no-op（旧装配与纯协议测试保持改动前行为）。
    * **入队失败刻意向上抛**：调用点据此不 emit、不推进闭环。
    */
-  private async enqueueRiskFact(session: EdgeSession, action: RiskAction, dedupeKey: string): Promise<void> {
+  private riskFactDedupeKey(
+    session: EdgeSession,
+    env: Envelope,
+    action: RiskAction,
+    discriminator?: string,
+  ): string {
+    const accountId = session.accountId?.trim();
+    const edgeId = session.edgeId?.trim();
+    if (!accountId || !edgeId) {
+      throw new Error('risk_fact_identity_missing');
+    }
+    const parts = [accountId, edgeId, String(env.ts), env.id, action];
+    if (discriminator !== undefined) parts.push(discriminator);
+    return `edge-risk:${parts.map((part) => encodeURIComponent(part)).join(':')}`;
+  }
+
+  private async enqueueRiskFact(
+    session: EdgeSession,
+    env: Envelope,
+    action: RiskAction,
+    discriminator?: string,
+  ): Promise<void> {
     const accountId = session.accountId?.trim();
     if (!accountId || !this.deps.riskAccounting) return;
+    const dedupeKey = this.riskFactDedupeKey(session, env, action, discriminator);
     await this.deps.riskAccounting.enqueue({ accountId, action, occurredAt: this.clock(), dedupeKey });
   }
 
@@ -576,7 +599,7 @@ export class DefaultMessageHandler implements MessageHandler {
           // 先落 outbox 再推进（design D5），与 like/collect/search 同形。入队成功之后才置
           // 「本 Reel 已记 view」标记：入队失败时这一笔既没进账本、也 MUST NOT 被标成已记，
           // 否则随后的 note.detail 会以为它已经算过而整条跳过。
-          await this.enqueueRiskFact(session, 'view', `${env.id}:view:${noteId ?? '-'}`);
+          await this.enqueueRiskFact(session, env, 'view', noteId ?? '-');
           session.countedReelViewNoteId = noteId;
           this.bus(session).emit('interaction.occurred', {
             action: 'view',
@@ -605,7 +628,7 @@ export class DefaultMessageHandler implements MessageHandler {
             session.countedFacebookFeedVideoViewKeys = counted;
             if (!counted.has(key)) {
               // 同上：先入队、成功后才登记「已记」，绝不让入队失败留下一个「算过了」的假标记。
-              await this.enqueueRiskFact(session, 'view', `${env.id}:view:${noteId}`);
+              await this.enqueueRiskFact(session, env, 'view', noteId);
               counted.add(key);
               this.bus(session).emit('interaction.occurred', {
                 action: 'view',
@@ -689,7 +712,7 @@ export class DefaultMessageHandler implements MessageHandler {
         const feedVideoViewAlreadyCounted =
           !!detail.noteId && !!session.countedFacebookFeedVideoViewKeys?.has(facebookPostKey(detail.noteId));
         if (!reelViewAlreadyCounted && !feedVideoViewAlreadyCounted) {
-          await this.enqueueRiskFact(session, 'view', `${env.id}:view:${detail.noteId ?? '-'}`);
+          await this.enqueueRiskFact(session, env, 'view', detail.noteId ?? '-');
           this.bus(session).emit('interaction.occurred', {
             action: 'view',
             accountId: session.accountId,
@@ -803,7 +826,7 @@ export class DefaultMessageHandler implements MessageHandler {
                 } else if (result.actuated === true && outcome !== 'not_submitted') {
                   // 先落持久 outbox，再推进（design D5）。搜索的去重键用 activityId：它每次搜索唯一，
                   // 且边缘重连重发同一条终态时携带同一个 activityId ⇒ 天然只记一次。
-                  await this.enqueueRiskFact(session, 'search', `${env.id}:search:${activityId}`);
+                  await this.enqueueRiskFact(session, env, 'search', activityId);
                   this.bus(session).emit('search.occurred', {
                     accountId: session.accountId,
                     activityId,
@@ -861,7 +884,7 @@ export class DefaultMessageHandler implements MessageHandler {
           // **先落持久 outbox，再 emit 推进浏览闭环**（design D5）。顺序不可换：emit 之后再记账
           // 就回到了「回执已到、计数未提交」那段真空——崩在那里这次真实动作就此从账本上消失。
           // 入队失败会抛出（并已在漏斗内告警 + 对该账号 fail-closed），此处刻意不 catch。
-          await this.enqueueRiskFact(session, result.action as RiskAction, `${env.id}:${result.action}`);
+          await this.enqueueRiskFact(session, env, result.action as RiskAction);
           this.bus(session).emit('interaction.occurred', {
             action: result.action as 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group',
             // accountId 从会话填（握手已保证存在）；缺失=上游缺陷，下游 consumer honest-fail 丢弃，绝不回落 default
@@ -1163,7 +1186,7 @@ export class DefaultMessageHandler implements MessageHandler {
               accountId,
               action,
               occurredAt: this.clock(),
-              dedupeKey: `${env.id}:risk.record:${action}`,
+              dedupeKey: this.riskFactDedupeKey(session, env, action, 'risk.record'),
             })
           ).allowed
         : await this.controllerFor(session).record(action);

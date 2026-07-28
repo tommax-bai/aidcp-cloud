@@ -77,7 +77,12 @@ function handlerWithAccounting() {
 
 test('note.detail 的一次浏览 MUST 与其它动作走同一条 outbox 漏斗（否则浏览配额彻底失效）', async () => {
   const { handler, enqueued, emitted } = handlerWithAccounting();
-  const session = { sessionId: 's', accountId: 'acc-view', platform: 'xiaohongshu' } as unknown as EdgeSession;
+  const session = {
+    sessionId: 's',
+    edgeId: 'edge-view',
+    accountId: 'acc-view',
+    platform: 'xiaohongshu',
+  } as unknown as EdgeSession;
   const detail = {
     noteId: 'note-1',
     title: 't',
@@ -90,10 +95,38 @@ test('note.detail 的一次浏览 MUST 与其它动作走同一条 outbox 漏斗
 
   assert.deepEqual(
     enqueued,
-    [{ accountId: 'acc-view', action: 'view', dedupeKey: 'env-1:view:note-1' }],
+    [{
+      accountId: 'acc-view',
+      action: 'view',
+      dedupeKey: 'edge-risk:acc-view:edge-view:1000:env-1:view:note-1',
+    }],
     'view MUST 入 outbox；只 emit 不入队 = 浏览量无上界',
   );
   assert.deepEqual(emitted, [{ action: 'view', noteId: 'note-1' }]);
+});
+
+test('Cloud 去重键绑定账号、环境和原始信封时间/ID，同时保持原信封重放稳定', async () => {
+  const { handler, enqueued } = handlerWithAccounting();
+  const payload = { action: 'like', ok: true } as const;
+  const session = (accountId: string, edgeId: string): EdgeSession => ({
+    sessionId: `${accountId}:${edgeId}`,
+    accountId,
+    edgeId,
+  });
+
+  await handler.handle(makeEnvelope('action.completed', 'edge-1', 1_001, payload), session('acc-a', 'env-a'));
+  await handler.handle(makeEnvelope('action.completed', 'edge-1', 1_001, payload), session('acc-a', 'env-a'));
+  await handler.handle(makeEnvelope('action.completed', 'edge-1', 1_001, payload), session('acc-b', 'env-a'));
+  await handler.handle(makeEnvelope('action.completed', 'edge-1', 1_001, payload), session('acc-a', 'env-b'));
+  await handler.handle(makeEnvelope('action.completed', 'edge-1', 2_001, payload), session('acc-a', 'env-a'));
+
+  const keys = enqueued.map((fact) => fact.dedupeKey);
+  assert.equal(keys[0], 'edge-risk:acc-a:env-a:1001:edge-1:like');
+  assert.equal(keys[1], keys[0], '同一原始信封重放 MUST 保持相同去重键');
+  assert.notEqual(keys[2], keys[0], '不同账号 MUST 不碰撞');
+  assert.notEqual(keys[3], keys[0], '不同环境 MUST 不碰撞');
+  assert.notEqual(keys[4], keys[0], '进程重启复用顺序 ID 时，不同原始时间戳 MUST 不碰撞');
+  assert.equal(new Set(keys).size, 4);
 });
 
 test('入队后 apply → risk_counters 多一行 view + 内存 view 计数 +1（端到端一条）', async () => {
