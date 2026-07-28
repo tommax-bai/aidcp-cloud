@@ -1185,6 +1185,25 @@ export class RoleDispatcher {
       });
       return;
     }
+    // 加群联系是一个复合动作。评论配额或本场评论预算已经耗尽时，必须在不可逆的加群动作前
+    // 终结整批，避免出现「已加群，但本来就不允许评论」的部分执行。
+    const commentRisk = this.explainInteract('comment');
+    if (!commentRisk.allowed) {
+      await this.finishFacebookRuleBatch({
+        joinState: 'not_started',
+        commentState: 'risk_suppressed',
+        blocker: commentRisk.reason ?? 'comment_risk_suppressed',
+      });
+      return;
+    }
+    if (this.remainingBudget('comment') <= 0) {
+      await this.finishFacebookRuleBatch({
+        joinState: 'not_started',
+        commentState: 'risk_suppressed',
+        blocker: 'comment_session_budget',
+      });
+      return;
+    }
     if (!this.triggerFacebookRuleJoinContact) {
       await this.finishFacebookRuleBatch({
         joinState: 'not_started',

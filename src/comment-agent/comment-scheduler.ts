@@ -53,7 +53,7 @@ export interface FacebookCoverageCommentConfig extends EffectiveFacebookCommentC
   coverageEnabled: boolean;
   /**
    * 放开时限兜底命中标记（change facebook-coverage-relax-and-keyword-space）：正常预热/冷却约束下无可评群、
-   * 降级放开时限选出的群 → true。仅用于在飞书人审卡标注「未满足冷却/预热」，不改变任何其它闸（日上限/人审照旧）。
+   * 降级放开时限选出的群 → true。仅用于在飞书人审卡标注「未满足冷却/预热」，不改变 RiskController 配额闸或人审。
    */
   relaxed?: boolean;
 }
@@ -202,7 +202,7 @@ export function commentOutcomeReason(c: FacebookCommentRunResult): string {
     case 'comment_rejected':
       return 'Facebook 已拒绝该评论（未上墙，需人工处理）';
     case 'quota_denied':
-      return c.reason === 'daily_cap' ? '当日评论已达上限' : '评论配额不足';
+      return c.reason === 'daily_cap' || c.reason === 'quota:day' ? '当日评论已达安全策略上限' : '评论配额不足';
     default:
       return `评论失败（${c.outcome}${c.reason ? ':' + c.reason : ''}）`;
   }
@@ -332,11 +332,8 @@ export interface CommentSchedulerDeps {
     accountId: string,
     ctx: { keyword: string; container: string; postText?: string; comments?: string[] },
   ) => Promise<string | null>;
-  /** 真发路径风控闸：canDo('comment')。 */
+  /** 自动真发路径的唯一评论配额闸：RiskController.canDo('comment')。 */
   facebookCanComment?: (accountId: string) => Promise<boolean>;
-  /** 真发路径日上限（当日已评数 / 上限）。 */
-  facebookCommentedToday?: (accountId: string) => Promise<number>;
-  facebookDailyCap?: (accountId: string) => number;
   /** best-effort 审计 sink（每次触发一行，含影子）。 */
   facebookAudit?: (row: FacebookCommentAuditRow) => void;
   /** 回填容器真实群名（change facebook-container-display-name）：边缘搜索时读出真名 → 刷新配置容器名（人只看群名）。 */
@@ -657,7 +654,7 @@ export class CommentScheduler {
         };
       }
       this.running.add(accountId);
-      // 手动 /comment（本方法为飞书手动出口）：manualOverride 透传到评论体 → 真发路径跳过评论配额 / 日上限闸。
+      // 手动 /comment（本方法为飞书手动出口）：manualOverride 透传到评论体 → 真发路径跳过 RiskController 前置闸。
       // 自动排期评论走独立入口（triggerTargeted / ContentScheduler），不带此旗标、配额照旧。
       void this.runFacebookTargetedTask(accountId, {
         contact,
@@ -856,7 +853,7 @@ export class CommentScheduler {
   /**
    * Facebook 定向评论执行（facebook-scheduled-comment 2.2/2.3 + 真发接线 task 4.x）。
    * 闸链 → 随机选关键词/容器 → 撰写 → 只拒不修校验：
-   * - 真发路径：过账号审批策略、canDo + 日上限闸后，经边端评论能力真发——
+   * - 真发路径：过账号审批策略和 RiskController 评论闸后，经边端评论能力真发——
    *   容器内搜索 → 选未评候选 → 开帖 → 提交并「服务器确认」。每步有界超时（此路径无巡视看门狗）。
    *
    * 红线：
@@ -1004,22 +1001,14 @@ export class CommentScheduler {
       return;
     }
 
-    // 真发路径先过风控 + 日上限闸（在浏览之前收口——被限额则不白跑一趟浏览）。影子跳过这两闸。
-    // 手动操作员命令（manualOverride，飞书 /comment）跳过这两个配额闸——含风控状态 + 速率配额 + 评论日上限，
+    // 真发路径先过 RiskController 评论闸（在浏览之前收口——被限额则不白跑一趟浏览）。影子跳过该闸。
+    // 手动操作员命令（manualOverride，飞书 /comment）跳过该前置闸——含风控状态 + 速率配额，
     // 与手动加群侧一致（用户定案 2026-07-10：手动命令不受配额限制、硬风控状态也强行）。自动排期评论 manualOverride=false、配额照旧。
     // 注：成功的风控计数仍走 interaction.occurred → RiskController.record 自动路径（handler.ts），绕的是**前置闸**、不漏计。
     if (!shadow && !options.manualOverride) {
       if (d.facebookCanComment && !(await d.facebookCanComment(accountId))) {
         audit({ accountId, outcome: 'quota_denied', reason: 'canDo', shadow: false, keyword, container });
         return;
-      }
-      if (d.facebookDailyCap && d.facebookCommentedToday) {
-        const cap = d.facebookDailyCap(accountId);
-        const done = await d.facebookCommentedToday(accountId);
-        if (cap > 0 && done >= cap) {
-          audit({ accountId, outcome: 'quota_denied', reason: 'daily_cap', shadow: false, keyword, container });
-          return;
-        }
       }
     }
 
@@ -1185,8 +1174,8 @@ export class CommentScheduler {
           // 提交被更高优先级任务抢占 / 边端失配 taskId 静默丢弃 → submitComment 超时回 ok:false → 走 else 诚实非提交（不打去重、可重试）。
           const submit = await steps.submitComment(target, v.text, groupChatCode, options.fastReturnToFeed === true);
           // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
-          // 硬失败（权限门/找不到评论框/被拦/身份未知）没真点提交、无重复真发风险，不打标记（可重试、不白占当日上限）。
-          // 该标记同时使 facebookCommentedToday 计入当日配额；仅计「真发过一次」的目标，不误伤硬失败重试。
+          // 硬失败（权限门/找不到评论框/被拦/身份未知）没真点提交、无重复真发风险，不打标记（可重试）。
+          // 该标记只承担同目标去重；账号日配额由 RiskController 的 risk_counters 单独计量。
           //
           // 🔴 这是**白名单**（只有列出的两档打去重），新增 outcome 默认落在闸外 = 不去重（安全侧）。
           // `comment_rejected` MUST NOT 进这个白名单：平台已明确拒绝该评论、它**没有上墙**，打去重等于
@@ -1243,6 +1232,7 @@ export class CommentScheduler {
     } = {},
   ): Promise<FacebookCommentRunResult> {
     const d = this.deps;
+    const resultSource = options.source === 'facebook_rule_batch' ? 'Facebook 规则模式' : undefined;
     const joinGate = options.actionGate?.('join_group');
     if (joinGate && !joinGate.allowed) {
       return {
@@ -1264,7 +1254,7 @@ export class CommentScheduler {
         level: 'error',
         title: '加群失败',
         message: `加群调度异常：${(err as Error).message}；未评论。`,
-      }, undefined, options.originChatId);
+      }, resultSource, options.originChatId);
       return {
         outcome: 'submit_failed',
         reason: `join_exception:${(err as Error).message}`,
@@ -1274,7 +1264,7 @@ export class CommentScheduler {
     const isMember =
       join.triggered && (join.outcome === 'joined' || join.outcome === 'already_member') && !!join.groupUrl;
     if (!isMember) {
-      await d.postResultCard?.(accountId, joinOnlyReceipt(join), undefined, options.originChatId);
+      await d.postResultCard?.(accountId, joinOnlyReceipt(join), resultSource, options.originChatId);
       return {
         outcome: 'no_targets',
         reason: `join_${join.reason ?? join.outcome ?? 'not_completed'}`,
@@ -1292,7 +1282,7 @@ export class CommentScheduler {
       };
     }
     // 已加入（或已是成员）→ 在该新群里发一条评论。override 容器强制真发；contactInfo 已在 triggerManual 解析一次（gate 同源）。
-    // manualOverride 透传 → 群内评论亦跳过评论配额 / 日上限闸（整条链一致，绝不「加了群却被评论配额拦住」）。
+    // manualOverride 透传 → 群内评论亦跳过 RiskController 前置闸（整条链一致）。
     const comment = await this.runFacebookTargetedTask(accountId, {
       contact: options.contact,
       overrideContainerUrl: join.groupUrl,
@@ -1307,7 +1297,12 @@ export class CommentScheduler {
     // 结果卡按**实际**注入值渲染（comment.contactIncluded），不按请求意图——
     // 用意图渲染会对一条降级发出的普通评论宣称「带联系方式（服务器已确认）」，
     // 而运营刚在人审卡上看过不带码的正文，两张卡自相矛盾。
-    await d.postResultCard?.(accountId, joinCommentReceipt(join, comment, comment.contactIncluded === true), undefined, options.originChatId);
+    await d.postResultCard?.(
+      accountId,
+      joinCommentReceipt(join, comment, comment.contactIncluded === true),
+      resultSource,
+      options.originChatId,
+    );
     return {
       ...comment,
       joinOutcome: join.outcome,

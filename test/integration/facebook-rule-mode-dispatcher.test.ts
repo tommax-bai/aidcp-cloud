@@ -331,9 +331,9 @@ describe('RoleDispatcher facebook rule mode', () => {
       facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
-      explainInteract: () => likeAllowed
-        ? { allowed: true }
-        : { allowed: false, reason: 'daily_like_quota' },
+      explainInteract: (action) => action === 'like' && !likeAllowed
+        ? { allowed: false, reason: 'daily_like_quota' }
+        : { allowed: true },
       explainRuleJoin: () => ({ allowed: true }),
       facebookRuleCommentBodyScheme: () => 'template',
       triggerFacebookRuleJoinContact: async () => {
@@ -379,6 +379,119 @@ describe('RoleDispatcher facebook rule mode', () => {
     await waitForAsyncChain();
     assert.equal(commands.some((command) => command.action === 'like'), false, '额度恢复不得补发历史点赞');
     assert.equal(joinCalls, 1, '终态批次不得重放历史加群联系');
+    dispatcher.endSession();
+  });
+
+  it('preflights the RiskController comment quota before joining a group', async () => {
+    const patches: Array<Record<string, unknown>> = [];
+    let joinCalls = 0;
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm: { complete: async () => '{"verdict":"skip"}' },
+      sendCommand: () => {},
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
+      updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
+      explainInteract: (action) => action === 'comment'
+        ? { allowed: false, reason: 'quota:day' }
+        : { allowed: false, reason: 'daily_like_quota' },
+      explainRuleJoin: () => ({ allowed: true }),
+      facebookRuleCommentBodyScheme: () => 'template',
+      triggerFacebookRuleJoinContact: async () => {
+        joinCalls += 1;
+        return {
+          started: true,
+          onTerminal: Promise.resolve({
+            joinState: 'confirmed' as const,
+            commentState: 'confirmed' as const,
+          }),
+        };
+      },
+    });
+    dispatcher.setCurrentAccountId('fb-1');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-1',
+      noteId: 'https://www.facebook.com/posts/quota-blocked',
+      sourceDedupeKey: 'receipt-quota-blocked',
+      source: 'detail',
+      occurredAt: Date.now(),
+    });
+    await waitForAsyncChain();
+
+    assert.equal(joinCalls, 0, '评论日配额已满时不得先执行不可逆的加群动作');
+    assert.ok(patches.some((patch) =>
+      patch.joinState === 'not_started'
+      && patch.commentState === 'risk_suppressed'
+      && patch.blocker === 'quota:day'
+      && patch.terminal === true,
+    ));
+    dispatcher.endSession();
+  });
+
+  it('preflights the active-session comment budget before joining a group', async () => {
+    const patches: Array<Record<string, unknown>> = [];
+    let joinCalls = 0;
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm: { complete: async () => '{"verdict":"skip"}' },
+      sendCommand: () => {},
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
+      updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
+      explainInteract: (action) => action === 'like'
+        ? { allowed: false, reason: 'daily_like_quota' }
+        : { allowed: true },
+      explainRuleJoin: () => ({ allowed: true }),
+      facebookRuleCommentBodyScheme: () => 'template',
+      sessionLimitProvider: {
+        sessionDurationMs: () => 10 * 60_000,
+        sessionBudget: () => ({
+          likes: 10,
+          collects: 5,
+          follows: 3,
+          searches: 5,
+          comments: 0,
+          comment_likes: 3,
+          join_groups: 1,
+        }),
+        collectSaveLikeRatio: () => 1 / 3,
+        followFansRatio: () => 1 / 8,
+        weekActiveMask: () => null,
+      },
+      triggerFacebookRuleJoinContact: async () => {
+        joinCalls += 1;
+        return {
+          started: true,
+          onTerminal: Promise.resolve({
+            joinState: 'confirmed' as const,
+            commentState: 'confirmed' as const,
+          }),
+        };
+      },
+    });
+    dispatcher.setCurrentAccountId('fb-1');
+    dispatcher.setup();
+    dispatcher.startSession();
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-1',
+      noteId: 'https://www.facebook.com/posts/session-blocked',
+      sourceDedupeKey: 'receipt-session-blocked',
+      source: 'detail',
+      occurredAt: Date.now(),
+    });
+    await waitForAsyncChain();
+
+    assert.equal(joinCalls, 0, '本场评论预算耗尽时不得先执行不可逆的加群动作');
+    assert.ok(patches.some((patch) =>
+      patch.joinState === 'not_started'
+      && patch.commentState === 'risk_suppressed'
+      && patch.blocker === 'comment_session_budget'
+      && patch.terminal === true,
+    ));
     dispatcher.endSession();
   });
 

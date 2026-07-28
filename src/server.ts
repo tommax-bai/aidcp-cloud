@@ -7013,8 +7013,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       }
     },
     facebookCanComment: async (accountId) => (await resolveController(accountId)).canDo('comment'),
-    facebookCommentedToday: (accountId) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
-    facebookDailyCap: () => Number(readEnvString('AIDCP_FB_COMMENT_DAILY_CAP') ?? '2') || 2,
     facebookAudit: (row) => {
       void facebookCommentAuditStore.append(row);
     },

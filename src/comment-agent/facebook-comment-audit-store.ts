@@ -18,7 +18,7 @@ export type FacebookCommentOutcome =
   | 'shadow_ok' // 影子：撰写+校验通过，未提交
   | 'commented' // 真发且服务器确认成功
   | 'no_targets' // 无关键词/容器（fail-closed）
-  | 'quota_denied' // canDo / 日上限拒
+  | 'quota_denied' // RiskController 评论闸拒绝
   | 'cooldown_denied' // 冷却拒
   | 'compose_skipped' // 校验器拒（不修不发）
   | 'no_strong_candidate' // 搜索无可评论候选
