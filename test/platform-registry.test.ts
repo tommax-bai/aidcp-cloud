@@ -223,7 +223,7 @@ test('platform registry: named catalog functions are the single reader implement
 
 // ── change seed-facebook-automation-defaults-on-registration：新账号种入默认值 ──
 
-test('新账号种入默认值: Facebook 取值逐字符合用户拍板值，且联系评论刻意缺席', () => {
+test('新账号种入默认值: Facebook 取值逐字符合用户拍板值，含联系评论', () => {
   const fb = newAccountAutomationDefaultsFor('facebook');
   assert.notEqual(fb, null);
   assert.deepEqual(fb!.schedule, {
@@ -231,15 +231,32 @@ test('新账号种入默认值: Facebook 取值逐字符合用户拍板值，且
     postMode: 'review',
     postDailyCap: 5,
     // 评论免审（用户 2026-07-29 定）。这条断言同时守住「发帖仍必须是需人审」——
-    // 两个模式刻意不同值，一起改成免审会在下一条用例当场红。
+    // 两个模式刻意不同值，一起改成免审会在下面那条用例当场红。
     commentMode: 'auto_approve',
     commentDailyCap: 20,
+    // 联系评论（change seed-facebook-contact-comment-default）。
+    //
+    // 上一个 change 这里原本断言「联系评论 MUST NOT 出现」，那是一条**有前置条件的守卫**：
+    // 带「先加群再评论」标记的复合动作只挂在联系评论上，种它等于让新账号具备
+    // 「加入新群后同一轮立即在该群评论」这一会招致平台警告的形态。
+    //
+    // 该前置已由 decouple-scheduled-contact-comment-from-group-join 解除（排期路径不再带那个标记，
+    // 改走账本选群、受预热与冷却约束），故守卫在此**连同理由一起反向改写**，而不是默默删掉。
+    // 若那个标记被加回排期路径，这两项 MUST 同时撤回。
+    contactCommentMode: 'auto_approve',
+    contactCommentDailyCap: 5,
   });
   assert.deepEqual(fb!.joinGroup, { enabled: true, dailyCap: 20 });
-  // 联系评论 MUST NOT 出现：带「先加群再评论」标记的复合动作只挂在它上面，
-  // 种它等于让新账号具备「加入新群后同一轮立即在该群评论」这一已知风险形态。
-  const keys = Object.keys(fb!.schedule);
-  assert.equal(keys.some((k) => k.toLowerCase().includes('contact')), false);
+});
+
+test('新账号种入默认值: 联系评论不得越过其自身硬上限（刻意与发帖/评论的 50 分开）', () => {
+  const fb = newAccountAutomationDefaultsFor('facebook')!;
+  const declared = availableScheduledAutomationActionsForPlatform('facebook');
+  const contactCap = declared.find((d) => d.action === 'contact_comment')?.maxDailyCap ?? -1;
+  assert.equal(contactCap, 10, '联系评论硬上限刻意是 10，不随发帖/评论的 50 走');
+  assert.ok(fb.schedule.contactCommentDailyCap <= contactCap);
+  // 并非要求它一定小于硬上限，但当前取 5 是刻意留出余量（与普通评论争抢同一评论配额）。
+  assert.ok(fb.schedule.contactCommentDailyCap < contactCap);
 });
 
 test('新账号种入默认值: 别名归一后仍命中 Facebook', () => {
