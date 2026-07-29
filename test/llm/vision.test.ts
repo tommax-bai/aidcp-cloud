@@ -6,6 +6,8 @@ import {
   type OpenAiCompatVisionClientOptions,
   type VisionChatMessage,
 } from '../../src/llm/index.js';
+// 直连 kernel 取同名类：用来钉死「错误族只有一份定义」（见文件末的跨出口同一性断言）。
+import { ProviderKeyMissingError as KernelProviderKeyMissingError } from '../../src/kernel/llm-errors.js';
 
 type Rec = { calls: number; url?: string; auth?: string; body?: Record<string, unknown> };
 
@@ -101,6 +103,27 @@ test('诚实失败：选中厂商缺密钥 → 发 fetch 前抛 ProviderKeyMissi
     (e) => e instanceof ProviderKeyMissingError && e.provider === 'visionprov',
   );
   assert.equal(rec.calls, 0); // 请求前就抛，零 fetch。
+});
+
+/**
+ * 拆仓不变量（change split-cloud-automation-production-runtime）：错误族 MUST 只有 kernel 那一份定义。
+ * 文本出口拆进共享传输包、本视觉出口留 content 之后，若哪一侧再复制一份错误类，
+ * 跨副本 `instanceof` 会恒 false —— 调用方的「该厂商密钥缺失」会被静默降级成泛化的「模型不可用」。
+ * 这条断言同时钉住两件事：视觉出口抛的就是 kernel 那个类，且 llm 出口面导出的与它是同一个引用。
+ */
+test('错误族单一定义：视觉出口抛的 ProviderKeyMissingError 就是 kernel 那一个类', async () => {
+  assert.equal(ProviderKeyMissingError, KernelProviderKeyMissingError);
+  const rec: Rec = { calls: 0 };
+  const c = new OpenAiCompatVisionClient({
+    getModel: () => 'qwen-vl-test',
+    getProvider: () => 'visionprov',
+    providerRuntime: { visionprov: { baseUrl: 'https://vision.example/v1', apiKey: '' } },
+    fetchImpl: fakeFetch(rec),
+  });
+  await assert.rejects(
+    () => c.chatVision(imageMessages),
+    (e) => e instanceof KernelProviderKeyMissingError,
+  );
 });
 
 test('厂商未注册进 providerRuntime → 同样发请求前诚实抛错', async () => {

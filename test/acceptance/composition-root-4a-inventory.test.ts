@@ -236,6 +236,13 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
     4,
     'Feishu operator bridge must enumerate delegate, publish/comment, card actions and dispatch',
   );
+  assert.equal(
+    actual.filter((blocker) => blocker.category === 'content-owner').length,
+    10,
+    'content-owner blockers: draft refinement, facebook publish media, concept, curated,'
+    + ' role factories, generic llm, token usage, text-card transcription, reply generation,'
+    + ' publish rejection evidence',
+  );
   for (const blocker of actual) {
     assert.ok(blocker.owner.length > 0, `${blocker.id} owner`);
     assert.ok(blocker.consumer.length > 0, `${blocker.id} consumer`);
@@ -253,6 +260,11 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
   assert.ok(actual.some((blocker) => blocker.id === 'content-role-factories'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-generic-llm-authority'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-token-usage-authority'));
+  assert.ok(actual.some((blocker) => blocker.id === 'content-textcard-transcription-authority'));
+  assert.ok(actual.some((blocker) => blocker.id === 'content-reply-generation-authority'));
+  assert.ok(
+    actual.some((blocker) => blocker.id === 'content-publish-rejection-evidence-authority'),
+  );
   assert.ok(actual.some((blocker) => blocker.id.startsWith('seg-a-foreign-pool-')));
   assert.ok(actual.some((blocker) => blocker.id.startsWith('seg-a-api-owner-')));
   assert.equal(
@@ -260,7 +272,10 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
       blocker.id.includes('persona-generator')
       || blocker.evidence.some((item) => item.includes('PersonaGenerator'))),
     false,
-    'PersonaGenerator is the approved 4a content port and must not remain in the blocker ledger',
+    'PersonaGenerator is the approved 4a content port and must not remain in the blocker ledger;'
+    + ' the only segC `new PersonaGenerator` (src/server.ts) sits inside the'
+    + " `seamMode === 'monolith'` branch — in automation mode the persona port comes from"
+    + ' apiDirectPorts.accountPersona, so it does not block an independent automation root',
   );
 });
 

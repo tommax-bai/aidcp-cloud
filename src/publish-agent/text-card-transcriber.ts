@@ -1,16 +1,25 @@
 import { createHash } from 'node:crypto';
 
-import {
-  normalizeCuratedReferenceImages,
-  orderedTextCardTexts,
-  type CuratedReferenceImage,
-  type CuratedReferenceImageInput,
-  type CuratedTextCardContext,
-  type TextCardTranscription,
-  type TextCardTranscriptionCard,
-} from '../cache/curated-content-store.js';
+import { normalizeCuratedReferenceImages } from '../cache/curated-content-store.js';
+// 数据模型与调用口的定义处都在 kernel；经 `cache/curated-content-store.ts` 的再导出壳取用会让那条边
+// 在扫描器眼里继续存在（它认的是 import 说明符，不是最终定义处）。直取 kernel。
+import type {
+  CuratedReferenceImage,
+  TextCardTranscription,
+  TextCardTranscriptionCard,
+} from '../kernel/curated-content-types.js';
+// 三个口的定义已下沉 kernel（两侧都要认识），**转写器本体留在本文件（content）**：
+// 它要视觉客户端 + 形态感知器 + OSS 图址，进不了零副作用层。owner 把口 import 回来，不留第二份定义。
+import type {
+  TextCardTranscriber,
+  TextCardTranscriberInput,
+  TextCardTranscriberOutcome,
+} from '../kernel/text-card-transcriber-port.js';
 import type { VisionChatMessage, VisionContentPart, VisionLlmClient } from '../llm/vision.js';
 import type { CoverFormSensor } from './cover-form-sensor.js';
+
+// 既有消费方（组合根 / 测试装配）从本模块取这三个口的导入面保持逐字不变。
+export type { TextCardTranscriber, TextCardTranscriberInput, TextCardTranscriberOutcome };
 
 export const TEXT_CARD_TRANSCRIBER_ROLE = 'browse:text_card_transcriber';
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -18,25 +27,6 @@ const DEFAULT_MAX_TOKENS = 8_192;
 const DEFAULT_MIN_CONFIDENCE = 0.75;
 const FORM_CONCURRENCY = 4;
 const MAX_CARD_TEXT_LENGTH = 8_000;
-
-export interface TextCardTranscriberInput {
-  accountId: string;
-  sourceId: string;
-  images: CuratedReferenceImageInput[];
-  snapshotAt: number;
-  cached?: CuratedTextCardContext | null;
-}
-
-export interface TextCardTranscriberOutcome {
-  images: CuratedReferenceImage[];
-  transcription?: TextCardTranscription;
-  cacheHit: boolean;
-}
-
-export interface TextCardTranscriber {
-  enabled(): boolean;
-  transcribe(input: TextCardTranscriberInput): Promise<TextCardTranscriberOutcome>;
-}
 
 export interface TextCardTranscriberDeps {
   vision: VisionLlmClient;
@@ -166,15 +156,8 @@ function failedCards(images: CuratedReferenceImage[], selected: number[], reason
   }));
 }
 
-/** Successful OCR text in source-card order, appended once to the current DOM body. */
-export function mergeBodyWithTextCardTranscription(body: string, transcription: TextCardTranscription | undefined): string {
-  const domBody = body.trim();
-  const normalizedDom = domBody.replace(/\s+/g, '');
-  const additions = orderedTextCardTexts(transcription)
-    .map((card) => card.text!.trim())
-    .filter((text) => text && !normalizedDom.includes(text.replace(/\s+/g, '')));
-  return [domBody, additions.join('\n\n')].filter(Boolean).join('\n\n');
-}
+// mergeBodyWithTextCardTranscription 已抬进 kernel（`kernel/text-card-transcription.ts`）：纯字符串运算、
+// 零依赖，且消费方在 automation 侧（精选准入评估角色）。同样不留再导出壳，消费方直取 kernel。
 
 export function createTextCardTranscriber(deps: TextCardTranscriberDeps): TextCardTranscriber {
   const timeoutMs = deps.timeoutMs ?? envPositiveInt('AIDCP_TEXTCARD_OCR_TIMEOUT_MS') ?? DEFAULT_TIMEOUT_MS;

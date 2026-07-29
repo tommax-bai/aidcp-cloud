@@ -21,7 +21,9 @@ import { referenceImageUrl, referenceImagesForGeneration } from '../reference-im
 import type { ChatLlmClient } from '../../llm/qwen.js';
 import type { CoverFormSensor, CoverFormSenseResult } from '../cover-form-sensor.js';
 import type { PostImageFormProfileService } from '../post-image-form-profile.js';
-import { orderedTextCardTexts, type TextCardTranscription } from '../../cache/curated-content-store.js';
+// 纯函数与类型的定义处都在 kernel；经存储层的再导出壳取用会让那条边在扫描器眼里继续存在（CLAUDE §8.3）。
+import { orderedTextCardTexts } from '../../kernel/text-card-transcription.js';
+import type { TextCardTranscription } from '../../kernel/curated-content-types.js';
 import type { TextCardRenderer } from '../../render/index.js';
 
 /**

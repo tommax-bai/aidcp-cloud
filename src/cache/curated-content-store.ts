@@ -53,8 +53,6 @@ import type {
   CuratedReferenceImageStatus,
   CuratedCoverForm,
   CuratedReferenceImageFormGuess,
-  TextCardTranscriptionCard,
-  TextCardTranscription,
   CuratedTextCardContext,
   CuratedReferenceImage,
   CuratedReferenceImageInput,
@@ -421,10 +419,9 @@ function parseReferenceImages(v: unknown): CuratedReferenceImage[] {
 }
 
 
-/** Successful per-card text in authoritative source-image order. */
-export function orderedTextCardTexts(transcription: TextCardTranscription | undefined): TextCardTranscriptionCard[] {
-  return transcription?.cards.filter((card) => card.status === 'transcribed' && !!card.text) ?? [];
-}
+// orderedTextCardTexts 已抬进 kernel（`kernel/text-card-transcription.ts`）：2 行纯函数、零 SQL，
+// 而消费方分属不同属主（content 的封面卡角色、将随准入评估角色去 automation 的正文合并）。
+// 这里刻意**不留再导出壳**——扫描器认的是 import 说明符，留壳等于那条边原样还在（CLAUDE §8.3 假消边）。
 
 interface CuratedRow {
   source_id: string;

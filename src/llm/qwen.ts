@@ -24,6 +24,28 @@ import type { LlmThinkingMode as ThinkingMode } from '../kernel/llm-contract.js'
 // 本文件对既有导入方保持等值再导出。LlmClient / ChatLlmClient 因门禁 §4.7 禁止 kernel 内出现该标识符而留本文件（content）。
 import type { LlmCallOpts, TextCompletionPort } from '../kernel/llm-contract.js';
 export type { LlmCallOpts } from '../kernel/llm-contract.js';
+// change split-cloud-automation-production-runtime：LLM 错误族整体迁入 kernel。
+// 拆仓后本文件归共享传输包、`vision.ts` 留 content，两侧都要抛/认这族错误；
+// 若各持一份定义，跨副本 `instanceof` 恒 false，会把「密钥没配」静默降级成「模型不可用」。
+// 故此处只 import 回来，**绝不在本文件重新定义**；`formatLlmMeta` 供本文件的超时错误共用同一套字段格式。
+import {
+  ProviderKeyMissingError,
+  buildLlmApiError,
+  buildLlmHttpError,
+  buildLlmShapeError,
+  formatLlmMeta,
+  type LlmErrorMeta,
+} from '../kernel/llm-errors.js';
+// 对既有导入方（`src/llm/index.ts` 的 `export *` → server / 探活 / 测试）保持等值再导出。
+// 消费方新代码 SHOULD 直接指 kernel；这里的再导出只为不破坏既有出口面。
+export {
+  ProviderKeyMissingError,
+  buildLlmApiError,
+  buildLlmHttpError,
+  buildLlmShapeError,
+  formatLlmMeta,
+} from '../kernel/llm-errors.js';
+export type { LlmErrorMeta } from '../kernel/llm-errors.js';
 
 /**
  * 通用文本 LLM 客户端接口（与 edge 侧 selector.LlmClient 同形，便于迁移）。只需补全。
@@ -70,20 +92,6 @@ export interface LlmCallCompletedInfo {
   requestId?: string;
   /** 是否由应用层硬 deadline 结算。 */
   timedOut: boolean;
-}
-
-/**
- * 选中厂商的密钥不可用时由 `chat()` 抛出（change model-config-volcengine-provider）。
- * 探活/调用方据此把失败诚实归因为"该厂商密钥缺失"（区别于模型名无效），绝不跨厂商兜底。
- */
-export class ProviderKeyMissingError extends Error {
-  constructor(
-    public readonly provider: string,
-    meta?: Pick<LlmErrorMeta, 'role' | 'model' | 'accountId'>,
-  ) {
-    super(`${provider} apiKey 缺失 ${formatLlmMeta({ ...meta, provider })}（在后台为该厂商配置密钥并重启 cloud）`);
-    this.name = 'ProviderKeyMissingError';
-  }
 }
 
 export interface QwenClientOptions {
@@ -150,15 +158,6 @@ interface ChatCompletionResponse {
 
 export const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
-/** LLM 错误排障元数据（错误信息统一带 provider/model/role/account/endpoint，多模态客户端复用）。 */
-export interface LlmErrorMeta {
-  provider?: string;
-  model?: string;
-  role?: string;
-  accountId?: string;
-  baseUrl?: string;
-}
-
 /**
  * 应用层硬 deadline：与底层 Abort 是否真正让 fetch settle 解耦。
  * stage/requestId 只含排障元数据，绝不包含 prompt、响应正文或密钥。
@@ -184,42 +183,6 @@ export class LlmTimeoutError extends Error {
   }
 }
 
-interface ProviderErrorPayload {
-  code?: string;
-  message?: string;
-  requestId?: string;
-  type?: string;
-}
-
-function endpointHost(baseUrl: string | undefined): string | undefined {
-  if (!baseUrl) return undefined;
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return baseUrl.slice(0, 80);
-  }
-}
-
-function compactText(s: string | undefined, max = 500): string | undefined {
-  const t = s?.replace(/\s+/g, ' ').trim();
-  if (!t) return undefined;
-  return t.length > max ? `${t.slice(0, max)}...` : t;
-}
-
-function valueOrDash(v: string | undefined): string {
-  return v?.trim() || '-';
-}
-
-function formatLlmMeta(meta: LlmErrorMeta): string {
-  return [
-    `provider=${valueOrDash(meta.provider)}`,
-    `model=${valueOrDash(meta.model)}`,
-    `role=${valueOrDash(meta.role)}`,
-    `account=${valueOrDash(meta.accountId)}`,
-    `endpoint=${valueOrDash(endpointHost(meta.baseUrl))}`,
-  ].join(' ');
-}
-
 /** 常见 OpenAI 兼容厂商请求 ID 响应头；缺 headers 的测试桩诚实返回 undefined。 */
 function responseRequestId(response: Response): string | undefined {
   const headers = (response as Response & { headers?: Headers }).headers;
@@ -229,88 +192,6 @@ function responseRequestId(response: Response): string | undefined {
     if (value) return value.slice(0, 200);
   }
   return undefined;
-}
-
-function extractRequestId(message: string | undefined): string | undefined {
-  return message?.match(/request\s*id\s*:\s*([A-Za-z0-9._:-]+)/i)?.[1];
-}
-
-function parseProviderErrorBody(body: string): ProviderErrorPayload {
-  try {
-    const parsed = JSON.parse(body) as {
-      error?: { code?: unknown; message?: unknown; request_id?: unknown; requestId?: unknown; type?: unknown };
-      code?: unknown;
-      message?: unknown;
-      request_id?: unknown;
-      requestId?: unknown;
-      type?: unknown;
-    };
-    const err = parsed.error ?? parsed;
-    const message = typeof err.message === 'string' ? err.message : undefined;
-    const requestIdRaw = err.request_id ?? err.requestId ?? parsed.request_id ?? parsed.requestId;
-    return {
-      code: typeof err.code === 'string' ? err.code : undefined,
-      message,
-      requestId: typeof requestIdRaw === 'string' ? requestIdRaw : extractRequestId(message),
-      type: typeof err.type === 'string' ? err.type : undefined,
-    };
-  } catch {
-    return { message: compactText(body, 240), requestId: extractRequestId(body) };
-  }
-}
-
-function formatProviderErrorFields(err: ProviderErrorPayload): string {
-  return [
-    err.code ? `code=${err.code}` : undefined,
-    err.requestId ? `requestId=${err.requestId}` : undefined,
-    err.type ? `type=${err.type}` : undefined,
-    err.message ? `apiMessage=${JSON.stringify(compactText(err.message, 240))}` : undefined,
-  ]
-    .filter(Boolean)
-    .join(' ');
-}
-
-/** HTTP 非 2xx → 统一格式错误（含厂商错误体解析；vision.ts 复用，勿在别处复制实现）。 */
-export function buildLlmHttpError(status: number, body: string, meta: LlmErrorMeta): Error {
-  const parsed = parseProviderErrorBody(body);
-  const providerFields = formatProviderErrorFields(parsed);
-  const bodyPreview = compactText(body, 300);
-  return new Error(
-    [
-      `LLM HTTP ${status}`,
-      formatLlmMeta(meta),
-      providerFields,
-      bodyPreview ? `body=${bodyPreview}` : undefined,
-    ]
-      .filter(Boolean)
-      .join(' | '),
-  );
-}
-
-/** 响应体带 error 字段（HTTP 200 但 API 报错）→ 统一格式错误（vision.ts 复用）。 */
-export function buildLlmApiError(
-  err: { code?: string; message?: string; request_id?: string; requestId?: string; type?: string },
-  meta: LlmErrorMeta,
-): Error {
-  return new Error(
-    [
-      'LLM API error',
-      formatLlmMeta(meta),
-      formatProviderErrorFields({
-        code: err.code,
-        message: err.message,
-        requestId: err.request_id ?? err.requestId ?? extractRequestId(err.message),
-        type: err.type,
-      }),
-    ]
-      .filter(Boolean)
-      .join(' | '),
-  );
-}
-
-/** 响应形状不符（缺 content 等）→ 统一格式错误（vision.ts 复用）。 */
-export function buildLlmShapeError(message: string, meta: LlmErrorMeta): Error {
-  return new Error(['LLM response error', formatLlmMeta(meta), message].join(' | '));
 }
 
 /** 已告警过的守卫组合（warn-once，避免刷屏）；key = `${provider}|${model}|${mode}`。 */

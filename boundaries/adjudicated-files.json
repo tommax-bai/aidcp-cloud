@@ -90,7 +90,6 @@
     "src/orchestrator/role-dispatcher.ts",
     "src/publish-agent/content-visual-brief.ts",
     "src/publish-agent/cover-form-sensor.ts",
-    "src/publish-agent/curated-gate.ts",
     "src/publish-agent/draft-refinement-worker.ts",
     "src/publish-agent/draft-refinement.ts",
     "src/publish-agent/facebook-publish-media-store.ts",

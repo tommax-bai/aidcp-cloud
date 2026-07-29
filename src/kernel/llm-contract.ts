@@ -6,7 +6,13 @@
  *
  * 客户端接口 `LlmClient` / `ChatLlmClient` **不进 kernel**：门禁 §4.7 kernel 准入把这两个标识符
  * 本身列为「LLM 或供应商 HTTP 调用」特征、禁止出现在 kernel 文件里，故它们留 `src/llm/qwen.ts`（content）。
- * 厂商 HTTP 客户端类、错误类、buildXxx 等 behavior 同样留 qwen.ts。
+ * 厂商 HTTP 客户端类与真正发请求的 behavior 同样留 qwen.ts。
+ *
+ * **错误族已不在此列**（change split-cloud-automation-production-runtime 更正）：
+ * `ProviderKeyMissingError` / `LlmErrorMeta` / `buildLlm*Error` 已抬进 `src/kernel/llm-errors.ts`。
+ * 理由是结构性的——拆仓后文本出口随 qwen.ts 进共享传输包、视觉出口 `src/llm/vision.ts` 留 content，
+ * 两侧各持一份错误类会让跨副本 `instanceof` 恒 false，把「该厂商密钥缺失」静默降级成「模型不可用」。
+ * **别照本段的旧版本把它们复制回来**：它们必须只有一份定义。
  *
  * kernel 准入：无 SQL / 无供应商调用标识符 / 无 fetch / 无进程内活状态 / 不反向依赖业务层。
  */

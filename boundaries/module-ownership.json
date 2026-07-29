@@ -81,8 +81,8 @@
   },
   {
     "path": "src/agents/concept-extractor-role.ts",
-    "layer": "content",
-    "note": "§7.2 判据三首批迁移名单"
+    "layer": "automation",
+    "note": "§7.2.1 改判（用户 2026-07-29）：同上。旁路写概念池、fire-and-forget 这条原依据说的是输出；输入仍是 automation 进程内事件总线的 note.detail.arrived。写概念池经窄端口"
   },
   {
     "path": "src/agents/content-curator-role.ts",
@@ -96,18 +96,18 @@
   },
   {
     "path": "src/agents/content-role.ts",
-    "layer": "content",
-    "note": "【待定稿裁决】P5-2 新写：content 侧事件驱动角色的薄壳基类。§7.2 判据三首批迁移名单里的四个角色（concept_extractor / curated_note_evaluator / curated_comment_evaluator / valuable_comment_archivist）此前继承 automation 属主的 src/agents/base-role.ts——那是本 change 前最后 4 条跨边界豁免，且拆仓后 content 的 src 里没有事件总线实现与 RoleName 联合、四个角色直接编译不过。本类与 BaseRole 是同一份 kernel 实现（role-runtime.ts）的两个外壳，各自只做「存字段 + 转调」，零逻辑重复。与 BaseRole 的唯一实质差别是两处收窄：事件总线只收 kernel 的 RoleEventSource（只订阅、不发布），角色名是裸 string 不标注 automation 的 RoleName（那道闸原样搬到 test/agents/content-role-names.test.ts，写错一个字母仍编译红）。归 content 而非 automation：它只服务四个 content 角色，拆仓时随它们进 aidcp-content，届时全部 import 皆为 kernel。消除 import 豁免 4 条。请求回写 §4.7 src/agents/ 逐文件表见 docpatch RK-P5-2"
+    "layer": "automation",
+    "note": "§7.2.1 改判（用户 2026-07-29，change split-cloud-automation-production-runtime）：本类是那四个角色的公共基类，消费者恰好只有它们四个（全库实测），随它们改判 automation。P5-2 当初写下的『拆仓时随它们进 aidcp-content』已随 §7.2.1 作废——方向反了，但那句话背后的判据（基类跟着它服务的角色走）恰恰仍然成立，只是那四个角色的落点变了。迁移代价为零：本文件 import 全部指向 kernel（soul-types / llm-contract / role-runtime），换层不产生任何新的跨层边，与 §10.7 那条零代价机械依据同形。与 automation 属主的 base-role.ts 的两处收窄照旧（事件总线只收 RoleEventSource 即只订阅不发布；角色名裸 string），改判后两者同层但仍不合并——合并会让『只订阅不发布』这道收窄消失。原 basis 见 git history"
   },
   {
     "path": "src/agents/curated-comment-evaluator.ts",
-    "layer": "content",
-    "note": "§7.2 判据三首批迁移名单"
+    "layer": "automation",
+    "note": "§7.2.1 改判（用户 2026-07-29）：同 curated-note-evaluator——订阅的 comment_like.confirmed 是 automation 进程内事件，且它同属 CONTENT_ROLE_FACTORIES 那张工厂函数表。写精选库经窄端口"
   },
   {
     "path": "src/agents/curated-note-evaluator.ts",
-    "layer": "content",
-    "note": "§7.2 判据三首批迁移名单"
+    "layer": "automation",
+    "note": "§7.2.1 改判（用户 2026-07-29，change split-cloud-automation-production-runtime）：判据三原依据说的是输出（产物落精选库、不回灌动作链），那部分仍成立；决定归属的是输入——本角色订阅 automation 进程内事件总线的 note.detail.arrived 与图片快照事件，拆仓后这些事件不跨进程，且系统里没有跨进程事件总线（在 content 侧另起第二个角色调度器的方案已被否）。另一条端口修不了的形态：四个角色经 CONTENT_ROLE_FACTORIES 以一张工厂函数表注入角色调度器，是构造输入而非被调用的服务，HTTP 端口包不了工厂函数（与 §10.7 发帖调度器同形）。写 content 属主表按 §5.1 经窄端口，MUST NOT 直连 content 属主库；判据五照常适用。可选的图内文字转写依赖不随迁（转写器留 content，见 §7.2.1），其窄接口与两个纯函数抬 kernel 供两侧共用"
   },
   {
     "path": "src/agents/deep-reader.ts",
@@ -266,8 +266,8 @@
   },
   {
     "path": "src/agents/valuable-comment-archivist.ts",
-    "layer": "content",
-    "note": "§7.2 判据三首批迁移名单"
+    "layer": "automation",
+    "note": "§7.2.1 改判（用户 2026-07-29）：同上。另有一条独立佐证——它归档的 valuableCommentStore（src/cache/valuable-comment-store.ts）属主本就是 automation，即今天存在一条『content 角色写 automation 属主表』的反方向边，任何 blocker 台账都没记它；改判后该反向边一并消失"
   },
   {
     "path": "src/alerts/alert-notification.ts",
@@ -1135,6 +1135,11 @@
     "note": "【待定稿裁决】change decouple-longtail-sweep 从 src/agents/comment-approval-gate.ts 析出 CommentApprovalNoticeInput 纯输入数据模型（requestId/noteId/text/title/authorName/accountId/accountName + approvalSource union，全为原语）。零 import、零 SQL、无进程内活状态。CommentApprovalGate 角色留 comment-approval-gate.ts（automation）并从 kernel 导入等值再导出。供飞书卡片层跨边界共导，消 1 条入边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-longtail"
   },
   {
+    "path": "src/kernel/concept-pool-port.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 新写：概念池跨属主端口面（表 concepts 属 content，消费方全在 automation），6 个方法逐条标注真实调用点。两个读方法**都不带可选标记**，回落改由具名的 unsupported_method 驱动——今天的 typeof 能力探针跨进程后恒为真（客户端类总是定义着方法），保留可选等于保留一张假的安全网、真实能力缺口反被静默吞掉。写口回执只回报真实影响行数，MUST NOT 因为请求发出去了就填 1。仅 import kernel；零 SQL/HTTP/LLM/模块级活状态"
+  },
+  {
     "path": "src/kernel/concept-pool.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P5-B 新写：概念池纯数据模型 ConceptPool（原 src/event-bus/types.ts，automation）。抬入理由同 note-detail：属主是 content 的 concept-store.ts，留 automation 会让 content 仓编译不过。**同时删掉原 source: Map<string,string> 字段**——全仓只有写入点、零读取点，而拆仓后概念池由 content 装载、automation 的 role-dispatcher / search-evaluator 消费，跨进程要过 JSON，Map 序列化恒为 {}，读方永远拿到空表且无一处报错（红线：静默假成功）。关键词来源归属未丢，落在 concept_pool.source_note 列、经 ConceptRecord.sourceNote 读出，那条路径有真实消费者。零 import、四条准入正则实跑零命中。消除 import 豁免 1 条。请求回写 §4.7 见 docpatch RK-P5-B"
@@ -1153,6 +1158,11 @@
     "path": "src/kernel/config-stop-work-reasons.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P3-5 从 src/config/mirror-stop-work.ts 析出两个**具名停手原因码**常量。整文件进不了 kernel（模块级 ReadonlySet = new Set(...)，类型标注不救；且自身 import 两个 api 文件），故只析出常量并把消费方 repoint——只留原位再导出是消不掉边的。请求回写 §4.7 见 docpatch RK-P3-5"
+  },
+  {
+    "path": "src/kernel/content-port-result.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 新写：automation→content 跨属主读写的统一结果信封（ContentPortResult<T> = ok|failure + 7 选一具名失败原因 + 结构化守卫 isContentPortFailure）。存在理由是让『对面明确回答了空』与『没问到对面』在类型层就分得开——今天三处现役代码把后者吃成前者（server.ts:7024 的 Promise.resolve([])、comment-scheduler.ts:1603 的 .catch(()=>[])、role-dispatcher.ts:2456 的回退空池）。守卫按 outcome 具名字段判而非 instanceof（CLAUDE §8.5：跨进程后 instanceof 恒 false）。零外部 import、零 SQL/HTTP/LLM/模块级活状态"
   },
   {
     "path": "src/kernel/content-schedule-mode.ts",
@@ -1178,6 +1188,11 @@
     "path": "src/kernel/curated-content-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/cache/curated-content-store.ts 析出纯数据模型类型（CuratedReferenceImageFormGuess / TextCardTranscription(*) / CuratedReferenceImage(Input) / CuratedObservation / CuratedSelectItem / CuratedPanelRow / CuratedFacets / CuratedContentType(Filter) 等），仅 import kernel（visual-reference-types / time）。CURATED_CONTENT_SCHEMA_SQL + CuratedContentStore 类 + normalize* 函数 + CuratedContentStoreOptions 留 curated-content-store.ts（content）。满足 §4.7 kernel 准入（无 SQL）。请求回写 §4.7 见 docpatch RK3"
+  },
+  {
+    "path": "src/kernel/curated-selection-port.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 新写：精选库召回的跨属主端口面（表 curated_content 属 content，两个消费方是 automation 的发帖与评论调度器）。刻意是两个方法而非一个：发帖侧要全字段，评论侧只要三字段窄投影——全字段视图挂着参照图集/视觉分析/文字卡转写等大块 JSON，搬过进程边界只为留三个字段，投影本就该在属主侧做。缺失计数用 null 而非 0，区别『不知道』与『真是 0』。仅 import kernel；零 SQL/HTTP/LLM/模块级活状态"
   },
   {
     "path": "src/kernel/default-chat-provider.ts",
@@ -1293,6 +1308,11 @@
     "path": "src/kernel/llm-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-llm-lang-interaction-contracts 从 src/llm/qwen.ts 析出：LlmThinkingModeOpt + LlmCallOpts（Per-call 覆盖选项，纯接口，无供应商语义标识符）。供 automation 侧多角色 type-only 共导，消 4 条 automation->content 边。thinkingMode 字段内联为 'off'|'on'|'default' 字面量（结构与 role-catalog ThinkingMode|'default' 逐字一致），以保 kernel 不反向依赖 api 属主的 role-catalog。LlmClient/ChatLlmClient 因门禁 §4.7 把这两个标识符本身列为「LLM 或供应商 HTTP 调用」特征而**不入 kernel**、留 qwen.ts（那 3 条 LlmClient/ChatLlmClient 边留 residual）。QwenClient 类/错误类/buildXxx 等 behavior 留 qwen.ts。零 SQL/HTTP/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
+  },
+  {
+    "path": "src/kernel/llm-errors.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 新写：LLM 错误族的唯一定义（ProviderKeyMissingError / LlmErrorMeta / buildLlmHttpError / buildLlmApiError / buildLlmShapeError + 其私有格式化闭包；formatLlmMeta 提升为 export 因留在 qwen.ts 的 LlmTimeoutError 也用它拼同一套排障字段，不导出就得复制第二份、字段位次会悄悄漂）。抬入理由是结构性的：拆仓后文本出口随 qwen.ts 进 aidcp-transport、视觉出口 vision.ts 留 content，两侧各持一份错误类会让跨副本 instanceof 恒 false，把『该厂商密钥缺失』静默降级成泛化的『模型不可用』（红线：静默假成功）。原处定义已删、非复制；vision.ts→qwen.ts 那条边随之彻底消失。零 import、四条准入正则实跑全 CLEAN、不 import 任何业务层文件。注：src/kernel/llm-contract.ts 文件头那句『错误类 …… 留 qwen.ts』已被本条推翻，已同批更正"
   },
   {
     "path": "src/kernel/llm-usage-types.ts",
@@ -1498,6 +1518,11 @@
     "path": "src/kernel/text-card-style.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-platform-type-closure 从 src/render/palettes.ts + src/render/text-card.ts 析出纯设计令牌类型（PaletteKey / LayoutVariant / Decoration / TextCardBackgroundTreatment / TextCardBackgroundPattern / TextCardBulletPresentation / TextCardSourceStyle），零 import、零 SQL、零活状态。色板 hex 数据 PALETTES + selectTheme/fnv1a 渲染逻辑留 render/（content），并以 satisfies 让 PALETTES/LAYOUT_VARIANTS/DECORATIONS 逐字对齐本联合。为发布管线闭包（publish-pipeline-types）能进 kernel 而析出。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK3"
+  },
+  {
+    "path": "src/kernel/text-card-transcriber-port.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 新写：图内文字转写的调用口与能力状态（TextCardTranscriber / Input / Outcome + TextCardTranscriberCapability 二态 + TextCardTranscriptionMode 三态）。这条缝的两侧分居两仓——转写本体按 §7.2.1 留 content（它依赖的封面形态感知是真·双段共用，组装根在两段各建一个实例），调用方 curated_note_evaluator 改判 automation——所以形状必须只有一份定义。能力二态的存在理由是红线：原写法 this.textCardTranscriber?.enabled() 在依赖缺席时表达式为 undefined、判定为假，于是『旗标关掉了』与『依赖没接上』长得一模一样，调用方照拿成功。零 IO，只 import kernel/curated-content-types.js；四条准入正则实跑全 CLEAN"
   },
   {
     "path": "src/kernel/text-card-transcription.ts",
@@ -1746,8 +1771,8 @@
   },
   {
     "path": "src/publish-agent/curated-gate.ts",
-    "layer": "content",
-    "note": "§4.6.3：生成候选段，api 6 与 automation 6 逐文件点名"
+    "layer": "automation",
+    "note": "§7.2.1 改判（用户 2026-07-29，change split-cloud-automation-production-runtime）：随 curated_note_evaluator / curated_comment_evaluator 两个角色改判 automation——两者值引用它的共鸣预筛与配置解析，而它在全库只有这两个角色 + 组装根三个消费者（组装根 src/server.ts:7225 那处也在 segCAutomation 段内）。迁移代价为零：本文件零 import。顺带坐实一条谁都没记的边——resolveCuratedGateConfig 今天在 automation 段被调用而文件属 content，automation 仓里根本没有它，任何 blocker 台账都没记；改判后就地消失。目录规则 src/publish-agent/ 默认 content，故必须逐文件点名"
   },
   {
     "path": "src/publish-agent/draft-image-remove.ts",

@@ -1,0 +1,74 @@
+/**
+ * 精选库**召回**的跨属主端口面（kernel，automation → content）。
+ *
+ * 精选库存储是 content 属主（`src/cache/curated-content-store.ts`，表 `curated_content`）。
+ * 它对外二十余个方法（准入、观测刷新、面板治理、保留期修剪…）全都不属于 automation；
+ * automation 真正跨界用到的**只有召回这一件事**，且只有两个调用方：
+ *
+ *   ① 发帖创作素材 —— `src/publish-agent/publish-scheduler.ts:264-270`（经其 `SchedulerCuratedStore` 窄契约），
+ *      取**全字段**视图，一次两问：`source_post`（limit = selectTopK，默认 8）当正向素材，
+ *      `comment`（limit = 3）当读者角度线索；两问都可能带「只要这一刻之后被观测刷新过的行」时间窗。
+ *      单体接线在 `src/server.ts:7224`。
+ *   ② 评论搜索词样本 —— `src/comment-agent/comment-scheduler.ts:1603`（经其 `selectCurated` 注入），
+ *      取 `source_post`、limit 8、**不带时间窗**，而且只要三个字段。
+ *      单体接线在 `src/server.ts:7021-7026`，那里挂着一个 `.then(rows => rows.map(...))` 的窄投影。
+ *
+ * **两个调用方要的形状不一样，所以这里是两个方法、不是一个。**
+ * 把②合并成「①之后调用方自己 map」跨进程会很贵也很蠢：全字段视图里挂着参照图集、视觉分析、
+ * 文字卡转写——都是大块 JSON——搬过进程边界只为了留下标题、话题、收藏数三个字段。
+ * 投影本来就该发生在属主那一侧；它今天已经写在组合根里了，拆开时顺势归位即可。
+ *
+ * **一个必须当场处置的诚实问题**：`src/server.ts:7024` 今天写的是
+ * `curatedContentStore ? … : Promise.resolve([])`，`comment-scheduler.ts:1603` 那侧还叠了一层
+ * `.catch(() => [])`。同进程里这没问题——精选库没接线就是真没有素材。跨进程后这两处会把
+ * **「连不上内容域」原样吃成「没有精选素材」**：搜索词生成拿零样本照跑、发帖创作以为没素材照发，
+ * 全程零报错。故本端口的返回类型一律经 `ContentPortResult` 交出，
+ * 「对面回答了空」与「没问到对面」在类型上就分得开；要降级仍可以降，
+ * 但必须是调用方看着具名原因**明写**的一个决定。
+ *
+ * 零 import 副作用、零 SQL、零 HTTP、零 LLM、无进程内活状态，满足 §4.7 kernel 准入。
+ */
+import type { ContentPortResult } from './content-port-result.js';
+import type { CuratedContentTypeFilter, CuratedSelectItem } from './curated-content-types.js';
+
+/**
+ * 召回时间窗（形状照抄属主存储真实签名里的 `opts`，不另造更宽松的一套）。
+ * 缺省 → 不按更新时间过滤（既有行为）。
+ */
+export interface CuratedSelectionWindow {
+  /** 只召回自此刻起被观测刷新过的行（epoch ms）。 */
+  updatedSinceMs?: number;
+}
+
+/**
+ * 搜索词生成样本 —— 属主侧完成的窄投影，跨进程只搬这三个字段。
+ * 计数诚实置空：`collectCount` 缺失为 `null`（**区别于真实的 0**，别在投影这一步把它填成 0）。
+ */
+export interface CuratedTermSample {
+  title: string;
+  topics: string[];
+  collectCount: number | null;
+}
+
+export interface CuratedSelectionPort {
+  /**
+   * 创作素材召回（发帖侧）：自有动作优先、再按收藏数与更新时间排序，按账号 + 内容类型过滤。
+   * 返回全字段视图 `CuratedSelectItem`（含参照图 / 视觉分析 / 文字卡转写——发帖配图段真的要用）。
+   */
+  selectForCreation(
+    accountId: string,
+    contentType: CuratedContentTypeFilter,
+    limit: number,
+    window?: CuratedSelectionWindow,
+  ): Promise<ContentPortResult<CuratedSelectItem[]>>;
+
+  /**
+   * 搜索词样本召回（评论侧）：与上一条**同一份排序与过滤**，但由属主侧投影成三字段后再过边界。
+   * 单独成方法的理由是形状与代价，不是洁癖——见文件头②。
+   */
+  selectSamplesForSearchTerms(
+    accountId: string,
+    contentType: CuratedContentTypeFilter,
+    limit: number,
+  ): Promise<ContentPortResult<CuratedTermSample[]>>;
+}

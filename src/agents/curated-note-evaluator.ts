@@ -36,10 +36,17 @@ import type {
   CuratedTextCardContext,
   TextCardTranscription,
 } from '../kernel/curated-content-types.js';
+// 转写本体留 content；本角色只认 kernel 的调用口与纯函数，零 content import。
 import {
   mergeBodyWithTextCardTranscription,
-  type TextCardTranscriber,
-} from '../publish-agent/text-card-transcriber.js';
+  resolveTextCardTranscriberCapability,
+  textCardTranscriptionMode,
+} from '../kernel/text-card-transcription.js';
+import type {
+  TextCardTranscriber,
+  TextCardTranscriberCapability,
+  TextCardTranscriptionMode,
+} from '../kernel/text-card-transcriber-port.js';
 
 /** 评估角色只需精选库的「观测落库」口（窄接口，便于测试桩）。 */
 export interface CuratedNoteSink {
@@ -66,7 +73,15 @@ export interface CuratedNoteEvaluatorOptions extends ContentRoleOptions {
    * （等价 Phase 2b 行为，相关性/丰富度不评）。
    */
   llmEvalEnabled?: boolean;
-  textCardTranscriber?: TextCardTranscriber;
+  /**
+   * 图内文字卡转写能力（三态，构造期定）：
+   *  - 传实现本身 → 已接线（旗标开关另由实现的 `enabled()` 在运行时表达）；
+   *  - 传 `{ state:'unavailable', reason }` → 组合根**明确**告知依赖没接上；
+   *  - 整字段省略 → 同样判 unavailable（reason=`not_injected`），构造期打一条具名日志。
+   *
+   * 红线：MUST NOT 把 unavailable 压成「旗标关」——前者是装配缺陷（拆仓才可能引入），后者是运营选择。
+   */
+  textCardTranscriber?: TextCardTranscriber | TextCardTranscriberCapability;
 }
 
 /** LLM 正文评估的严格 JSON 输出契约。 */
@@ -83,7 +98,9 @@ export class CuratedNoteEvaluator extends ContentRole {
   private readonly curatedStore: CuratedNoteSink;
   private readonly getAccountId: () => string;
   private readonly llmEvalEnabled: boolean;
-  private readonly textCardTranscriber?: TextCardTranscriber;
+  private readonly transcriberCapability: TextCardTranscriberCapability;
+  /** 缺席只在首次真正跳过转写时再响一次（构造期已响过一次），避免逐条笔记刷屏。 */
+  private transcriberAbsenceSkipLogged = false;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CuratedNoteEvaluatorOptions) {
@@ -92,7 +109,40 @@ export class CuratedNoteEvaluator extends ContentRole {
     this.curatedStore = options.curatedStore;
     this.getAccountId = options.getAccountId;
     this.llmEvalEnabled = options.llmEvalEnabled ?? true;
-    this.textCardTranscriber = options.textCardTranscriber;
+    this.transcriberCapability = resolveTextCardTranscriberCapability(options.textCardTranscriber);
+    // 装配缺陷必须当场留痕：MUST NOT 抛（本角色 fire-and-forget，抛出会打断浏览主路径），
+    // 但也 MUST NOT 静默——不然「依赖没接上」与「旗标关掉了」在运行现场无从分辨。
+    if (this.transcriberCapability.state === 'unavailable') {
+      this.log(
+        `图内文字卡转写能力未接线（reason=${this.transcriberCapability.reason}）：` +
+          `本角色将只依据 DOM 正文评估；这不是旗标关闭，请检查组合根装配`,
+      );
+    }
+  }
+
+  /** 当前该走哪一态（能力在 → 现读旗标；能力缺席 → unavailable）。 */
+  private transcriptionMode(): TextCardTranscriptionMode {
+    return textCardTranscriptionMode(this.transcriberCapability);
+  }
+
+  /**
+   * 已接线**且**旗标开时给出转写器，否则 undefined。
+   * 两种 undefined（缺席 / 旗标关）的区分不靠这个返回值，靠 {@link transcriptionMode} 与调用点的留痕。
+   */
+  private activeTranscriber(): TextCardTranscriber | undefined {
+    const capability = this.transcriberCapability;
+    return capability.state === 'wired' && capability.transcriber.enabled() ? capability.transcriber : undefined;
+  }
+
+  /** 因能力缺席而跳过转写：诚实记录一次，绝不抛、绝不伪装成旗标关闭。 */
+  private noteTranscriberAbsence(noteId: string, stage: string): void {
+    if (this.transcriberCapability.state !== 'unavailable') return;
+    if (this.transcriberAbsenceSkipLogged) return;
+    this.transcriberAbsenceSkipLogged = true;
+    this.log(
+      `跳过图内文字卡转写（能力未接线 reason=${this.transcriberCapability.reason}，stage=${stage}）note=${noteId}：` +
+        `图内文字不进正文，后续同类跳过不再重复记录`,
+    );
   }
 
   subscribe(): void {
@@ -145,10 +195,13 @@ export class CuratedNoteEvaluator extends ContentRole {
   private async refreshImages(d: NoteDetailData, eventAccountId: string | undefined, snapshotAt: number): Promise<void> {
     if (!d || !d.noteId || !d.images?.length) return;
     // OCR 开启时必须让新图片快照重新走锚判断与正文重建，不能只替换图片后留下旧转写。
-    if (this.textCardTranscriber?.enabled()) {
+    const mode = this.transcriptionMode();
+    if (mode === 'active') {
       await this.evaluate(d, eventAccountId, snapshotAt);
       return;
     }
+    // 能力缺席与旗标关闭走同一条「只换图」的降级路径（缺席时本就转不了），但**留痕不同**。
+    if (mode === 'unavailable') this.noteTranscriberAbsence(d.noteId, 'image_snapshot');
     const accountId = eventAccountId ?? this.getAccountId();
     if (!accountId || accountId === '__unbound__') return;
     const contentType = d.mediaType === 'video' ? 'video' : 'image_text';
@@ -179,27 +232,34 @@ export class CuratedNoteEvaluator extends ContentRole {
     let referenceImages: CuratedReferenceImageInput[] = d.images ?? [];
     let textCardTranscription: TextCardTranscription | undefined;
     let body = d.content.trim();
-    if (contentType === 'image_text' && referenceImages.length > 0 && this.textCardTranscriber?.enabled()) {
-      let cached: CuratedTextCardContext | null = null;
-      try {
-        cached = (await this.curatedStore.getTextCardContext?.(accountId, d.noteId, contentType)) ?? null;
-      } catch (err) {
-        this.log(`读取文字卡转写缓存失败（继续现转）：${(err as Error).message}`);
-      }
-      try {
-        const outcome = await this.textCardTranscriber.transcribe({
-          accountId,
-          sourceId: d.noteId,
-          images: referenceImages,
-          snapshotAt,
-          cached,
-        });
-        referenceImages = outcome.images;
-        textCardTranscription = outcome.transcription;
-        body = mergeBodyWithTextCardTranscription(body, textCardTranscription);
-      } catch (err) {
-        // 服务承诺吞视觉失败；此处再防御，正文保持 DOM 原值，绝不阻断浏览。
-        this.log(`文字卡转写异常（保持 DOM 正文）：${(err as Error).message}`);
+    if (contentType === 'image_text' && referenceImages.length > 0) {
+      const transcriber = this.activeTranscriber();
+      if (!transcriber) {
+        // 两种「没转写」在这里分开留痕：能力缺席响一次（装配缺陷），旗标关闭静默（运营选择）。
+        // 无论哪种都不抛、不中断评估——正文保持 DOM 原值继续走准入。
+        this.noteTranscriberAbsence(d.noteId, 'admission_eval');
+      } else {
+        let cached: CuratedTextCardContext | null = null;
+        try {
+          cached = (await this.curatedStore.getTextCardContext?.(accountId, d.noteId, contentType)) ?? null;
+        } catch (err) {
+          this.log(`读取文字卡转写缓存失败（继续现转）：${(err as Error).message}`);
+        }
+        try {
+          const outcome = await transcriber.transcribe({
+            accountId,
+            sourceId: d.noteId,
+            images: referenceImages,
+            snapshotAt,
+            cached,
+          });
+          referenceImages = outcome.images;
+          textCardTranscription = outcome.transcription;
+          body = mergeBodyWithTextCardTranscription(body, textCardTranscription);
+        } catch (err) {
+          // 服务承诺吞视觉失败；此处再防御，正文保持 DOM 原值，绝不阻断浏览。
+          this.log(`文字卡转写异常（保持 DOM 正文）：${(err as Error).message}`);
+        }
       }
     }
     if (!body) return;

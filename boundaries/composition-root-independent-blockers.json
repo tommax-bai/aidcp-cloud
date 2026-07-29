@@ -4,11 +4,11 @@
   "claimBlocked": true,
   "claim": "api, automation, and content are independently bootable without foreign owner pools, stores, or synchronous in-process dependencies",
   "summary": {
-    "total": 52,
+    "total": 55,
     "byCategory": {
       "4b-mirror": 14,
       "operator-command": 4,
-      "content-owner": 7,
+      "content-owner": 10,
       "composition-root": 27
     }
   },
@@ -222,7 +222,7 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:FacebookPublishMediaStore",
-        "src/server.ts#segCAutomation:identifier:facebookPublishMediaStore",
+        "src/server.ts#segCAutomation:identifier-use:facebookPublishMediaStore",
         "src/server.ts#segDApiServing:identifier:facebookPublishMediaStore"
       ]
     },
@@ -234,7 +234,7 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:ConceptStore",
-        "src/server.ts#segCAutomation:identifier:conceptStore"
+        "src/server.ts#segCAutomation:identifier-use:conceptStore"
       ]
     },
     {
@@ -245,7 +245,7 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:CuratedContentStore",
-        "src/server.ts#segCAutomation:identifier:curatedContentStore",
+        "src/server.ts#segCAutomation:identifier-use:curatedContentStore",
         "src/server.ts#segDApiServing:identifier:curatedContentStore"
       ]
     },
@@ -281,6 +281,40 @@
         "src/server.ts#segAApiFoundation:new:TokenUsageStore",
         "src/server.ts#segCAutomation:identifier:tokenUsageStore",
         "src/server.ts#segDApiServing:identifier:tokenUsageStore"
+      ]
+    },
+    {
+      "id": "content-textcard-transcription-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segCAutomation:new:OpenAiCompatVisionClient",
+        "src/server.ts#segCAutomation:call:createCoverFormSensor",
+        "src/server.ts#segCAutomation:call:createTextCardTranscriber",
+        "src/server.ts#segCAutomation:call:resolveTextCardTranscriptionProvider",
+        "src/server.ts#segCAutomation:call:resolveTextCardTranscriptionModel"
+      ]
+    },
+    {
+      "id": "content-reply-generation-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segCAutomation:new:ReplyAiService"
+      ]
+    },
+    {
+      "id": "content-publish-rejection-evidence-authority",
+      "category": "content-owner",
+      "owner": "content",
+      "consumer": "automation",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segCAutomation:call:hasUserRejectionEvidence"
       ]
     },
     {

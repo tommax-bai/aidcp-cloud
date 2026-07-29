@@ -16,12 +16,15 @@
  *   绝不含密钥或提示词正文，绝不影响调用本体）。
  */
 
+// change split-cloud-automation-production-runtime：错误族从 kernel 取，**绝不**再从文本出口 `./qwen.js` 取。
+// 拆仓后文本出口归共享传输包、本文件留 content；两份副本各持一份错误类会让跨副本 `instanceof` 恒 false，
+// 把「该厂商密钥缺失」静默降级成泛化的「模型不可用」。同一份定义是这条诚实归因的唯一保证。
 import {
   ProviderKeyMissingError,
   buildLlmApiError,
   buildLlmHttpError,
   buildLlmShapeError,
-} from './qwen.js';
+} from '../kernel/llm-errors.js';
 
 /** 纯文本内容段。 */
 export interface VisionTextPart {

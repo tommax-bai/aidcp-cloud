@@ -113,7 +113,13 @@ const CONTENT_ROLE_FACTORIES: RoleFactoryRegistry = {
     return new CuratedNoteEvaluator({
       ...rest,
       curatedStore: curatedStore as CuratedNoteSink,
-      ...(textCardTranscriber ? { textCardTranscriber: textCardTranscriber as TextCardTranscriber } : {}),
+      // 三态显式化：句柄在 → wired；句柄缺 → **明说「依赖没接上」**，绝不省略字段。
+      // 省略会在角色内退化成 `transcriber?.enabled()` 的假，与「旗标关掉了」长得一模一样；
+      // 单体里转写器是无条件构造 + 无条件注入的，这条 false 分支生产上从未走过——
+      // 「漏传」只可能由拆仓引入，所以它必须一发生就在日志里说话，而不是悄悄少一段图内文字。
+      textCardTranscriber: textCardTranscriber
+        ? { state: 'wired', transcriber: textCardTranscriber as TextCardTranscriber }
+        : { state: 'unavailable', reason: 'not_wired_by_composition_root' },
     });
   },
   curated_comment_evaluator: (o: CuratedCommentEvaluatorFactoryOptions) => {

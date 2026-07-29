@@ -52,10 +52,22 @@ interface ProductionConsumerBinding {
   callPath: string;
 }
 
+/**
+ * `identifier` answers "does this name appear anywhere in the scope". Inside
+ * `segCAutomation` that question is not discriminating: the segment opens with
+ * a single `const { … } = ctx` destructure naming nearly every store, so an
+ * `identifier` probe fires on the destructure entry alone. It therefore stays
+ * green after every real consumption site has been repointed to an HTTP client
+ * (false positive), and goes silently absent when only the destructure entry is
+ * deleted while the real consumption sites remain (false negative).
+ *
+ * `identifier-use` counts occurrences that are **not** declaration bindings, so
+ * it tracks real consumption sites instead of the segment preamble.
+ */
 interface EvidenceProbe {
   sourceFile: string;
   scope?: string;
-  kind: 'call' | 'new' | 'identifier' | 'text';
+  kind: 'call' | 'new' | 'identifier' | 'identifier-use' | 'text';
   symbol: string;
 }
 
@@ -968,7 +980,9 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segCAutomation',
-        kind: 'identifier',
+        // 0.3c: not `identifier` — segC's `const { … } = ctx` preamble names this
+        // store, so `identifier` would fire on the preamble alone.
+        kind: 'identifier-use',
         symbol: 'facebookPublishMediaStore',
       },
       {
@@ -995,7 +1009,8 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segCAutomation',
-        kind: 'identifier',
+        // 0.3c: see `identifier-use` — the segC preamble destructure is not evidence.
+        kind: 'identifier-use',
         symbol: 'conceptStore',
       },
     ],
@@ -1016,7 +1031,8 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segCAutomation',
-        kind: 'identifier',
+        // 0.3c: see `identifier-use` — the segC preamble destructure is not evidence.
+        kind: 'identifier-use',
         symbol: 'curatedContentStore',
       },
       {
@@ -1093,6 +1109,98 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
         scope: 'segDApiServing',
         kind: 'identifier',
         symbol: 'tokenUsageStore',
+      },
+    ],
+  },
+  /**
+   * 0.3d: the text-card OCR sub-chain was missing from this ledger entirely.
+   * segC builds two vision clients, the cover-form sensor and the transcriber
+   * in-process; all four modules are content-owned (`src/llm/vision.ts`,
+   * `src/publish-agent/cover-form-sensor.ts`,
+   * `src/publish-agent/text-card-transcriber.ts`) and none of them exists in
+   * the automation package, so an automation-only process cannot construct
+   * this chain at all. The two provider/model closures are listed as separate
+   * probes because they resolve content-owned model selection, which survives
+   * even if the clients themselves were repointed.
+   */
+  {
+    id: 'content-textcard-transcription-authority',
+    category: 'content-owner',
+    owner: 'content',
+    consumer: 'automation',
+    closingChange: 'future',
+    probes: [
+      {
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: 'new',
+        symbol: 'OpenAiCompatVisionClient',
+      },
+      {
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: 'call',
+        symbol: 'createCoverFormSensor',
+      },
+      {
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: 'call',
+        symbol: 'createTextCardTranscriber',
+      },
+      {
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: 'call',
+        symbol: 'resolveTextCardTranscriptionProvider',
+      },
+      {
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: 'call',
+        symbol: 'resolveTextCardTranscriptionModel',
+      },
+    ],
+  },
+  /**
+   * 0.3d: segC constructs the interaction reply generator in-process.
+   * `src/interactions/reply-ai.ts` is content-owned and absent from the
+   * automation package, so the reply workflow cannot be assembled there.
+   */
+  {
+    id: 'content-reply-generation-authority',
+    category: 'content-owner',
+    owner: 'content',
+    consumer: 'automation',
+    closingChange: 'future',
+    probes: [
+      {
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: 'new',
+        symbol: 'ReplyAiService',
+      },
+    ],
+  },
+  /**
+   * 0.3d: the delegated-executor candidate loader reads rejection evidence out
+   * of draft metadata through a content-owned predicate
+   * (`src/publish-agent/types.ts`). Absent from the automation package, and it
+   * is exactly the kind of dependency that would silently degrade to `false`
+   * if it were stubbed — a rejected draft would read as "not rejected".
+   */
+  {
+    id: 'content-publish-rejection-evidence-authority',
+    category: 'content-owner',
+    owner: 'content',
+    consumer: 'automation',
+    closingChange: 'future',
+    probes: [
+      {
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: 'call',
+        symbol: 'hasUserRejectionEvidence',
       },
     ],
   },
@@ -1374,6 +1482,41 @@ function containsIdentifier(root: ts.Node | null, identifier: string): boolean {
   return found;
 }
 
+/**
+ * A declaration binding introduces the name; it never consumes the value.
+ * Excluded: destructure entries (`const { x } = ctx`, `const { x: y } = ctx`),
+ * plain variable/parameter declarations, import specifiers, and object/type
+ * member keys. Everything else — including `ctx.x` member reads and shorthand
+ * object-literal forwarding (`{ x }` in a factory argument) — is a real use.
+ */
+function isDeclarationBinding(node: ts.Identifier): boolean {
+  const parent = node.parent as ts.Node | undefined;
+  if (!parent) return false;
+  if (ts.isBindingElement(parent)) {
+    return parent.name === node || parent.propertyName === node;
+  }
+  if (ts.isVariableDeclaration(parent) && parent.name === node) return true;
+  if (ts.isParameter(parent) && parent.name === node) return true;
+  if (ts.isImportSpecifier(parent) || ts.isImportClause(parent)) return true;
+  if (ts.isPropertyAssignment(parent) && parent.name === node) return true;
+  if (ts.isPropertySignature(parent) && parent.name === node) return true;
+  if (ts.isMethodSignature(parent) && parent.name === node) return true;
+  return false;
+}
+
+function identifierUseCount(root: ts.Node | null, identifier: string): number {
+  if (!root) return 0;
+  let count = 0;
+  function visit(node: ts.Node): void {
+    if (ts.isIdentifier(node) && node.text === identifier && !isDeclarationBinding(node)) {
+      count += 1;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(root);
+  return count;
+}
+
 function containsNew(root: ts.Node | null, className: string): boolean {
   if (!root) return false;
   let found = false;
@@ -1549,7 +1692,9 @@ function probeEvidence(
         ? containsNew(root, probe.symbol)
         : probe.kind === 'identifier'
           ? containsIdentifier(root, probe.symbol)
-          : root.getText(file).includes(probe.symbol);
+          : probe.kind === 'identifier-use'
+            ? identifierUseCount(root, probe.symbol) > 0
+            : root.getText(file).includes(probe.symbol);
   if (!present) return null;
   const scope = probe.scope ? `${probe.scope}:` : '';
   return `${probe.sourceFile}#${scope}${probe.kind}:${probe.symbol}`;

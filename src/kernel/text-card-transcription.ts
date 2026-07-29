@@ -1,5 +1,10 @@
 /**
- * 文字卡转写结果的边界归一（kernel）。存储 / SQL 留 content。
+ * 文字卡转写结果的边界归一 + 纯读取 helper（kernel）。存储 / SQL / 视觉调用留 content。
+ *
+ * 本文件是这一族**运行时纯函数**的家：JSONB 归一、成功卡取用、正文合并、转写能力状态结算。
+ * 它们的共同点是零 IO、零依赖注入，且**两侧属主都要用**（content 的转写器与封面卡角色、
+ * automation 的精选准入评估角色）。对应的类型 / 调用口分别在 `curated-content-types.ts`
+ * 与 `text-card-transcriber-port.ts`。
  */
 import type {
   TextCardTranscription,
@@ -7,6 +12,11 @@ import type {
   TextCardTranscriptionCardStatus,
   TextCardTranscriptionStatus,
 } from './curated-content-types.js';
+import type {
+  TextCardTranscriber,
+  TextCardTranscriberCapability,
+  TextCardTranscriptionMode,
+} from './text-card-transcriber-port.js';
 
 export const CURATED_REFERENCE_IMAGE_HARD_MAX = 18;
 
@@ -94,5 +104,49 @@ export function normalizeTextCardTranscription(v: unknown): TextCardTranscriptio
     succeeded === cards.length ? 'complete' : succeeded > 0 ? 'partial' : 'failed';
   if (o.status !== derivedStatus) return undefined;
   return { version: 1, status: o.status, anchor, provider, model, transcribedAt, cards };
+}
+
+/** Successful per-card text in authoritative source-image order. */
+export function orderedTextCardTexts(transcription: TextCardTranscription | undefined): TextCardTranscriptionCard[] {
+  return transcription?.cards.filter((card) => card.status === 'transcribed' && !!card.text) ?? [];
+}
+
+/** Successful OCR text in source-card order, appended once to the current DOM body. */
+export function mergeBodyWithTextCardTranscription(body: string, transcription: TextCardTranscription | undefined): string {
+  const domBody = body.trim();
+  const normalizedDom = domBody.replace(/\s+/g, '');
+  const additions = orderedTextCardTexts(transcription)
+    .map((card) => card.text!.trim())
+    .filter((text) => text && !normalizedDom.includes(text.replace(/\s+/g, '')));
+  return [domBody, additions.join('\n\n')].filter(Boolean).join('\n\n');
+}
+
+/**
+ * 构造期结算转写能力的二态。
+ *
+ * 入参两种合法形态：转写器实现本身（＝已接线），或组合根显式给出的 {@link TextCardTranscriberCapability}。
+ * **缺席（undefined）不被压成「关掉了」**，而是结算成带 reason 的 `unavailable`，由调用方留痕后跳过。
+ * 形状不认识时同样判 `unavailable`（reason=`invalid_capability`），绝不当作可用实现去调。
+ */
+export function resolveTextCardTranscriberCapability(
+  input: TextCardTranscriber | TextCardTranscriberCapability | undefined,
+): TextCardTranscriberCapability {
+  if (!input) return { state: 'unavailable', reason: 'not_injected' };
+  if ('state' in input) return input;
+  if (typeof input.enabled === 'function' && typeof input.transcribe === 'function') {
+    return { state: 'wired', transcriber: input };
+  }
+  return { state: 'unavailable', reason: 'invalid_capability' };
+}
+
+/**
+ * 结算调用点当前该走哪一态。
+ *
+ * `enabled()` 只在能力已接线时才问——依赖缺席时它根本不存在，今天那句 `transcriber?.enabled()` 正是
+ * 在这里把缺席吞成了假。旗标读取本身若抛出，**照原样冒泡**：把它吞成 `flag_off` 就是又一次静默假成功。
+ */
+export function textCardTranscriptionMode(capability: TextCardTranscriberCapability): TextCardTranscriptionMode {
+  if (capability.state === 'unavailable') return 'unavailable';
+  return capability.transcriber.enabled() ? 'active' : 'flag_off';
 }
 
