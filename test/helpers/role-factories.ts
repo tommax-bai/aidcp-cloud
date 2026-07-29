@@ -31,7 +31,13 @@ export function contentRoleFactories(): RoleFactoryRegistry {
       return new CuratedNoteEvaluator({
         ...rest,
         curatedStore: curatedStore as CuratedNoteSink,
-        ...(textCardTranscriber ? { textCardTranscriber: textCardTranscriber as TextCardTranscriber } : {}),
+        // 与生产同形：句柄缺时**明说「依赖没接上」**，绝不省略字段。
+        // 省略在角色内会退化成与「旗标关掉了」一模一样的假，而本文件的存在意义正是
+        // 「与生产逐条对齐」——一旦这里省略而生产不省略，那句自述就变成假的，
+        // 且偏差方向是**测试比生产宽松**：拆仓引入的漏传在测试里照样绿。
+        textCardTranscriber: textCardTranscriber
+          ? { state: 'wired', transcriber: textCardTranscriber as TextCardTranscriber }
+          : { state: 'unavailable', reason: 'not_wired_by_composition_root' },
       });
     },
     curated_comment_evaluator: (o: CuratedCommentEvaluatorFactoryOptions) => {
