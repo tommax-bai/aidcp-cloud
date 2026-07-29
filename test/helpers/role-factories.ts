@@ -16,7 +16,7 @@ import { ConceptExtractorRole } from '../../src/agents/concept-extractor-role.js
 import { CuratedNoteEvaluator, type CuratedNoteSink } from '../../src/agents/curated-note-evaluator.js';
 import { CuratedCommentEvaluator, type CuratedCommentSink } from '../../src/agents/curated-comment-evaluator.js';
 import { ValuableCommentArchivist } from '../../src/agents/valuable-comment-archivist.js';
-import type { TextCardTranscriber } from '../../src/publish-agent/text-card-transcriber.js';
+import type { TextCardTranscriber } from '../../src/kernel/text-card-transcriber-port.js';
 
 /**
  * 与生产 `CONTENT_ROLE_FACTORIES` 逐条对齐的测试装配（含入参标注为构造契约、opaque 句柄就地 narrow 的同款做法，

@@ -6,6 +6,7 @@ import {
   assertNoIndependentRootBlockers,
   deriveIndependentRootBlockers,
   deriveSurface,
+  evidenceForProbe,
   type DerivedBlocker,
   type SurfaceDirection,
 } from './helpers/composition-root-4a-census.js';
@@ -276,6 +277,40 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
     + ' the only segC `new PersonaGenerator` (src/server.ts) sits inside the'
     + " `seamMode === 'monolith'` branch — in automation mode the persona port comes from"
     + ' apiDirectPorts.accountPersona, so it does not block an independent automation root',
+  );
+});
+
+/**
+ * The seam filter is otherwise unobservable: a probe aimed at a monolith-only
+ * construction would just quietly add a phantom blocker, and no existing
+ * assertion would move. These two probes are the anchor — the negative case is
+ * a real monolith-only construction in segC, the positive case is a real
+ * unconditional one in the same scope, so deleting the filter turns the first
+ * assertion red and weakening `existsInScope` turns the second red.
+ */
+test('new/call probes ignore monolith-only seam branches', async () => {
+  assert.equal(
+    await evidenceForProbe({
+      sourceFile: 'src/server.ts',
+      scope: 'segCAutomation',
+      kind: 'new',
+      symbol: 'PersonaGenerator',
+    }),
+    null,
+    "segC's only `new PersonaGenerator` sits inside `if (seamMode === 'monolith')`;"
+    + ' an automation process never executes it, so a probe pointing there must not'
+    + ' manufacture a blocker',
+  );
+  assert.equal(
+    await evidenceForProbe({
+      sourceFile: 'src/server.ts',
+      scope: 'segCAutomation',
+      kind: 'new',
+      symbol: 'ConfigMirrorRefresher',
+    }),
+    'src/server.ts#segCAutomation:new:ConfigMirrorRefresher',
+    'an unconditional segC construction must still resolve; the seam filter must not'
+    + ' swallow real evidence',
   );
 });
 

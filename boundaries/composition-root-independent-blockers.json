@@ -105,7 +105,7 @@
       "closingChange": "split-cloud-api-composition-root-4b",
       "evidence": [
         "src/server.ts#segCAutomation:new:ConfigMirrorRefresher",
-        "src/server.ts#segCAutomation:identifier:mirrorVersionStore"
+        "src/server.ts#segCAutomation:identifier-use:mirrorVersionStore"
       ]
     },
     {
@@ -116,7 +116,7 @@
       "closingChange": "split-cloud-api-composition-root-4b",
       "evidence": [
         "src/server.ts#segCAutomation:call:accountDisplayName",
-        "src/server.ts#segCAutomation:identifier:accountStore"
+        "src/server.ts#segCAutomation:identifier-use:accountStore"
       ]
     },
     {
@@ -211,7 +211,7 @@
       "evidence": [
         "src/server.ts#segAApiFoundation:new:DraftRefinementStore",
         "src/server.ts#segCAutomation:new:DraftRefinementWorker",
-        "src/server.ts#segDApiServing:identifier:draftRefinementStore"
+        "src/server.ts#segDApiServing:identifier-use:draftRefinementStore"
       ]
     },
     {
@@ -223,7 +223,7 @@
       "evidence": [
         "src/server.ts#segAApiFoundation:new:FacebookPublishMediaStore",
         "src/server.ts#segCAutomation:identifier-use:facebookPublishMediaStore",
-        "src/server.ts#segDApiServing:identifier:facebookPublishMediaStore"
+        "src/server.ts#segDApiServing:identifier-use:facebookPublishMediaStore"
       ]
     },
     {
@@ -246,7 +246,7 @@
       "evidence": [
         "src/server.ts#segAApiFoundation:new:CuratedContentStore",
         "src/server.ts#segCAutomation:identifier-use:curatedContentStore",
-        "src/server.ts#segDApiServing:identifier:curatedContentStore"
+        "src/server.ts#segDApiServing:identifier-use:curatedContentStore"
       ]
     },
     {
@@ -267,8 +267,8 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:QwenClient",
-        "src/server.ts#segCAutomation:identifier:llm",
-        "src/server.ts#segDApiServing:identifier:llm"
+        "src/server.ts#segCAutomation:identifier-use:llm",
+        "src/server.ts#segDApiServing:identifier-use:llm"
       ]
     },
     {
@@ -279,8 +279,8 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:TokenUsageStore",
-        "src/server.ts#segCAutomation:identifier:tokenUsageStore",
-        "src/server.ts#segDApiServing:identifier:tokenUsageStore"
+        "src/server.ts#segCAutomation:identifier-use:tokenUsageStore",
+        "src/server.ts#segDApiServing:identifier-use:tokenUsageStore"
       ]
     },
     {

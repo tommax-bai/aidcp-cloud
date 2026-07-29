@@ -143,7 +143,13 @@ export function resolveTextCardTranscriberCapability(
  * 结算调用点当前该走哪一态。
  *
  * `enabled()` 只在能力已接线时才问——依赖缺席时它根本不存在，今天那句 `transcriber?.enabled()` 正是
- * 在这里把缺席吞成了假。旗标读取本身若抛出，**照原样冒泡**：把它吞成 `flag_off` 就是又一次静默假成功。
+ * 在这里把缺席吞成了假。
+ *
+ * 旗标读取本身若抛出，本函数**不接管、不兜底**：吞成 `flag_off` 就是又一次静默假成功。但要如实说明
+ * 它冒泡到哪为止——现役调用点（精选准入评估角色）的两个入口都是 fire-and-forget（`void evaluate(...)`
+ * / `void refreshImages(...)`），所以这个抛出落进一个**无人 await 的 promise**：浏览主路径不会被打断
+ * （这正是要的），代价是它只以进程级 unhandled rejection 现形，**不会**变成调用方能就地识别的失败。
+ * 也就是说这里保住的是「不撒谎」，不是「一定看得见」；真要可观测，得由调用点自己接住并留痕。
  */
 export function textCardTranscriptionMode(capability: TextCardTranscriberCapability): TextCardTranscriptionMode {
   if (capability.state === 'unavailable') return 'unavailable';

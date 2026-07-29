@@ -18,8 +18,8 @@ import type {
 import type { VisionChatMessage, VisionContentPart, VisionLlmClient } from '../llm/vision.js';
 import type { CoverFormSensor } from './cover-form-sensor.js';
 
-// 既有消费方（组合根 / 测试装配）从本模块取这三个口的导入面保持逐字不变。
-export type { TextCardTranscriber, TextCardTranscriberInput, TextCardTranscriberOutcome };
+// **不在此再导出这三个口**：留壳只是把那条跨属主边换个马甲原样留着（扫描器认的是 import 说明符，
+// 不是最终定义处），且会把消费它的测试永久钉在 cloud。消费方一律直取 kernel，本文件只留实现。
 
 export const TEXT_CARD_TRANSCRIBER_ROLE = 'browse:text_card_transcriber';
 const DEFAULT_TIMEOUT_MS = 120_000;

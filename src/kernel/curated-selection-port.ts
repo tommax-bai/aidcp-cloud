@@ -22,13 +22,19 @@
  * `curatedContentStore ? … : Promise.resolve([])`，`comment-scheduler.ts:1603` 那侧还叠了一层
  * `.catch(() => [])`。同进程里这没问题——精选库没接线就是真没有素材。跨进程后这两处会把
  * **「连不上内容域」原样吃成「没有精选素材」**：搜索词生成拿零样本照跑、发帖创作以为没素材照发，
- * 全程零报错。故本端口的返回类型一律经 `ContentPortResult` 交出，
- * 「对面回答了空」与「没问到对面」在类型上就分得开；要降级仍可以降，
- * 但必须是调用方看着具名原因**明写**的一个决定。
+ * 全程零报错。
  *
- * 零 import 副作用、零 SQL、零 HTTP、零 LLM、无进程内活状态，满足 §4.7 kernel 准入。
+ * **失败语义（与本仓既有跨属主端口范式一致）**：方法返回**裸值**，失败**抛**
+ * {@link file://./content-port-error.ts} 的 `ContentPortError` —— 抛出本来就不是空数组，
+ * 「对面回答了空」与「没问到对面」自然分得开；判定按具名 `reason`，不用 `instanceof`。
+ * 这与属主侧既有行为同向：精选表缺失时它本来就抛具名的 `CuratedContentUnavailableError`
+ * （见 `curated-content-types.ts`），**绝不回落空结果**。要降级仍可以降，
+ * 但必须是调用方看着具名原因**明写**的一个决定，那两处 `Promise.resolve([])` / `.catch(() => [])` 得改。
+ *
+ * 签名照抄属主存储的真实签名，属主实例结构上即满足本端口；拆进程后换 HTTP 客户端，调用点不改。
+ *
+ * 零 import 副作用、零 SQL、零 HTTP、零模型调用、无进程内活状态，满足 §4.7 kernel 准入。
  */
-import type { ContentPortResult } from './content-port-result.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from './curated-content-types.js';
 
 /**
@@ -60,7 +66,7 @@ export interface CuratedSelectionPort {
     contentType: CuratedContentTypeFilter,
     limit: number,
     window?: CuratedSelectionWindow,
-  ): Promise<ContentPortResult<CuratedSelectItem[]>>;
+  ): Promise<CuratedSelectItem[]>;
 
   /**
    * 搜索词样本召回（评论侧）：与上一条**同一份排序与过滤**，但由属主侧投影成三字段后再过边界。
@@ -70,5 +76,5 @@ export interface CuratedSelectionPort {
     accountId: string,
     contentType: CuratedContentTypeFilter,
     limit: number,
-  ): Promise<ContentPortResult<CuratedTermSample[]>>;
+  ): Promise<CuratedTermSample[]>;
 }

@@ -54,17 +54,31 @@ interface ProductionConsumerBinding {
 
 /**
  * `identifier` answers "does this name appear anywhere in the scope". Inside
- * `segCAutomation` that question is not discriminating: the segment opens with
- * a single `const { … } = ctx` destructure naming nearly every store, so an
- * `identifier` probe fires on the destructure entry alone. It therefore stays
- * green after every real consumption site has been repointed to an HTTP client
- * (false positive), and goes silently absent when only the destructure entry is
- * deleted while the real consumption sites remain (false negative).
+ * `segCAutomation` and `segDApiServing` that question is not discriminating:
+ * both segments open with a single `const { … } = ctx` destructure naming
+ * nearly every store, so an `identifier` probe fires on the destructure entry
+ * alone.
+ *
+ * The defect is a **false positive only**. `containsIdentifier` walks the whole
+ * scope and matches any same-named identifier, so deleting just the destructure
+ * entry while the real consumption sites remain still resolves — there is no
+ * "silently absent" direction, and an earlier revision of this comment that
+ * claimed one was wrong. The real problem is the opposite: an `identifier`
+ * probe stays green after every real consumption site has been repointed to an
+ * HTTP client, because the preamble entry alone keeps it lit.
  *
  * `identifier-use` counts occurrences that are **not** declaration bindings, so
  * it tracks real consumption sites instead of the segment preamble.
+ *
+ * How much this buys, stated so nobody over-reads it: an entry below is kept
+ * when **any one** of its probes resolves. Every content-owner entry that uses
+ * an `identifier-use` segC/segD probe also carries a segA `new …Store` probe,
+ * which this change does not touch. So even if segC's real consumption vanished
+ * entirely, the entry would still be listed — only its evidence lines would
+ * shrink. `identifier-use` improves the honesty of the evidence line; it does
+ * not give a blocker the ability to extinguish itself.
  */
-interface EvidenceProbe {
+export interface EvidenceProbe {
   sourceFile: string;
   scope?: string;
   kind: 'call' | 'new' | 'identifier' | 'identifier-use' | 'text';
@@ -770,7 +784,7 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segCAutomation',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'mirrorVersionStore',
       },
     ],
@@ -797,7 +811,7 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segCAutomation',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'accountStore',
       },
     ],
@@ -959,7 +973,7 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segDApiServing',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'draftRefinementStore',
       },
     ],
@@ -988,7 +1002,7 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segDApiServing',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'facebookPublishMediaStore',
       },
     ],
@@ -1038,7 +1052,7 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segDApiServing',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'curatedContentStore',
       },
     ],
@@ -1053,6 +1067,10 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segCAutomation',
+        // Stays `identifier` on purpose: this is a module-level import, not a
+        // `ctx` destructure entry. Inside the segC body it has zero declaration
+        // bindings, so its only occurrence already is a real use and
+        // `identifier-use` would be the same probe with a longer name.
         kind: 'identifier',
         symbol: 'CONTENT_ROLE_FACTORIES',
       },
@@ -1074,13 +1092,13 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segCAutomation',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'llm',
       },
       {
         sourceFile: 'src/server.ts',
         scope: 'segDApiServing',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'llm',
       },
     ],
@@ -1101,13 +1119,13 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       {
         sourceFile: 'src/server.ts',
         scope: 'segCAutomation',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'tokenUsageStore',
       },
       {
         sourceFile: 'src/server.ts',
         scope: 'segDApiServing',
-        kind: 'identifier',
+        kind: 'identifier-use',
         symbol: 'tokenUsageStore',
       },
     ],
@@ -1517,34 +1535,76 @@ function identifierUseCount(root: ts.Node | null, identifier: string): number {
   return count;
 }
 
-function containsNew(root: ts.Node | null, className: string): boolean {
+/**
+ * Seam-branch filter for `new` / `call` probes.
+ *
+ * A construction that only runs when the root is assembled as a monolith is by
+ * definition absent from every split process. Pointing a probe at one would
+ * manufacture a **phantom blocker**: the ledger would claim an independent root
+ * is blocked by code that no split root ever executes, and nothing mechanical
+ * would contradict it. `ownerStoreConstructions` already screens its own
+ * `serviceMode === 'api'` branch this way; the probe path did not, which is the
+ * hole this closes.
+ *
+ * Deliberately narrow: only the `=== 'monolith'` test counts. `seamMode !==
+ * 'automation'` is **not** treated as monolith-only — it also covers `core`,
+ * and whether such a branch blocks a given root is an adjudication, not a
+ * mechanical fact. Widening this predicate silently deletes ledger entries, so
+ * it must be done by decision, not by convenience.
+ */
+function isMonolithOnlyBranch(node: ts.Node, root: ts.Node): boolean {
+  let current: ts.Node | undefined = node.parent;
+  while (current && current !== root) {
+    if (ts.isIfStatement(current)) {
+      const condition = current.expression.getText();
+      const isThenBranch = current.thenStatement.pos <= node.pos
+        && node.end <= current.thenStatement.end;
+      if (
+        isThenBranch
+        && /(?:seamMode|serviceMode|serviceModeFromEnv\(\))\s*===\s*['"]monolith['"]/.test(condition)
+      ) {
+        return true;
+      }
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+/**
+ * Single traversal point for probe matching, so the seam filter above cannot be
+ * applied to one probe kind and forgotten on the other.
+ */
+function existsInScope(
+  root: ts.Node | null,
+  matches: (node: ts.Node) => boolean,
+): boolean {
   if (!root) return false;
+  const scope = root;
   let found = false;
   function visit(node: ts.Node): void {
-    if (
-      ts.isNewExpression(node)
-      && ts.isIdentifier(node.expression)
-      && node.expression.text === className
-    ) {
-      found = true;
-    }
+    if (matches(node) && !isMonolithOnlyBranch(node, scope)) found = true;
     ts.forEachChild(node, visit);
   }
-  visit(root);
+  visit(scope);
   return found;
 }
 
+function containsNew(root: ts.Node | null, className: string): boolean {
+  return existsInScope(
+    root,
+    (node) =>
+      ts.isNewExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === className,
+  );
+}
+
 function containsCall(root: ts.Node | null, callPath: string): boolean {
-  if (!root) return false;
-  let found = false;
-  function visit(node: ts.Node): void {
-    if (ts.isCallExpression(node) && callChain(node.expression) === callPath) {
-      found = true;
-    }
-    ts.forEachChild(node, visit);
-  }
-  visit(root);
-  return found;
+  return existsInScope(
+    root,
+    (node) => ts.isCallExpression(node) && callChain(node.expression) === callPath,
+  );
 }
 
 function normalizeImportedSource(moduleName: string): string | null {
@@ -1698,6 +1758,15 @@ function probeEvidence(
   if (!present) return null;
   const scope = probe.scope ? `${probe.scope}:` : '';
   return `${probe.sourceFile}#${scope}${probe.kind}:${probe.symbol}`;
+}
+
+/**
+ * Evaluates a single probe against production source. Exported so the seam
+ * filter above has a red-when-broken anchor instead of being an unobservable
+ * internal.
+ */
+export async function evidenceForProbe(probe: EvidenceProbe): Promise<string | null> {
+  return probeEvidence(await sourceFile(probe.sourceFile), probe);
 }
 
 export async function deriveIndependentRootBlockers(): Promise<DerivedBlocker[]> {

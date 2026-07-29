@@ -90,7 +90,7 @@ import { ConceptExtractorRole } from './agents/concept-extractor-role.js';
 import { CuratedNoteEvaluator, type CuratedNoteSink } from './agents/curated-note-evaluator.js';
 import { CuratedCommentEvaluator, type CuratedCommentSink } from './agents/curated-comment-evaluator.js';
 import { ValuableCommentArchivist } from './agents/valuable-comment-archivist.js';
-import type { TextCardTranscriber } from './publish-agent/text-card-transcriber.js';
+import type { TextCardTranscriber } from './kernel/text-card-transcriber-port.js';
 import { FACEBOOK_REEL_FOLLOW_EDGE_CAPABILITY } from './platform/facebook-presented-video.js';
 
 /**
