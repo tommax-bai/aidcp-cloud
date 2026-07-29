@@ -27,12 +27,15 @@ import type { ContentRoleOptions } from './content-role.js';
 import type { NoteDetailData } from '../kernel/note-detail.js';
 import { topicKeysFromTitle } from '../kernel/valuable-comment-types.js';
 import { passesResonance, resolveCuratedGateConfig } from '../publish-agent/curated-gate.js';
+// 这四个类型的定义早已抬进 kernel；`cache/curated-content-store.ts` 对它们只是再导出壳。
+// 经壳取用会让这条边在扫描器眼里继续存在（它认的是 import 说明符，不是最终定义处），
+// 属 CLAUDE §8.3 的假消边残留。直取 kernel。
 import type {
   CuratedObservation,
   CuratedReferenceImageInput,
   CuratedTextCardContext,
   TextCardTranscription,
-} from '../cache/curated-content-store.js';
+} from '../kernel/curated-content-types.js';
 import {
   mergeBodyWithTextCardTranscription,
   type TextCardTranscriber,
