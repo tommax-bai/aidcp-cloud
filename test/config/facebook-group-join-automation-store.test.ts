@@ -3,6 +3,11 @@ import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import { FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, FACEBOOK_GROUP_JOIN_AUTOMATION_DAILY_CAP_MAX, FacebookGroupJoinAutomationStore } from '../../src/config/facebook-group-join-automation-store.js';
+import {
+  SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX,
+  SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX,
+} from '../../src/kernel/platform-types.js';
+import { SCHEDULED_AUTOMATION_CATALOG } from '../../src/kernel/scheduled-automation-catalog.js';
 import { fakeSchemaProbe } from '../fixtures/schema-probe.js';
 
 /** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
@@ -73,9 +78,38 @@ test('schema: 配置表可在 accounts 初始化前 additive 建表，默认关�
   assert.match(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, /account_id\s+TEXT PRIMARY KEY/);
   assert.doesNotMatch(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, /REFERENCES accounts/);
   assert.match(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, /enabled\s+BOOLEAN NOT NULL DEFAULT false/);
-  assert.match(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, /daily_cap BETWEEN 0 AND 10/);
+  assert.match(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, /daily_cap BETWEEN 0 AND 50/);
   assert.match(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, /week_mask ~ '\^\[01\]\{168\}\$'/);
-  assert.equal(FACEBOOK_GROUP_JOIN_AUTOMATION_DAILY_CAP_MAX, 10);
+  assert.equal(FACEBOOK_GROUP_JOIN_AUTOMATION_DAILY_CAP_MAX, 50);
+});
+
+// change raise-facebook-group-join-cap-ceiling：加群硬上限 10 → 50。
+// 这三条断言各挡一类回归，缺一不可。
+test('cap ceiling: 50 放行、51 整块拒，且联系评论的 10 不被顺带抬高', () => {
+  // ① 天花板本身抬到 50。
+  assert.equal(SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX, 50);
+  assert.equal(FACEBOOK_GROUP_JOIN_AUTOMATION_DAILY_CAP_MAX, SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX);
+
+  // ② **误改红线**：联系评论硬上限与加群常量在 kernel 同一文件相邻两行、历史同值 10。
+  // 本条专挡「按行号定位、把两条一起改成 50」这个误改（design.md Risks 第一条）。
+  assert.equal(SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX, 10);
+  assert.notEqual(SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX, SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX);
+
+  // ③ 自愈建表模板按常量插值，MUST 与常量逐字一致——漂移会让「代码放行、库拒收」重演。
+  assert.match(
+    FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL,
+    new RegExp(`daily_cap BETWEEN 0 AND ${SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX}`),
+  );
+  assert.doesNotMatch(FACEBOOK_GROUP_JOIN_AUTOMATION_CONFIG_SCHEMA_SQL, /daily_cap BETWEEN 0 AND 10/);
+});
+
+test('cap ceiling: 平台动作目录下发的加群上限跟随常量（后台输入框上限由它决定）', () => {
+  const fb = SCHEDULED_AUTOMATION_CATALOG.facebook.join_group;
+  assert.equal(fb.supported, true);
+  assert.equal(fb.supported === true ? fb.maxDailyCap : -1, 50);
+  // 联系评论同一张目录里保持 10（后台两个输入框上限必须不同）。
+  const contact = SCHEDULED_AUTOMATION_CATALOG.facebook.contact_comment;
+  assert.equal(contact.supported === true ? contact.maxDailyCap : -1, 10);
 });
 
 test('init/getForAccount: 缺行默认关闭且不造行；已有数据库真态载入镜像', async () => {
@@ -177,10 +211,12 @@ test('setAccount: 所有字段先校验，非法补丁整块拒且完全不查�
     { enabled: 'yes' },
     { dailyCap: -1 },
     { dailyCap: 1.5 },
-    { dailyCap: 11 },
+    // change raise-facebook-group-join-cap-ceiling：越界样本随硬上限 10 → 50 上移。
+    // 用 MAX + 1 而不是写死 51，硬上限再变时这条不会悄悄退化成「测了个合法值」。
+    { dailyCap: SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX + 1 },
     { weekMask: '1'.repeat(167) },
     { weekMask: '1'.repeat(167) + 'x' },
-    { enabled: true, dailyCap: 11, weekMask: FULL },
+    { enabled: true, dailyCap: SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX + 1, weekMask: FULL },
   ]) {
     const { calls, pool } = fakePool();
     const store = new FacebookGroupJoinAutomationStore({ schemaEnsurer: ensureCapabilitySchema, pool });

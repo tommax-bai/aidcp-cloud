@@ -102,10 +102,13 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   // 环境键配置只动 api 属主的两张配置表。
   assert.ok(api.includes('0097_environment_level_rule_mode_and_approval'));
   assert.ok(!automation.includes('0097_environment_level_rule_mode_and_approval'));
-  // 每加一条迁移都要在这里同步抬（change environment-level-rule-mode-and-approval → 0097）。
+  // 加群日上限的 CHECK 放宽只动 api 属主的加群配置表。
+  assert.ok(api.includes('0098_facebook_group_join_daily_cap_50'));
+  assert.ok(!automation.includes('0098_facebook_group_join_daily_cap_50'));
+  // 每加一条迁移都要在这里同步抬（change raise-facebook-group-join-cap-ceiling → 0098）。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0097_environment_level_rule_mode_and_approval',
+    '0098_facebook_group_join_daily_cap_50',
   );
 });
 

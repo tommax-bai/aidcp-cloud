@@ -138,8 +138,13 @@ export const REQUIRED_SCHEMA_VERSION = '0097_environment_level_rule_mode_and_app
  * 给规则模式配置与评论审批覆盖策略加环境键并回填。两个存储的 schema probe **都显式要求 env_key**：
  * 缺列时它们在 init 处带 version id fail-closed（规则模式=不启用、审批=按来源规则），而不是回落读旧账号列
  * ——回落等于把「设置跟账号走」这条已被否决的语义偷偷放回来。故 REQUIRED 与 KNOWN_MAX 一并抬到 0097。
+ *
+ * 注：`0098_facebook_group_join_daily_cap_50`（change raise-facebook-group-join-cap-ceiling）
+ * 把自动加群日上限的库侧 CHECK 从 0..10 放宽到 0..50。**只抬 KNOWN_MAX、不抬 REQUIRED**：
+ * 它是放宽方向的约束替换，缺它时旧库仍能正常跑（只是写不进大于 10 的值、写入被库拒并有明确报错），
+ * 不构成「缺列就写不进、链路失败」的硬依赖，故不满足抬 REQUIRED 的门槛。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0097_environment_level_rule_mode_and_approval';
+export const KNOWN_MAX_SCHEMA_VERSION = '0098_facebook_group_join_daily_cap_50';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

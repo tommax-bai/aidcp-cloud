@@ -185,8 +185,26 @@ export function normalizePlatformId(raw: string | null | undefined): PlatformId 
  * api 侧两张配置表在建表 CHECK 与写入边界校验里**导入期**就要它们，故必须是常量、不能走端口注入。
  */
 export const SCHEDULED_CONTENT_DAILY_CAP_MAX = 50;
+/**
+ * 联系评论的硬上限**刻意与其余动作分开**，与发帖 / 评论的 50 无关（content-schedule 规格逐字写死
+ * 「联系评论日上限硬上限 SHALL 为 10（越界整块拒；与发帖 / 评论的 50 刻意分开）」）。
+ * 它与下面的加群常量相邻、历史上同值 10——change raise-facebook-group-join-cap-ceiling 只抬加群那条，
+ * **本条保持 10**。改动一律按符号名定位、禁止按行号；测试侧另有一条回归断言专门挡这个误改。
+ */
 export const SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX = 10;
-export const SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX = 10;
+/**
+ * 自动加群硬上限（change raise-facebook-group-join-cap-ceiling：10 → 50）。
+ *
+ * 本常量是**事实源**：写前边界校验、后台输入框上限下发、配置表 CHECK 三处全部由它派生或与它逐字一致。
+ * 数据库那条 CHECK 由 `migrations/0098_facebook_group_join_daily_cap_50.sql` 显式换掉——
+ * store 的自愈建表模板只在**表不存在**时才执行，对已存在的表不生效，
+ * **只改本常量而不跑那条迁移，写入会在数据库层失败**（校验放行 51、库拒收，报错无业务含义）。
+ *
+ * 抬高本值 MUST NOT 被读作放宽风控：每日准入仍取 `min(账号配置 dailyCap, RiskController 当日
+ * join_group 额度)`，每次执行另需通过 `canDo('join_group')` 与剩余会话 join_groups 预算；
+ * 账号配置 MUST NOT 提高后两者（content-schedule 既有要求）。因此单抬本值时线上加群量不变。
+ */
+export const SCHEDULED_GROUP_JOIN_DAILY_CAP_MAX = 50;
 
 /**
  * 排期自动化目录的窄读端口（change cloud-coupling-phase4-runtime-ports）。

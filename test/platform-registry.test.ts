@@ -152,8 +152,10 @@ test('platform registry: catalog projection is ordered, honest, and detached fro
   assert.deepEqual(availableScheduledAutomationActionsForPlatform('fb'), [
     { action: 'post', allowedModes: ['review'], maxDailyCap: 50 },
     { action: 'comment', allowedModes: ['review', 'auto_approve'], maxDailyCap: 50 },
+    // 联系评论保持 10、加群抬到 50（change raise-facebook-group-join-cap-ceiling）。
+    // 两者刻意不同值：这一行同时守住「加群已抬」与「联系评论没被顺带抬」。
     { action: 'contact_comment', allowedModes: ['review', 'auto_approve'], maxDailyCap: 10 },
-    { action: 'join_group', allowedModes: [], maxDailyCap: 10 },
+    { action: 'join_group', allowedModes: [], maxDailyCap: 50 },
   ]);
   assert.deepEqual(availableScheduledAutomationActionsForPlatform('wechat_channels'), []);
   assert.deepEqual(availableScheduledAutomationActionsForPlatform('future-platform'), []);
