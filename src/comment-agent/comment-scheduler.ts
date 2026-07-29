@@ -235,6 +235,14 @@ export function joinCommentReceipt(
       message: `${joinedWord}「${groupLabel}」，并已在群内发出一条${contactPhrase}评论（服务器已确认）。`,
     };
   }
+  if (comment.outcome === 'verification_ambiguous') {
+    return {
+      ok: false,
+      level: 'warning',
+      title: '已加群，已评论，未确认发布结果',
+      message: `${joinedWord}「${groupLabel}」，群内评论已提交，但尚未确认是否上墙。`,
+    };
+  }
   return {
     ok: false,
     level: 'warning',

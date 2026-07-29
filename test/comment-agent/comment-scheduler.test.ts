@@ -2256,6 +2256,31 @@ describe('join-comment 结果卡不泄露裸群 id/URL', () => {
     assert.match(r.message, /带联系方式/);
     assert.equal(r.level, 'success');
   });
+  it('joinCommentReceipt：评论已提交但无法确认上墙 → 黄卡明确已评论、未确认发布结果', () => {
+    const r = joinCommentReceipt(
+      { outcome: 'joined' },
+      { outcome: 'verification_ambiguous', container: 'PR Café' },
+      false,
+    );
+    assert.equal(r.ok, false);
+    assert.equal(r.level, 'warning');
+    assert.equal(r.title, '已加群，已评论，未确认发布结果');
+    assert.match(r.message, /PR Café/);
+    assert.match(r.message, /评论已提交/);
+    assert.match(r.message, /尚未确认是否上墙/);
+    assert.doesNotMatch(r.message, /服务器已确认/);
+  });
+  it('joinCommentReceipt：提交前失败仍说未评论，不误用已提交文案', () => {
+    const r = joinCommentReceipt(
+      { outcome: 'joined' },
+      { outcome: 'no_strong_candidate', reason: 'editor_not_found', container: 'PR Café' },
+      false,
+    );
+    assert.equal(r.title, '已加群，但未评论');
+    assert.doesNotMatch(r.title, /已评论/);
+    assert.doesNotMatch(r.message, /评论已提交/);
+    assert.match(r.message, /评论入口未就绪或不可用/);
+  });
 
   // change facebook-comment-participation-gate：群参与审批入群闸 = 未上墙、待管理员批准（诚实、非绿、非去重）。
   it('commentOutcomeReason：pending_group_approval → 「待管理员批准、未上墙」人话', () => {
