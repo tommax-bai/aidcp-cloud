@@ -27,6 +27,12 @@
  * **失败语义（与本仓既有跨属主端口范式一致）**：方法返回**裸值**，失败**抛**
  * {@link file://./content-port-error.ts} 的 `ContentPortError` —— 抛出本来就不是空数组，
  * 「对面回答了空」与「没问到对面」自然分得开；判定按具名 `reason`，不用 `instanceof`。
+ *
+ * **⚠️ 只写「不用 instanceof」是不够的，照那样写会得到一个永不触发的守卫。**
+ * 本仓内部 HTTP 的错误编码只保 `code` + `message`，**`name` 与 `reason` 跨那一跳会全丢**，
+ * 于是 `isContentPortError(线上错误)` 恒为 `false`——守卫本身跨不过去。
+ * 传输适配层 **MUST** 先用 `contentPortReasonFromCode(err.code)` 还原、再重新抛出；
+ * **还原不出返回 `null` 时 MUST NOT 套默认 reason**。守卫要判的是**还原之后**的错误。
  * 这与属主侧既有行为同向：精选表缺失时它本来就抛具名的 `CuratedContentUnavailableError`
  * （见 `curated-content-types.ts`），**绝不回落空结果**。要降级仍可以降，
  * 但必须是调用方看着具名原因**明写**的一个决定，那两处 `Promise.resolve([])` / `.catch(() => [])` 得改。

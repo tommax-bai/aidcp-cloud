@@ -29,6 +29,14 @@
  *
  * **失败语义（与本仓既有跨属主端口范式一致）**：方法返回**裸值**，失败**抛**
  * {@link file://./content-port-error.ts} 的 `ContentPortError`（按具名 `reason` 判，不用 `instanceof`）。
+ *
+ * **⚠️ 只写「不用 instanceof」是不够的，照那样写会得到一个永不触发的守卫。**
+ * 本仓内部 HTTP 的错误编码只保 `code` + `message`，**`name` 与 `reason` 跨那一跳会全丢**，
+ * 于是 `isContentPortError(线上错误)` 恒为 `false`——守卫本身跨不过去。
+ * 所以传输适配层 **MUST** 先用 `contentPortReasonFromCode(err.code)` 还原、再重新抛出一个
+ * `ContentPortError`；**还原不出返回 `null` 时 MUST NOT 套一个默认 reason**
+ * （套默认会把「对面不支持这个方法」吞成「对面报错了」，下面那条回落分支就第二次变成死代码）。
+ * 客户端侧的守卫要判的是**还原之后**的错误，不是线上原样收到的那个。
  * 读失败 MUST NOT 被翻译成「池是空的 / 没有新概念」。现役的两处降级——调度器「装载失败 → 回退空池」、
  * 抽取角色「写失败只记日志」——本身是合理的（不能让概念池拖垮浏览闭环），但拆进程后它们 MUST 变成
  * 调用方**看着具名原因明写**的决定，而不是 `catch` 顺手吃掉的副产物。
