@@ -600,6 +600,7 @@ import type {
 import { decideFacebookBrowseMode } from './orchestrator/facebook-rule-mode.js';
 import { FacebookCommentAuditStore } from './comment-agent/facebook-comment-audit-store.js';
 import {
+  facebookCoverageRelaxEnabled,
   FacebookGroupJoinAuditStore,
   FacebookGroupMembershipStore,
   FacebookGroupTargetStore,
@@ -7091,11 +7092,19 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         cooldownMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_COOLDOWN_HOURS', 72) * 60 * 60 * 1000,
         warmupMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_WARMUP_HOURS', 24) * 60 * 60 * 1000,
       });
-      // 放开时限兜底（change facebook-coverage-relax-and-keyword-space）：正常约束下无可评群 → 默认降级放开预热/冷却，
+      // 放开时限兜底（change facebook-coverage-relax-and-keyword-space）：正常约束下无可评群时，放开预热/冷却，
       // 选「最久没评」的加入群，仍守日上限与人审；relaxed pick 会在飞书审核卡标注「未满足冷却/预热」交人把关。
-      // AIDCP_FB_GROUP_COVERAGE_RELAX=false 可退回严格「无群则跳过」。账号无任何加入群 → 两级都空 → 诚实 no-op。
+      //
+      // **默认严格**（change default-facebook-coverage-timing-to-strict）：无合规群即本轮不评论，
+      // MUST NOT 退而求其次去评一个不满足预热或仍在冷却中的群。只有把 AIDCP_FB_GROUP_COVERAGE_RELAX
+      // 显式设成 'true' 才放开——它是一次**具名的临时放宽**，不是常备档位。
+      //
+      // 判据与「为什么默认必须由代码承载」都收在 facebookCoverageRelaxEnabled 里（可单测的纯函数）——
+      // 这里只负责把运行时取值喂给它，不在组装根里另立一份判定。
+      //
+      // 账号无任何加入群 → 两级都空 → 诚实 no-op（与是否放开无关）。
       let relaxed = false;
-      const relaxWhenEmpty = readEnvString('AIDCP_FB_GROUP_COVERAGE_RELAX') !== 'false';
+      const relaxWhenEmpty = facebookCoverageRelaxEnabled(readEnvString('AIDCP_FB_GROUP_COVERAGE_RELAX'));
       if (candidates.length === 0 && relaxWhenEmpty) {
         candidates = await facebookGroupMembershipStore.coverageCandidates(accountId, { limit: pickWindow, relaxed: true });
         relaxed = candidates.length > 0;

@@ -89,6 +89,25 @@ export interface FacebookGroupCoverageCandidateOptions {
   relaxed?: boolean;
 }
 
+/**
+ * 放开时限兜底是否启用（change default-facebook-coverage-timing-to-strict）。
+ *
+ * **默认严格**：无合规群即本轮不评论，MUST NOT 退而求其次去评一个不满足预热或仍在冷却中的群。
+ * 只有把配置**显式**写成 `'true'` 才放开——它是一次具名的临时放宽，不是常备档位。
+ *
+ * 判据刻意是 `=== 'true'` 而**不是**取反原来的 `!== 'false'`：后者把「没配」「配成空」「取值拼错」
+ * 三种情形全部归入放开一侧，一个手滑写错的值就能静默把预热与冷却关掉。现在这三种一律归入严格侧，
+ * 失败方向由宽松转为收紧。
+ *
+ * **本函数就是那个默认值的落脚点。** 该配置活在运行时配置文件里，而那个文件不进版本库、部署时被
+ * 显式排除、仓库里也没有模板——所以在此之前，「它应该是关的」这件事在代码库里无处可查，换机 / 重建 /
+ * 从更早备份恢复都会让它静默回到放开，且不报错、不告警、日志里看不出来。默认值必须由代码承载，
+ * MUST NOT 只靠运行时配置维持。
+ */
+export function facebookCoverageRelaxEnabled(raw: string | undefined | null): boolean {
+  return raw === 'true';
+}
+
 export type FacebookGroupJoinTriggerSource = 'scheduled' | 'manual_pool' | 'manual_specific' | 'shadow';
 
 export interface FacebookGroupJoinAuditRow {
