@@ -41,9 +41,31 @@ test('browser-standby: env config defaults enabled with 5min threshold and warmu
   assert.equal(cfg.enabled, true);
   assert.equal(cfg.minWaitMs, DEFAULT_BROWSER_STANDBY_MIN_WAIT_MS);
   assert.equal(cfg.warmupMs, DEFAULT_BROWSER_STANDBY_WARMUP_MS);
-  // 门槛两端各有一份默认值，边缘取的是较大值 —— 只改一端不生效且无报错。这条钉死云端这份是 5 分钟；
-  // 边缘那份由 aidcp-edge 的 browser-slot-scheduling.test.ts 断言，两处必须同为 5 分钟。
+  // Cloud is the single threshold authority and keeps the product default at five minutes.
   assert.equal(DEFAULT_BROWSER_STANDBY_MIN_WAIT_MS, 5 * 60_000);
+});
+
+test('browser-standby: resolved Cloud threshold is emitted and used for short-wait admission', () => {
+  const minWaitMs = 7 * 60_000;
+  const config = resolveBrowserStandbyConfig({
+    AIDCP_BROWSER_COLD_STANDBY_MIN_WAIT_MS: String(minWaitMs),
+  });
+
+  const short = buildBrowserStandbyHint(source({ waits: { minute: minWaitMs - 1 } }), {
+    now: 1_000,
+    config,
+  });
+  assert.equal(short.minWaitMs, minWaitMs);
+  assert.equal(short.eligible, false);
+  assert.equal(short.reason, 'short_wait');
+
+  const eligible = buildBrowserStandbyHint(source({ waits: { minute: minWaitMs } }), {
+    now: 1_000,
+    config,
+  });
+  assert.equal(eligible.minWaitMs, minWaitMs);
+  assert.equal(eligible.eligible, true);
+  assert.equal(eligible.reason, 'view_quota:minute');
 });
 
 test('browser-standby: disabled switch produces ineligible hint', () => {

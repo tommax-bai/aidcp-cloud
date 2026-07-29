@@ -2,11 +2,11 @@ import type { UiBrowserStandbyPayload } from './protocol.js';
 import type { RiskAction, RiskWindow } from '../risk/types.js';
 
 /**
- * 待机门槛（change standby-covers-idle-waits：20min → 5min）。
+ * Cloud-owned cold-standby wait threshold (change standby-covers-idle-waits: 20min -> 5min).
  *
- * **红线：这个默认值在边缘也有一份**（aidcp-edge `src/electron/browser-cold-standby.cjs` 的
- * `DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS`），而边缘取的是**两者的较大值**。**只改这一端不生效、且无任何
- * 报错**——边缘会按自己那份旧门槛把提示拦下来。改门槛 MUST 两端同改。
+ * Cloud resolves this default or its environment override, uses the resolved value for eligibility,
+ * and publishes the same value as `browserStandby.minWaitMs`. Edge may recheck the current remaining
+ * wait against that advertised value, but MUST NOT combine it with a separate local policy threshold.
  */
 export const DEFAULT_BROWSER_STANDBY_MIN_WAIT_MS = 5 * 60_000;
 export const DEFAULT_BROWSER_STANDBY_WARMUP_MS = 90_000;
