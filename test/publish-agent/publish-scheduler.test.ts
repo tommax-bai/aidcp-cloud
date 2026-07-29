@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { PublishScheduler } from '../../src/publish-agent/publish-scheduler.js';
 import type { PublishSchedulerDeps } from '../../src/publish-agent/publish-scheduler.js';
+import { ContentPortError, isContentPortError } from '../../src/kernel/content-port-error.js';
 
 const T = 1700000000000;
 const HOUR = 3_600_000;
@@ -453,5 +454,57 @@ describe('生成端口传输失败 → 诚实失败终态', () => {
     assert.match(first.result === 'triggered' ? first.failureReason ?? '' : '', /transport_error/);
     const second = await scheduler.triggerManual('acc-test');
     assert.equal(second.result === 'triggered' && second.status, 'failed', '键未卡死：第二次仍进得了编排段');
+  });
+});
+
+/**
+ * 精选灵感库读不到 ≠ 精选库是空的（change split-cloud-automation-production-runtime，task 0.6f 吞点④⑤）。
+ *
+ * 原写法把「库没接线」写成 `Promise.resolve([] as CuratedSelectItem[])` —— 与「召回回来是空的」逐字相同。
+ * 拆进程后连不上 content 域也会落成同一个空数组，发帖侧就会以为「本来就没素材」照常发，全程零报错。
+ */
+describe('精选素材：缺席与读失败都不得冒充「查过了是空的」', () => {
+  function buildCurated(curatedStore: PublishSchedulerDeps['curatedStore'], warns: string[]) {
+    const deps: PublishSchedulerDeps = {
+      conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [] },
+      likedStore: { countSince: async () => 0, recentSince: async () => [] },
+      publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
+      resolveRisk: async () => ({
+        canDo: () => true,
+        explain: () => ({ allowed: true }),
+        getState: () => ({ status: 'normal', quotaLevel: 'normal' }),
+      }),
+      resolveSingleAccountId: async () => 'acc-test',
+      orchestrator: { trigger: async () => ({ status: 'draft' }) },
+      soul: {} as PublishSchedulerDeps['soul'],
+      ...(curatedStore ? { curatedStore } : {}),
+      clock: () => T,
+      logger: { log() {}, warn(m: string) { warns.push(m); }, error() {} },
+    };
+    return new PublishScheduler(deps);
+  }
+
+  it('精选库未接线 → 素材为空但带具名 not_configured 告警，且只响一次', async () => {
+    const warns: string[] = [];
+    const scheduler = buildCurated(undefined, warns);
+    const first = await scheduler.buildTriggerInput('acc-test');
+    await scheduler.buildTriggerInput('acc-test');
+    assert.deepEqual(first.generateInput.materials, [], '没接线时确实没有素材（回落旧点赞路径）');
+    const named = warns.filter((w) => w.includes('reason=not_configured'));
+    assert.equal(named.length, 1, '缺席必须以具名原因说出来，且只说一次');
+    assert.match(named[0], /未.*确认精选库为空/, '日志必须点明这不是「查过了是空的」');
+  });
+
+  it('精选库读失败 → buildTriggerInput 抛出，绝不退化成空素材照常发帖', async () => {
+    const warns: string[] = [];
+    const scheduler = buildCurated(
+      { selectForCreation: async () => { throw new ContentPortError('unreachable', 'curated-selection.selectForCreation'); } },
+      warns,
+    );
+    await assert.rejects(
+      () => scheduler.buildTriggerInput('acc-test'),
+      (e: unknown) => isContentPortError(e) && e.reason === 'unreachable',
+      '传输失败必须原样冒泡，MUST NOT 被压成 materials: []',
+    );
   });
 });

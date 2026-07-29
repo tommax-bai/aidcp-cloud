@@ -10,6 +10,7 @@ import type { CuratedObservation } from '../../src/kernel/curated-content-types.
 import type { NoteDetailData } from '../../src/kernel/note-detail.js';
 import type { Soul } from '../../src/kernel/soul-types.js';
 import type { TextCardTranscriber } from '../../src/kernel/text-card-transcriber-port.js';
+import { ContentPortError } from '../../src/kernel/content-port-error.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },
@@ -58,7 +59,12 @@ async function run(detail: NoteDetailData, opts: RunOpts = {}) {
         return opts.llmRaw ?? '{"admit":true,"relevanceOk":true,"richnessOk":true,"isPromoOrClickbait":false,"reason":"相关扎实"}';
       },
     },
-    curatedStore: { upsertObservation: async (obs) => { upserts.push(obs); } },
+    // Sink 三个方法都必选（task 0.6d 消掉的那对 `?`）：桩按「库里没这条 / 没缓存」如实回答。
+    curatedStore: {
+      upsertObservation: async (obs) => { upserts.push(obs); },
+      refreshReferenceImages: async () => 0,
+      getTextCardContext: async () => null,
+    },
     getAccountId: () => opts.accountId ?? 'acc-1',
     ...(opts.llmEvalEnabled === undefined ? {} : { llmEvalEnabled: opts.llmEvalEnabled }),
     // 必填字段：没给实现时**明说**「没接上」，不省略。省略正是本 change 要消掉的那个形态。
@@ -212,6 +218,7 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
           refreshes.push({ accountId, sourceId, images });
           return 1;
         },
+        getTextCardContext: async () => null,
       },
       getAccountId: () => 'acc-1',
       // 必填：本用例不测转写，明说没接上而非省略。
@@ -249,6 +256,7 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
           upserts.push(obs);
         },
         refreshReferenceImages: async () => 0,
+        getTextCardContext: async () => null,
       },
       getAccountId: () => 'acc-1',
       // 必填：本用例不测转写，明说没接上而非省略。
@@ -266,5 +274,59 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
     assert.equal(upserts.length, 1);
     assert.equal(upserts[0].accountId, 'acc-evt');
     assert.deepEqual(upserts[0].referenceImages, [{ index: 0, url: 'https://img.test/a.jpg' }]);
+  });
+});
+
+/**
+ * Sink 的可选方法是第二处静默陷阱（change split-cloud-automation-production-runtime，task 0.6d）。
+ *
+ * 两个方法原本带 `?`、调用点写 `sink.m?.(…)`：换成 HTTP 客户端后少实现一个，
+ * TS 照过、运行期整条表达式静默求值成 undefined。少 `getTextCardContext` 尤其阴——
+ * 转写缓存恒为空，每篇图文帖都重跑一次视觉转写，纯烧钱、零错误信号。
+ * 现在两个方法都必选，「提供不了」MUST 由实现方抛具名 unsupported_method 来说。
+ */
+describe('精选库 Sink 的可选能力：缺席必须响，不许静默', () => {
+  it('getTextCardContext 抛 unsupported_method → 一条点名成本后果的告警（重复不刷屏）', async () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+    const transcriber: TextCardTranscriber = {
+      enabled: () => true,
+      transcribe: async () => ({ images: normalizeImagesForTest(), cacheHit: false }),
+    };
+    try {
+      const bus = new EventBus();
+      const role = new CuratedNoteEvaluator({
+        eventBus: bus,
+        soul,
+        llm: { complete: async () => '{"admit":true,"relevanceOk":true,"richnessOk":true,"isPromoOrClickbait":false,"reason":"x"}' },
+        curatedStore: {
+          upsertObservation: async () => {},
+          refreshReferenceImages: async () => 0,
+          getTextCardContext: async () => {
+            throw new ContentPortError('unsupported_method', 'curated-selection.getTextCardContext');
+          },
+        },
+        getAccountId: () => 'acc-1',
+        textCardTranscriber: transcriber,
+      });
+      role.subscribe();
+      const detail = mkDetail({ collectCount: 100, images: [{ index: 0, url: 'https://img.test/0.jpg' }] });
+      bus.emit('note.detail.arrived', { detail, ts: 1 });
+      await sleep(30);
+      bus.emit('note.detail.arrived', { detail, ts: 2 });
+      await sleep(30);
+      role.unsubscribe();
+    } finally {
+      console.log = originalLog;
+    }
+    assert.equal(
+      logs.filter((l) => l.includes('reason=unsupported_method')).length,
+      2,
+      '每次读失败都要带具名 reason（这一条随笔记走）',
+    );
+    const loud = logs.filter((l) => l.includes('文字卡转写缓存不可用'));
+    assert.equal(loud.length, 1, '「永久读不到」的成本后果只响一次，但必须响');
+    assert.match(loud[0], /重跑视觉转写/, '告警要说清后果是什么，而不只是「失败了」');
   });
 });

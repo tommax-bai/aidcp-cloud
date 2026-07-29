@@ -35,6 +35,8 @@ import { sendAutoApproveNotificationBestEffort } from './auto-approve-notificati
 import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
 import type { CuratedContentTypeFilter } from '../kernel/curated-content-types.js';
+// 精选库读失败的具名归类：结构化守卫，同时认端口错误与属主自有错误（§8.5 不用 instanceof）。
+import { curatedContentFailureReason } from '../kernel/curated-content-types.js';
 import {
   XHS_COMMENT_PROFILE,
   commentProfileForPlatform,
@@ -1600,7 +1602,20 @@ export class CommentScheduler {
         });
 
       // 搜索词生成是 cloud-only LLM，边缘租约尚未申请。
-      const samples = await this.deps.selectCurated(accountId, 'source_post', 8).catch(() => []);
+      // 精选样本读不到 ≠ 精选库是空的（task 0.6f 吞点②）。原写法是 `.catch(() => [])`：
+      // 连不上内容域、超时、对面报错，统统被压成「查过了，一条素材都没有」，然后拿零样本照常生成搜索词、
+      // 全程零报错。降级本身保留（评论命令不该被精选库拖死），但它现在是**看着具名原因**作的决定，
+      // 并且在运行日志里说清「这不是空结果，这是没问到」。
+      let samples: CuratedSampleForTerms[];
+      try {
+        samples = await this.deps.selectCurated(accountId, 'source_post', 8);
+      } catch (err) {
+        samples = [];
+        log.warn(
+          `[comment] 精选样本读取失败 account=${accountId} reason=${curatedContentFailureReason(err)}` +
+            ` → 本次不带精选样本生成搜索词（**未**确认精选库为空）`,
+        );
+      }
       const terms = (await generator.generate(samples)).terms;
       if (!terms.length) {
         result = { outcome: 'no_terms', termsTried: 0 };

@@ -10,6 +10,7 @@ import { CommentScheduler, outcomeToReceipt, humanGroupLabel, joinOnlyReceipt, j
 import { EdgeTaskLeaseError } from '../../src/comm/edge-task-lease-client.js';
 import type { CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
 import type { Soul } from '../../src/kernel/soul-types.js';
+import { ContentPortError } from '../../src/kernel/content-port-error.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: 'x', tone: '理性' },
@@ -2336,5 +2337,38 @@ describe('join-comment 结果卡不泄露裸群 id/URL', () => {
     assert.equal(reallySubmitted({ ok: true }), true);
     assert.equal(reallySubmitted({ ok: false, reason: 'verification_ambiguous' }), true);
     assert.equal(reallySubmitted({ ok: false, reason: 'pending_group_approval' }), false);
+  });
+});
+
+/**
+ * 精选样本读不到 ≠ 精选库是空的（change split-cloud-automation-production-runtime，task 0.6f 吞点②）。
+ *
+ * 原写法 `selectCurated(...).catch(() => [])` 把「连不上内容域 / 超时 / 对面报错」统统压成
+ * 「查过了，一条精选素材都没有」，然后拿零样本照常生成搜索词、照常评论，全程零报错。
+ * 降级保留（评论命令不该被精选库拖死），但它必须是**看着具名原因**作的决定。
+ */
+describe('精选样本读失败：降级可以，冒充「查过了是空的」不行', () => {
+  it('selectCurated 抛出 → 任务照跑，但留下带具名 reason 的告警', async () => {
+    const bus = new EventBus();
+    const warns: string[] = [];
+    const cardDone = deferred();
+    const s = new CommentScheduler(
+      baseDeps({
+        resolveConnection: () => ({ bus, edgeId: 'e1' }),
+        pusher: fakeEdge(bus),
+        selectCurated: async () => {
+          throw new ContentPortError('unreachable', 'curated-selection.selectSamplesForSearchTerms');
+        },
+        approval: { request: async () => {}, isApproved: async () => true },
+        postResultCard: () => { cardDone.resolve(); },
+        logger: { log: () => {}, warn: (m: string) => { warns.push(m); } },
+      }),
+    );
+    const r = await s.triggerManual('acc-1');
+    assert.equal(r.ok, true, '精选样本读不到不该拖死评论命令');
+    await cardDone.promise;
+    const named = warns.filter((w) => w.includes('reason=unreachable'));
+    assert.equal(named.length, 1, '读失败必须以具名原因说出来');
+    assert.match(named[0], /未.*确认精选库为空/, '日志必须点明这不是「查过了是空的」');
   });
 });

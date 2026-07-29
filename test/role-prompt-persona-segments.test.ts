@@ -79,7 +79,12 @@ test('CuratedNoteEvaluator：真实渲染 prompt 能定位人设段，且包含 
     eventBus: new EventBus(),
     soul: mockSoul,
     llm: { complete: async () => '{}' },
-    curatedStore: { upsertObservation: async () => {} },
+    // Sink 三个方法都必选（task 0.6d）：本例只看 prompt 渲染，桩如实回答「库里没这条 / 没缓存」。
+    curatedStore: {
+      upsertObservation: async () => {},
+      refreshReferenceImages: async () => 0,
+      getTextCardContext: async () => null,
+    },
     getAccountId: () => 'acc-1',
     // 本用例只看 prompt 渲染，不需要转写能力——但字段必填，所以**明说**没接上，而不是省略。
     textCardTranscriber: { state: 'unavailable', reason: 'not_injected' },

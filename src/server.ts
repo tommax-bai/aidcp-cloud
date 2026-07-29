@@ -38,6 +38,8 @@ import { PgAnchorCache, GroupRouteStore, LikedNoteStore, ValuableCommentStore, I
 import { ConceptStore } from './cache/concept-store.js';
 import { NotificationContactStore } from './cache/notification-contact-store.js';
 import { CuratedContentStore, CuratedContentUnavailableError } from './cache/curated-content-store.js';
+// 组装根层「这条跨属主端口本进程没配置」的响亮取用闸（§8.5）：缺席抛具名 reason，绝不回空值/默认值。
+import { ContentPortError } from './kernel/content-port-error.js';
 import type { CuratedReferenceImage, CuratedReferenceImageInput, CuratedSourceAdmission } from './cache/curated-content-store.js';
 import { FirstPostOnboardingStore } from './onboarding/first-post-onboarding-store.js';
 import { FirstPostOnboardingCoordinator } from './onboarding/first-post-onboarding-coordinator.js';
@@ -110,9 +112,14 @@ const CONTENT_ROLE_FACTORIES: RoleFactoryRegistry = {
   valuable_comment_archivist: (o: ValuableCommentArchivistFactoryOptions) => new ValuableCommentArchivist(o),
   curated_note_evaluator: (o: CuratedNoteEvaluatorFactoryOptions) => {
     const { curatedStore, textCardTranscriber, ...rest } = o;
+    // 两跳而不是一跳（task 0.6d）：先把 opaque 句柄断言成**本进程真正注入的那个 content 类型**，
+    // 再靠赋值给 `curatedStore: CuratedNoteSink` 做结构核对。直接 `as CuratedNoteSink` 是一次
+    // 无检查的转换，Sink 上任何方法缺失都过得去——而 Sink 的三个方法今天已全部必选，
+    // 正是要靠这一步把「换成 HTTP 客户端后少实现一个方法」变成此处的编译红。
+    const noteSink: CuratedNoteSink = curatedStore as CuratedContentStore;
     return new CuratedNoteEvaluator({
       ...rest,
-      curatedStore: curatedStore as CuratedNoteSink,
+      curatedStore: noteSink,
       // 三态显式化：句柄在 → wired；句柄缺 → **明说「依赖没接上」**，绝不省略字段。
       // 省略会在角色内退化成 `transcriber?.enabled()` 的假，与「旗标关掉了」长得一模一样；
       // 单体里转写器是无条件构造 + 无条件注入的，这条 false 分支生产上从未走过——
@@ -7023,12 +7030,23 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     getContactInfo: accountStore?.getContactInfo
       ? (accountId) => accountStore!.getContactInfo!(accountId)
       : undefined,
-    selectCurated: (accountId, type, limit) =>
-      curatedContentStore
-        ? curatedContentStore
-            .selectForCreation(accountId, type, limit)
-            .then((rows) => rows.map((r) => ({ title: r.title, topics: r.topics, collectCount: r.collectCount })))
-        : Promise.resolve([]),
+    // 精选库缺席 MUST 抛具名的 not_configured，MUST NOT 回一个空数组（task 0.6f 吞点①）。
+    // 空数组的意思是「问过了，精选库里没有素材」；这里的真实情况是「这一问根本没发生」。
+    // 单体里两者后果相同（没接线就是真没素材），拆进程后就不同了：连不上 content 域会长成同一个空数组，
+    // 搜索词生成拿零样本照跑、零报错——正是红线点名的静默假成功。降级仍由调用方决定（见 comment-scheduler），
+    // 但它现在是看着 reason 作的决定。
+    selectCurated: (accountId, type, limit) => {
+      if (!curatedContentStore) {
+        return Promise.reject(
+          new ContentPortError('not_configured', 'curated-selection.selectSamplesForSearchTerms', 'curatedContentStore 未注入'),
+        );
+      }
+      // 窄投影就地做（三个字段），与 kernel/curated-selection-port.ts 的 selectSamplesForSearchTerms 同形：
+      // 全字段视图挂着参照图集 / 视觉分析 / 转写等大块 JSON，搬过边界只为留三个字段是白搬。
+      return curatedContentStore
+        .selectForCreation(accountId, type, limit)
+        .then((rows) => rows.map((r) => ({ title: r.title, topics: r.topics, collectCount: r.collectCount })));
+    },
     llmFor: (accountId) => ({ complete: (prompt, opts) => llm.complete(prompt, { ...opts, accountId }) }),
     dedupFor: (accountId) => ({
       hasInteracted: (noteId, action) => riskStore.hasInteraction(accountId, noteId, action).catch(() => false),

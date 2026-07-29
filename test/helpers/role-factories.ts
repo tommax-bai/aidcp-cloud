@@ -30,6 +30,10 @@ export function contentRoleFactories(): RoleFactoryRegistry {
       const { curatedStore, textCardTranscriber, ...rest } = o;
       return new CuratedNoteEvaluator({
         ...rest,
+        // **这一行有意与生产不同，别照生产改**：生产先把句柄断言成它真正注入的那个 content 类型，
+        // 再靠赋值做结构核对，好让 Sink 少实现一个方法变成编译红（task 0.6d）。测试侧注入的句柄
+        // 常是 `{}`（各用例只关心注册与否），做同样的核对会把一批与本题无关的用例逼成编译错。
+        // 代价是这条断言在测试里不设防——Sink 契约的那道闸由生产组装根守，本文件不承担。
         curatedStore: curatedStore as CuratedNoteSink,
         // 与生产同形：句柄缺时**明说「依赖没接上」**，绝不省略字段。
         // 省略在角色内会退化成与「旗标关掉了」一模一样的假，而本文件的存在意义正是

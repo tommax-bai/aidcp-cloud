@@ -67,6 +67,9 @@ async function runEvaluatorCapturingLogs(
         upsertObservation: async (obs) => {
           upserts.push(obs);
         },
+        // Sink 三个方法都必选（task 0.6d）：本例不走这两条，桩如实回答「库里没这条 / 没缓存」。
+        refreshReferenceImages: async () => 0,
+        getTextCardContext: async () => null,
       },
       getAccountId: () => 'acc-tct3',
       textCardTranscriber,

@@ -5,10 +5,15 @@
  * 那些（CURATED_CONTENT_SCHEMA_SQL、CuratedContentStore 类、normalize* 函数、CuratedContentStoreOptions）
  * 留在 src/cache/curated-content-store.ts（content）。本文件供发布管线纯类型闭包与 api/automation 侧
  * type-only 共导，绝不让消费方拿到存储实现。
+ *
+ * 例外是文件末尾那个哨兵错误类与它的**结构化守卫 / 具名归类**：它们描述的是「这个库回不了话」这件事本身，
+ * 与存储实现无关，两侧属主都要认，故与类型同处一室（零 SQL / 零 pg / 无进程内活状态，仍满足 kernel 准入）。
  */
 
 import type { ReferenceVisualAnalysis } from './visual-reference-types.js';
 import type { SourcePublishedAtPrecision, SourcePublishedAtStatus } from '../time/source-published-time.js';
+// 精选库读失败的具名归类要同时认「端口错误」与「属主自有错误」两类，故本文件取用它的结构化守卫。
+import { isContentPortError } from './content-port-error.js';
 
 export type CuratedSourceContentType = 'image_text' | 'video';
 export type CuratedContentType = CuratedSourceContentType | 'comment';
@@ -238,6 +243,37 @@ export class CuratedContentUnavailableError extends Error {
     super(`curated content store unavailable (missing table) during ${operation}`);
     this.name = 'CuratedContentUnavailableError';
   }
+}
+
+/** {@link CuratedContentUnavailableError} 的跨进程识别键（实例自有的可枚举属性，序列化往返后仍在）。 */
+export const CURATED_CONTENT_UNAVAILABLE_ERROR_NAME = 'CuratedContentUnavailableError';
+
+/**
+ * 结构化识别「精选库自称不可用」。
+ *
+ * 上面那个类今天有三处 api 调用点用 `instanceof` 认它——同进程里成立，拆进程后不成立：
+ * 跨那一跳收到的是 JSON 反序列化出来的裸对象，原型链上什么都没有（CLAUDE §8.5）。
+ * 新写的判定一律用本守卫；它对同进程实例与反序列化裸对象一视同仁。
+ */
+export function isCuratedContentUnavailableError(e: unknown): e is { name: string; operation?: string } {
+  return typeof e === 'object' && e !== null && (e as { name?: unknown }).name === CURATED_CONTENT_UNAVAILABLE_ERROR_NAME;
+}
+
+/**
+ * 把精选库读写的**抛出物**归成一个具名原因，供调用方写进日志 / 告警。
+ *
+ * 存在的理由是判据本身：抛出意味着**这一问根本没问到对面**，MUST NOT 被压成「对面回答了空」。
+ * 归类只影响留痕的精度，不影响这条结论——所以认不出来的抛出物也有名字（`unclassified_error`），
+ * 绝不因为「不认识」就退回沉默。
+ *
+ * 两类抛出物都要认（这不是冗余）：拆进程后跨端口来的是 `ContentPortError`，
+ * 而今天单体里属主存储抛的是它自己的 {@link CuratedContentUnavailableError}——
+ * 只认前一类的守卫今天恒 false，只认后一类的守卫拆完恒 false。
+ */
+export function curatedContentFailureReason(err: unknown): string {
+  if (isContentPortError(err)) return err.reason;
+  if (isCuratedContentUnavailableError(err)) return 'curated_content_unavailable';
+  return 'unclassified_error';
 }
 
 /**

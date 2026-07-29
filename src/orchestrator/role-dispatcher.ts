@@ -104,6 +104,8 @@ import {
 import type { ResumeGateVerdict } from '../comm/browser-standby.js';
 import type { RiskStatus, RiskQuotaLevel } from '../risk/types.js';
 import type { ConceptPool } from '../kernel/concept-pool.js';
+// 跨属主端口失败的结构化守卫（§8.5：跨进程后 instanceof 恒 false）。
+import { isContentPortError } from '../kernel/content-port-error.js';
 import type { NotificationItem } from '../comm/protocol.js';
 import {
   FACEBOOK_REELS_FOLLOW_PROBABILITY,
@@ -777,6 +779,8 @@ export class RoleDispatcher {
   private readonly pendingSearchKeywords = new Map<string, string>();
   /** 概念池快照：startSession 时 loadPool 刷新，供 SearchEvaluator 读取。 */
   private conceptPool: ConceptPool = EMPTY_CONCEPT_POOL;
+  /** 「概念池未接线」只响一次：装配状态在进程生命周期内不变，逐会话重复无信息量。 */
+  private conceptPoolAbsenceLogged = false;
   /** 会话开始时刻，用于估算会话进度（疲劳乘子）。时长上限改为从全局单场上限提供者惰性解析（见 maxDurationMs()）。 */
   private sessionStartedAt: number;
   private roles: SubscribableRole[] = [];
@@ -2454,10 +2458,25 @@ export class RoleDispatcher {
   /**
    * 从 ConceptStore 载入概念池快照供 SearchEvaluator 使用。
    * PG 不可用 / loadPool 失败 → 回退空池（退化为仅 seed_keywords），不崩浏览闭环。
+   *
+   * **降级保留，但降级的依据必须说出来**（task 0.6f 吞点③）。这条路径上有三种完全不同的情形，
+   * 原写法把后两种压成了和第一种一模一样的空池：
+   *   ① 池里真的一个词都没有 —— 空池是事实；
+   *   ② 本进程压根没接概念池 —— 装配状态，原本连一行日志都没有；
+   *   ③ 问了但没问到（PG 抖 / 拆进程后连不上 content 域） —— 原本只有一行不带原因码的 warn。
+   * 后两种如今各带具名 reason 落日志，浏览闭环照旧不被拖垮。
    */
   private async refreshConceptPool(): Promise<void> {
     if (!this.conceptStore) {
       this.conceptPool = EMPTY_CONCEPT_POOL;
+      // 缺席只响一次：它在整个进程生命周期里不会变，逐会话刷屏没有信息量。
+      if (!this.conceptPoolAbsenceLogged) {
+        this.conceptPoolAbsenceLogged = true;
+        console.warn(
+          '[RoleDispatcher] 概念池未接线 reason=not_configured：本进程搜索词只用 seed_keywords，' +
+            '这**不是**「池是空的」——若非预期请检查组装根注入',
+        );
+      }
       return;
     }
     try {
@@ -2467,7 +2486,13 @@ export class RoleDispatcher {
       );
     } catch (err) {
       this.conceptPool = EMPTY_CONCEPT_POOL;
-      console.warn(`[RoleDispatcher] 概念池载入失败，退化为仅 seed_keywords: ${err instanceof Error ? err.message : String(err)}`);
+      // 结构化守卫，不用 instanceof（§8.5：跨进程后收到的是反序列化裸对象，原型链上什么都没有）。
+      // 认不出来的抛出物照样有名字，绝不因为「不认识」就退回沉默。
+      const reason = isContentPortError(err) ? err.reason : 'unclassified_error';
+      console.warn(
+        `[RoleDispatcher] 概念池装载失败 reason=${reason} → 本场退化为仅 seed_keywords` +
+          `（空池是降级结果，**未**确认池为空）: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

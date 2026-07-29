@@ -47,17 +47,33 @@ import type {
   TextCardTranscriberCapability,
   TextCardTranscriptionMode,
 } from '../kernel/text-card-transcriber-port.js';
+// 跨属主端口的失败识别一律走结构化守卫（§8.5：跨进程后 instanceof 恒 false）。
+import { curatedContentFailureReason } from '../kernel/curated-content-types.js';
 
-/** 评估角色只需精选库的「观测落库」口（窄接口，便于测试桩）。 */
+/**
+ * 评估角色只需精选库的「观测落库」口（窄接口，便于测试桩）。
+ *
+ * **三个方法都是必选，一个 `?` 都不留**（change split-cloud-automation-production-runtime，task 0.6d）。
+ * 原本后两个带 `?`、调用点写 `sink.m?.(…)`：单体里 Sink 恒是那个存储实例、两个方法恒在，
+ * 那对 `?` 从没生效过；换成 HTTP 客户端后它们变成一张**假的安全网**——客户端少实现一个方法，
+ * TS 照过、运行期整条表达式静默求值成 `undefined`：少 `refreshReferenceImages` 会让每次图片快照
+ * 白跑一遍全量准入评估，少 `getTextCardContext` 会让转写缓存**恒为空**、每篇图文帖重跑一次视觉转写
+ * （纯成本爆炸、零错误信号）。
+ *
+ * 「某个实现真的提供不了这个方法」这件事仍然允许，但 MUST 由实现方**抛具名的
+ * `unsupported_method`**（见 kernel/content-port-error.ts）来说，而不是靠不定义方法来说——
+ * 与 kernel/concept-pool-port.ts 对两个读方法的处置逐字同口径：
+ * **保留 `?` 等于保留一张假的安全网。**
+ */
 export interface CuratedNoteSink {
   upsertObservation(obs: CuratedObservation): Promise<void>;
-  refreshReferenceImages?(
+  refreshReferenceImages(
     accountId: string,
     sourceId: string,
     contentType: 'image_text' | 'video',
     images: NonNullable<NoteDetailData['images']>,
   ): Promise<number>;
-  getTextCardContext?(
+  getTextCardContext(
     accountId: string,
     sourceId: string,
     contentType: 'image_text' | 'video',
@@ -110,6 +126,8 @@ export class CuratedNoteEvaluator extends ContentRole {
   private readonly transcriberCapability: TextCardTranscriberCapability;
   /** 缺席只在首次真正跳过转写时再响一次（构造期已响过一次），避免逐条笔记刷屏。 */
   private transcriberAbsenceSkipLogged = false;
+  /** 「精选库不提供转写缓存读取」只响一次：它是不会自愈的结构性缺口，不是逐条抖动。 */
+  private textCardCacheUnsupportedLogged = false;
   private unsubscribers: (() => void)[] = [];
 
   constructor(options: CuratedNoteEvaluatorOptions) {
@@ -141,6 +159,23 @@ export class CuratedNoteEvaluator extends ContentRole {
   private activeTranscriber(): TextCardTranscriber | undefined {
     const capability = this.transcriberCapability;
     return capability.state === 'wired' && capability.transcriber.enabled() ? capability.transcriber : undefined;
+  }
+
+  /**
+   * 转写缓存**永久**读不到（对面不提供这个方法）时的一次性告警。
+   *
+   * 与「这一次没读着」分开报的理由是后果不同：前者意味着此后每篇图文帖都会重跑一次视觉转写，
+   * 是一条只烧钱、不报错的成本泄漏；它一旦发生就不会自愈，所以要用一条能被检索到的具名告警说出来，
+   * 而不是混在逐条笔记的失败日志里被当成偶发抖动。
+   */
+  private noteTextCardCacheUnsupported(reason: string): void {
+    if (reason !== 'unsupported_method') return;
+    if (this.textCardCacheUnsupportedLogged) return;
+    this.textCardCacheUnsupportedLogged = true;
+    this.log(
+      '文字卡转写缓存不可用（精选库不提供 getTextCardContext）：此后每篇图文帖都会重跑视觉转写，' +
+        '成本按帖累加且不会自愈——请检查精选库端口是否接线完整',
+    );
   }
 
   /** 因能力缺席而跳过转写：诚实记录一次，绝不抛、绝不伪装成旗标关闭。 */
@@ -215,13 +250,18 @@ export class CuratedNoteEvaluator extends ContentRole {
     if (!accountId || accountId === '__unbound__') return;
     const contentType = d.mediaType === 'video' ? 'video' : 'image_text';
     try {
-      const updated = await this.curatedStore.refreshReferenceImages?.(accountId, d.noteId, contentType, d.images);
-      if (updated && updated > 0) {
+      const updated = await this.curatedStore.refreshReferenceImages(accountId, d.noteId, contentType, d.images);
+      // 0 行 = 精选库里本来就没有这条源帖，落到下面重走一遍准入评估是对的（这是「对面回答了 0」）。
+      if (updated > 0) {
         this.log(`刷新精选参考图 note=${d.noteId} images=${d.images.length}`);
         return;
       }
     } catch (err) {
-      this.log(`刷新精选参考图失败（回落准入评估）：${(err as Error).message}`);
+      // 抛出 = 这一问没问到对面，与「对面说这条不存在」不是一回事：具名原因必须进日志，
+      // 否则运行现场只看得见「又重跑了一遍评估」，看不见精选库其实已经答不上话了。
+      this.log(
+        `刷新精选参考图失败 reason=${curatedContentFailureReason(err)}（未确认是否落库，回落准入评估）：${(err as Error).message}`,
+      );
     }
     await this.evaluate(d, eventAccountId, snapshotAt);
   }
@@ -250,9 +290,14 @@ export class CuratedNoteEvaluator extends ContentRole {
       } else {
         let cached: CuratedTextCardContext | null = null;
         try {
-          cached = (await this.curatedStore.getTextCardContext?.(accountId, d.noteId, contentType)) ?? null;
+          cached = await this.curatedStore.getTextCardContext(accountId, d.noteId, contentType);
         } catch (err) {
-          this.log(`读取文字卡转写缓存失败（继续现转）：${(err as Error).message}`);
+          // 这里的降级（继续现转）本身是对的，但它有代价：缓存读不到就等于每篇图文帖都重跑一次视觉转写。
+          // 所以失败 MUST 带具名原因；`unsupported_method` 尤其要单独响一次——它意味着缓存**永久**读不到，
+          // 成本会一直烧下去，而不是这一次没读着。
+          const reason = curatedContentFailureReason(err);
+          this.log(`读取文字卡转写缓存失败 reason=${reason}（继续现转）：${(err as Error).message}`);
+          this.noteTextCardCacheUnsupported(reason);
         }
         try {
           const outcome = await transcriber.transcribe({

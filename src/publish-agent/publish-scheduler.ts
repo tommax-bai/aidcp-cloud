@@ -158,6 +158,8 @@ export class PublishScheduler {
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
   private readonly conceptThreshold: number;
   private readonly minHoursBetween: number;
+  /** 「精选灵感库未接线」只响一次：装配状态在进程生命周期内不变。 */
+  private curatedAbsenceLogged = false;
   /** 无发布记录时的基准（进程启动时刻），避免把历史全量概念算成"新"。 */
   private readonly startedAt: number;
   /**
@@ -246,6 +248,29 @@ export class PublishScheduler {
     return (await this.d.publishLog.getMostRecentPublishTime()) ?? this.startedAt;
   }
 
+  /**
+   * 精选库**没接线**时的素材空集（task 0.6f 吞点④⑤）。
+   *
+   * 原写法是 `: Promise.resolve([] as CuratedSelectItem[])` —— 一个和「精选库回答了空」
+   * 逐字一样的返回值。回落到旧点赞素材这件事保留（它本来就是设计好的降级），要改的是它必须
+   * **有名字**：缺席是装配状态，不是召回结果。
+   *
+   * 注意这里只管缺席一种情形：精选库在、但读失败时抛出物会经 `Promise.all` 原样冒泡出
+   * `buildTriggerInput`，那条路径今天就没有 catch，本来就分得开——不要为了「对称」给它加一个 catch，
+   * 那等于新造第六个吞点。
+   */
+  private noCuratedMaterials(contentType: CuratedContentTypeFilter): Promise<CuratedSelectItem[]> {
+    // 缺席只响一次：它在进程生命周期内不变，逐次触发刷屏没有信息量。
+    if (!this.curatedAbsenceLogged) {
+      this.curatedAbsenceLogged = true;
+      this.logger.warn(
+        `[PublishScheduler] 精选灵感库未接线 reason=not_configured（首次命中 contentType=${contentType}）` +
+          ' → 创作素材回落旧点赞路径（**未**确认精选库为空；若非预期请检查组装根注入）',
+      );
+    }
+    return Promise.resolve([]);
+  }
+
   /** 聚合 TriggerInput（真概念 + 真点赞 + 最近已发 + 目标账号人设）。 */
   async buildTriggerInput(accountId: string, opts?: { inspirationSinceMs?: number }): Promise<TriggerInput> {
     const baseline = Math.max(await this.baselineMs(), opts?.inspirationSinceMs ?? Number.NEGATIVE_INFINITY);
@@ -264,12 +289,12 @@ export class PublishScheduler {
       this.d.curatedStore
         ? this.d.curatedStore.selectForCreation(accountId, 'source_post', selectTopK,
             opts?.inspirationSinceMs === undefined ? undefined : { updatedSinceMs: opts.inspirationSinceMs })
-        : Promise.resolve([] as CuratedSelectItem[]),
+        : this.noCuratedMaterials('source_post'),
       // 精选评论当「读者角度线索」（change curated-inspiration-corpus Phase 2）：少量、次级素材。
       this.d.curatedStore
         ? this.d.curatedStore.selectForCreation(accountId, 'comment', 3,
             opts?.inspirationSinceMs === undefined ? undefined : { updatedSinceMs: opts.inspirationSinceMs })
-        : Promise.resolve([] as CuratedSelectItem[]),
+        : this.noCuratedMaterials('comment'),
     ]);
     const platform = this.d.getPlatform ? await this.d.getPlatform(accountId) : 'xiaohongshu';
     const hoursSinceLastPublish = (this.clock() - baseline) / HOUR_MS;
