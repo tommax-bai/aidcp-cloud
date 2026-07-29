@@ -1345,6 +1345,11 @@
     "note": "【待定稿裁决】change block3-l3-offboard-eventual-consistency 新写：离场**执行台账物化**的跨域操作端口契约（OffboardMaterializationOperations 接口 + MaterializeEnvironmentOffboardInput / Outcome 纯类型 + 原因字面量联合）。唯一 import 是同层 client-env-automation-types 的 OffboardProjection 行类型；零 SQL / HTTP / LLM / 模块级 Set-Map。与同族两端口互补：client-env-automation-types 是只读投影、offboard-cleanup-grant-types 是清理授权的签发/烧票，本端口是台账物化。三者都**不接调用方事务句柄、各自成一笔事务**——这正是拆库后仍成立的判据。属主实现在 src/interactions/offboard-write-adapter.ts（automation）跑在 automation 池上。本端口取代了原 api 侧的 client-auth/offboard-write-port.ts（那个端口的方法接 api 事务句柄，于是 api 的连接去跑 automation 的 SQL，拆库即 42P01 或写进错的库；该文件随本 change 删除）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
   },
   {
+    "path": "src/kernel/operator-command-port.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 新写：四条运营指令（自由文本委托 / 发布评论指令 / 委托任务卡片动作 / 调度启停）的跨属主窄口，共同形状为『入站在 api、处理器在 automation』。形状逐字复用 4a 已建立的 paired command（api-direct-port.ts 的信封 + 幂等键 + applied|duplicate|collision 回执），不另造第二套机制；executionTarget 由客户端从本进程部署事实注入、调用方无入口可选，DEV/OL 共库下这条是硬约束。四条语义钉在类型上：不可达回 not_delivered 具名原因（MUST NOT 说成已受理）、传输失败/超时抛出且原因码明说『结果未知』（发布/评论/启停都有真实副作用，绝不推断成功或失败）、重放按持久台账原样回放首次结果（MUST NOT 现算一个 changed:false）。不新造错误类，只补 isDelegatedTaskServiceError 结构化守卫——今天两处消费方（飞书 delegated-task-card 判 version_conflict、client-auth-server 映射 HTTP 状态）用 instanceof 认它，跨进程后恒 false。仅 import 同层 kernel 契约与 DeploymentTarget；零 SQL/HTTP/LLM/模块级活状态"
+  },
+  {
     "path": "src/kernel/panel-automation-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change block3-l3-panel-read-port 新写：面板（api 属主 panel-store）对 automation 域的只读投影端口契约（PanelAutomationReader 接口 + PanelActionTotal / PanelAccountActionTotal / PanelLikeViewTotal / PanelRiskStateProjection / PanelAlertProjection / PanelInteractionProjection 纯行类型）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 risk-read-types（账号维风控状态投影端口）同类：读方（api）只依赖本 kernel 接口、绝不直连 automation 的库；属主实现在 src/risk/panel-automation-read.ts（automation）跑在 automation 池上。Block③ 物理拆库 L3 面板读侧解耦。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
@@ -2496,6 +2501,11 @@
   },
   {
     "path": "src/transport/internal-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
+  },
+  {
+    "path": "src/transport/operator-command-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的异步事件 outbox 传输原语（有 SQL、不进 kernel）。首个消费者为风控事件、与既有 risk_counter_outbox 同域，整目录归 automation；本目录只承载共享传输原语、无逐文件切分，新文件 inherit。MUST 回写 §4.7"
   },
