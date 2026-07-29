@@ -279,7 +279,7 @@ export class FacebookGroupJoinScheduler {
     let observed: FacebookGroupJoinStepResult;
     try {
       const observeOnce = (): Promise<FacebookGroupJoinStepResult> => this.deps.edgeTaskLeases.withLease(
-        { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
+        { edgeId, kind: 'group_join', priority: gear, leaseMs: 270_000 },
         (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(assigned.groupUrl),
       );
       observed = await observeOnce();
@@ -318,7 +318,7 @@ export class FacebookGroupJoinScheduler {
     let clicked: FacebookGroupJoinStepResult;
     try {
       clicked = await this.deps.edgeTaskLeases.withLease(
-        { edgeId, kind: 'group_join', priority: gear, leaseMs: 3 * 60_000 },
+        { edgeId, kind: 'group_join', priority: gear, leaseMs: 270_000 },
         (lease) => this.steps(bus, edgeId, lease.taskId).clickJoin(assigned.groupUrl),
       );
     } catch (err) {

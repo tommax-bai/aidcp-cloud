@@ -1023,7 +1023,7 @@ export class CommentScheduler {
     // 提交命令被挡（对抗复核 wf_933f178c 确证）。窗内两段纯云无命令：撰写（成功可逼近 LLM 天花板 ~180s）+ 飞书人审（≤90s）。
     // 故取 6min 严格 > (撰写 ~180s + 人审 90s + 搜索/开帖 + 往返余量)，远低于边端 30min 绝对上限。
     // 注：小红书 keep-open（:1307 的 4min）同样只按 ~150s 预算、未含撰写，存在同一薄裕度隐患——本 change 不动它（越界），登记 backlog。
-    const FB_KEEP_OPEN_LEASE_MS = 6 * 60_000;
+    const FB_KEEP_OPEN_LEASE_MS = 9 * 60_000;
     const priority: EdgeTaskPriority = options.manualOverride ? 'human' : 'automatic';
     // conn.edgeId / conn.bus 在此已过 `!conn || !conn.edgeId` 守卫（narrowed 为非空）；捕成 const 供闭包用——
     // 控制流收窄不穿透嵌套闭包，闭包内直接读 conn.edgeId 会被 TS 当 string|undefined。
@@ -1604,7 +1604,7 @@ export class CommentScheduler {
         // 拿不到浏览器、不会把页面带走，故发布前无需再复搜关键词（根治 target_not_found_on_commit / read_failed，
         // 见 2026-07-11 Tmax 故障）。「commit 不信旧 DOM」的新鲜度改由边端发布前【就地重读当前详情页 noteId】保证。
         // leaseMs 覆盖 搜索(~30s)+pick(~5s)+读正文(~10s)+人审超时(90s)+发布(~15s) 最坏 ≈ 150s，留足 TTL 余量。
-        const KEEP_OPEN_LEASE_MS = 4 * 60_000;
+        const KEEP_OPEN_LEASE_MS = 6 * 60_000;
         let tried = 0;
         let final: CommentTaskResult | undefined;
         for (const term of terms) {
