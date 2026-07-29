@@ -3,6 +3,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
+import {
+  ownsApiFeishuForMode,
+  ownsPublishApprovalAuthorityForMode,
+  segmentsForMode,
+  type SegmentPlan,
+  type ServiceMode,
+} from '../../../src/gateway/service-mode.js';
+
 export type SurfaceDirection =
   | 'automation-to-api'
   | 'api-to-automation'
@@ -1535,64 +1543,338 @@ function identifierUseCount(root: ts.Node | null, identifier: string): number {
   return count;
 }
 
+/* ─────────────────── seam-branch filter for `new` / `call` probes ─────────────────── */
+
 /**
- * Seam-branch filter for `new` / `call` probes.
- *
- * A construction that only runs when the root is assembled as a monolith is by
- * definition absent from every split process. Pointing a probe at one would
- * manufacture a **phantom blocker**: the ledger would claim an independent root
- * is blocked by code that no split root ever executes, and nothing mechanical
- * would contradict it. `ownerStoreConstructions` already screens its own
- * `serviceMode === 'api'` branch this way; the probe path did not, which is the
- * hole this closes.
- *
- * Deliberately narrow: only the `=== 'monolith'` test counts. `seamMode !==
- * 'automation'` is **not** treated as monolith-only — it also covers `core`,
- * and whether such a branch blocks a given root is an adjudication, not a
- * mechanical fact. Widening this predicate silently deletes ledger entries, so
- * it must be done by decision, not by convenience.
+ * Every `ServiceMode`, split by whether it is an **independent root** (one of
+ * the three processes this ledger claims are separately bootable) or a
+ * composite deployment shape. Written as an exhaustive `Record<ServiceMode, …>`
+ * so adding a mode to the union is a compile error here rather than a silent
+ * omission from the filter.
  */
-function isMonolithOnlyBranch(node: ts.Node, root: ts.Node): boolean {
+const SEAM_MODE_ROLES: Record<ServiceMode, 'independent-root' | 'composite'> = {
+  automation: 'independent-root',
+  api: 'independent-root',
+  content: 'independent-root',
+  monolith: 'composite',
+  core: 'composite',
+};
+
+const INDEPENDENT_ROOT_MODES: readonly ServiceMode[] =
+  (Object.keys(SEAM_MODE_ROLES) as ServiceMode[])
+    .filter((mode) => SEAM_MODE_ROLES[mode] === 'independent-root');
+
+/** Probe scope (composition-root segment function) → the `SegmentPlan` key it is. */
+const SEGMENT_BY_SCOPE: Readonly<Record<string, keyof SegmentPlan>> = {
+  segAApiFoundation: 'segA',
+  segBContent: 'segB',
+  segCAutomation: 'segC',
+  segDApiServing: 'segD',
+};
+
+/**
+ * Mode-only predicate helpers the composition root branches on. Bound to the
+ * **real exported functions**, so their semantics can never drift from what the
+ * process actually does — the whole point of not pattern-matching source text.
+ */
+const SEAM_MODE_PREDICATES: Readonly<Record<string, (mode: ServiceMode) => boolean>> = {
+  ownsPublishApprovalAuthorityForMode,
+  ownsApiFeishuForMode,
+};
+
+/** Abstract value domain for evaluating a guard with the seam mode pinned. */
+type SeamValue =
+  | { kind: 'mode' }
+  | { kind: 'string'; value: string }
+  | { kind: 'boolean'; value: boolean }
+  | { kind: 'unknown' };
+
+const SEAM_UNKNOWN: SeamValue = { kind: 'unknown' };
+
+const seamModeBindingCache = new WeakMap<ts.SourceFile, Set<string>>();
+
+/**
+ * Names bound to the seam mode in this file, derived from `const x =
+ * serviceModeFromEnv()` declarations rather than from a hardcoded name list —
+ * `serviceMode`, `seamMode` and `approvalOwnerMode` are all the same value, and
+ * a fourth one appearing tomorrow must not quietly fall out of the filter.
+ */
+function seamModeBindings(file: ts.SourceFile): Set<string> {
+  const cached = seamModeBindingCache.get(file);
+  if (cached) return cached;
+  const names = new Set<string>();
+  function visit(node: ts.Node): void {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer
+      && ts.isCallExpression(node.initializer)
+      && ts.isIdentifier(node.initializer.expression)
+      && node.initializer.expression.text === 'serviceModeFromEnv'
+    ) {
+      names.add(node.name.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  seamModeBindingCache.set(file, names);
+  return names;
+}
+
+/**
+ * Evaluates a guard expression with the seam mode pinned to `mode` and
+ * everything else unknown. This is an interpreter over the real expression
+ * shape — comparisons, `&&`/`||`/`!`, and the exported mode predicates — not a
+ * regex over condition text. Anything it does not understand stays `unknown`,
+ * which means "may execute": the filter can only ever fail *towards keeping* a
+ * ledger entry.
+ */
+function evaluateSeam(
+  node: ts.Expression,
+  mode: ServiceMode,
+  modeNames: ReadonlySet<string>,
+): SeamValue {
+  if (ts.isParenthesizedExpression(node)) return evaluateSeam(node.expression, mode, modeNames);
+  if (ts.isAsExpression(node) || ts.isNonNullExpression(node)) {
+    return evaluateSeam(node.expression, mode, modeNames);
+  }
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return { kind: 'string', value: node.text };
+  }
+  if (node.kind === ts.SyntaxKind.TrueKeyword) return { kind: 'boolean', value: true };
+  if (node.kind === ts.SyntaxKind.FalseKeyword) return { kind: 'boolean', value: false };
+  if (ts.isIdentifier(node)) {
+    return modeNames.has(node.text) ? { kind: 'mode' } : SEAM_UNKNOWN;
+  }
+  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+    if (node.expression.text === 'serviceModeFromEnv') return { kind: 'mode' };
+    const predicate = SEAM_MODE_PREDICATES[node.expression.text];
+    if (predicate && node.arguments.length === 1) {
+      const argument = evaluateSeam(node.arguments[0]!, mode, modeNames);
+      if (argument.kind === 'mode') return { kind: 'boolean', value: predicate(mode) };
+    }
+    return SEAM_UNKNOWN;
+  }
+  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken) {
+    const operand = evaluateSeam(node.operand, mode, modeNames);
+    return operand.kind === 'boolean' ? { kind: 'boolean', value: !operand.value } : SEAM_UNKNOWN;
+  }
+  if (!ts.isBinaryExpression(node)) return SEAM_UNKNOWN;
+  const operator = node.operatorToken.kind;
+  if (
+    operator === ts.SyntaxKind.EqualsEqualsEqualsToken
+    || operator === ts.SyntaxKind.ExclamationEqualsEqualsToken
+  ) {
+    const left = asSeamString(evaluateSeam(node.left, mode, modeNames), mode);
+    const right = asSeamString(evaluateSeam(node.right, mode, modeNames), mode);
+    if (left === null || right === null) return SEAM_UNKNOWN;
+    const equal = left === right;
+    return {
+      kind: 'boolean',
+      value: operator === ts.SyntaxKind.EqualsEqualsEqualsToken ? equal : !equal,
+    };
+  }
+  if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
+    const left = evaluateSeam(node.left, mode, modeNames);
+    if (left.kind === 'boolean' && !left.value) return { kind: 'boolean', value: false };
+    const right = evaluateSeam(node.right, mode, modeNames);
+    // `unknown && false` is falsy either way: truthy left yields `false`, falsy
+    // left yields the falsy left. Both are "branch not taken".
+    if (right.kind === 'boolean' && !right.value) return { kind: 'boolean', value: false };
+    if (left.kind === 'boolean' && left.value) return right;
+    return SEAM_UNKNOWN;
+  }
+  if (operator === ts.SyntaxKind.BarBarToken) {
+    const left = evaluateSeam(node.left, mode, modeNames);
+    if (left.kind === 'boolean' && left.value) return { kind: 'boolean', value: true };
+    const right = evaluateSeam(node.right, mode, modeNames);
+    if (right.kind === 'boolean' && right.value) return { kind: 'boolean', value: true };
+    if (left.kind === 'boolean' && !left.value) return right;
+    return SEAM_UNKNOWN;
+  }
+  return SEAM_UNKNOWN;
+}
+
+function asSeamString(value: SeamValue, mode: ServiceMode): string | null {
+  if (value.kind === 'mode') return mode;
+  if (value.kind === 'string') return value.value;
+  return null;
+}
+
+function isSeamFalse(
+  expression: ts.Expression,
+  mode: ServiceMode,
+  modeNames: ReadonlySet<string>,
+): boolean {
+  const value = evaluateSeam(expression, mode, modeNames);
+  return value.kind === 'boolean' && !value.value;
+}
+
+function isSeamTrue(
+  expression: ts.Expression,
+  mode: ServiceMode,
+  modeNames: ReadonlySet<string>,
+): boolean {
+  const value = evaluateSeam(expression, mode, modeNames);
+  return value.kind === 'boolean' && value.value;
+}
+
+/**
+ * Walks the enclosing control flow and reports the first guard that provably
+ * excludes `mode` from reaching `node`. Covers `if`/`else`, the two arms of a
+ * conditional expression, and short-circuit `&&`/`||` operands — the four
+ * shapes the composition root actually uses to gate seam-specific wiring.
+ */
+function seamGuardExcluding(
+  node: ts.Node,
+  root: ts.Node,
+  mode: ServiceMode,
+  modeNames: ReadonlySet<string>,
+): string | null {
+  let child: ts.Node = node;
   let current: ts.Node | undefined = node.parent;
-  while (current && current !== root) {
+  while (current && child !== root) {
     if (ts.isIfStatement(current)) {
-      const condition = current.expression.getText();
-      const isThenBranch = current.thenStatement.pos <= node.pos
-        && node.end <= current.thenStatement.end;
+      if (child === current.thenStatement && isSeamFalse(current.expression, mode, modeNames)) {
+        return current.expression.getText();
+      }
       if (
-        isThenBranch
-        && /(?:seamMode|serviceMode|serviceModeFromEnv\(\))\s*===\s*['"]monolith['"]/.test(condition)
+        current.elseStatement
+        && child === current.elseStatement
+        && isSeamTrue(current.expression, mode, modeNames)
       ) {
-        return true;
+        return `!(${current.expression.getText()})`;
+      }
+    } else if (ts.isConditionalExpression(current)) {
+      if (child === current.whenTrue && isSeamFalse(current.condition, mode, modeNames)) {
+        return current.condition.getText();
+      }
+      if (child === current.whenFalse && isSeamTrue(current.condition, mode, modeNames)) {
+        return `!(${current.condition.getText()})`;
+      }
+    } else if (ts.isBinaryExpression(current) && child === current.right) {
+      const operator = current.operatorToken.kind;
+      if (
+        operator === ts.SyntaxKind.AmpersandAmpersandToken
+        && isSeamFalse(current.left, mode, modeNames)
+      ) {
+        return current.left.getText();
+      }
+      if (
+        operator === ts.SyntaxKind.BarBarToken
+        && isSeamTrue(current.left, mode, modeNames)
+      ) {
+        return `!(${current.left.getText()})`;
       }
     }
+    child = current;
     current = current.parent;
   }
-  return false;
+  return null;
+}
+
+/** One dropped `new`/`call` match, with the reason per independent root. */
+export interface SuppressedSeamMatch {
+  /** `<sourceFile>#<scope>:<kind>:<symbol>` — the probe the match would have fed. */
+  probe: string;
+  /** `<sourceFile>:<line>` of the dropped construction/call. */
+  location: string;
+  /** One entry per independent-root mode: why that root never executes it. */
+  reasons: string[];
+}
+
+interface SeamScope {
+  file: ts.SourceFile;
+  root: ts.Node;
+  scope?: string;
+  probe: string;
+}
+
+interface ScopeMatchResult {
+  found: boolean;
+  suppressed: SuppressedSeamMatch[];
+}
+
+/**
+ * Why (if at all) no independently-booted root executes `node`.
+ *
+ * Two independent exclusions compose here, and both are read from real
+ * semantics rather than guessed from text:
+ *   1. **Segment membership** — `segmentsForMode` says which of segA..segD each
+ *      mode runs at all. A `segC` construction is simply not in the api or
+ *      content process, whatever the guard says.
+ *   2. **Seam guards** — the enclosing branch conditions, interpreted with the
+ *      mode pinned.
+ *
+ * A construction excluded for all three independent roots is executed only by
+ * `monolith` / `core`, the composite shapes. Pointing a blocker probe at one
+ * manufactures a **phantom blocker**: the ledger would claim an independent
+ * root is blocked by code no independent root ever runs.
+ *
+ * This is the widened form of the old `=== 'monolith'` test (task 0.3f). The
+ * concrete case that forced it: the draft-refinement worker sits in segC behind
+ * `seamMode !== 'automation' && …`, so automation skips it by guard while api
+ * and content skip the whole segment — nobody's independent root is blocked by
+ * it, yet the narrow filter still counted it. Note the two exclusions are *both*
+ * required: filtering on "automation does not execute it" alone would delete
+ * genuine api/content debts from segA, which every mode runs.
+ */
+function seamSuppressionReasons(node: ts.Node, ctx: SeamScope): string[] | null {
+  const segment = ctx.scope ? SEGMENT_BY_SCOPE[ctx.scope] : undefined;
+  const modeNames = seamModeBindings(ctx.file);
+  const reasons: string[] = [];
+  for (const mode of INDEPENDENT_ROOT_MODES) {
+    if (segment && !segmentsForMode(mode)[segment]) {
+      reasons.push(`${mode}: does not run ${segment}`);
+      continue;
+    }
+    const guard = seamGuardExcluding(node, ctx.root, mode, modeNames);
+    if (!guard) return null;
+    reasons.push(`${mode}: guarded by \`${guard}\``);
+  }
+  return reasons;
 }
 
 /**
  * Single traversal point for probe matching, so the seam filter above cannot be
- * applied to one probe kind and forgotten on the other.
+ * applied to one probe kind and forgotten on the other. Dropped matches are
+ * **returned**, never swallowed: a filter that silently removes evidence lines
+ * is exactly the silent-false-success shape this repo forbids.
  */
 function existsInScope(
-  root: ts.Node | null,
+  ctx: SeamScope,
   matches: (node: ts.Node) => boolean,
-): boolean {
-  if (!root) return false;
-  const scope = root;
+): ScopeMatchResult {
   let found = false;
+  const suppressed: SuppressedSeamMatch[] = [];
   function visit(node: ts.Node): void {
-    if (matches(node) && !isMonolithOnlyBranch(node, scope)) found = true;
+    if (matches(node)) {
+      const reasons = seamSuppressionReasons(node, ctx);
+      if (reasons) {
+        const line = ctx.file.getLineAndCharacterOfPosition(node.getStart(ctx.file)).line + 1;
+        suppressed.push({
+          probe: ctx.probe,
+          location: `${relativeSourcePath(ctx.file)}:${line}`,
+          reasons,
+        });
+      } else {
+        found = true;
+      }
+    }
     ts.forEachChild(node, visit);
   }
-  visit(scope);
-  return found;
+  visit(ctx.root);
+  return { found, suppressed };
 }
 
-function containsNew(root: ts.Node | null, className: string): boolean {
+function relativeSourcePath(file: ts.SourceFile): string {
+  const prefix = `${REPO_ROOT}/`;
+  return file.fileName.startsWith(prefix) ? file.fileName.slice(prefix.length) : file.fileName;
+}
+
+function containsNew(ctx: SeamScope, className: string): ScopeMatchResult {
   return existsInScope(
-    root,
+    ctx,
     (node) =>
       ts.isNewExpression(node)
       && ts.isIdentifier(node.expression)
@@ -1600,9 +1882,9 @@ function containsNew(root: ts.Node | null, className: string): boolean {
   );
 }
 
-function containsCall(root: ts.Node | null, callPath: string): boolean {
+function containsCall(ctx: SeamScope, callPath: string): ScopeMatchResult {
   return existsInScope(
-    root,
+    ctx,
     (node) => ts.isCallExpression(node) && callChain(node.expression) === callPath,
   );
 }
@@ -1739,25 +2021,47 @@ function kebabCase(value: string): string {
     .toLowerCase();
 }
 
+/** A probe's verdict plus every match the seam filter refused to count. */
+export interface ProbeOutcome {
+  evidence: string | null;
+  suppressed: SuppressedSeamMatch[];
+}
+
+function probeLabel(probe: EvidenceProbe): string {
+  const scope = probe.scope ? `${probe.scope}:` : '';
+  return `${probe.sourceFile}#${scope}${probe.kind}:${probe.symbol}`;
+}
+
 function probeEvidence(
   file: ts.SourceFile,
   probe: EvidenceProbe,
-): string | null {
+): ProbeOutcome {
   const root = probe.scope ? functionBody(file, probe.scope) : file;
-  if (!root) return null;
-  const present =
+  if (!root) return { evidence: null, suppressed: [] };
+  const label = probeLabel(probe);
+  const ctx: SeamScope = {
+    file,
+    root,
+    ...(probe.scope ? { scope: probe.scope } : {}),
+    probe: label,
+  };
+  const seamFiltered =
     probe.kind === 'call'
-      ? containsCall(root, probe.symbol)
+      ? containsCall(ctx, probe.symbol)
       : probe.kind === 'new'
-        ? containsNew(root, probe.symbol)
-        : probe.kind === 'identifier'
-          ? containsIdentifier(root, probe.symbol)
-          : probe.kind === 'identifier-use'
-            ? identifierUseCount(root, probe.symbol) > 0
-            : root.getText(file).includes(probe.symbol);
-  if (!present) return null;
-  const scope = probe.scope ? `${probe.scope}:` : '';
-  return `${probe.sourceFile}#${scope}${probe.kind}:${probe.symbol}`;
+        ? containsNew(ctx, probe.symbol)
+        : null;
+  const present = seamFiltered
+    ? seamFiltered.found
+    : probe.kind === 'identifier'
+      ? containsIdentifier(root, probe.symbol)
+      : probe.kind === 'identifier-use'
+        ? identifierUseCount(root, probe.symbol) > 0
+        : root.getText(file).includes(probe.symbol);
+  return {
+    evidence: present ? label : null,
+    suppressed: seamFiltered?.suppressed ?? [],
+  };
 }
 
 /**
@@ -1766,19 +2070,30 @@ function probeEvidence(
  * internal.
  */
 export async function evidenceForProbe(probe: EvidenceProbe): Promise<string | null> {
-  return probeEvidence(await sourceFile(probe.sourceFile), probe);
+  return (probeEvidence(await sourceFile(probe.sourceFile), probe)).evidence;
 }
 
-export async function deriveIndependentRootBlockers(): Promise<DerivedBlocker[]> {
-  const [server, ownershipRaw] = await Promise.all([
-    sourceFile('src/server.ts'),
-    readFile(resolve(REPO_ROOT, 'boundaries/module-ownership.json'), 'utf8'),
-  ]);
-  const ownership = JSON.parse(ownershipRaw) as OwnershipEntry[];
-  const segA = functionBody(server, 'segAApiFoundation');
-  const imports = importedOwners(server, ownership);
-  const sourceByFile = new Map<string, ts.SourceFile>([['src/server.ts', server]]);
+/**
+ * Every `new`/`call` match the seam filter refused to count, across the whole
+ * reviewed probe set.
+ *
+ * This exists because the filter's failure mode is **silence**: it can only
+ * remove evidence lines, and a removed line looks exactly like a line that was
+ * never there. Refreshing the ledger prints this, and
+ * `composition-root-4a-inventory.test.ts` pins it, so widening or narrowing the
+ * filter is a visible, reviewed change rather than a quietly shorter ledger.
+ */
+export async function deriveSeamSuppressedProbeMatches(): Promise<SuppressedSeamMatch[]> {
+  return (await sweepReviewedProbes()).suppressed;
+}
+
+async function sweepReviewedProbes(): Promise<{
+  blockers: DerivedBlocker[];
+  suppressed: SuppressedSeamMatch[];
+}> {
+  const sourceByFile = new Map<string, ts.SourceFile>();
   const reviewed: DerivedBlocker[] = [];
+  const suppressed: SuppressedSeamMatch[] = [];
   for (const binding of REVIEWED_BLOCKER_BINDINGS) {
     const evidence: string[] = [];
     for (const probe of binding.probes) {
@@ -1787,8 +2102,9 @@ export async function deriveIndependentRootBlockers(): Promise<DerivedBlocker[]>
         file = await sourceFile(probe.sourceFile);
         sourceByFile.set(probe.sourceFile, file);
       }
-      const item = probeEvidence(file, probe);
-      if (item) evidence.push(item);
+      const outcome = probeEvidence(file, probe);
+      if (outcome.evidence) evidence.push(outcome.evidence);
+      suppressed.push(...outcome.suppressed);
     }
     if (evidence.length > 0) {
       reviewed.push({
@@ -1801,6 +2117,19 @@ export async function deriveIndependentRootBlockers(): Promise<DerivedBlocker[]>
       });
     }
   }
+  return { blockers: reviewed, suppressed };
+}
+
+export async function deriveIndependentRootBlockers(): Promise<DerivedBlocker[]> {
+  const [server, ownershipRaw, sweep] = await Promise.all([
+    sourceFile('src/server.ts'),
+    readFile(resolve(REPO_ROOT, 'boundaries/module-ownership.json'), 'utf8'),
+    sweepReviewedProbes(),
+  ]);
+  const ownership = JSON.parse(ownershipRaw) as OwnershipEntry[];
+  const segA = functionBody(server, 'segAApiFoundation');
+  const imports = importedOwners(server, ownership);
+  const reviewed = sweep.blockers;
 
   const pools = ownerPools(segA).map((evidence): DerivedBlocker => {
     const [poolName, owner] = evidence.split(':');
@@ -1857,10 +2186,22 @@ async function runCli(argv: readonly string[]): Promise<void> {
       'usage: composition-root-4a-census.ts <--report|--refresh-ledger|--require-empty>',
     );
   }
-  const [surface, blockers] = await Promise.all([
+  const [surface, blockers, seamSuppressed] = await Promise.all([
     deriveSurface(),
     deriveIndependentRootBlockers(),
+    deriveSeamSuppressedProbeMatches(),
   ]);
+  // The seam filter subtracts evidence, so it is reported on every run — a
+  // shorter ledger must never be the only trace that something was dropped.
+  const reportSeamSuppressed = (): void => {
+    console.log(
+      `seam-filtered probe matches (not counted as blockers): ${seamSuppressed.length}`,
+    );
+    for (const match of seamSuppressed) {
+      console.log(`  - ${match.probe} @ ${match.location}`);
+      for (const reason of match.reasons) console.log(`      ${reason}`);
+    }
+  };
   if (argv[0] === '--report') {
     const methods = surface.groups.reduce((sum, group) => sum + group.methods.length, 0);
     const consumed = surface.groups.reduce(
@@ -1871,8 +2212,10 @@ async function runCli(argv: readonly string[]): Promise<void> {
       `composition-root 4a census groups=${surface.groups.length}`
       + ` methodSlots=${methods} productionConsumers=${consumed}`
       + ` approvedAlternates=${surface.alternates.filter((item) => item.selected).length}`
-      + ` independentRootBlockers=${blockers.length}`,
+      + ` independentRootBlockers=${blockers.length}`
+      + ` seamFilteredProbeMatches=${seamSuppressed.length}`,
     );
+    reportSeamSuppressed();
     return;
   }
   if (argv[0] === '--refresh-ledger') {
@@ -1901,8 +2244,10 @@ async function runCli(argv: readonly string[]): Promise<void> {
       'utf8',
     );
     console.log(`refreshed independent composition-root blocker ledger (${blockers.length})`);
+    reportSeamSuppressed();
     return;
   }
+  reportSeamSuppressed();
   assertNoIndependentRootBlockers(blockers);
   console.log('independent composition-root blocker ledger is empty');
 }

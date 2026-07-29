@@ -210,7 +210,6 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:DraftRefinementStore",
-        "src/server.ts#segCAutomation:new:DraftRefinementWorker",
         "src/server.ts#segDApiServing:identifier-use:draftRefinementStore"
       ]
     },

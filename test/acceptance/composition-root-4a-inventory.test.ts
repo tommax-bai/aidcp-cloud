@@ -5,6 +5,7 @@ import {
   PRODUCTION_CONSUMER_BINDINGS,
   assertNoIndependentRootBlockers,
   deriveIndependentRootBlockers,
+  deriveSeamSuppressedProbeMatches,
   deriveSurface,
   evidenceForProbe,
   type DerivedBlocker,
@@ -281,14 +282,16 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
 });
 
 /**
- * The seam filter is otherwise unobservable: a probe aimed at a monolith-only
- * construction would just quietly add a phantom blocker, and no existing
- * assertion would move. These two probes are the anchor — the negative case is
- * a real monolith-only construction in segC, the positive case is a real
- * unconditional one in the same scope, so deleting the filter turns the first
- * assertion red and weakening `existsInScope` turns the second red.
+ * The seam filter is otherwise unobservable: a probe aimed at a branch no
+ * independent root executes would just quietly add a phantom blocker, and no
+ * existing assertion would move. These three probes are the anchor — the two
+ * negative cases are real unexecuted constructions in segC (one behind
+ * `=== 'monolith'`, one behind `!== 'automation'`, which task 0.3f widened the
+ * filter to cover), the positive case is a real unconditional one in the same
+ * scope, so deleting the filter turns the first assertions red and weakening
+ * `existsInScope` turns the last one red.
  */
-test('new/call probes ignore monolith-only seam branches', async () => {
+test('new/call probes ignore seam branches no independent root executes', async () => {
   assert.equal(
     await evidenceForProbe({
       sourceFile: 'src/server.ts',
@@ -306,11 +309,84 @@ test('new/call probes ignore monolith-only seam branches', async () => {
       sourceFile: 'src/server.ts',
       scope: 'segCAutomation',
       kind: 'new',
+      symbol: 'DraftRefinementWorker',
+    }),
+    null,
+    "segC's only `new DraftRefinementWorker` sits behind `seamMode !== 'automation' && …`,"
+    + ' so the automation process skips it by guard while api and content skip segC'
+    + ' entirely — no independent root is blocked by it',
+  );
+  assert.equal(
+    await evidenceForProbe({
+      sourceFile: 'src/server.ts',
+      scope: 'segCAutomation',
+      kind: 'new',
       symbol: 'ConfigMirrorRefresher',
     }),
     'src/server.ts#segCAutomation:new:ConfigMirrorRefresher',
     'an unconditional segC construction must still resolve; the seam filter must not'
     + ' swallow real evidence',
+  );
+});
+
+/**
+ * The filter's only failure mode is silence — it subtracts evidence lines, and
+ * a subtracted line is indistinguishable from a line that was never derived.
+ * Pinning the exact dropped set is what makes widening or narrowing it a
+ * reviewed change instead of a quietly shorter ledger. Adding a case here is
+ * expected work when a new seam guard appears; having one appear *without* this
+ * list moving is the thing that must not be possible.
+ */
+test('seam-filtered probe matches are enumerated, never silently dropped', async () => {
+  const suppressed = await deriveSeamSuppressedProbeMatches();
+  assert.deepEqual(
+    suppressed.map((match) => ({ probe: match.probe, reasons: match.reasons })),
+    [
+      {
+        probe: 'src/server.ts#segCAutomation:call:accountDisplayName',
+        reasons: [
+          "automation: guarded by `seamMode !== 'automation' && publishApprovalStore"
+          + ' && deploymentTarget`',
+          'api: does not run segC',
+          'content: does not run segC',
+        ],
+      },
+      {
+        probe: 'src/server.ts#segCAutomation:new:DraftRefinementWorker',
+        reasons: [
+          "automation: guarded by `seamMode !== 'automation' && draftRefinementStore"
+          + ' && imageProvider`',
+          'api: does not run segC',
+          'content: does not run segC',
+        ],
+      },
+    ],
+    'the seam filter dropped a different set of probe matches than the reviewed one;'
+    + ' run `npm run composition-root:census` to see them and adjudicate before'
+    + ' updating this list',
+  );
+  for (const match of suppressed) {
+    assert.match(match.location, /^src\/[^:]+\.ts:\d+$/, `${match.probe} location`);
+  }
+  // The pending-dispatch watchdog's `accountDisplayName` call is dropped, but the
+  // mirror entry survives on its other, unguarded segC call site: suppression
+  // shortens evidence, it does not by itself extinguish a blocker.
+  const blockers = await deriveIndependentRootBlockers();
+  assert.deepEqual(
+    blockers.find((blocker) => blocker.id === '4b-b4-account-identity-status-mirror')?.evidence,
+    [
+      'src/server.ts#segCAutomation:call:accountDisplayName',
+      'src/server.ts#segCAutomation:identifier-use:accountStore',
+    ],
+  );
+  assert.deepEqual(
+    blockers.find((blocker) => blocker.id === 'content-draft-refinement-authority')?.evidence,
+    [
+      'src/server.ts#segAApiFoundation:new:DraftRefinementStore',
+      'src/server.ts#segDApiServing:identifier-use:draftRefinementStore',
+    ],
+    'draft refinement stays a Cloud-ledger blocker on its segA store and segD reader;'
+    + ' only the segC worker line goes away',
   );
 });
 
