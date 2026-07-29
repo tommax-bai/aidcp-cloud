@@ -258,6 +258,20 @@ export interface PgAccountStoreOptions {
    * 账号继续点赞。缺省 = 不推版本（行为逐位退回今日现状）。
    */
   mirrorVersionBumper?: MirrorVersionBumper;
+  /**
+   * 新账号自动化默认配置的种入钩子（change seed-facebook-automation-defaults-on-registration）。
+   *
+   * **只在 `ensureAccount` 真的插入了一行新账号、且调用方显式声明了平台时调用。**
+   * 缺省不注入 ⇒ 登记行为逐字回到本 change 之前（零回归），这也是回滚拉杆。
+   *
+   * 判据必须是「真的插了新行」而 **MUST NOT** 是「配置侧表没有这个账号的行」：后者对一个早已
+   * 存在、只是从未被运营配过的账号同样成立，用它做判据会把种入扩散到全部存量账号——与本 change
+   * 「存量一个不碰」的范围正好相反（用户 2026-07-29 定）。
+   *
+   * 本文件 MUST NOT 认识排期 / 加群这两个配置域：钩子由组装根接线，账号存储只负责在正确的时刻
+   * 把「谁、什么平台」交出去。异常由 `ensureAccount` 捕获、绝不外抛（种入失败不许阻断登记）。
+   */
+  onAccountRegistered?: (accountId: string, platform: PlatformId) => Promise<void> | void;
 }
 
 interface AccountRow {
@@ -283,10 +297,13 @@ export class PgAccountStore implements AccountStore {
   private readonly createdAtCache = new Map<string, number>();
 
   private readonly schemaEnsurer: SchemaEnsurer;
+  /** 新账号种入钩子（change seed-facebook-automation-defaults-on-registration）；缺省不注入 = 零回归。 */
+  private readonly onAccountRegistered?: (accountId: string, platform: PlatformId) => Promise<void> | void;
 
   constructor(options: PgAccountStoreOptions) {
     this.schemaEnsurer = options.schemaEnsurer;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
+    this.onAccountRegistered = options.onAccountRegistered;
     this.pool =
       options.pool ??
       new Pool({
@@ -425,6 +442,49 @@ export class PgAccountStore implements AccountStore {
       });
       this.platformCache.set(accountId, normalizePlatformId(rows[0].platform));
       if (rows[0].created_at) this.createdAtCache.set(accountId, rows[0].created_at.getTime());
+      await this.seedAutomationDefaults(accountId, platform, normalizePlatformId(rows[0].platform));
+    }
+  }
+
+  /**
+   * 新账号自动化默认配置的种入（change seed-facebook-automation-defaults-on-registration）。
+   *
+   * **调用位置就是判据**：本方法只在上面 `rows.length > 0` 的分支里被调到，也就是本次写入**真的
+   * 插入了一行新账号**。MUST NOT 改成在别处按「配置侧表有没有这个账号的行」判断——一个早已存在、
+   * 只是从未被运营配过的账号同样满足那个条件，改了会把种入静默扩散到全部存量账号
+   * （dev 实测 40 个 FB 账号里 37 个正处在这个状态），而单账号测试完全看不出来。
+   *
+   * **平台未显式声明则不种**：上面的 `normalized` 在缺省时回落成小红书，那个回落值只用于建行的
+   * platform 列（历史行为，不动）；但拿它去种配置，等于给一个可能是 Facebook 的账号种一份小红书
+   * 默认值。握手那条路会显式声明平台且已校验，另一个内部登记入口可以不带——故这里以**入参是否
+   * 存在**为准，读不到就如实不种并说明，不猜。
+   *
+   * **失败绝不外抛**：登记本身照常成功。日志带可检索前缀，便于事后捞出所有种入失败的账号。
+   * **刻意不重试、不补种**：任何补种路径都要去扫描「已存在但没有配置行」的账号集合，而那正是本
+   * change 明确排除的存量集合。失败后的补救走后台手工配置（proposal「已知不做补救的一处缺口」）。
+   */
+  private async seedAutomationDefaults(
+    accountId: string,
+    declaredPlatform: PlatformId | undefined,
+    storedPlatform: PlatformId,
+  ): Promise<void> {
+    if (!this.onAccountRegistered) return;
+    if (!declaredPlatform) {
+      console.warn(
+        `[account-seed] 因平台未声明而未种入自动化默认配置 account=${accountId}`
+        + '（登记入参缺 platform；建行时回落值仅用于 platform 列，不作为种入依据）',
+      );
+      return;
+    }
+    try {
+      await this.onAccountRegistered(accountId, storedPlatform);
+    } catch (err) {
+      // 具名前缀 `[account-seed] 种入失败` 便于事后一次捞全；登记已成功、不回滚、不重试。
+      console.warn(
+        `[account-seed] 种入失败 account=${accountId} platform=${storedPlatform}: `
+        + `${err instanceof Error ? err.message : String(err)}`
+        + '（登记已成功、不重试；该账号需在后台手工配置）',
+      );
     }
   }
 

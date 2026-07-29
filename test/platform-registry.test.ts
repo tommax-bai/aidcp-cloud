@@ -14,6 +14,10 @@ import {
   scheduledAutomationDeclarationsForPlatform,
   identityCaptureStrategyForPlatform,
 } from '../src/platform/index.js';
+import {
+  NEW_ACCOUNT_AUTOMATION_SEED_ACTOR,
+  newAccountAutomationDefaultsFor,
+} from '../src/kernel/scheduled-automation-catalog.js';
 import type { NoteScopedAction, PlatformRegistryEntry } from '../src/platform/index.js';
 
 const NOTE_SCOPED_ACTIONS: NoteScopedAction[] = [
@@ -215,4 +219,54 @@ test('platform registry: named catalog functions are the single reader implement
     allowedModes: ['review', 'auto_approve'],
     maxDailyCap: 50,
   });
+});
+
+// ── change seed-facebook-automation-defaults-on-registration：新账号种入默认值 ──
+
+test('新账号种入默认值: Facebook 取值逐字符合用户拍板值，且联系评论刻意缺席', () => {
+  const fb = newAccountAutomationDefaultsFor('facebook');
+  assert.notEqual(fb, null);
+  assert.deepEqual(fb!.schedule, {
+    autoEnabled: true,
+    postMode: 'review',
+    postDailyCap: 5,
+    commentMode: 'review',
+    commentDailyCap: 20,
+  });
+  assert.deepEqual(fb!.joinGroup, { enabled: true, dailyCap: 20 });
+  // 联系评论 MUST NOT 出现：带「先加群再评论」标记的复合动作只挂在它上面，
+  // 种它等于让新账号具备「加入新群后同一轮立即在该群评论」这一已知风险形态。
+  const keys = Object.keys(fb!.schedule);
+  assert.equal(keys.some((k) => k.toLowerCase().includes('contact')), false);
+});
+
+test('新账号种入默认值: 别名归一后仍命中 Facebook', () => {
+  assert.notEqual(newAccountAutomationDefaultsFor('fb'), null);
+});
+
+test('新账号种入默认值: 其余平台一律不种（无条目 = 不种）', () => {
+  for (const p of ['xiaohongshu', 'wechat_channels', 'future-platform', null, undefined, '']) {
+    assert.equal(newAccountAutomationDefaultsFor(p), null, `${String(p)} MUST NOT 被种入`);
+  }
+});
+
+test('新账号种入默认值: 取值不得越过各自动作的硬上限', () => {
+  const fb = newAccountAutomationDefaultsFor('facebook')!;
+  const declared = availableScheduledAutomationActionsForPlatform('facebook');
+  const capOf = (action: string) => declared.find((d) => d.action === action)?.maxDailyCap ?? -1;
+  assert.ok(fb.schedule.postDailyCap <= capOf('post'));
+  assert.ok(fb.schedule.commentDailyCap <= capOf('comment'));
+  assert.ok(fb.joinGroup.dailyCap <= capOf('join_group'));
+});
+
+test('新账号种入默认值: Facebook 发帖只能是需人审（免审对 FB 发帖 fail-closed）', () => {
+  const fb = newAccountAutomationDefaultsFor('facebook')!;
+  const declared = availableScheduledAutomationActionsForPlatform('facebook');
+  const postModes = declared.find((d) => d.action === 'post')?.allowedModes ?? [];
+  assert.deepEqual(postModes, ['review']);
+  assert.equal(fb.schedule.postMode, 'review');
+});
+
+test('种入署名可辨识，便于区分系统种入与运营手工写入', () => {
+  assert.match(NEW_ACCOUNT_AUTOMATION_SEED_ACTOR, /^system:/);
 });

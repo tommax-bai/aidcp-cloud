@@ -313,6 +313,10 @@ import {
 import { parseDeploymentTarget } from './deployment-target.js';
 import { runSchemaContractGate, takePendingSchemaGateAlert } from './schema/schema-gate.js';
 import { isSchemaCapabilityError } from './kernel/schema-capability-contract.js';
+import {
+  NEW_ACCOUNT_AUTOMATION_SEED_ACTOR,
+  newAccountAutomationDefaultsFor,
+} from './kernel/scheduled-automation-catalog.js';
 import { ensureCapabilitySchema, probeSchemaShape } from './schema/schema-capability.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
 import {
@@ -2779,6 +2783,35 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
       database: readEnvString('PGDATABASE'),
       user: readEnvString('PGUSER'),
       password: readEnvString('PGPASSWORD'),
+      // 新账号种入自动化默认配置（change seed-facebook-automation-defaults-on-registration）。
+      // 账号存储只负责在「真的插入了一行新账号」时把 (谁, 什么平台) 交出来；种什么、往哪儿种在这里接。
+      // 两个写入方法各自带写前校验（账号行存在、平台受支持、取值边界）与镜像版本推进，
+      // 所以种入取值必然满足与后台写入完全相同的约束，跨进程缓存失效也无需在此另行处理。
+      // 两次写入刻意不放在同一事务：两行相互独立，任一缺失都只是「该动作不自动」这一保守方向，
+      // 而把它们绑成一个事务会把账号登记的失败面扩大到两张配置表。
+      onAccountRegistered: async (accountId, platform) => {
+        const defaults = newAccountAutomationDefaultsFor(platform);
+        if (!defaults) return; // 该平台无种入声明 = 不种（显式决定，见 kernel 目录注释）
+        const schedule = await contentScheduleStore.setAccount(
+          accountId,
+          { ...defaults.schedule },
+          NEW_ACCOUNT_AUTOMATION_SEED_ACTOR,
+        );
+        if (!schedule.ok) {
+          console.warn(`[account-seed] 排期行种入被拒 account=${accountId} reason=${schedule.reason}`);
+        }
+        const join = await facebookGroupJoinAutomationStore.setAccount(
+          accountId,
+          { ...defaults.joinGroup },
+          NEW_ACCOUNT_AUTOMATION_SEED_ACTOR,
+        );
+        if (!join.ok) {
+          console.warn(`[account-seed] 加群行种入被拒 account=${accountId} reason=${join.reason}`);
+        }
+        if (schedule.ok && join.ok) {
+          console.log(`[account-seed] 新账号已种入自动化默认配置 account=${accountId} platform=${platform}`);
+        }
+      },
     });
     await store.init();
     accountStore = store;

@@ -436,6 +436,87 @@ test('ensureAccount: 既有行冲突（RETURNING 空）→ 不回填缓存（不
   assert.equal(calls.length, 2, '既有行不应回填缓存，getPlatform 必须落库读真态');
 });
 
+// ── change seed-facebook-automation-defaults-on-registration：新账号种入自动化默认配置 ──
+//
+// 范围铁律：**只对真正首次登记的账号种入，存量一个不碰**（用户 2026-07-29 定）。
+// 下面这组用例逐条守住那条铁律的每一个失效方向。
+
+/** 收集种入钩子被调到的次数与入参。 */
+function seedSpy() {
+  const seen: { accountId: string; platform: string }[] = [];
+  return {
+    seen,
+    hook: (accountId: string, platform: string) => {
+      seen.push({ accountId, platform });
+    },
+  };
+}
+
+test('种入: 真的插入了新行才触发钩子，且带归一化后的平台', async () => {
+  const spy = seedSpy();
+  const { pool } = fakePoolReturning([{ platform: 'facebook' }]);
+  const store = new PgAccountStore({
+    schemaEnsurer: ensureCapabilitySchema, pool, onAccountRegistered: spy.hook,
+  });
+  await store.ensureAccount('fb-new', 'facebook');
+  assert.deepEqual(spy.seen, [{ accountId: 'fb-new', platform: 'facebook' }]);
+});
+
+test('种入: 存量账号防扩散——已存在的行（RETURNING 空）绝不触发钩子', async () => {
+  // 这是本 change 最危险的失效方向：若判据被写成「配置侧表没有该账号的行」，
+  // 一个早已存在、只是从未被配过的账号同样满足，种入会静默扩散到全部存量账号
+  // （dev 实测 40 个 FB 账号里 37 个正处在这个状态），而单账号测试完全看不出来。
+  // ON CONFLICT DO NOTHING 命中既有行 → RETURNING 空 → 钩子 MUST NOT 被调到。
+  const spy = seedSpy();
+  const { pool } = fakePoolReturning([]);
+  const store = new PgAccountStore({
+    schemaEnsurer: ensureCapabilitySchema, pool, onAccountRegistered: spy.hook,
+  });
+  await store.ensureAccount('fb-existing', 'facebook');
+  assert.deepEqual(spy.seen, [], '既有账号 MUST NOT 被种入');
+});
+
+test('种入: 调用方未声明平台 → 不触发钩子（回落值只用于建行，不作为种入依据）', async () => {
+  const spy = seedSpy();
+  const { pool } = fakePoolReturning([{ platform: 'xiaohongshu' }]);
+  const store = new PgAccountStore({
+    schemaEnsurer: ensureCapabilitySchema, pool, onAccountRegistered: spy.hook,
+  });
+  await store.ensureAccount('unknown-platform-acc');
+  assert.deepEqual(spy.seen, [], '平台未声明时 MUST NOT 按回落值种入');
+});
+
+test('种入: 钩子抛错不外抛、不阻断登记（缓存回填照常完成）', async () => {
+  const { pool } = fakePoolReturning([{ platform: 'facebook' }]);
+  const store = new PgAccountStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    onAccountRegistered: () => { throw new Error('seed boom'); },
+  });
+  await store.ensureAccount('fb-seed-fails', 'facebook');
+  // 登记本身成功：平台缓存已回填（不必落库即可读到）。
+  assert.equal(await store.getPlatform('fb-seed-fails'), 'facebook');
+});
+
+test('种入: 退役保留账号既不建行也不触发钩子', async () => {
+  const spy = seedSpy();
+  const { calls, pool } = fakePoolReturning([{ platform: 'facebook' }]);
+  const store = new PgAccountStore({
+    schemaEnsurer: ensureCapabilitySchema, pool, onAccountRegistered: spy.hook,
+  });
+  await store.ensureAccount('default', 'facebook');
+  assert.equal(calls.length, 0, '退役保留账号不得建行');
+  assert.deepEqual(spy.seen, []);
+});
+
+test('种入: 不注入钩子时行为逐字回到本 change 之前（零回归 / 回滚拉杆）', async () => {
+  const { calls, pool } = fakePoolReturning([{ platform: 'facebook' }]);
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  await store.ensureAccount('fb-no-hook', 'facebook');
+  assert.equal(calls.length, 1);
+  assert.equal(await store.getPlatform('fb-no-hook'), 'facebook');
+});
+
 // ── change environment-level-slow-start：旧列只留迁移/回滚，不再提供账号级运行时读写 ──
 
 test('ACCOUNTS_SCHEMA_SQL 含 slow_start_since 幂等自愈 ALTER（本仓无迁移执行器，dev/OL 那张既有表靠它补列）', () => {
