@@ -37,9 +37,15 @@ import { SimplePlanner } from './planner/index.js';
 import { PgAnchorCache, GroupRouteStore, LikedNoteStore, ValuableCommentStore, InteractionFeedStore, topicKeysFromTitle } from './cache/index.js';
 import { ConceptStore } from './cache/concept-store.js';
 import { NotificationContactStore } from './cache/notification-contact-store.js';
-import { CuratedContentStore, CuratedContentUnavailableError } from './cache/curated-content-store.js';
+import { CuratedContentStore } from './cache/curated-content-store.js';
 // 组装根层「这条跨属主端口本进程没配置」的响亮取用闸（§8.5）：缺席抛具名 reason，绝不回空值/默认值。
 import { ContentPortError } from './kernel/content-port-error.js';
+// 精选库不可用改用结构化守卫识别：拆进程后这个错误是 JSON 反序列化出来的裸对象、
+// 原型链上什么都没有，`instanceof` 恒 false，具名失败会静默退化成一条泛化失败（§8.5）。
+import {
+  isCuratedContentUnavailableError,
+  type CuratedContentCapability,
+} from './kernel/curated-content-types.js';
 import type { CuratedReferenceImage, CuratedReferenceImageInput, CuratedSourceAdmission } from './cache/curated-content-store.js';
 import { FirstPostOnboardingStore } from './onboarding/first-post-onboarding-store.js';
 import { FirstPostOnboardingCoordinator } from './onboarding/first-post-onboarding-coordinator.js';
@@ -3015,7 +3021,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
                 : null;
             } catch (err) {
               // 缺表/改名（42P01）：诚实回「服务不可用」，MUST NOT 复用 curated_target_unavailable（那句是「这行不存在」= 谎）。
-              if (err instanceof CuratedContentUnavailableError) {
+              if (isCuratedContentUnavailableError(err)) {
                 return { ok: false, code: 'curated_content_unavailable', message: '精选内容存储暂不可用，请稍后重试。' };
               }
               throw err;
@@ -3051,7 +3057,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
               row = curatedContentStore ? await curatedContentStore.getOneForAccount(curatedId, task.accountId) : null;
             } catch (err) {
               // 缺表/改名（42P01）：诚实回「服务不可用」，MUST NOT 复用 curated_target_changed（那句是「已删/已变」= 谎）。
-              if (err instanceof CuratedContentUnavailableError) {
+              if (isCuratedContentUnavailableError(err)) {
                 return { ok: false, code: 'curated_content_unavailable', message: '精选内容存储暂不可用，请稍后重试。' };
               }
               throw err;
@@ -3955,6 +3961,22 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   const automationPublishLog = apiDirectPorts.publishLog;
   if (!automationPublishLog) {
     throw new Error('automation_publish_log_authority_unavailable');
+  }
+  /**
+   * 精选库能力的显式二态（task 0.6c）。本段有两处原先只把存储句柄当布尔用
+   * （「最近观测笔记」缓存的写入闸、以及客户端自动首作链的承诺闸）。句柄真值判断今天等价于
+   * 「精选库在不在」，拆进程后不再等价：那时句柄是个恒为真的 HTTP 客户端，
+   * 「没接上」这个状态会连落脚点都没有、直接消失成「一切正常」。
+   * 结算一次、两处共用；`unavailable` 带着可读 reason，在下面的启动日志里说出来。
+   */
+  const curatedContentCapability: CuratedContentCapability = curatedContentStore
+    ? { state: 'wired' }
+    : { state: 'unavailable', reason: 'not_wired_by_composition_root' };
+  if (curatedContentCapability.state === 'unavailable') {
+    console.warn(
+      `[aidcp-cloud] 精选灵感库能力不可用 reason=${curatedContentCapability.reason}` +
+        ' → 自有收藏不补建精选、客户端自动首作链不承诺（**未**确认精选库为空）',
+    );
   }
   const deliverStructuredNotification = async (
     notification: Parameters<StructuredNotificationDeliveryPort['deliver']>[0]['notification'],
@@ -4996,7 +5018,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 此处**只记最近观测笔记内容**（供自有收藏 markBotAction('collect') 在正文可用时补建精选，见 interaction.occurred 处理器）。
     // 「笔记是否进精选」的准入判定已移交角色 curated_note_evaluator（Phase 3 两段式：共鸣预筛 → 读全文 LLM 评估），
     // 以拿到账号绑定 LLM 与人设；此处不再直接 upsertObservation。
-    if (noteKeyPersistable && curatedContentStore && d.noteId) {
+    // 闸的判据是**精选库能力可用与否**（task 0.6c），不是「那个句柄是不是真值」——
+    // 这份缓存唯一的用途就是喂给 markBotAction('collect') 补建精选，能力不可用时留着它没有意义。
+    if (noteKeyPersistable && curatedContentCapability.state === 'wired' && d.noteId) {
       const topics = topicKeysFromTitle(d.title);
       lastObservedNoteByAccount.set(acc, {
         noteId: d.noteId,
@@ -5321,7 +5345,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     ? {
         armFirstBind: async (accountId: string) => {
           // 只有精选入口与既有参照创作调度器都就绪，才向客户端承诺这条自动首作链。
-          if (!curatedContentStore || !ctx.publishScheduler) return false;
+          // 精选入口按**能力二态**判（task 0.6c）：拆进程后句柄恒为真，真值判断会把
+          // 「精选库没接上」悄悄读成「就绪」，然后向客户端许一条它兑现不了的自动首作。
+          if (curatedContentCapability.state !== 'wired' || !ctx.publishScheduler) return false;
           const created = await firstPostOnboardingStore!.armFirstBind(accountId);
           if (created) void ctx.uiSnapshot?.pushDailyUsage(accountId);
           return created;
@@ -7035,17 +7061,22 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 单体里两者后果相同（没接线就是真没素材），拆进程后就不同了：连不上 content 域会长成同一个空数组，
     // 搜索词生成拿零样本照跑、零报错——正是红线点名的静默假成功。降级仍由调用方决定（见 comment-scheduler），
     // 但它现在是看着 reason 作的决定。
-    selectCurated: (accountId, type, limit) => {
-      if (!curatedContentStore) {
-        return Promise.reject(
-          new ContentPortError('not_configured', 'curated-selection.selectSamplesForSearchTerms', 'curatedContentStore 未注入'),
-        );
-      }
-      // 窄投影就地做（三个字段），与 kernel/curated-selection-port.ts 的 selectSamplesForSearchTerms 同形：
-      // 全字段视图挂着参照图集 / 视觉分析 / 转写等大块 JSON，搬过边界只为留三个字段是白搬。
-      return curatedContentStore
-        .selectForCreation(accountId, type, limit)
-        .then((rows) => rows.map((r) => ({ title: r.title, topics: r.topics, collectCount: r.collectCount })));
+    // 注入形态已是 kernel 端口（task 0.6c）：拆进程时这里换成 content 的 HTTP 客户端实例，
+    // comment-scheduler 一行不用改。单体里属主存储只满足端口的另一条（全字段召回），
+    // 三字段投影暂由本适配对象代做——投影**该在属主侧**，拆开时随注册函数一起归位。
+    curatedSelection: {
+      selectSamplesForSearchTerms: (accountId, type, limit) => {
+        if (!curatedContentStore) {
+          return Promise.reject(
+            new ContentPortError('not_configured', 'curated-selection.selectSamplesForSearchTerms', 'curatedContentStore 未注入'),
+          );
+        }
+        // 窄投影就地做（三个字段），与 kernel/curated-selection-port.ts 的 selectSamplesForSearchTerms 同形：
+        // 全字段视图挂着参照图集 / 视觉分析 / 转写等大块 JSON，搬过边界只为留三个字段是白搬。
+        return curatedContentStore
+          .selectForCreation(accountId, type, limit)
+          .then((rows) => rows.map((r) => ({ title: r.title, topics: r.topics, collectCount: r.collectCount })));
+      },
     },
     llmFor: (accountId) => ({ complete: (prompt, opts) => llm.complete(prompt, { ...opts, accountId }) }),
     dedupFor: (accountId) => ({
@@ -8216,17 +8247,15 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
         fastReturnToFeed: options?.fastReturnToFeed === true,
       });
     },
-    dispatch:
-      ctx.automationDispatchCommands?.dispatch
-      ?? (() =>
-        Promise.reject(
-          new Error('automation_operator_command_unavailable:dispatch'),
-        )),
-    dispatchActive:
-      ctx.automationDispatchCommands?.dispatchActive
-      ?? (() => {
-        throw new Error('automation_operator_command_unavailable:dispatch');
-      }),
+    // 调度启停两条句柄**直接透传，不补占位桩**（change split-cloud-automation-production-runtime，1.4a）。
+    // 原先这里 `?? (() => Promise.reject(...))` / `?? (() => { throw ... })` 是被类型逼出来的：
+    // 两份同名类型里飞书那份写的是必填，组装根只能在「抛错」和「撒谎」之间选一个。
+    // 两份已收成一份、且两个字段都改可选，于是「诚实地不注入」第一次在类型层表达得出来。
+    // 后果不是新增分支，而是让**已经写好但到不了**的两条诚实分支真的可达：
+    // 面板 `/dispatch` 回 503 `dispatch_unavailable`，状态灯回 `null`（区别于 true/false）。
+    // 单体形态下这里恒有值（segC 无条件挂上它），所以现网行为逐位不变。
+    dispatch: ctx.automationDispatchCommands?.dispatch,
+    dispatchActive: ctx.automationDispatchCommands?.dispatchActive,
     managementChatIds,
   });
   ctx.commandFace = commandFace;

@@ -34,7 +34,7 @@ import { buildComposeAndApprove, type AutoApproveCommentNotification, type PostP
 import { sendAutoApproveNotificationBestEffort } from './auto-approve-notification.js';
 import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
 import type { CuratedSampleForTerms } from '../agents/comment-search-term-generator.js';
-import type { CuratedContentTypeFilter } from '../kernel/curated-content-types.js';
+import type { CuratedSelectionPort } from '../kernel/curated-selection-port.js';
 // 精选库读失败的具名归类：结构化守卫，同时认端口错误与属主自有错误（§8.5 不用 instanceof）。
 import { curatedContentFailureReason } from '../kernel/curated-content-types.js';
 import {
@@ -271,8 +271,19 @@ export interface CommentSchedulerDeps {
    * 缺省 → 无法取值（--contact 时一律 fail-closed）。
    */
   getContactInfo?: (accountId: string) => Promise<string | null>;
-  /** 取精选样本喂搜索词生成（按账号；出错回 []）。 */
-  selectCurated: (accountId: string, contentType: CuratedContentTypeFilter, limit: number) => Promise<CuratedSampleForTerms[]>;
+  /**
+   * 取精选样本喂搜索词生成（按账号）——**注入的是 kernel 端口面上的那条方法，不再是一个自造闭包**
+   * （task 0.6c）。
+   *
+   * 窄成一条：评论侧只用「搜索词样本」这一个召回，发帖侧那条全字段召回不在本取用面内。
+   * 三字段投影**属于属主那一侧**（全字段视图挂着参照图集 / 视觉分析 / 文字卡转写等大块 JSON，
+   * 搬过进程边界只为留标题、话题、收藏数是白搬）；单体里它暂时还写在组装根的适配对象里，
+   * 拆进程时随属主一起归位，本文件一行不用改。
+   *
+   * **失败靠抛、绝不回空数组**：空数组的意思是「问过了，精选库里没有素材」，与「没问到对面」
+   * 是两件事。降级由调用点看着具名 reason 明写（见下方 try/catch）。
+   */
+  curatedSelection: Pick<CuratedSelectionPort, 'selectSamplesForSearchTerms'>;
   /** 账号绑定 LLM（计 token 归属该账号）。 */
   llmFor: (accountId: string) => RoleLlmLike;
   /** 该账号每笔记去重（InteractionDedup）。 */
@@ -1608,7 +1619,7 @@ export class CommentScheduler {
       // 并且在运行日志里说清「这不是空结果，这是没问到」。
       let samples: CuratedSampleForTerms[];
       try {
-        samples = await this.deps.selectCurated(accountId, 'source_post', 8);
+        samples = await this.deps.curatedSelection.selectSamplesForSearchTerms(accountId, 'source_post', 8);
       } catch (err) {
         samples = [];
         log.warn(

@@ -198,7 +198,6 @@
       "consumer": "api",
       "closingChange": "future",
       "evidence": [
-        "src/server.ts#segDApiServing:text:automation_operator_command_unavailable:dispatch",
         "src/panel/panel-server.ts#call:deps.commandActions.dispatch"
       ]
     },

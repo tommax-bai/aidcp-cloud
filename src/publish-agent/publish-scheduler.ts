@@ -15,6 +15,10 @@
 import type { PublishResult, PublishSourceReference, ReferenceImageSnapshot, TriggerInput } from '../kernel/publish-pipeline-types.js';
 import type { Soul } from '../kernel/soul-types.js';
 import type { CuratedContentTypeFilter, CuratedSelectItem } from '../kernel/curated-content-types.js';
+import type { ConceptPoolPort, ConceptWithSource } from '../kernel/concept-pool-port.js';
+import type { CuratedSelectionPort } from '../kernel/curated-selection-port.js';
+// 跨属主端口失败的结构化守卫（§8.5：跨进程后 instanceof 恒 false，错误是反序列化裸对象）。
+import { isContentPortError } from '../kernel/content-port-error.js';
 import type { ContentScheduleApprovalMode } from '../kernel/content-schedule-mode.js';
 import type { PersonaBinding } from '../kernel/persona-binding.js';
 import { PERSONA_UNAVAILABLE_REASON } from '../kernel/config-stop-work-reasons.js';
@@ -31,21 +35,26 @@ export type { ReferenceNote, ClaimRejectReason, TriggerOutcome, BeginRewriteResu
 export const REFERENCE_BODY_MAX_LEN = 6000;
 export { REFERENCE_IMAGE_MAX_COUNT };
 
-export interface SchedulerConceptStore {
-  countNewSince(sinceMs: number): Promise<number>;
-  getNewConceptsSince(sinceMs: number, limit?: number): Promise<string[]>;
-  /** change curated-inspiration-corpus：带来源笔记标题的概念（可选；缺省回落只取关键词）。 */
-  getNewConceptsWithSourceSince?(sinceMs: number, limit?: number): Promise<Array<{ keyword: string; sourceNote: string | null }>>;
-}
-/** 精选灵感语料召回口（change curated-inspiration-corpus）。 */
-export interface SchedulerCuratedStore {
-  selectForCreation(
-    accountId: string,
-    contentType: CuratedContentTypeFilter,
-    limit: number,
-    opts?: { updatedSinceMs?: number },
-  ): Promise<CuratedSelectItem[]>;
-}
+/**
+ * 概念池取用面——**签名取自 kernel 的跨属主端口，本文件不再就地声明**（task 0.6b/0.6e）。
+ *
+ * 只窄化到发帖侧真正读的三条；`addCandidate` / `loadPool` / `markSearched` 是浏览闭环那侧的取用面，
+ * 别一并要过来。
+ *
+ * **两条读方法都是必选，`?` 已删**（task 0.6e）：原先富方法带 `?`，调用点用
+ * `store.getNewConceptsWithSourceSince ? … : …` 探在场。那个探针跨进程后**恒为真**——HTTP 客户端类
+ * 总是定义着方法——回落分支就此变成死代码，而真正的能力缺口（对面版本旧、路由没注册）被静默吞掉。
+ * 回落现在只由具名原因 `unsupported_method` 驱动，见 {@link PublishScheduler.newConceptsWithSource}。
+ */
+export type SchedulerConceptStore = Pick<
+  ConceptPoolPort,
+  'countNewSince' | 'getNewConceptsSince' | 'getNewConceptsWithSourceSince'
+>;
+/**
+ * 精选灵感语料召回口（change curated-inspiration-corpus）——签名同样取自 kernel 端口面。
+ * 发帖侧只用全字段召回这一条；评论侧那条窄投影方法不在本取用面内。
+ */
+export type SchedulerCuratedStore = Pick<CuratedSelectionPort, 'selectForCreation'>;
 export interface SchedulerLikedStore {
   countSince(sinceMs: number): Promise<number>;
   recentSince(sinceMs: number, limit?: number): Promise<Array<{ id: number; title: string; summary: string; author?: string }>>;
@@ -271,16 +280,44 @@ export class PublishScheduler {
     return Promise.resolve([]);
   }
 
+  /**
+   * 取「自基准时刻起的新概念 + 来源笔记标题」，富方法不可用时回落到只取关键词（task 0.6e）。
+   *
+   * **回落的触发条件从「方法在不在」换成了「对面说不支持」。** 原写法
+   * `store.getNewConceptsWithSourceSince ? … : …` 是一个 `typeof` 在场探针：单体里属主实例恒有这个
+   * 方法、探针恒真，拆进程后 HTTP 客户端类同样恒有，探针**还是**恒真——回落分支从头到尾是死代码，
+   * 而真正的能力缺口（对面版本旧、这条路由没注册）会以别的形状冒出来并被上层当成一次读失败吞掉。
+   *
+   * 现在只认 `unsupported_method` 这**一个**具名原因。别把它放宽成「凡是抛了就回落」：
+   * 连不上 / 超时 / 对面报错时，回落方法走的是同一条通道、同一个契约版本，照样会失败，
+   * 判成回落只是把一次通道故障伪装成一次能力缺口，然后拿一份**没有来源标题**的概念照常发帖。
+   *
+   * 触发路径的现实形态见 `src/transport/content-authority-http.ts`：`unsupported_method`
+   * 由对面 **404**（路由未注册）译出，不是「属主没实现这个方法」——端口上它是必选的，
+   * 属主实例结构上恒满足。
+   */
+  private async newConceptsWithSource(sinceMs: number): Promise<ConceptWithSource[]> {
+    try {
+      return await this.d.conceptStore.getNewConceptsWithSourceSince(sinceMs);
+    } catch (err) {
+      // 结构化守卫，不用 instanceof（§8.5）。认不出来的一律往上抛，绝不当成能力缺口。
+      if (!isContentPortError(err) || err.reason !== 'unsupported_method') throw err;
+      this.logger.warn(
+        '[PublishScheduler] 概念池富方法不可用 reason=unsupported_method → 回落只取关键词' +
+          '（本次概念不带来源笔记标题；这**不是**「没有新概念」）',
+      );
+      const keywords = await this.d.conceptStore.getNewConceptsSince(sinceMs);
+      return keywords.map((keyword) => ({ keyword, sourceNote: null }));
+    }
+  }
+
   /** 聚合 TriggerInput（真概念 + 真点赞 + 最近已发 + 目标账号人设）。 */
   async buildTriggerInput(accountId: string, opts?: { inspirationSinceMs?: number }): Promise<TriggerInput> {
     const baseline = Math.max(await this.baselineMs(), opts?.inspirationSinceMs ?? Number.NEGATIVE_INFINITY);
     const selectTopK = this.d.selectTopK ?? 8;
-    // 概念带来源笔记标题（change curated-inspiration-corpus）：有富方法用之，否则回落只取关键词。
-    const conceptsPromise = this.d.conceptStore.getNewConceptsWithSourceSince
-      ? this.d.conceptStore.getNewConceptsWithSourceSince(baseline)
-      : this.d.conceptStore
-          .getNewConceptsSince(baseline)
-          .then((ks) => ks.map((keyword) => ({ keyword, sourceNote: null as string | null })));
+    // 概念带来源笔记标题（change curated-inspiration-corpus）：首选富方法，
+    // 只在对面具名回「不支持这个方法」时才回落到关键词（task 0.6e，见 newConceptsWithSource）。
+    const conceptsPromise = this.newConceptsWithSource(baseline);
     const [conceptsWithSource, liked, recentPublished, newConceptCount, materials, commentItems] = await Promise.all([
       conceptsPromise,
       this.d.likedStore.recentSince(baseline),

@@ -87,7 +87,12 @@ describe('AC-PERSONA 强制账号人设（系统不存在默认/兜底人设）'
   it('AC-PERSONA-1C 发布：无人设账号手动/自动触发均被拒，不调编排、不生成任何内容', async () => {
     const triggered: unknown[] = [];
     const deps: PublishSchedulerDeps = {
-      conceptStore: { countNewSince: async () => 99, getNewConceptsSince: async () => ['k'] },
+      // 端口上富方法已必选（task 0.6e）：属主实例结构上恒有，桩照此补齐；桩无来源标题 → 如实置 null。
+      conceptStore: {
+        countNewSince: async () => 99,
+        getNewConceptsSince: async () => ['k'],
+        getNewConceptsWithSourceSince: async () => [{ keyword: 'k', sourceNote: null }],
+      },
       likedStore: { countSince: async () => 1, recentSince: async () => [] },
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
       resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
@@ -120,7 +125,7 @@ describe('AC-PERSONA 强制账号人设（系统不存在默认/兜底人设）'
       },
       getSoul: () => mockSoul,
       personaBinding: () => 'unbound',
-      selectCurated: async () => [],
+      curatedSelection: { selectSamplesForSearchTerms: async () => [] },
       llmFor: () => ({ complete: async () => '{}' }),
       dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async () => {} }),
       onTakeoverStart: () => { takeovers += 1; },

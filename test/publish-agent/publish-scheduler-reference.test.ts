@@ -18,6 +18,8 @@ function build() {
     conceptStore: {
       countNewSince: async () => 0,
       getNewConceptsSince: async () => [],
+      // 端口上富方法已必选（task 0.6e）：属主实例结构上恒有，桩照此补齐。
+      getNewConceptsWithSourceSince: async () => [],
     },
     likedStore: { countSince: async () => 0, recentSince: async () => [] },
     publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
@@ -138,7 +140,7 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
 
   it('未绑人设时参照创作同样被人设闸拒绝（与 /publish 同口径）', async () => {
     const gated = new PublishScheduler({
-      conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [] },
+      conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [], getNewConceptsWithSourceSince: async () => [] },
       likedStore: { countSince: async () => 0, recentSince: async () => [] },
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
       resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),

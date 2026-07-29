@@ -68,7 +68,7 @@ function baseDeps(over: Partial<CommentSchedulerDeps> = {}): CommentSchedulerDep
       withLease: async (request, work) => work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
     },
     getSoul: () => soul,
-    selectCurated: async () => [],
+    curatedSelection: { selectSamplesForSearchTerms: async () => [] },
     llmFor: () => fakeLlm(),
     dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async () => {} }),
     approval: { request: async () => {}, isApproved: async () => true },

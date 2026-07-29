@@ -71,7 +71,7 @@ function baseDeps(over: Partial<CommentSchedulerDeps> = {}): CommentSchedulerDep
       withLease: async (request, work) => work({ taskId: `task-${request.kind}`, edgeId: request.edgeId, kind: request.kind, priority: request.priority }),
     },
     getSoul: () => soul,
-    selectCurated: async () => [{ title: 'RAG 工程实战' }],
+    curatedSelection: { selectSamplesForSearchTerms: async () => [{ title: 'RAG 工程实战', topics: [], collectCount: null }] },
     llmFor: () => fakeLlm(),
     dedupFor: () => ({ hasInteracted: async () => false, recordInteraction: async () => {} }),
     approval: { request: async () => {}, isApproved: async () => true },
@@ -397,9 +397,11 @@ describe('CommentScheduler.triggerManual', () => {
       baseDeps({
         resolveConnection: () => ({ bus, edgeId: 'e1' }),
         pusher: fakeEdge(bus),
-        selectCurated: async () => {
-          await gate.promise; // 卡住直到释放
-          return [{ title: 'x' }];
+        curatedSelection: {
+          selectSamplesForSearchTerms: async () => {
+            await gate.promise; // 卡住直到释放
+            return [{ title: 'x', topics: [], collectCount: null }];
+          },
         },
         approval: { request: async () => {}, isApproved: async () => true },
         postResultCard: () => { cardDone.resolve(); },
@@ -2348,7 +2350,7 @@ describe('join-comment 结果卡不泄露裸群 id/URL', () => {
  * 降级保留（评论命令不该被精选库拖死），但它必须是**看着具名原因**作的决定。
  */
 describe('精选样本读失败：降级可以，冒充「查过了是空的」不行', () => {
-  it('selectCurated 抛出 → 任务照跑，但留下带具名 reason 的告警', async () => {
+  it('精选样本召回抛出 → 任务照跑，但留下带具名 reason 的告警', async () => {
     const bus = new EventBus();
     const warns: string[] = [];
     const cardDone = deferred();
@@ -2356,8 +2358,10 @@ describe('精选样本读失败：降级可以，冒充「查过了是空的」�
       baseDeps({
         resolveConnection: () => ({ bus, edgeId: 'e1' }),
         pusher: fakeEdge(bus),
-        selectCurated: async () => {
-          throw new ContentPortError('unreachable', 'curated-selection.selectSamplesForSearchTerms');
+        curatedSelection: {
+          selectSamplesForSearchTerms: async () => {
+            throw new ContentPortError('unreachable', 'curated-selection.selectSamplesForSearchTerms');
+          },
         },
         approval: { request: async () => {}, isApproved: async () => true },
         postResultCard: () => { cardDone.resolve(); },

@@ -104,6 +104,7 @@ import {
 import type { ResumeGateVerdict } from '../comm/browser-standby.js';
 import type { RiskStatus, RiskQuotaLevel } from '../risk/types.js';
 import type { ConceptPool } from '../kernel/concept-pool.js';
+import type { ConceptPoolPort } from '../kernel/concept-pool-port.js';
 // 跨属主端口失败的结构化守卫（§8.5：跨进程后 instanceof 恒 false）。
 import { isContentPortError } from '../kernel/content-port-error.js';
 import type { NotificationItem } from '../comm/protocol.js';
@@ -133,15 +134,20 @@ export {
 } from '../platform/facebook-presented-video.js';
 
 /**
- * 概念池读写下游（ConceptStore 的最小契约，便于注入桩单测）。
- * `addCandidate` 与 content 侧 `ConceptSink` 逐字同签名——ConceptStorePort 结构上即是 ConceptSink 的超集，
- * 故 dispatcher 透传给 concept_extractor 工厂时天然满足其 `conceptStore: ConceptSink` 契约，而**无需**静态 import 该 content 类型。
+ * 概念池读写下游——**签名不再在此就地声明，一律取自 kernel 的跨属主端口面**（task 0.6b/0.6g）。
+ *
+ * 这里只做「窄化」：调度器真正取用的是 `loadPool` / `markSearched` 两条，
+ * 发帖调度器那三条读方法不在本文件的取用面内，别把它们一并要过来。
+ *
+ * `addCandidate` 是第三条、且是**唯一一条 automation 侧没有直接调用点**的：它被原样透传给
+ * content 属主的概念抽取角色工厂（真正的调用点在 `src/agents/concept-extractor-role.ts`，
+ * 经其 `ConceptSink` 窄契约）。透传方拿不到它那条链就断，所以它必须留在这张面上，
+ * 但它**不是 automation 的自用面**——本文件内不会有第二处调用点，看不到调用点不等于可以删。
+ *
+ * 端口签名与 content 侧 `ConceptSink` 逐字相同，故本类型结构上即是 `ConceptSink` 的超集，
+ * 透传时天然满足其契约，**无需**静态 import 该 content 类型。
  */
-export interface ConceptStorePort {
-  addCandidate(keyword: string, sourceNote?: string): Promise<boolean>;
-  loadPool(): Promise<ConceptPool>;
-  markSearched(keyword: string): Promise<void>;
-}
+export type ConceptStorePort = Pick<ConceptPoolPort, 'addCandidate' | 'loadPool' | 'markSearched'>;
 
 /**
  * 调度器对一个角色实例**唯一**要求的能力：能挂上、能摘下（change cloud-coupling-phase5 P5-2）。
@@ -2497,6 +2503,30 @@ export class RoleDispatcher {
   }
 
   /**
+   * 「这个概念词已经搜过了」的**唯一**回写口（task 0.6g：调用点有两处，legacy 与回执各一）。
+   *
+   * 收成一处的理由是拆进程：单体里这是一次本地 upsert，拆完是一次跨域 HTTP，两处各写各的 catch
+   * 迟早有一处漏掉原因码。写失败照旧只记日志、不打断浏览闭环（概念池是记忆、不是主路径），
+   * 但失败必须带具名 reason —— 拆进程后「连不上 content 域」与「对面拒了这次写」在原来那行
+   * 只有 message 的 warn 里长得一模一样。
+   *
+   * 概念池未接线时**刻意不再响**：装配缺席已由 `refreshConceptPool` 在会话启动时具名报过一次，
+   * 而本方法每搜一个词就走一次，在这里重复只会刷屏、不增加任何信息。
+   */
+  private markConceptSearched(keyword: string, phase: 'legacy' | 'receipt'): void {
+    const store = this.conceptStore;
+    if (!store) return;
+    void store.markSearched(keyword).catch((err) => {
+      // 结构化守卫，不用 instanceof（§8.5）；认不出来的抛出物照样给名字，绝不退回沉默。
+      const reason = isContentPortError(err) ? err.reason : 'unclassified_error';
+      console.warn(
+        `[RoleDispatcher] markSearched 失败 phase=${phase} keyword=${keyword} reason=${reason}` +
+          `（该词本次未记入已搜，下次仍可能被选中）: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  /**
    * 边缘新 hello 时重置并重启会话。
    *
    * 修复 bug：会话原本只在云端启动时 setup()+startSession() 一次性开启，
@@ -3433,9 +3463,7 @@ export class RoleDispatcher {
           this.pendingSearchKeywords.set(activityId, keyword);
         } else {
           // 旧 Edge 无统一终态，保持历史兼容；handler 不会把该兼容标记冒充账号搜索事实。
-          this.conceptStore?.markSearched(keyword).catch((err) =>
-            console.warn(`[RoleDispatcher] legacy markSearched 失败 keyword=${keyword}: ${err instanceof Error ? err.message : String(err)}`),
-          );
+          this.markConceptSearched(keyword, 'legacy');
         }
       }),
 
@@ -3736,9 +3764,7 @@ export class RoleDispatcher {
           if (activityId && keyword) {
             this.pendingSearchKeywords.delete(activityId);
             if (payload.actuated === true) {
-              this.conceptStore?.markSearched(keyword).catch((err) =>
-                console.warn(`[RoleDispatcher] receipt markSearched 失败 keyword=${keyword}: ${err instanceof Error ? err.message : String(err)}`),
-              );
+              this.markConceptSearched(keyword, 'receipt');
             }
           }
         }

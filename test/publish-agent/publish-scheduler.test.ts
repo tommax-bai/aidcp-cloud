@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { PublishScheduler } from '../../src/publish-agent/publish-scheduler.js';
 import type { PublishSchedulerDeps } from '../../src/publish-agent/publish-scheduler.js';
 import { ContentPortError, isContentPortError } from '../../src/kernel/content-port-error.js';
@@ -37,6 +38,10 @@ function build(k: Knobs = {}) {
     conceptStore: {
       countNewSince: async () => k.newConcepts ?? 0,
       getNewConceptsSince: async () => k.conceptKeywords ?? ['LLM Agent', 'RAG'],
+      // 富方法在端口上已是必选（task 0.6e）：属主实例结构上恒有它，桩照此补齐。
+      // 桩里本就没有来源标题 → 如实置 null，与原回落分支产出的形状逐字相同。
+      getNewConceptsWithSourceSince: async () =>
+        (k.conceptKeywords ?? ['LLM Agent', 'RAG']).map((keyword) => ({ keyword, sourceNote: null })),
     },
     likedStore: {
       countSince: async () => 1,
@@ -253,6 +258,7 @@ describe('claim 键控单飞与容量帽', () => {
           return 0;
         },
         getNewConceptsSince: async () => [],
+        getNewConceptsWithSourceSince: async () => [],
       },
       likedStore: { countSince: async () => 0, recentSince: async () => [] },
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
@@ -419,7 +425,7 @@ describe('claim 键控单飞与容量帽', () => {
 describe('生成端口传输失败 → 诚实失败终态', () => {
   function buildThrowing(err: unknown) {
     const deps: PublishSchedulerDeps = {
-      conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [] },
+      conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [], getNewConceptsWithSourceSince: async () => [] },
       likedStore: { countSince: async () => 0, recentSince: async () => [] },
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
       resolveRisk: async () => ({
@@ -466,7 +472,7 @@ describe('生成端口传输失败 → 诚实失败终态', () => {
 describe('精选素材：缺席与读失败都不得冒充「查过了是空的」', () => {
   function buildCurated(curatedStore: PublishSchedulerDeps['curatedStore'], warns: string[]) {
     const deps: PublishSchedulerDeps = {
-      conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [] },
+      conceptStore: { countNewSince: async () => 0, getNewConceptsSince: async () => [], getNewConceptsWithSourceSince: async () => [] },
       likedStore: { countSince: async () => 0, recentSince: async () => [] },
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
       resolveRisk: async () => ({
@@ -506,5 +512,86 @@ describe('精选素材：缺席与读失败都不得冒充「查过了是空的�
       (e: unknown) => isContentPortError(e) && e.reason === 'unreachable',
       '传输失败必须原样冒泡，MUST NOT 被压成 materials: []',
     );
+  });
+});
+
+/**
+ * 概念富方法的回落分支必须**真的活着**（change split-cloud-automation-production-runtime，task 0.6e）。
+ *
+ * 原写法 `conceptStore.getNewConceptsWithSourceSince ? … : …` 是一个 `typeof` 在场探针：
+ * 单体里属主实例恒有这个方法、探针恒真；拆进程后 HTTP 客户端类同样恒有，探针**还是**恒真——
+ * 回落分支从头到尾是死代码，而真正的能力缺口（对面版本旧、路由没注册 → 404）被当成一次普通读失败吞掉。
+ * 回落改由具名原因 `unsupported_method` 驱动，下面三条把「活着」「只认这一个原因」「探针写法不复存在」钉住。
+ */
+describe('概念富方法回落：只认 unsupported_method', () => {
+  function buildConcepts(rich: () => Promise<Array<{ keyword: string; sourceNote: string | null }>>, plainCalls: string[]) {
+    const deps: PublishSchedulerDeps = {
+      conceptStore: {
+        countNewSince: async () => 0,
+        getNewConceptsSince: async () => {
+          plainCalls.push('getNewConceptsSince');
+          return ['回落词 A', '回落词 B'];
+        },
+        getNewConceptsWithSourceSince: rich,
+      },
+      likedStore: { countSince: async () => 0, recentSince: async () => [] },
+      publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
+      resolveRisk: async () => ({
+        canDo: () => true,
+        explain: () => ({ allowed: true }),
+        getState: () => ({ status: 'normal', quotaLevel: 'normal' }),
+      }),
+      resolveSingleAccountId: async () => 'acc-test',
+      orchestrator: { trigger: async () => ({ status: 'draft' }) },
+      soul: {} as PublishSchedulerDeps['soul'],
+      clock: () => T,
+      logger: silent,
+    };
+    return new PublishScheduler(deps);
+  }
+
+  it('富方法抛 unsupported_method → 走回落，拿到只有关键词的概念', async () => {
+    const plainCalls: string[] = [];
+    const scheduler = buildConcepts(async () => {
+      throw new ContentPortError('unsupported_method', 'concept-pool.getNewConceptsWithSourceSince', '404');
+    }, plainCalls);
+    const input = await scheduler.buildTriggerInput('acc-test');
+    assert.deepEqual(plainCalls, ['getNewConceptsSince'], '回落分支必须真的被走到（它不是死代码）');
+    assert.deepEqual(
+      input.generateInput.concepts,
+      [{ keyword: '回落词 A' }, { keyword: '回落词 B' }],
+      '回落产出与富方法缺来源标题时逐字同形',
+    );
+  });
+
+  /**
+   * 变异实测：把富方法换成抛**另一个**具名原因，回落必须不发生。
+   * 放宽成「凡是抛了就回落」等于把一次通道故障伪装成一次能力缺口——回落方法走同一条通道、
+   * 同一个契约版本，照样会失败，只是失败前先把「没问到对面」洗成了「问到了、只是没有来源标题」。
+   */
+  it('富方法抛 unreachable → 绝不回落，原样冒泡', async () => {
+    const plainCalls: string[] = [];
+    const scheduler = buildConcepts(async () => {
+      throw new ContentPortError('unreachable', 'concept-pool.getNewConceptsWithSourceSince');
+    }, plainCalls);
+    await assert.rejects(
+      () => scheduler.buildTriggerInput('acc-test'),
+      (e: unknown) => isContentPortError(e) && e.reason === 'unreachable',
+      '别的原因必须原样冒泡，MUST NOT 被当成能力缺口',
+    );
+    assert.deepEqual(plainCalls, [], '回落只认 unsupported_method 这一个原因');
+  });
+
+  it('源码里不再有 typeof 在场探针，端口面上富方法不带可选标记', async () => {
+    const source = await readFile(new URL('../../src/publish-agent/publish-scheduler.ts', import.meta.url), 'utf8');
+    assert.ok(
+      !/getNewConceptsWithSourceSince\?\(/.test(source),
+      '端口上富方法必选；留 `?` 等于留一张假的安全网（跨进程后客户端类恒定义着它）',
+    );
+    assert.ok(
+      !/conceptStore\.getNewConceptsWithSourceSince\s*$/m.test(source),
+      '不得再出现「拿方法本身当真值」的在场探针',
+    );
+    assert.ok(source.includes("'unsupported_method'"), '回落必须由具名原因驱动');
   });
 });
