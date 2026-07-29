@@ -84,6 +84,8 @@
       "src/kernel/concept-pool-port.ts",
       "src/kernel/curated-selection-port.ts",
       "src/kernel/operator-command-port.ts",
+      "src/kernel/facebook-publish-media-port.ts",
+      "src/kernel/llm-usage-recording-port.ts",
       "src/kernel/ai-flavor-detection.ts",
       "src/kernel/config-panel-ports.ts",
       "src/kernel/group-route-types.ts",
