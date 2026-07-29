@@ -71,7 +71,7 @@ export const SCHEDULED_AUTOMATION_CATALOG_READER: ScheduledAutomationCatalogRead
  *     新账号就不会出现「加入新群后同一轮立即在该群评论」这一已知风险形态。
  *  后续 change 若要给它加默认值，MUST 先处置那条复合动作。
  *
- * 审批模式取 `review`：Facebook 发帖本就只允许需人审；评论取需人审与保守失败同向，运营可自行改免审。
+ * 审批模式：发帖 `review`（Facebook 发帖只允许需人审），评论 `auto_approve`（用户 2026-07-29 定）。
  *
  * 小红书与视频号刻意不列：本次诉求是 Facebook；视频号四个动作在上面的目录里全部 unsupported，
  * 给它写任何正日上限都会被写前校验整块拒。
@@ -80,9 +80,14 @@ export const NEW_ACCOUNT_AUTOMATION_DEFAULTS = Object.freeze({
   facebook: Object.freeze({
     schedule: Object.freeze({
       autoEnabled: true,
+      // 发帖只能是需人审：免审对 Facebook 发帖在规格里就是禁用 / fail-closed，没得选。
       postMode: 'review',
       postDailyCap: 5,
-      commentMode: 'review',
+      // 评论取免审（用户 2026-07-29 决定，推翻本 change 初稿的需人审）。
+      // 可达性已核：环境级评论审批策略只能把来源模式**升**成免审，缺省 `source_rules` 时逐字沿用来源模式；
+      // 只有策略读取失败才 fail-closed 回需人审——失败方向安全。
+      // 后果如实记在这里：新账号一旦绑上人设并通过其余各闸，评论会直接发到平台、无人过目。
+      commentMode: 'auto_approve',
       commentDailyCap: 20,
     }),
     joinGroup: Object.freeze({ enabled: true, dailyCap: 20 }),

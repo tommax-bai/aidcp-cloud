@@ -230,7 +230,9 @@ test('新账号种入默认值: Facebook 取值逐字符合用户拍板值，且
     autoEnabled: true,
     postMode: 'review',
     postDailyCap: 5,
-    commentMode: 'review',
+    // 评论免审（用户 2026-07-29 定）。这条断言同时守住「发帖仍必须是需人审」——
+    // 两个模式刻意不同值，一起改成免审会在下一条用例当场红。
+    commentMode: 'auto_approve',
     commentDailyCap: 20,
   });
   assert.deepEqual(fb!.joinGroup, { enabled: true, dailyCap: 20 });
@@ -259,12 +261,18 @@ test('新账号种入默认值: 取值不得越过各自动作的硬上限', () 
   assert.ok(fb.joinGroup.dailyCap <= capOf('join_group'));
 });
 
-test('新账号种入默认值: Facebook 发帖只能是需人审（免审对 FB 发帖 fail-closed）', () => {
+test('新账号种入默认值: 发帖必须需人审、评论必须免审，且各自都在平台允许的模式集合内', () => {
   const fb = newAccountAutomationDefaultsFor('facebook')!;
   const declared = availableScheduledAutomationActionsForPlatform('facebook');
-  const postModes = declared.find((d) => d.action === 'post')?.allowedModes ?? [];
-  assert.deepEqual(postModes, ['review']);
+  const modesOf = (action: string) => declared.find((d) => d.action === action)?.allowedModes ?? [];
+  // 发帖：平台只允许需人审，种入值别无选择。
+  assert.deepEqual(modesOf('post'), ['review']);
   assert.equal(fb.schedule.postMode, 'review');
+  // 评论：平台允许免审，种入值取免审（用户 2026-07-29 定）。
+  assert.ok(modesOf('comment').includes('auto_approve'));
+  assert.equal(fb.schedule.commentMode, 'auto_approve');
+  // 两者刻意不同值：这一行专挡「把两个模式一起改掉」的误编辑。
+  assert.notEqual(fb.schedule.postMode, fb.schedule.commentMode);
 });
 
 test('种入署名可辨识，便于区分系统种入与运营手工写入', () => {
