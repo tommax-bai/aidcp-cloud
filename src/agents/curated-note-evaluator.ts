@@ -74,14 +74,23 @@ export interface CuratedNoteEvaluatorOptions extends ContentRoleOptions {
    */
   llmEvalEnabled?: boolean;
   /**
-   * 图内文字卡转写能力（三态，构造期定）：
+   * 图内文字卡转写能力（二态，构造期定）：
    *  - 传实现本身 → 已接线（旗标开关另由实现的 `enabled()` 在运行时表达）；
-   *  - 传 `{ state:'unavailable', reason }` → 组合根**明确**告知依赖没接上；
-   *  - 整字段省略 → 同样判 unavailable（reason=`not_injected`），构造期打一条具名日志。
+   *  - 传 `{ state:'unavailable', reason }` → 组合根**明确**告知依赖没接上。
+   *
+   * **必填，且刻意不给默认值。** 它一度可选，那正是本 change 要消掉的形态：
+   * 省略字段在角色内退化成与「旗标关掉了」一模一样的假。
+   * 而单体里转写器是**无条件构造 + 无条件注入**的——也就是说「漏传」这个失败态
+   * **只可能由拆仓引入**，现有测试不可能覆盖它。改成必填后漏传是**编译红**，
+   * 不再是一条要靠人看见的运行期日志。
+   *
+   * 不接这个能力仍然允许，但必须**明说** `{ state:'unavailable', reason }`。
+   * 运行期兜底（`resolveTextCardTranscriberCapability` 对 `undefined` 判 `not_injected`）
+   * 保留不动——它守的是 JS 侧绕过类型的调用，不是给 TS 侧留后门。
    *
    * 红线：MUST NOT 把 unavailable 压成「旗标关」——前者是装配缺陷（拆仓才可能引入），后者是运营选择。
    */
-  textCardTranscriber?: TextCardTranscriber | TextCardTranscriberCapability;
+  textCardTranscriber: TextCardTranscriber | TextCardTranscriberCapability;
 }
 
 /** LLM 正文评估的严格 JSON 输出契约。 */

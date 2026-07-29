@@ -61,7 +61,8 @@ async function run(detail: NoteDetailData, opts: RunOpts = {}) {
     curatedStore: { upsertObservation: async (obs) => { upserts.push(obs); } },
     getAccountId: () => opts.accountId ?? 'acc-1',
     ...(opts.llmEvalEnabled === undefined ? {} : { llmEvalEnabled: opts.llmEvalEnabled }),
-    ...(opts.textCardTranscriber ? { textCardTranscriber: opts.textCardTranscriber } : {}),
+    // 必填字段：没给实现时**明说**「没接上」，不省略。省略正是本 change 要消掉的那个形态。
+    textCardTranscriber: opts.textCardTranscriber ?? { state: 'unavailable', reason: 'not_injected' },
   });
   role.subscribe();
   bus.emit('note.detail.arrived', { detail, accountId: opts.eventAccountId, ts: opts.eventTs ?? Date.now() });
@@ -213,6 +214,8 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
         },
       },
       getAccountId: () => 'acc-1',
+      // 必填：本用例不测转写，明说没接上而非省略。
+      textCardTranscriber: { state: 'unavailable', reason: 'not_injected' },
     });
     role.subscribe();
     bus.emit('note.image_snapshot.arrived', {
@@ -248,6 +251,8 @@ describe('CuratedNoteEvaluator 两段式准入', () => {
         refreshReferenceImages: async () => 0,
       },
       getAccountId: () => 'acc-1',
+      // 必填：本用例不测转写，明说没接上而非省略。
+      textCardTranscriber: { state: 'unavailable', reason: 'not_injected' },
     });
     role.subscribe();
     bus.emit('note.image_snapshot.arrived', {

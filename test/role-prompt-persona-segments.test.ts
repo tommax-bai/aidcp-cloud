@@ -81,6 +81,8 @@ test('CuratedNoteEvaluator：真实渲染 prompt 能定位人设段，且包含 
     llm: { complete: async () => '{}' },
     curatedStore: { upsertObservation: async () => {} },
     getAccountId: () => 'acc-1',
+    // 本用例只看 prompt 渲染，不需要转写能力——但字段必填，所以**明说**没接上，而不是省略。
+    textCardTranscriber: { state: 'unavailable', reason: 'not_injected' },
   });
   const flat = role.previewPrompt();
   const segs = segmentPromptByPersona(flat, role.personaSegments());
