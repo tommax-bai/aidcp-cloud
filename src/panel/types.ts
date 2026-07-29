@@ -100,7 +100,7 @@ import type {
   PanelAccount,
   PanelAlert,
 } from './panel-store.js';
-import type { PublishApprovalPayload, ApprovalWriteResult, PublishApprovalPreflightResult } from '../feishu/index.js';
+import type { PublishApprovalPayload, ApprovalWriteResult, PublishApprovalPreflightResult, PanelCommandActions } from '../feishu/index.js';
 import type { LlmUsageQuery, LlmUsagePayload } from '../kernel/llm-usage-types.js';
 import type { BillingPriceRefreshResult } from '../kernel/billing-price-refresh-types.js';
 import type { NotificationContact, NotificationContactManual } from '../cache/notification-contact-store.js';
@@ -243,37 +243,14 @@ export interface PanelDeps {
   };
   /** 待审稿件被后台编辑后，刷新绑定 edge 的只读稿件预览（best-effort）。 */
   notifyPublishPreviewChanged?: (recordId: number) => void;
-  /** 账号命令（durable，与飞书 actions 共享 accountState 底层）；返回真实结果（resume 带恢复 edge 数）。 */
-  commandActions: {
-    pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;
-    resume(accountId: string): Promise<
-      | {
-          accountId: string;
-          status: 'active';
-          accountState: 'active';
-          edgeResume: 'applied';
-          resumedEdges: number;
-        }
-      | {
-          accountId: string;
-          status: 'active';
-          accountState: 'active';
-          edgeResume: 'failed' | 'unknown';
-          reason: string;
-        }
-    >;
-    /**
-     * 调度启停（V1 task 9.4）：start/stop 现役单全局 RoleDispatcher；回报真实在线 edge 数。
-     * 偏离：单账号现实下为全局开关（accountId 信息性）；per-edge 拆分留到真多账号（design 步骤 8）。
-     * 未注入则 /dispatch 返回 503（向后兼容）。
-     */
-    dispatch?(
-      accountId: string,
-      action: 'start' | 'stop',
-    ): Promise<{ accountId: string; dispatch: 'started' | 'stopped'; changed: boolean; edgesOnline: number }>;
-    /** 调度引擎当前是否活跃（dashboard summary 读）。 */
-    dispatchActive?(): boolean;
-  };
+  /**
+   * 账号命令（durable，与飞书 actions 共享 accountState 底层）；返回真实结果（resume 带恢复 edge 数）。
+   *
+   * 直接引 api 侧命令面那**唯一一份**定义。此前这里是一份逐字重抄的内联结构，且与那份的
+   * 必填性相反（这里 dispatch 可选、那边必填），于是本层「未注入 → 503」的诚实分支在组合根侧
+   * 根本无法被触发——只能塞一个一调就抛的假实现。两份合一后，「不接调度引擎」是类型上说得出口的选择。
+   */
+  commandActions: PanelCommandActions;
   /**
    * 风控写出口（异步命令；change cloud-coupling-phase5 P5-1）。
    * `/risk/status` 与 `/risk/quota` 只提交命令拿 commandId，结果由 `/api/risk-commands/:id` 回读。

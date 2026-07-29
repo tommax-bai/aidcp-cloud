@@ -1,6 +1,6 @@
 import type { DelegatedTaskConfirmationSummary, DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
-import { DelegatedTaskServiceError } from '../kernel/delegated-task-types.js';
 import type { DelegatedTask } from '../kernel/delegated-task-types.js';
+import { isDelegatedTaskServiceError } from '../kernel/operator-command-port.js';
 import type { FeishuCard, FeishuField, FeishuHeaderTemplate } from './types.js';
 
 export type DelegatedTaskCardAction = 'confirm' | 'cancel' | 'pause' | 'resume' | 'status';
@@ -140,10 +140,13 @@ export async function handleDelegatedTaskCardAction(
     // 直接回裸 FeishuCard 会触发飞书错误 200672（与发布审批卡同源，见 18c6f2b / feishu-publish-approval-e2e.md）。
     return { toast: { type: 'success', content }, card: { type: 'raw', data: buildDelegatedTaskProgressCard(task) } };
   } catch (err) {
-    const known = err instanceof DelegatedTaskServiceError;
+    // 结构化识别、MUST NOT 用 instanceof：委托服务拆到另一个进程后，这里拿到的是 JSON 反序列化
+    // 出来的裸对象，instanceof 恒 false —— version_conflict 会退化成一条普通错误 toast，
+    // 且不再回刷新卡，运营看到的是「操作失败」而不是「卡片过期了，这是最新的」。
+    const known = isDelegatedTaskServiceError(err) && err.code === 'version_conflict';
     return {
-      toast: { type: known && err.code === 'version_conflict' ? 'info' : 'error', content: (err as Error).message },
-      ...(known && err.code === 'version_conflict'
+      toast: { type: known ? 'info' : 'error', content: (err as Error).message },
+      ...(known
         ? { card: { type: 'raw' as const, data: buildDelegatedTaskProgressCard(await service.get(parsed.taskId)) } }
         : {}),
     };

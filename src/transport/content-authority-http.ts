@@ -691,6 +691,6 @@ export const CONTENT_AUTHORITY_WIRING_DEBT = [
   'automation 侧需新增 AIDCP_CONTENT_URL 与 AIDCP_CONTENT_INTERNAL_TOKEN（内部令牌 env 名已在 kernel 的 CONTENT_COMMAND_TOKEN_ENV 定好）——这是 automation 第一次有 content 方向的出边',
   'content 侧注册照 design §2.6：每组独立注册，一组初始化失败不得连带关闭其它组，且实际注册成功的组名要进启动日志',
   '既有 registerCuratedContentRoutes 是更早期的裸形态（无 Bearer、无信封），与本文件两条精选路由同进程并存时 MUST 统一口径，否则同一个域会有两套鉴权与 target 校验',
-  'CuratedContentUnavailableError 没有 code（与 FacebookPublishMediaError 同一处判例缺口）：本文件在属主侧包了一层译成具名 remote_error，但若它自身要跨边界被识别，仍需照同一形状补 code',
+  '【已消，保留供追溯】CuratedContentUnavailableError 与 FacebookPublishMediaError 的 code 缺口已在同一 change 内补齐（各自的 code 常量 + 编码/还原函数，还原不出返回 null 绝不套默认）。本文件在属主侧包一层译成具名 remote_error 的做法照旧成立，只是不再是唯一出路',
   '本文件 MUST 进控制仓 scripts/sync-split-repos 的 TRANSPORT_MEMBERS：服务端在 content、客户端在 automation，不进名单则 content 仓拿不到注册函数',
 ] as const;

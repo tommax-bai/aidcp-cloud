@@ -21,17 +21,31 @@ import type { AccountState } from '../account-state.js';
 import type { CommandActions } from './commands.js';
 
 /**
- * 面板命令动作（与 `PanelServerDeps['commandActions']` 结构对齐）：durable，与飞书命令面共用同一套
- * 账号级底层动作。dispatch / dispatchActive 为调度引擎启停（现役单全局 RoleDispatcher）。
+ * 面板命令动作：durable，与飞书命令面共用同一套账号级底层动作。
+ * dispatch / dispatchActive 为调度引擎启停（现役单全局 RoleDispatcher）。
+ *
+ * **这是这套动作面的唯一定义**：`PanelServerDeps['commandActions']` 直接引本接口，不再各写一份。
+ * 此前两份并存且**必填性相反**（这一份必填、面板那一份可选）。后果不是类型噪音：面板路由据
+ * 「未注入 → 503」写了诚实分支，而这一份的必填让组合根压根没法诚实地不注入，只能塞一个
+ * 「一调就抛」的假实现——把「这台机器上没有调度引擎」演成「你这次操作失败了」，503 分支成死代码。
+ *
+ * 故 dispatch / dispatchActive **可选**：调度引擎属自动化运行时，api 独立起进程时它可能就是不在。
+ * 缺席由面板路由回 503（服务不可用）明说，MUST NOT 伪装成一次失败的调用。
  */
 export interface PanelCommandActions {
   pause(accountId: string): Promise<{ accountId: string; status: 'paused' }>;
   resume(accountId: string): Promise<AccountResumeResult>;
-  dispatch(
+  /**
+   * 调度启停（V1 task 9.4）：start/stop 现役单全局 RoleDispatcher；回报真实在线 edge 数。
+   * 偏离：单账号现实下为全局开关（accountId 信息性）；per-edge 拆分留到真多账号。
+   * 未注入则 `/dispatch` 返回 503。
+   */
+  dispatch?(
     accountId: string,
     action: 'start' | 'stop',
   ): Promise<{ accountId: string; dispatch: 'started' | 'stopped'; changed: boolean; edgesOnline: number }>;
-  dispatchActive(): boolean;
+  /** 调度引擎当前是否活跃（dashboard summary 读）。未注入则该字段回 null（「读不到」，不是「没在跑」）。 */
+  dispatchActive?(): boolean;
 }
 
 export type EdgeResumeOutcome =
@@ -82,10 +96,14 @@ export interface CommandFaceDeps {
   publish: NonNullable<CommandActions['publish']>;
   /** 手动按需评论扳机（→ 评论调度器）。 */
   comment: NonNullable<CommandActions['comment']>;
-  /** 调度引擎启停（面板 /dispatch；现役单全局 RoleDispatcher）。 */
-  dispatch: PanelCommandActions['dispatch'];
-  /** 调度引擎当前是否活跃（dashboard summary 读）。 */
-  dispatchActive: PanelCommandActions['dispatchActive'];
+  /**
+   * 调度引擎启停（面板 /dispatch；现役单全局 RoleDispatcher）。
+   * **可选**：调度引擎属自动化运行时，api 独立起进程时它可能就是不在——组合根这时 MUST 直接不给，
+   * MUST NOT 塞一个「一调就抛」的假实现（那会把「没有这个能力」演成「这次操作失败了」）。
+   */
+  dispatch?: PanelCommandActions['dispatch'];
+  /** 调度引擎当前是否活跃（dashboard summary 读）。可选，理由同上。 */
+  dispatchActive?: PanelCommandActions['dispatchActive'];
   /**
    * 飞书命令作用域鉴权：管理群白名单（FEISHU_MANAGEMENT_CHAT_IDS 解析结果）。
    * 空集合 → 未启用作用域 → 放行全部命令（零回归 / 滚动上线）。

@@ -51,7 +51,7 @@ import {
   type FacebookGroupTargetInput,
 } from '../kernel/facebook-group-types.js';
 import { readDownloadsManifest } from './downloads-manifest.js';
-import { DelegatedTaskServiceError } from '../kernel/delegated-task-types.js';
+import { isDelegatedTaskServiceError } from '../kernel/operator-command-port.js';
 import type {
   DelegatedActionFamily,
   DelegatedTaskIntent,
@@ -60,7 +60,7 @@ import type {
 } from '../kernel/delegated-task-types.js';
 import { clampClientApprovalMode, DELEGATED_TASK_STATUSES } from '../kernel/delegated-task-types.js';
 import { buildPublishLifecycle, type ApprovalDispatchProjection } from './publish-stage-lifecycle.js';
-import { CuratedContentUnavailableError } from '../kernel/curated-content-types.js';
+import { isCuratedContentUnavailableError } from '../kernel/curated-content-types.js';
 
 /** 登录/写体很小，限制请求体大小防滥用。 */
 const MAX_BODY_BYTES = 16 * 1024;
@@ -283,8 +283,13 @@ function configMirrorHealthResponse(deps: PanelDeps): PanelConfigMirrorHealthRes
 }
 
 function sendDelegatedTaskError(res: http.ServerResponse, err: unknown): void {
-  if (err instanceof DelegatedTaskServiceError) {
-    sendJson(res, err.status, { error: err.code, message: err.message });
+  // 结构化识别、MUST NOT 用 instanceof：委托服务拆到另一个进程后这里拿到的是反序列化裸对象，
+  // instanceof 恒 false —— 409（版本冲突 / 账号已暂停）与 422（平台不支持）会一律塌成
+  // 500 delegated_task_error，运营在后台只看得到「内部错误」，具名拒绝原因整片丢失。
+  if (isDelegatedTaskServiceError(err)) {
+    // status 缺席时回 500 而不是补一个 4xx：补 4xx 等于替对面断言「是你的请求有问题」，
+    // 而此刻我们只知道「它拒了、拒的理由叫这个名字」。code 照常带上。
+    sendJson(res, typeof err.status === 'number' ? err.status : 500, { error: err.code, message: err.message });
     return;
   }
   sendJson(res, 500, { error: 'delegated_task_error', message: (err as Error).message ?? String(err) });
@@ -3207,7 +3212,10 @@ function createRequestHandler(
       // 缺表/改名（42P01）由精选只读方法抛 typed error：诚实回 503（服务不可用），落进面板「加载中/暂无数据/
       // 服务不可用」三态的第三态，绝不回落空池、绝不 500（change curated-envkey-account-binding，D6；覆盖
       // 列表 / 筛选面 / 单行读取三处只读调用点）。只有精选只读方法抛此类型，故此处映射精确无副作用。
-      if (err instanceof CuratedContentUnavailableError) {
+      // 结构化识别、MUST NOT 用 instanceof：精选库拆到另一个进程后这里拿到的是反序列化裸对象，
+      // instanceof 恒 false —— 上面这条「诚实回 503」会退化成 500，面板三态里的「服务不可用」
+      // 那一态就此不再出现。
+      if (isCuratedContentUnavailableError(err)) {
         if (!res.headersSent) sendJson(res, 503, { error: 'curated_unavailable' });
         return;
       }

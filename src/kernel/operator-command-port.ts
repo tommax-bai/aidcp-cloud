@@ -261,10 +261,13 @@ export interface DelegatedTaskServiceErrorShape {
 /**
  * 结构化识别委托任务业务错误。**同进程实例与跨进程反序列化对象一视同仁。**
  *
- * 存在理由（不是防御性编程，是已具名的缺口）：`src/feishu/delegated-task-card.ts` 与
- * `src/client-auth/client-auth-server.ts` 今天都用 `instanceof DelegatedTaskServiceError` 认它。
- * 拆进程后那两处恒 false —— 卡片上的 `version_conflict` 会退化成普通错误 toast 且不再回刷新卡，
- * 客户端 API 的 409 / 422 会一律塌成 500。迁到本守卫即修。
+ * 存在理由（不是防御性编程，是已具名的缺口）：实测**三个文件、六个调用点**今天都用
+ * `instanceof DelegatedTaskServiceError` 认它——`src/feishu/delegated-task-card.ts`（1）、
+ * `src/client-auth/client-auth-server.ts`（**4**，四段逐字重复）、
+ * 以及 `src/panel/panel-server.ts` 的委托任务错误出口（1）。
+ * 拆进程后这六处恒 false —— 卡片上的 `version_conflict` 会退化成普通错误 toast 且不再回刷新卡，
+ * 客户端 API 的 409 / 422 会一律塌成 500，**后台控制台发起的委托任务同样塌成一条泛化 500**。
+ * 六处均已迁到本守卫。
  */
 export function isDelegatedTaskServiceError(
   value: unknown,

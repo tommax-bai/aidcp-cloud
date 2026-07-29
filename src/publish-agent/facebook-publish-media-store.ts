@@ -8,6 +8,9 @@ import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import {
   FACEBOOK_PUBLISH_MEDIA_ERROR_NAME,
   FACEBOOK_PUBLISH_MEDIA_STATUSES,
+  facebookPublishMediaErrorCode,
+  isFacebookPublishMediaError,
+  isFacebookPublishMediaErrorReason,
 } from '../kernel/facebook-publish-media-types.js';
 import type {
   FacebookPublishImageInput,
@@ -35,11 +38,17 @@ export type {
 };
 
 export class FacebookPublishMediaError extends Error {
+  /** 线上 code，恒为 `facebook_publish_media_<reason>`（见 kernel 侧的 code 生成 / 还原一对函数）。 */
+  readonly code: string;
+
   constructor(readonly reason: FacebookPublishMediaErrorReason, message?: string) {
     super(message ?? reason);
     // 跨进程识别键：MUST 是实例自有的可枚举属性。不赋值时 Error 子类的 name 继承为 'Error'，
     // JSON 序列化后面板层无从分辨，reason 会被兜底文案吞掉（见 kernel/facebook-publish-media-types.ts）。
     this.name = FACEBOOK_PUBLISH_MEDIA_ERROR_NAME;
+    // name / reason 只活到「JSON 往返」为止。内部 HTTP 那一跳只搬 code + message，
+    // 不带 code 的抛出物到对面一律被记成 handler_error —— 具名原因整片丢掉。
+    this.code = facebookPublishMediaErrorCode(reason);
   }
 }
 
@@ -254,7 +263,12 @@ export class FacebookPublishMediaStore {
       try {
         results.push(await this.uploadOne(accountId, file, i));
       } catch (err) {
-        const reason = err instanceof FacebookPublishMediaError ? err.reason : 'invalid_file';
+        // 结构化识别、MUST NOT 用 instanceof：本类今天只在同进程内构造，但 uploadOne 的抛出物
+        // 将来会经属主进程边界回来，那时 instanceof 恒 false、逐条原因全部塌成 invalid_file。
+        // 未在枚举内的 reason 不硬塞回闭集合字段（跨进程取值不受本进程枚举约束）。
+        const reason = isFacebookPublishMediaError(err) && isFacebookPublishMediaErrorReason(err.reason)
+          ? err.reason
+          : 'invalid_file';
         results.push({
           ok: false,
           filename: file?.filename ? normalizeFilename(file.filename) : `file-${i + 1}`,

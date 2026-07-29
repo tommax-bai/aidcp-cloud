@@ -8,6 +8,7 @@ import {
 } from '../../src/feishu/delegated-task-card.js';
 import { DelegatedTaskService } from '../../src/delegated-task/service.js';
 import { MemoryDelegatedTaskStore } from '../../src/delegated-task/store.js';
+import { DelegatedTaskServiceError, type DelegatedTaskServicePort } from '../../src/kernel/delegated-task-types.js';
 
 const TASK_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -64,4 +65,37 @@ test('DelegatedTask card duplicate confirm is idempotent and returns the same qu
   assert.equal(live.version, firstTask.version, '重复确认不重复排队、不再次增长版本');
   assert.match(JSON.stringify(duplicate?.card?.data), /queued/);
   assert.match(JSON.stringify(buildDelegatedTaskProgressCard(live)), /成功/);
+});
+
+test('DelegatedTask 卡片：版本冲突经跨进程裸对象回来时仍判成「已过期」并回刷新卡', async () => {
+  const now = 2_000_000_000_000;
+  const store = new MemoryDelegatedTaskStore();
+  const real = new DelegatedTaskService({
+    store,
+    listAccounts: async () => [{ accountId: 'acc-1', nickname: '晚风', platform: 'xiaohongshu' }],
+    now: () => now,
+  });
+  const receipt = await real.createDraft({
+    source: 'feishu', sourceRef: 'om-stale', accountName: '晚风', action: 'comment_batch',
+    targetSuccessCount: 3, maxAttempts: 5, deadlineAt: now + 86_400_000,
+    executionWindow: { mode: 'immediate' }, sourceConstraints: {}, targetConstraints: {},
+    approvalMode: 'review', priority: 'normal',
+  });
+  // 委托服务拆到另一个进程后，拒绝是 JSON 反序列化出来的裸对象——原型链上什么都没有。
+  const wireError = JSON.parse(
+    JSON.stringify(new DelegatedTaskServiceError('version_conflict', '任务已被更新，请刷新后重试', 409)),
+  ) as unknown;
+  assert.equal(wireError instanceof DelegatedTaskServiceError, false, '前提：跨进程对象不再是本进程的类实例');
+  const service = {
+    ...real,
+    confirm: async () => { throw wireError; },
+    get: (taskId: string) => real.get(taskId),
+  } as unknown as DelegatedTaskServicePort;
+
+  const result = await handleDelegatedTaskCardAction(service, {
+    action: 'delegated_task_confirm', taskId: receipt.task.id, version: receipt.task.version,
+  });
+  // 认不出来的后果不是报错，是静默降级：普通 error toast + 不再回刷新卡，运营看到的是「操作失败」。
+  assert.equal(result?.toast.type, 'info', '版本冲突 MUST 判成提示而非失败');
+  assert.equal(result?.card?.type, 'raw', '版本冲突 MUST 回一张最新状态卡，让运营就地看到真实版本');
 });

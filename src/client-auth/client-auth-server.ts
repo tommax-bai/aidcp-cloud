@@ -23,11 +23,12 @@ import {
   type ClientUserStore,
 } from './client-user-store.js';
 import type { LoginRateLimiter } from './rate-limiter.js';
-import { DelegatedTaskServiceError, type DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
+import type { DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
 import type { DelegatedTaskIntent, JsonValue } from '../kernel/delegated-task-types.js';
 import { clampClientApprovalMode } from '../kernel/delegated-task-types.js';
+import { isDelegatedTaskServiceError } from '../kernel/operator-command-port.js';
 import type { CuratedContentReader, CuratedPanelRow, CuratedReferenceImage } from '../kernel/curated-content-types.js';
-import { CuratedContentUnavailableError } from '../kernel/curated-content-types.js';
+import { isCuratedContentUnavailableError } from '../kernel/curated-content-types.js';
 import type { ResolvedBinding } from './client-user-store.js';
 import type {
   PublishApprovalActionPayload,
@@ -534,6 +535,19 @@ function toClientTaskReceipt(task: { id: string; status: string; version: number
  * 与谎报成成功同为不诚实。`binding_unknown`（日常态，连一次云端即自愈）与 `binding_conflict`（跨客户争用，
  * 安全事件）**码不同**，绝不合并——合成一个码就是把告警埋进日常噪声。
  */
+/**
+ * 委托服务的**业务拒绝**回报。识别走结构化守卫、MUST NOT 用 `instanceof`：委托服务拆到另一个进程后
+ * 这里拿到的是 JSON 反序列化出来的裸对象，`instanceof` 恒 false，409（版本冲突 / 账号已暂停）与
+ * 422（平台不支持该委托）会一律塌成 500。认不出来的**原样抛回**（由外层统一处置），不在这里吞。
+ *
+ * `status` 缺席时回 500 而不是补一个 4xx：补 4xx 等于替对面断言「是你的请求有问题」，
+ * 而我们此刻只知道「它拒了、拒的理由叫这个名字」。code 照常带上，调用方仍分得出是哪一条拒绝。
+ */
+function sendDelegatedTaskRejection(res: http.ServerResponse, err: unknown): void {
+  if (!isDelegatedTaskServiceError(err)) throw err;
+  sendJson(res, typeof err.status === 'number' ? err.status : 500, { error: err.code, message: err.message });
+}
+
 function sendBindingFailure(res: http.ServerResponse, reason: Exclude<ResolvedBinding, { ok: true }>['reason']): void {
   const status = reason === 'environment_not_owned' ? 403
     : reason === 'binding_unavailable' ? 503
@@ -2209,11 +2223,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           task: toClientTaskReceipt(result.task),
         });
       } catch (err) {
-        if (err instanceof DelegatedTaskServiceError) {
-          sendJson(res, err.status, { error: err.code, message: err.message });
-        } else {
-          throw err;
-        }
+        sendDelegatedTaskRejection(res, err);
       }
       return;
     }
@@ -2577,11 +2587,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           meta: { requestId: randomUUID(), asOf: Date.now() },
         });
       } catch (err) {
-        if (err instanceof DelegatedTaskServiceError) {
-          sendJson(res, err.status, { error: err.code, message: err.message });
-        } else {
-          throw err;
-        }
+        sendDelegatedTaskRejection(res, err);
       }
       return;
     }
@@ -2641,11 +2647,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         });
         sendJson(res, result.created ? 201 : 200, result);
       } catch (err) {
-        if (err instanceof DelegatedTaskServiceError) {
-          sendJson(res, err.status, { error: err.code, message: err.message });
-        } else {
-          throw err;
-        }
+        sendDelegatedTaskRejection(res, err);
       }
       return;
     }
@@ -2684,11 +2686,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
               : await deps.delegatedTasks.cancel(taskId, version);
         sendJson(res, 200, { task: updated });
       } catch (err) {
-        if (err instanceof DelegatedTaskServiceError) {
-          sendJson(res, err.status, { error: err.code, message: err.message });
-        } else {
-          throw err;
-        }
+        sendDelegatedTaskRejection(res, err);
       }
       return;
     }
@@ -2702,7 +2700,10 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     void handle(req, res).catch((err) => {
       // 缺表/改名（42P01）由只读方法抛 typed error：诚实回 503，绝不回落空结果、绝不 500（change
       // curated-envkey-account-binding，D6）。只有精选只读方法抛此类型，故此处映射精确无副作用。
-      if (err instanceof CuratedContentUnavailableError) {
+      // 结构化识别、MUST NOT 用 instanceof：精选库拆到另一个进程后这里拿到的是反序列化裸对象，
+      // instanceof 恒 false —— 「精选表缺失 → 诚实回 503」会退化成 500，前端三态里的「服务不可用」
+      // 那一态就此不再出现，看起来像是我们自己崩了。
+      if (isCuratedContentUnavailableError(err)) {
         if (!res.headersSent) sendJson(res, 503, { error: 'curated_content_unavailable' });
         return;
       }

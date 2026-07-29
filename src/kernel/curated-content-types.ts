@@ -232,30 +232,57 @@ export type CuratedClientCreationStatus = 'uncreated' | 'created' | 'creatable' 
 /** 客户端灵感库排序：只允许固定产品语义，调用方不得提交 SQL 字段或方向。 */
 export type CuratedClientSort = 'weighted' | 'collects' | 'likes' | 'recent';
 
+/** 「精选库自称不可用」的跨进程识别键（实例自有的可枚举属性，序列化往返后仍在）。 */
+export const CURATED_CONTENT_UNAVAILABLE_ERROR_NAME = 'CuratedContentUnavailableError';
+
+/**
+ * 线上 `code`。
+ *
+ * 为什么 `name` 之外还要有它：内部 HTTP 传输把抛出物编码成线格式时**只保 `code` + `message`**
+ * （不带 string `code` 的一律记成 `handler_error`，见 `src/transport/internal-http.ts`）。
+ * 精选库属主一旦拆到另一个进程，没有 code 的抛出物过了那一跳就只剩一坨兜底，
+ * 「精选表缺失 → 诚实回 503」会退化成「500 内部错误」——同一个静默退化换了个地方发生。
+ * 本错误只有一种原因，故 code 是常量而非按 reason 拼；两侧共用这一个常量，防止各写各的字面量。
+ */
+export const CURATED_CONTENT_UNAVAILABLE_ERROR_CODE = 'curated_content_unavailable';
+
 /**
  * 精选库缺表时的**哨兵错误**（原定义在 src/cache/curated-content-store.ts）。抬入 kernel 供
- * api 侧（client-auth-server / panel-server）在 `instanceof` 处捕获而无需 type-only 依赖 content 的存储类。
+ * api 侧（client-auth-server / panel-server）判定而无需 type-only 依赖 content 的存储类。
  * 纯 Error 子类：无 SQL / 无 pg / 无进程内活状态，满足 §4.7 kernel 准入（与 kernel/schema-capability-contract 的
  * SchemaCapabilityError 同一手法）。
  */
 export class CuratedContentUnavailableError extends Error {
+  /** 线上 code，见 {@link CURATED_CONTENT_UNAVAILABLE_ERROR_CODE}。 */
+  readonly code: string = CURATED_CONTENT_UNAVAILABLE_ERROR_CODE;
+
   constructor(readonly operation: string) {
     super(`curated content store unavailable (missing table) during ${operation}`);
-    this.name = 'CuratedContentUnavailableError';
+    this.name = CURATED_CONTENT_UNAVAILABLE_ERROR_NAME;
   }
 }
 
-/** {@link CuratedContentUnavailableError} 的跨进程识别键（实例自有的可枚举属性，序列化往返后仍在）。 */
-export const CURATED_CONTENT_UNAVAILABLE_ERROR_NAME = 'CuratedContentUnavailableError';
+/** 跨进程边界上「精选库自称不可用」的最小可识别形状（JSON 往返后仍成立的字段）。 */
+export interface CuratedContentUnavailableErrorShape {
+  name: typeof CURATED_CONTENT_UNAVAILABLE_ERROR_NAME;
+  /** 出错的只读方法名，仅供日志定位。 */
+  operation?: string;
+  /** 线上 code。守卫不看它——过了内部 HTTP 那一跳 `name` 已经没了，还原是传输适配层的职责。 */
+  code?: string;
+  message?: string;
+}
 
 /**
  * 结构化识别「精选库自称不可用」。
  *
- * 上面那个类今天有三处 api 调用点用 `instanceof` 认它——同进程里成立，拆进程后不成立：
+ * 上面那个类今天有四处 api 调用点用 `instanceof` 认它——同进程里成立，拆进程后不成立：
  * 跨那一跳收到的是 JSON 反序列化出来的裸对象，原型链上什么都没有（CLAUDE §8.5）。
  * 新写的判定一律用本守卫；它对同进程实例与反序列化裸对象一视同仁。
+ *
+ * 判定只认 `name`：本错误只有一种原因，`name` 就是完整的判别信息，
+ * 再要求 `code` 只会让「对面跑的是还没加 code 的版本」当场恒 false —— 那正是本守卫要消灭的东西。
  */
-export function isCuratedContentUnavailableError(e: unknown): e is { name: string; operation?: string } {
+export function isCuratedContentUnavailableError(e: unknown): e is CuratedContentUnavailableErrorShape {
   return typeof e === 'object' && e !== null && (e as { name?: unknown }).name === CURATED_CONTENT_UNAVAILABLE_ERROR_NAME;
 }
 
@@ -272,9 +299,26 @@ export function isCuratedContentUnavailableError(e: unknown): e is { name: strin
  */
 export function curatedContentFailureReason(err: unknown): string {
   if (isContentPortError(err)) return err.reason;
-  if (isCuratedContentUnavailableError(err)) return 'curated_content_unavailable';
+  if (isCuratedContentUnavailableError(err)) return CURATED_CONTENT_UNAVAILABLE_ERROR_CODE;
   return 'unclassified_error';
 }
+
+/**
+ * 精选库能力的**构造期二态**（task 0.6c）。形状逐字照既有判例
+ * {@link file://./text-card-transcriber-port.ts} 的 `TextCardTranscriberCapability`，**不另立第二套**。
+ *
+ * 这条 union 存在的全部理由：组装根里那个存储句柄今天被当成布尔用——
+ * `if (curatedContentStore && …)` / `if (!curatedContentStore) return false`。同进程里这没问题
+ * （句柄在不在就等于精选库在不在），拆进程后就不是了：句柄会变成一个**恒为真**的客户端对象，
+ * 于是「精选库没接上」这个状态在代码里连个落脚点都没有，直接消失成「一切正常」。
+ *
+ * 所以缺席要有名字：`unavailable` 必须带可读 reason（它会被打进启动日志）。
+ * **刻意不带取用句柄**：两个消费点都只做判定、不经它取数（真正的取用面各自是属主句柄或 kernel 端口），
+ * 硬塞一个没人调的 payload 只会让 kernel 认识 content 的存储类。
+ */
+export type CuratedContentCapability =
+  | { state: 'wired' }
+  | { state: 'unavailable'; reason: string };
 
 /**
  * 精选库的**账号维读侧窄面**（consumer-facing reader port）。api 侧 client-auth-server 只驱动

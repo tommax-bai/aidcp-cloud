@@ -24,16 +24,28 @@ export const FACEBOOK_PUBLISH_MEDIA_STATUSES = [
 
 export type FacebookPublishMediaStatus = (typeof FACEBOOK_PUBLISH_MEDIA_STATUSES)[number];
 
-export type FacebookPublishMediaErrorReason =
-  | 'retired_account'
-  | 'account_not_found'
-  | 'non_facebook_account'
-  | 'object_store_unavailable'
-  | 'invalid_file'
-  | 'body_too_large'
-  | 'not_found'
-  | 'status_locked'
-  | 'invalid_value';
+export const FACEBOOK_PUBLISH_MEDIA_ERROR_REASONS = [
+  'retired_account',
+  'account_not_found',
+  'non_facebook_account',
+  'object_store_unavailable',
+  'invalid_file',
+  'body_too_large',
+  'not_found',
+  'status_locked',
+  'invalid_value',
+] as const;
+
+export type FacebookPublishMediaErrorReason = (typeof FACEBOOK_PUBLISH_MEDIA_ERROR_REASONS)[number];
+
+/**
+ * 收窄一个来路不明的 reason。跨进程收到的取值不受本进程枚举约束，
+ * 调用方要把它塞回自家闭集合字段时 MUST 先过这一道，认不出来的由调用方显式处置。
+ */
+export function isFacebookPublishMediaErrorReason(value: unknown): value is FacebookPublishMediaErrorReason {
+  return typeof value === 'string'
+    && (FACEBOOK_PUBLISH_MEDIA_ERROR_REASONS as readonly string[]).includes(value);
+}
 
 /**
  * 属主错误类的 `name` 取值——**跨进程识别键**，属主侧构造时 MUST 逐字写入实例
@@ -42,10 +54,46 @@ export type FacebookPublishMediaErrorReason =
  */
 export const FACEBOOK_PUBLISH_MEDIA_ERROR_NAME = 'FacebookPublishMediaError';
 
-/** 跨进程边界上素材池错误的最小可识别形状（JSON 往返后仍成立的两字段）。 */
+/**
+ * 线上 `code` 的前缀。完整取值恒为 `facebook_publish_media_<reason>`。
+ *
+ * 为什么 `name` + `reason` 还不够、非要再有一个 `code`：内部 HTTP 传输把抛出物编码成线格式时
+ * **只保 `code` + `message`**（带 string `code` 的按 code 原样透传，否则一律记成 `handler_error`，
+ * 见 `src/transport/internal-http.ts` 的 `encodeHandlerError`）。素材池属主一旦拆到另一个进程，
+ * 没有 `code` 的抛出物过了那一跳就只剩 `handler_error` —— 面板层看到的不再是
+ * `object_store_unavailable`(503) / `status_locked`(409)，而是一坨兜底，
+ * 与本文件头点名的那个静默退化一模一样。加前缀是为了不与传输层自己的码撞名。
+ */
+export const FACEBOOK_PUBLISH_MEDIA_ERROR_CODE_PREFIX = 'facebook_publish_media_';
+
+/** 由 reason 生成线上 code。两侧共用这一个函数，防止各拼各的。 */
+export function facebookPublishMediaErrorCode(reason: FacebookPublishMediaErrorReason): string {
+  return `${FACEBOOK_PUBLISH_MEDIA_ERROR_CODE_PREFIX}${reason}`;
+}
+
+/**
+ * 由线上 code 还原 reason；**还原不出来返回 `null`，绝不套默认值**。
+ *
+ * 传输适配层拿到的是传输层自己的错误对象（`name` / `reason` 都已在那一跳丢掉），MUST 用本函数
+ * 还原后重建素材池错误再抛；还原不出来 MUST 显式当成未知处置，MUST NOT 默默套一个 reason ——
+ * 那会把「对象存储挂了」说成「你这个文件不合法」。形状逐字照 `content-port-error.ts` 的判例。
+ */
+export function facebookPublishMediaReasonFromCode(code: unknown): FacebookPublishMediaErrorReason | null {
+  if (typeof code !== 'string' || !code.startsWith(FACEBOOK_PUBLISH_MEDIA_ERROR_CODE_PREFIX)) return null;
+  const reason = code.slice(FACEBOOK_PUBLISH_MEDIA_ERROR_CODE_PREFIX.length);
+  return isFacebookPublishMediaErrorReason(reason) ? reason : null;
+}
+
+/** 跨进程边界上素材池错误的最小可识别形状（JSON 往返后仍成立的字段）。 */
 export interface FacebookPublishMediaErrorShape {
   name: typeof FACEBOOK_PUBLISH_MEDIA_ERROR_NAME;
   reason: string;
+  /**
+   * 线上 code（`facebook_publish_media_<reason>`）。守卫**不**看它：过了内部 HTTP 那一跳的对象
+   * 只剩 code、`name` 已经没了，认它是**传输适配层**的职责（用上面那个还原函数重建后再抛），
+   * 不是守卫的。守卫认的是「还带着 name 的那种对象」——同进程实例与 JSON 往返裸对象。
+   */
+  code?: string;
   message?: string;
 }
 

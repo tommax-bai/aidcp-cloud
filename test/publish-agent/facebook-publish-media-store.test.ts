@@ -6,8 +6,26 @@ import {
   FacebookPublishMediaStore,
   FacebookPublishMediaError,
 } from '../../src/publish-agent/facebook-publish-media-store.js';
+import {
+  facebookPublishMediaErrorCode,
+  facebookPublishMediaReasonFromCode,
+  isFacebookPublishMediaError,
+} from '../../src/kernel/facebook-publish-media-types.js';
 import type { ObjectStore } from '../../src/storage/object-store.js';
 import type { PlatformId, AccountPlatformReader } from '../../src/kernel/platform-types.js';
+
+test('素材池错误：跨进程裸对象仍认得出；code 可还原 reason，还原不出返回 null 而非默认值', () => {
+  const err = new FacebookPublishMediaError('object_store_unavailable');
+  const wire = JSON.parse(JSON.stringify(err)) as unknown;
+  assert.equal(wire instanceof FacebookPublishMediaError, false, '前提：跨进程对象不再是本进程的类实例');
+  assert.equal(isFacebookPublishMediaError(wire), true, '跨进程裸对象 MUST 认得出');
+  // 再往前一跳（内部 HTTP）只搬 code + message，name / reason 都没了 —— 那一层靠 code 还原。
+  assert.equal(err.code, facebookPublishMediaErrorCode('object_store_unavailable'));
+  assert.equal(facebookPublishMediaReasonFromCode(err.code), 'object_store_unavailable');
+  // 认不出来 MUST 说「认不出来」：套一个默认 reason 会把「对象存储挂了」说成「你这个文件不合法」。
+  assert.equal(facebookPublishMediaReasonFromCode('handler_error'), null);
+  assert.equal(facebookPublishMediaReasonFromCode('facebook_publish_media_who_knows'), null);
+});
 
 /** Block③ 拆库解耦：assertFacebookAccount 现经 AccountPlatformReader 端口取平台（缺账号返 null），不再直查库。 */
 const readerFor = (platform: PlatformId | null): (() => AccountPlatformReader) =>
