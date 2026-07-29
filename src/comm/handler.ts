@@ -106,6 +106,13 @@ import {
 } from '../kernel/interaction-types.js';
 
 /**
+ * 一个连接上最多记多少个「内容派生会话内引用」的身份声明
+ * （change generalize-facebook-content-derived-post-identity）。
+ * 单场浏览的卡片量远在此之下；取上限只是不让长连接无上限增长。
+ */
+const CONTENT_REF_IDENTITY_MEMORY = 4_096;
+
+/**
  * action.completed 的 action 是云端角色的关联键，正常值是 `browse_images` 而非
  * `note.browse_images`。旧 edge 或平台会话若回传协议消息名，入口统一归一化，避免
  * DeepReader / CommentReviewer 漏消费失败回执并让 dispatcher 在详情页错误补发 feed scroll。
@@ -402,6 +409,39 @@ export class DefaultMessageHandler implements MessageHandler {
   }
 
   /**
+   * 记下这一批卡里**边缘显式声明**为内容派生会话内引用的 noteId
+   * （change generalize-facebook-content-derived-post-identity）。
+   *
+   * 为什么必须在这里记：后续的浏览事实与互动回执（`note.detail` / `action.completed`）只带 noteId、
+   * 不带分档。下游若要判「这条能不能落库、能不能交给人」，不记就只剩「按字符串形态猜」——
+   * 而协议明令禁止那么做（把契约藏在字符串格式里，漏判一处就是把会话内引用当地址用）。
+   *
+   * 有界 FIFO：引用只在签发它的列表面与文档代内有效，早批次的引用不可能还有在途动作。
+   */
+  private rememberContentRefIdentities(session: EdgeSession, cards: PageCardsPayload['cards']): void {
+    for (const card of cards) {
+      if (!card.noteId || card.noteIdKind !== 'content_ref') continue;
+      const known = session.contentRefNoteIds ?? new Set<string>();
+      session.contentRefNoteIds = known;
+      known.delete(card.noteId);
+      known.add(card.noteId);
+      while (known.size > CONTENT_REF_IDENTITY_MEMORY) {
+        const oldest = known.values().next();
+        if (oldest.done) break;
+        known.delete(oldest.value);
+      }
+    }
+  }
+
+  /**
+   * 这个 noteId 在本连接里是不是内容派生的会话内引用。
+   * 判据是**边缘的声明**（经上一函数留存），不是 noteId 长什么样。
+   */
+  private contentRefKind(session: EdgeSession, noteId: string | undefined): 'content_ref' | undefined {
+    return noteId && session.contentRefNoteIds?.has(noteId) ? 'content_ref' : undefined;
+  }
+
+  /**
    * note-scoped 互动（like/collect）的血缘归账仲裁（change platform-browse-protocol）。
    * 返回写入 interaction.occurred 的 noteId（undefined=拒写血缘；风控仍按真实发生计数、不写 liked_notes 血缘）。
    * 阶段 0（readSurface 恒 detail、无派生 noteId、无 observation）逐位回落 session.currentNoteId=今天行为。
@@ -587,6 +627,7 @@ export class DefaultMessageHandler implements MessageHandler {
         // 留存最近一批卡快照（change platform-browse-protocol）：note-scoped 互动回执带独立见证 observation 时，
         // 归账仲裁据此逐字段比对选中卡（信息流就地点赞防点错卡）。详情页/无 observation 时不消费——阶段 0 惰性。
         session.lastCards = cards;
+        this.rememberContentRefIdentities(session, cards);
         // Reels 与普通 feed 的语义不同：单卡就是当前已经呈现、正在播放的内容，不需要等 content_evaluator
         // 再决定「打开」才算浏览。每次 Edge 上报的新活动 Reel 当场记一次 view，避免不感兴趣/外语内容全部
         // skip 后 view 永远为 0、会话只剩无限 scroll。Edge 的 Reels session 已保证每次 cards 是一个新活动
@@ -605,6 +646,7 @@ export class DefaultMessageHandler implements MessageHandler {
             action: 'view',
             accountId: session.accountId,
             ...(noteId ? { noteId } : {}),
+            ...(this.contentRefKind(session, noteId) ? { noteIdKind: 'content_ref' as const } : {}),
           });
           if (session.accountId && noteId) {
             presentedRuleView = {
@@ -634,6 +676,7 @@ export class DefaultMessageHandler implements MessageHandler {
                 action: 'view',
                 accountId: session.accountId,
                 noteId,
+                ...(this.contentRefKind(session, noteId) ? { noteIdKind: 'content_ref' as const } : {}),
               });
               if (session.accountId) {
                 presentedRuleView = {
@@ -691,12 +734,25 @@ export class DefaultMessageHandler implements MessageHandler {
         const detail = env.payload as NoteDetailPayload;
         // 戳当前笔记 id（v2 现役路径）：action.completed 据此补 noteId（V1 task 9.2）。
         if (detail.noteId) session.currentNoteId = detail.noteId;
+        // 身份分档随详情带出（change generalize-facebook-content-derived-post-identity）：
+        // 详情本身不带分档，判据取自边缘先前在 page.cards 上的显式声明。
+        const detailNoteIdKind = this.contentRefKind(session, detail.noteId);
         if (detail.refreshOnly) {
-          this.bus(session).emit('note.image_snapshot.arrived', { detail, accountId: session.accountId, ts: this.clock() });
+          this.bus(session).emit('note.image_snapshot.arrived', {
+            detail,
+            accountId: session.accountId,
+            ts: this.clock(),
+            ...(detailNoteIdKind ? { noteIdKind: detailNoteIdKind } : {}),
+          });
           return null;
         }
         // accountId 随事件带出（change interaction-feed-enrichment）：tee 到全局总线后元数据 upsert 按真实账号归属。
-        this.bus(session).emit('note.detail.arrived', { detail, accountId: session.accountId, ts: this.clock() });
+        this.bus(session).emit('note.detail.arrived', {
+          detail,
+          accountId: session.accountId,
+          ts: this.clock(),
+          ...(detailNoteIdKind ? { noteIdKind: detailNoteIdKind } : {}),
+        });
         // 浏览计数（fix view-count-zero）：成功打开并上报一篇笔记即一次 view。执行端不单独回执 view 动作，
         // 故在此唯一必经入口按账号驱动计数——与 like/collect 同走 interaction.occurred，
         // 既补齐面板浏览数（risk_counters），又激活浏览配额与点赞/浏览比例闸门（内存窗口）。
@@ -717,6 +773,7 @@ export class DefaultMessageHandler implements MessageHandler {
             action: 'view',
             accountId: session.accountId,
             ...(detail.noteId ? { noteId: detail.noteId } : {}),
+            ...(detailNoteIdKind ? { noteIdKind: detailNoteIdKind } : {}),
           });
           if (
             normalizePlatformId(session.platform) === 'facebook'
@@ -906,6 +963,9 @@ export class DefaultMessageHandler implements MessageHandler {
             ...(attributedNoteId ? { noteId: attributedNoteId } : {}),
             // targetId：喂展示账本 interaction_feed（笔记动作=noteId，关注=authorId）。
             ...(targetId ? { targetId } : {}),
+            // 身份分档（change generalize-facebook-content-derived-post-identity）：按边缘声明打标。
+            // 关注按作者归属、与帖子身份无关，故只看归账笔记 id。
+            ...(this.contentRefKind(session, attributedNoteId) ? { noteIdKind: 'content_ref' as const } : {}),
           });
         }
         return null;

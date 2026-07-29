@@ -468,4 +468,43 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     const env = makeEnvelope('page.cards', 'pc-unreportable', 1700000000000, payload);
     assert.deepEqual(parseEnvelope(JSON.stringify(env))?.payload, payload);
   });
+
+  it('AC-PROTO-20c page.cards 身份分档往返存活；缺分档即平台链接（老边端零回归）', () => {
+    const payload: PageCardsPayload = {
+      cards: [
+        {
+          index: 0,
+          title: '群组帖：零交互取不到任何平台地址',
+          likeCount: 3,
+          collectCount: 0,
+          noteId: `aidcp:facebook-group-feed-post:v1:${'a1'.repeat(32)}`,
+          noteIdKind: 'content_ref',
+        },
+        {
+          index: 1,
+          title: '主页帖：悬停时间戳换出永久链接',
+          likeCount: 5,
+          collectCount: 0,
+          noteId: 'https://www.facebook.com/Alice/posts/pfbid1',
+          noteIdKind: 'permalink',
+        },
+        // 老边端：不带分档字段 ⇒ 消费方一律按平台链接处理，行为逐位等于今天。
+        {
+          index: 2,
+          title: '老边端上报的卡',
+          likeCount: 1,
+          collectCount: 0,
+          noteId: 'https://www.facebook.com/Bob/posts/pfbid2',
+        },
+      ],
+      listKind: 'feed',
+      listState: 'ready',
+    };
+    const back = parseEnvelope(JSON.stringify(makeEnvelope('page.cards', 'pc-kind', 1700000000000, payload)));
+    assert.deepEqual(back?.payload, payload);
+    const cards = (back!.payload as PageCardsPayload).cards;
+    assert.equal(cards[0]!.noteIdKind, 'content_ref');
+    assert.equal(cards[1]!.noteIdKind, 'permalink');
+    assert.equal(cards[2]!.noteIdKind, undefined);
+  });
 });

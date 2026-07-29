@@ -4856,15 +4856,25 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       .catch((err) => {
         console.warn('[aidcp-cloud] RiskController record error:', err);
       });
+    // 内容派生的会话内引用 MUST NOT 进任何**按笔记键**的持久行
+    // （change generalize-facebook-content-derived-post-identity，task 4.4）。
+    //
+    // 分界线是「计数」与「按笔记键落行」：
+    //  · 风控计数照常（上面那段）——浏览与点赞是真实发生的事实，不因身份形态而不算数。
+    //  · 下面这些行都以 noteId 为键，且都要跨会话再被读到（去重台账 / 血缘 / 展示账本 / 精选库）。
+    //    引用换个会话就解析不出任何东西：写进去等于往这些表里塞一个永远对不上的键——
+    //    去重表还会更糟，它会把一条本来该读的新帖误判成「已互动」而永久跳过。
+    // 判据只认边缘的显式声明（handler 依 page.cards 打标），绝不去正则匹配 noteId 的字符串形态。
+    const noteKeyPersistable = evt.noteIdKind !== 'content_ref';
     // A 阶段4 来源血缘：真实点赞落 liked_notes（noteId 才落；详情缺则空字段如实，不编造）。
-    if (evt.action === 'like' && evt.noteId && likedNoteStore) {
+    if (noteKeyPersistable && evt.action === 'like' && evt.noteId && likedNoteStore) {
       likedNoteStore.recordLike(evt.noteId).catch((err) => {
         console.warn('[aidcp-cloud] LikedNoteStore recordLike error:', err);
       });
     }
     // 精选灵感：把自有动作并入精选语料（change curated-inspiration-corpus）。
     // like = 弱信号（只标既有行、不自动建）；collect = 强信号（有同访问非空正文才补建精选，取不到则只补标记既有行）。
-    if (curatedContentStore && evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
+    if (noteKeyPersistable && curatedContentStore && evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
       const observed = lastObservedNoteByAccount.get(accountId);
       const content =
         evt.action === 'collect' && observed && observed.noteId === evt.noteId
@@ -4891,7 +4901,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // V1 task 9.2：按笔记互动落去重表（接线孤儿 risk_interactions）。
     // 仅 like/collect（InteractionAction，follow 无 per-note 语义）；ON CONFLICT DO NOTHING 天然去重。
     // 注：change interaction-feed-enrichment 后面板已改读 interaction_feed，此表保留为去重台账、行为不变（零回归）。
-    if (evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
+    if (noteKeyPersistable && evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
       riskStore
         .recordInteraction(accountId, evt.noteId, evt.action, Date.now())
         .catch((err) => {
@@ -4901,6 +4911,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 展示账本（change interaction-feed-enrichment）：四类动作落 interaction_feed —— 纯观测账本，不碰 RiskController 终态。
     // targetId 由 handler 据动作填（笔记动作=noteId，关注=authorId）；comment_like 无目标语义、刻意不进。
     if (
+      // 关注按作者归属（targetId=authorId，与帖子身份无关）⇒ 分档只挡笔记类动作，绝不误伤关注。
+      (noteKeyPersistable || evt.action === 'follow') &&
       interactionFeedStore &&
       evt.targetId &&
       (evt.action === 'like' || evt.action === 'collect' || evt.action === 'comment' || evt.action === 'follow')
@@ -4939,7 +4951,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
 
   // 展示账本元数据（change interaction-feed-enrichment）：看到笔记/作者时独立 upsert 标题+链接，面板读时 LEFT JOIN。
   // 与互动事件解耦 → 杀「动作回执先于详情到达→标题为空」竞态；诚实置空（COALESCE 缺则不覆盖、不伪造）。
-  const rememberObservedNote = (evt: { detail: NoteDetailData; accountId?: string; ts: number }): void => {
+  const rememberObservedNote = (evt: {
+    detail: NoteDetailData;
+    accountId?: string;
+    ts: number;
+    noteIdKind?: 'permalink' | 'content_ref';
+  }): void => {
     // retire-default-account：缺 accountId 即 honest-fail 丢弃，绝不回落 default。
     if (!evt.accountId) {
       console.warn('[aidcp-cloud] note.detail.arrived 缺 accountId — 跳过（honest-fail）');
@@ -4947,7 +4964,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     }
     const acc = evt.accountId;
     const d = evt.detail;
-    if (interactionFeedStore && d.noteId) {
+    // 内容派生的会话内引用：详情照常评估、照常计浏览（上游已做），但下面两处都是**按笔记键落到后续
+    // 会话**——展示账本给人看那条帖子，最近观测笔记喂「自有收藏补建精选库」。引用两样都交不出去：
+    // 换个会话它解析不出任何东西（change generalize-facebook-content-derived-post-identity，task 4.3/4.4）。
+    // 作者元数据不在此列：作者主页是真地址，与帖子身份无关，照常补。
+    const noteKeyPersistable = evt.noteIdKind !== 'content_ref';
+    if (noteKeyPersistable && interactionFeedStore && d.noteId) {
       interactionFeedStore.upsertMeta(acc, d.noteId, { title: d.title, url: d.url }).catch((err) => {
         console.warn('[aidcp-cloud] interactionFeed upsertMeta(note) error:', err);
       });
@@ -4960,7 +4982,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 此处**只记最近观测笔记内容**（供自有收藏 markBotAction('collect') 在正文可用时补建精选，见 interaction.occurred 处理器）。
     // 「笔记是否进精选」的准入判定已移交角色 curated_note_evaluator（Phase 3 两段式：共鸣预筛 → 读全文 LLM 评估），
     // 以拿到账号绑定 LLM 与人设；此处不再直接 upsertObservation。
-    if (curatedContentStore && d.noteId) {
+    if (noteKeyPersistable && curatedContentStore && d.noteId) {
       const topics = topicKeysFromTitle(d.title);
       lastObservedNoteByAccount.set(acc, {
         noteId: d.noteId,

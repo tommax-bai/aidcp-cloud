@@ -64,7 +64,16 @@ export class HotLeadDetector extends BaseRole {
   private readonly triggeredTtlMs: number;
   private readonly now: () => number;
 
-  private lastDetail: { detail: NoteDetailData; accountId?: string; observedAt: number } | null = null;
+  /**
+   * `noteIdKind`（change generalize-facebook-content-derived-post-identity）：这条详情的身份分档。
+   * `content_ref` = 内容派生的会话内引用——没有平台地址，交到人工手里也打不开。
+   */
+  private lastDetail: {
+    detail: NoteDetailData;
+    accountId?: string;
+    observedAt: number;
+    noteIdKind?: 'permalink' | 'content_ref';
+  } | null = null;
   /** 短时「本 note 已尝试过（任意终态）」标记：account:noteId → 过期时刻。 */
   private readonly triggeredMarks = new Map<string, number>();
   private unsubscribers: Array<() => void> = [];
@@ -86,7 +95,12 @@ export class HotLeadDetector extends BaseRole {
     this.unsubscribers.push(
       this.eventBus.on('note.detail.arrived', (p) => {
         if (p.detail?.refreshOnly) return;
-        this.lastDetail = { detail: p.detail, accountId: p.accountId, observedAt: p.ts };
+        this.lastDetail = {
+          detail: p.detail,
+          accountId: p.accountId,
+          observedAt: p.ts,
+          ...(p.noteIdKind ? { noteIdKind: p.noteIdKind } : {}),
+        };
       }),
       this.eventBus.on('quality.pass', (p) => {
         void this.onQualityPass(p);
@@ -121,6 +135,16 @@ export class HotLeadDetector extends BaseRole {
 
     const detail = cached.detail;
     const accountId = cached.accountId ?? this.getAccountId();
+
+    // 内容派生的会话内引用不进人工线索链路
+    // （change generalize-facebook-content-derived-post-identity，task 4.3）。
+    // 线索的终点是运营手上的一张待审卡：他要能打开那条帖子、要能对着它定向评论。
+    // 引用换个会话就解析不出任何东西——交出去就是给人一条打不开的线索，且沿途还会把它写进
+    // 跨会话去重表与联系评论台账。**必须出声再返回**：静默跳过会让「热帖从不触发」查不出原因。
+    if (cached.noteIdKind === 'content_ref') {
+      this.log(`引流线索命中但只有会话内引用、交不出去 → 不触发 note=${detail.noteId} account=${accountId}`);
+      return;
+    }
 
     const evAl = evaluateHotLead(
       { likeCount: detail.likeCount, publishedAtText: detail.publishedAtText, observedAt: cached.observedAt },

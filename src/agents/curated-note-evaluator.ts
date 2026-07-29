@@ -106,12 +106,36 @@ export class CuratedNoteEvaluator extends ContentRole {
 
   // ─── 事件处理 ─────────────────────────────────────────────
 
-  private onNoteDetailArrived(payload: { detail: NoteDetailData; accountId?: string; ts: number }): void {
+  /**
+   * 内容派生的会话内引用绝不进精选库
+   * （change generalize-facebook-content-derived-post-identity，task 4.3）。
+   *
+   * 精选库是**交付人工的面**：后台精选页会把它列出来，还挂着「定向评论」按钮，按下去就按 `sourceId`
+   * 去开那条帖子。引用在别的会话里解析不出任何东西，那颗按钮必然失败。交不出去的东西不许交。
+   * 判据只认事件上的显式分档，绝不去看 noteId 长什么样。
+   */
+  private contentRefOnly(payload: { noteIdKind?: 'permalink' | 'content_ref' }): boolean {
+    return payload.noteIdKind === 'content_ref';
+  }
+
+  private onNoteDetailArrived(payload: {
+    detail: NoteDetailData;
+    accountId?: string;
+    ts: number;
+    noteIdKind?: 'permalink' | 'content_ref';
+  }): void {
+    if (this.contentRefOnly(payload)) return;
     // 异步评估，绝不阻塞浏览主路径（fire-and-forget）。
     void this.evaluate(payload.detail, payload.accountId, payload.ts);
   }
 
-  private onImageSnapshotArrived(payload: { detail: NoteDetailData; accountId?: string; ts: number }): void {
+  private onImageSnapshotArrived(payload: {
+    detail: NoteDetailData;
+    accountId?: string;
+    ts: number;
+    noteIdKind?: 'permalink' | 'content_ref';
+  }): void {
+    if (this.contentRefOnly(payload)) return;
     void this.refreshImages(payload.detail, payload.accountId, payload.ts);
   }
 

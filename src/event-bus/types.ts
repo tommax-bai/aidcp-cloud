@@ -129,7 +129,14 @@ export interface EventMap {
   'session.started': { sessionId: string };
   'session.ended': { stats: SessionStats };
   // targetId（change interaction-feed-enrichment）：展示账本去重键——笔记动作=noteId，关注=authorId。noteId 保留（喂 likedNoteStore）。
-  'interaction.occurred': { action: 'view' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group'; accountId?: string; noteId?: string; targetId?: string };
+  /**
+   * `noteIdKind`（change generalize-facebook-content-derived-post-identity）：`noteId` / `targetId` 的身份分档，
+   * 由 handler 依边缘在 `page.cards` 上的**显式声明**打上。缺省 = 平台永久链接 ⇒ 逐位等于今天。
+   * `content_ref` = 内容派生的会话内引用：风控照常计数（浏览与点赞都是真实发生的事实），
+   * 但 MUST NOT 写进任何**按笔记键**的持久行（跨会话去重表 / 血缘 / 展示账本 / 精选库）——
+   * 换个会话它就解析不出来了，落库只会留下一个永远对不上的键。
+   */
+  'interaction.occurred': { action: 'view' | 'like' | 'collect' | 'follow' | 'comment' | 'comment_like' | 'join_group'; accountId?: string; noteId?: string; targetId?: string; noteIdKind?: 'permalink' | 'content_ref' };
   /** 风控 view fact 已持久入队后的 Facebook 规则模式候选事实。 */
   'facebook.rule.view.confirmed': {
     accountId: string;
@@ -157,9 +164,12 @@ export interface EventMap {
   /** Facebook 首页物理卡在场，但 Edge 有界续滚后仍无法形成可上报身份。 */
   'feed.present_unreportable.confirmed': { startupId?: string; documentGeneration?: string; ts: number };
   // accountId（change interaction-feed-enrichment）：tee 到全局观测总线后，元数据 upsert 需按真实账号归属（缺则保留键）。
-  'note.detail.arrived': { detail: NoteDetailData; accountId?: string; ts: number };
+  // noteIdKind（change generalize-facebook-content-derived-post-identity）：detail.noteId 的身份分档。
+  // 缺省 = 平台永久链接。`content_ref` 的详情可评估、可计浏览，但 MUST NOT 落任何按笔记键的持久行，
+  // 也 MUST NOT 进人工线索——它交不出去（引用在别的会话里解析不出任何东西）。
+  'note.detail.arrived': { detail: NoteDetailData; accountId?: string; ts: number; noteIdKind?: 'permalink' | 'content_ref' };
   /** Refresh-only note detail carrying newly observed carousel images; consumers MUST NOT count it as a new view. */
-  'note.image_snapshot.arrived': { detail: NoteDetailData; accountId?: string; ts: number };
+  'note.image_snapshot.arrived': { detail: NoteDetailData; accountId?: string; ts: number; noteIdKind?: 'permalink' | 'content_ref' };
   'profile.detail.arrived': { detail: ProfileDetailData; accountId?: string; ts: number };
   'identity.observed.arrived': { observation: IdentityObservedPayload; accountId?: string; ts: number };
   // noteId/observation（change platform-browse-protocol）：边缘从被点 article 派生的规范 id + 独立见证包（现读被点卡）。

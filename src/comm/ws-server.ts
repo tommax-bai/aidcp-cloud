@@ -74,6 +74,18 @@ export interface EdgeSession {
   countedReelViewNoteId?: string;
   /** Ordinary Feed videos already counted as presented views in this connection session. */
   countedFacebookFeedVideoViewKeys?: Set<string>;
+  /**
+   * 本连接内、身份为「内容派生会话内引用」的 noteId（change generalize-facebook-content-derived-post-identity）。
+   *
+   * 由 `page.cards` 上**边缘显式声明**的分档字段填。它存在的唯一理由是：随后的浏览事实与互动回执
+   * （`note.detail` / `action.completed`）只带 noteId、不带分档，下游若要判「这条能不能落库、能不能
+   * 交给人」，就只剩「按字符串形态猜」这一条路——那正是协议明令禁止的做法。把声明记在会话上、
+   * 再显式打到派生事件上，判据始终来自边缘的声明，不来自猜测。
+   *
+   * 有界（FIFO 淘汰最早的）：引用本就只在签发它的列表面与文档代内有效，早批次的引用不可能还有
+   * 在途动作，淘汰它们不丢事实；不设界则长会话会无上限增长。
+   */
+  contentRefNoteIds?: Set<string>;
 }
 
 /**

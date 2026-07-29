@@ -52,6 +52,17 @@ test('命中 + 账号开 + 过闸 → 触发 + 消耗单场预算', async () => 
   assert.equal(calls.lastArgs?.currentDetail.content, 'body');
 });
 
+// change generalize-facebook-content-derived-post-identity task 4.3：
+// 线索的终点是运营手上一张要能点开的卡；会话内引用换个会话就解析不出任何东西——交不出去的东西不许交。
+test('身份只有会话内引用 → 不进人工线索链路', async () => {
+  const { bus, calls } = makeDetector();
+  const d = detail({ noteId: `aidcp:facebook-group-feed-post:v1:${'a1'.repeat(32)}` });
+  bus.emit('note.detail.arrived', { detail: d, accountId: 'acc-1', ts: 1, noteIdKind: 'content_ref' });
+  bus.emit('quality.pass', { noteId: d.noteId, sourcePageType: 'feed', reason: 'ok', ts: 2 });
+  await flush();
+  assert.equal(calls.fired, 0);
+});
+
 test('账号未开自动联系评论 → 不触发（零回归）', async () => {
   const { bus, calls } = makeDetector({ enabled: false });
   pass(bus, detail());
