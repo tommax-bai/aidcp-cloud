@@ -7328,8 +7328,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               },
               isCommentBusy: (accountId: string) => commentScheduler!.isRunning(accountId),
               commentedTodayCount: (accountId: string) => riskStore.countInteractionsTodayForAccount(accountId, 'comment'),
-              // 联系评论两件套：Facebook = 加群评论（联系），先 joinFirst 再 injectContact 评论；
-              // 其它平台维持既有联系评论。触发回执 ok 才记持久 attempt。
+              // 联系评论（change decouple-scheduled-contact-comment-from-group-join：**不再先加群**）。
+              // 全平台一致走 injectContact 评论，容器由已加入群账本的选群口给出——那里才检查预热期与单群冷却。
+              // Facebook 的加群改由独立自动加群动作驱动，受其开关 / 日上限 / 动作时段三道闸约束。
+              // 触发回执 ok 才记持久 attempt。
               triggerContactComment: async (accountId: string, approvalMode) => {
                 let actionLabel = '联系评论';
                 const sendReceiptCard = async (level: 'warning' | 'error', title: string, message: string) => {
