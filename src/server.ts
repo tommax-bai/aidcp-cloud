@@ -449,6 +449,12 @@ import {
   registerStructuredNotificationRoutes,
 } from './transport/api-direct-http.js';
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
+// automation → content 的两条属主端口。**单体只挂服务端、不建客户端**：同进程里 automation 段
+// 拿到的仍是属主实例本身，走 HTTP 只会白绕一圈还多一处失败面。客户端类由 automation 独立根建。
+import {
+  registerConceptPoolAuthorityRoutes,
+  registerCuratedSelectionAuthorityRoutes,
+} from './transport/content-authority-http.js';
 import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
 import { registerPublishLogRoutes } from './transport/publish-log-http.js';
@@ -1910,6 +1916,43 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
   } else {
     console.warn(
       '[aidcp-cloud] content 内部 API：curated-content 路由未注册（CuratedContentStore 不可用）',
+    );
+  }
+  // automation → content 的两条属主端口（task 2.1）。与上面那组 curated-content 并列、**各注册各的**：
+  // 概念池起不来不该连带关掉精选召回，反之亦然。两组都要 target，缺 target 时宁可不挂——
+  // DEV/OL 长期共库，一条不校验 target 的路由等于让调用方决定在哪台机器上真读。
+  if (ctx.deploymentTarget) {
+    const contentAuthorityToken = requireDirectInternalToken('AIDCP_CONTENT_INTERNAL_TOKEN');
+    if (ctx.conceptStore) {
+      registerConceptPoolAuthorityRoutes(
+        httpServer,
+        ctx.conceptStore,
+        contentAuthorityToken,
+        ctx.deploymentTarget,
+      );
+      capabilities.push('concept-pool-authority');
+    } else {
+      console.warn(
+        '[aidcp-cloud] content 内部 API：concept-pool-authority 路由未注册（ConceptStore 不可用）',
+      );
+    }
+    if (store) {
+      registerCuratedSelectionAuthorityRoutes(
+        httpServer,
+        store,
+        contentAuthorityToken,
+        ctx.deploymentTarget,
+      );
+      capabilities.push('curated-selection-authority');
+    } else {
+      console.warn(
+        '[aidcp-cloud] content 内部 API：curated-selection-authority 路由未注册（CuratedContentStore 不可用）',
+      );
+    }
+  } else {
+    console.warn(
+      '[aidcp-cloud] content 内部 API：concept-pool-authority / curated-selection-authority 均未注册' +
+        '（AIDCP_DEPLOY_ENV 缺失/非法，无法校验调用方 target）',
     );
   }
   // Block② 2e：把发布队列状态读 + 发布生成触发 additive 暴露到 content 侧内部读 API。
@@ -7071,11 +7114,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
             new ContentPortError('not_configured', 'curated-selection.selectSamplesForSearchTerms', 'curatedContentStore 未注入'),
           );
         }
-        // 窄投影就地做（三个字段），与 kernel/curated-selection-port.ts 的 selectSamplesForSearchTerms 同形：
-        // 全字段视图挂着参照图集 / 视觉分析 / 转写等大块 JSON，搬过边界只为留三个字段是白搬。
-        return curatedContentStore
-          .selectForCreation(accountId, type, limit)
-          .then((rows) => rows.map((r) => ({ title: r.title, topics: r.topics, collectCount: r.collectCount })));
+        // 窄投影**已归位属主**（task 2.1）：这里只是把端口调用原样转给属主实例，不再就地 map。
+        // 归位之前，「属主结构上满足端口」这句话对本方法是假的——服务端注册那层的在场探针会把它
+        // 当成「对面不支持这个方法」，而那条具名原因本来是留给版本落后用的。
+        return curatedContentStore.selectSamplesForSearchTerms(accountId, type, limit);
       },
     },
     llmFor: (accountId) => ({ complete: (prompt, opts) => llm.complete(prompt, { ...opts, accountId }) }),

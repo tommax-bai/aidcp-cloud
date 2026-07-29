@@ -33,6 +33,9 @@ import {
   type SourcePublishedTime,
 } from '../time/source-published-time.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
+// 搜索词样本的形状定义在跨属主端口面上，不在本文件另写一份：投影的**收货方**是 automation，
+// 由它那侧的契约说了算；属主只负责按那个形状交货。
+import type { CuratedTermSample } from '../kernel/curated-selection-port.js';
 import {
   CURATED_REFERENCE_IMAGE_HARD_MAX,
   cleanOptionalString,
@@ -1028,6 +1031,30 @@ export class CuratedContentStore {
         ...(textCardTranscription ? { textCardTranscription } : {}),
       };
     });
+  }
+
+  /**
+   * 召回给搜索词生成侧：与 {@link selectForCreation} **同一份排序与过滤**，只多做一步三字段投影。
+   *
+   * 投影放在属主这一侧，理由是代价不是洁癖：全字段行上挂着参照图集、视觉分析、文字卡转写三块大 JSON，
+   * 而搜索词生成只要标题 / 话题 / 收藏数。拆进程后由调用方自己 map，等于每次选词都把那三块搬过一次
+   * 进程边界再丢掉。这段投影原先写在组装根里，归位到这里之后单体与拆进程两种形态用的是同一段代码。
+   *
+   * **刻意复用上一条而不是另写一句 SQL**：排序（自有动作优先 → 收藏数 → 点赞数 → 更新时间）是两条
+   * 召回共同的语义，抄成两份就会各自漂——而漂了不会报错，只会让选词看到的样本和创作看到的素材悄悄错位。
+   * 收藏数保持 `null` 不填 0：「没记到收藏数」与「收藏数真是 0」在选词时是两回事。
+   */
+  async selectSamplesForSearchTerms(
+    accountId: string,
+    contentType: CuratedContentTypeFilter,
+    limit: number,
+  ): Promise<CuratedTermSample[]> {
+    const rows = await this.selectForCreation(accountId, contentType, limit);
+    return rows.map((row) => ({
+      title: row.title,
+      topics: row.topics,
+      collectCount: row.collectCount,
+    }));
   }
 
   // ── 后台管理（change curated-content-admin-page）：只读检索 + 治理写 ──────────────
