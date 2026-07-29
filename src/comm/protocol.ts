@@ -1623,6 +1623,16 @@ export interface PageCardsPayload {
     collectCount: number;
     coverDesc?: string;
     noteId?: string;
+    /**
+     * `noteId` 的身份分档（change generalize-facebook-content-derived-post-identity）。
+     * 缺省 = `permalink` ⇒ 老边端与既有路径逐位等于今天。
+     * `content_ref` = 内容派生的**会话内**引用（形如 `aidcp:facebook-group-feed-post:v1:<sha256>`，
+     * 前缀为历史命名、语义已不止群组）：可参与内容评估、可计入浏览、可就地点赞；
+     * **MUST NOT** 用于导航 / 打开详情 / 定向评论 / 交付人工线索 / 跨会话去重。
+     * 消费方 MUST 读本字段判能力，**MUST NOT** 靠正则匹配 `noteId` 的字符串形态来猜——
+     * 把契约藏在字符串格式里，漏判一处就是把会话内引用当地址用（静默假成功）。
+     */
+    noteIdKind?: 'permalink' | 'content_ref';
     isVideo?: boolean;
   }>;
   /**

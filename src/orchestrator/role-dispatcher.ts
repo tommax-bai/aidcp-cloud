@@ -577,6 +577,13 @@ export interface VisibleCard {
   collectCount: number;
   coverDesc?: string;
   noteId?: string;
+  /**
+   * `noteId` 的身份分档（change generalize-facebook-content-derived-post-identity）。
+   * 缺省 = 平台永久链接。`content_ref` = 内容派生的会话内引用：可评估、可计浏览、可就地点赞，
+   * 但 MUST NOT 用于导航 / 打开详情 / 定向评论 / 交付人工线索 / 跨会话去重。
+   * 判能力一律读本字段，MUST NOT 去匹配 noteId 的字符串形态。
+   */
+  noteIdKind?: 'permalink' | 'content_ref';
 }
 
 export interface SessionUsageSnapshot {
@@ -786,6 +793,13 @@ export class RoleDispatcher {
   private visibleCards: VisibleCard[] = [];
   private currentNote: NoteData | null = null;
   /** Facebook 自然互动证据：必须先由 content_evaluator 选中，再由 content_curator 放行，interaction_appraiser 才能发 like。 */
+  /**
+   * 本会话内、身份为「内容派生引用」的帖子（change generalize-facebook-content-derived-post-identity）。
+   * 这类帖子拿不到平台地址（真机实测：群组帖零交互下 6/6 无地址），只能就地读、就地赞。
+   * 任何需要真地址的命令都必须在统一出口被扣住——**在这里拦，不依赖边缘兜底**：
+   * 边缘拒绝只是最后一道保险，让云端把明知做不到的命令发出去本身就是一次假动作。
+   */
+  private readonly contentRefNoteIds = new Set<string>();
   private readonly facebookContentSelectedNoteIds = new Set<string>();
   private readonly facebookQualityPassedNoteIds = new Set<string>();
   /** 已呈现 Facebook 视频的会话级一次性决策集合；命中/未命中/被安全闸挡住都不得因重报重抽。 */
@@ -1459,7 +1473,31 @@ export class RoleDispatcher {
     this.rawSendCommand({ action: 'pacing_update', params: { tempo } });
   }
 
+  /**
+   * 该命令是否**必须**有平台地址才能执行。
+   * - 定向评论：要跳到帖子上，必须要。
+   * - `open_note`：`purpose:'navigate'`（评论迁移）或非 feed 面（打开详情页）要；
+   *   就地读（`surface==='feed'`）不跳转、不需要地址 ⇒ 放行。
+   */
+  private commandRequiresPlatformAddress(command: EdgeCommand): boolean {
+    if (command.action === 'comment') return true;
+    if (command.action !== 'open_note') return false;
+    const params = command.params ?? {};
+    if (params.purpose === 'navigate') return true;
+    return params.surface !== 'feed';
+  }
+
   private sendCommand(command: EdgeCommand): boolean {
+    // 会话内引用闸（change generalize-facebook-content-derived-post-identity）：先于一切其他闸。
+    // 这类身份没有平台地址，导航 / 详情 / 定向评论结构性做不到；发出去只会换回一个必然的失败回执，
+    // 或者更糟——被某处当成地址用。红线：MUST NOT 静默假成功。
+    const targetNoteId = typeof command.params?.noteId === 'string' ? command.params.noteId : '';
+    if (targetNoteId && this.contentRefNoteIds.has(targetNoteId) && this.commandRequiresPlatformAddress(command)) {
+      console.warn(
+        `[RoleDispatcher] ${command.action} 的目标只有会话内引用、没有平台地址 → 不下发（content_ref_not_addressable）`,
+      );
+      return false;
+    }
     // 中途档位补推：先于软暂停/配额/去重闸——控制消息不应被抑制、不占配额（见 maybePushTempo）。
     this.maybePushTempo();
     // 闸门镜像陈旧 → 停手（change config-mirror-cross-process-invalidation task 4.8）。
@@ -3490,6 +3528,9 @@ export class RoleDispatcher {
 
       // Edge 上报可见卡片 → 更新数据并触发评估
       this.eventBus.on('page.cards.arrived', (payload) => {
+        for (const card of payload.cards ?? []) {
+          if (card.noteId && card.noteIdKind === 'content_ref') this.contentRefNoteIds.add(card.noteId);
+        }
         // 规则模式豁免的边界（change facebook-rule-mode-without-persona）：豁免**只**解除会话启动闸。
         // 会话起来之后每一批卡都现读一次裁决——此刻若不是规则模式（活跃周之外、慢启动接管、裁决权威
         // 读不到…），而该账号又是权威的「未绑人设」，就 MUST NOT 让人设浏览闭环跑起来：不评估、不下发，

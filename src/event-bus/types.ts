@@ -27,6 +27,13 @@ export interface PageCardsData {
   collectCount: number;
   coverDesc?: string;
   noteId?: string;
+  /**
+   * `noteId` 的身份分档（change generalize-facebook-content-derived-post-identity）。
+   * 缺省 = 平台永久链接 ⇒ 老边端逐位等于今天。
+   * `content_ref` = 内容派生的会话内引用：可评估、可计浏览、可就地点赞；
+   * MUST NOT 用于导航 / 打开详情 / 定向评论 / 交付人工线索 / 跨会话去重。
+   */
+  noteIdKind?: 'permalink' | 'content_ref';
   /** Existing protocol witness: this presented card contains a video. */
   isVideo?: boolean;
 }
