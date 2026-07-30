@@ -488,6 +488,29 @@ export interface DelegatedTaskCommandPort
 /* ────────────────────────────────── ② 发布指令（手动 /publish） */
 
 /**
+ * ⚠️ **下面这两条指令（手动发帖 / 手动评论）今天没有活的 api 侧调用方——契约刻意保留，但 MUST NOT 接线。**
+ * （用户 2026-07-30 裁定；change `split-cloud-automation-production-runtime` task 1.7b。）
+ *
+ * 实测链路：`CommandRouter` 对 `/publish`、`/comment` 的分支是
+ * `this.actions.delegate ? runDelegated(...) : runPublish/runComment(...)`，而统一命令面把
+ * `delegate` 声明成 `NonNullable<CommandActions['delegate']>`、组装根**恒注入一个函数**
+ * （服务缺席时是那个函数**内部**抛，不是不给函数）⇒ 那个三元永远走委托分支、另一支不可达；
+ * 而 `runPublish` / `runComment` 是 `CommandActions.publish` / `.comment` 的**唯一**消费者，
+ * 面板那份动作面（`PanelCommandActions`）里**没有** publish / comment。
+ *
+ * ⇒ api 模式下这两条能力真正的失败发生在**委托通道**上，由
+ * `feishu-operator-natural-language-delegate` 那条欠账承接；此前另记一条
+ * `feishu-operator-publish-comment` 是把同一个缺口记了两遍，已按论证撤掉（两侧台账各留了理由）。
+ * 生产里 `/publish`、`/comment` 走「委托 → automation 意图解析 → 委托任务 → 委托执行器就地调
+ * `triggerManual`」，而拆完之后执行器与调度器**同在 automation 进程**，这一跳压根不跨进程。
+ *
+ * **为什么不删契约**：形状是对的，且一旦裁定「这两条命令应绕开委托路径直发」，它立刻就有消费者。
+ * 但在那之前接线 = 新增一处「看着接好了、其实永不触发」的假绿，正是本仓红线点名的形态。
+ * 要接线 MUST 先重新裁定那一步；届时飞书侧还欠一个稳定键的透传
+ * （消息 id 今天只透传给了自由文本委托那条，发帖 / 评论只拿到来源会话 id）。
+ */
+
+/**
  * 手动发帖指令入参。处理器是发布调度器的 `triggerManual(accountId?, opts?)`。
  *
  * `accountId` **收成必填**：今天 api 侧在下发前已用昵称解析出真实账号，缺省解析（「唯一真实账号」）

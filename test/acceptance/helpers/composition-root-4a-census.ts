@@ -899,27 +899,17 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       },
     ],
   },
-  {
-    id: 'feishu-operator-publish-comment',
-    category: 'operator-command',
-    owner: 'automation',
-    consumer: 'api',
-    closingChange: 'future',
-    probes: [
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segDApiServing',
-        kind: 'text',
-        symbol: 'automation_operator_command_unavailable:publish',
-      },
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segDApiServing',
-        kind: 'text',
-        symbol: 'automation_operator_command_unavailable:comment',
-      },
-    ],
-  },
+  // `feishu-operator-publish-comment` was retired here (user adjudicated 2026-07-30, change
+  // split-cloud-automation-production-runtime task 1.7b). Its two probes pointed at the
+  // `mode === 'api'` arms of the command face's `publish:` / `comment:` closures — and those
+  // closures are **unreachable**: CommandRouter only calls them when `actions.delegate` is falsy,
+  // while `CommandFaceDeps.delegate` is `NonNullable<...>` and the composition root always injects
+  // a function (a missing service throws from *inside* it, it is never absent). The panel's action
+  // surface carries no publish/comment at all. So in api mode both capabilities fail through the
+  // **delegate** channel, tracked by `feishu-operator-natural-language-delegate` — the capability
+  // stays covered, it was merely recorded against the wrong entry. The contracts
+  // (ManualPublish/ManualCommentCommandPort) are deliberately kept; see their kernel docblocks.
+  // Reappearance is asserted against in test/acceptance/composition-root-4a-inventory.test.ts.
   {
     id: 'feishu-operator-delegated-card-actions',
     category: 'operator-command',

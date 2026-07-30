@@ -235,8 +235,13 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
   );
   assert.equal(
     actual.filter((blocker) => blocker.category === 'operator-command').length,
-    4,
-    'Feishu operator bridge must enumerate delegate, publish/comment, card actions and dispatch',
+    3,
+    'Feishu operator bridge enumerates delegate, card actions and dispatch. It was 4:'
+    + ' publish/comment was retired by adjudication on 2026-07-30 because its probes aimed at'
+    + ' unreachable closures and the real gap is the delegate channel (see the retirement note in'
+    + ' composition-root-4a-census.ts and the dedicated reappearance assertion below).'
+    + ' This count only ever goes DOWN by adjudication — a drop with no matching retirement note'
+    + ' means a probe stopped matching, which is a regression, not progress.',
   );
   assert.equal(
     actual.filter((blocker) => blocker.category === 'content-owner').length,
@@ -278,6 +283,25 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
     + ' the only segC `new PersonaGenerator` (src/server.ts) sits inside the'
     + " `seamMode === 'monolith'` branch — in automation mode the persona port comes from"
     + ' apiDirectPorts.accountPersona, so it does not block an independent automation root',
+  );
+  assert.equal(
+    actual.some((blocker) =>
+      blocker.id === 'feishu-operator-publish-comment'
+      || blocker.evidence.some((item) =>
+        item.includes('automation_operator_command_unavailable:publish')
+        || item.includes('automation_operator_command_unavailable:comment'))),
+    false,
+    'feishu-operator-publish-comment was retired by adjudication (2026-07-30) and must not come back:'
+    + " its two probes point at the `mode === 'api'` arms of the command face's publish:/comment:"
+    + ' closures, and those closures are unreachable — CommandRouter only calls them when'
+    + ' actions.delegate is falsy, while CommandFaceDeps.delegate is NonNullable<...> and the'
+    + ' composition root always injects a function (a missing service throws from inside it).'
+    + ' The panel action surface has no publish/comment at all. In api mode both capabilities fail'
+    + ' through the delegate channel, which feishu-operator-natural-language-delegate already tracks'
+    + ' — so re-adding this entry double-counts one gap instead of recording a second one.'
+    + ' If those two closures ever become reachable (e.g. delegate made optional again, or'
+    + ' /publish and /comment routed to bypass the delegate path), that is a real change of'
+    + ' premise: re-adjudicate rather than silently re-adding the binding.',
   );
 });
 
