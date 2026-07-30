@@ -23,6 +23,8 @@ import {
   normalizePlatformId,
   type PlatformId,
 } from '../platform/index.js';
+import { resolveSessionMode, type SessionMode } from '../managed-automation/contracts/session-mode.js';
+import { resolveTaskModeSchedulingExclusionEnabled } from '../managed-automation/task-mode-exclusion.js';
 
 /** 单连接运行时束。 */
 export interface ConnectionRuntime {
@@ -31,6 +33,8 @@ export interface ConnectionRuntime {
   accountId: string;
   platform: PlatformId;
   capabilities?: string[];
+  /** 会话模式（期1-3）：握手登记快照（已归一）；'task' = 专供托管自动化运行时，编排调度排除对象。 */
+  mode: SessionMode;
   bus: EventBus;
   controller: RiskController;
   /** 浏览业务运行时只在 welcome 已写出后激活；interaction-only / degraded 连接保持 undefined。 */
@@ -98,14 +102,41 @@ export interface RuntimeRegistryDeps {
     /** 归属切换后强制重放该账号计数（从库按账号级重读，MUST NOT 复用可能陈旧的内存值）。 */
     onClaimed?: (accountId: string) => Promise<void> | void;
   };
+  /**
+   * 任务模式调度排除总开关（期1-3）：开启时 mode='task' 的连接不激活 RoleDispatcher、
+   * 不进在线账号扇出（ContentScheduler / 自动排期）、不被评论接管解析命中。
+   * 缺省读 env `AIDCP_TASK_MODE_SCHEDULING_EXCLUSION`（默认关闭 → 过滤短路、行为与主干一致）。
+   */
+  taskModeExclusionEnabled?: boolean;
   logger?: Pick<Console, 'log' | 'warn' | 'error'>;
 }
 
 /** 连接运行时注册表：按 sessionId 持有，握手创建、断连拆除。 */
 export class ConnectionRuntimeRegistry {
   private readonly bySession = new Map<string, ConnectionRuntime>();
+  /** 任务模式调度排除开关快照（构造时定）；默认关闭。 */
+  private readonly taskModeExclusionEnabled: boolean;
+  /** 已记过「调度排除」日志的 sessionId（每会话每类枚举路径只记一次，防每分钟 tick 刷屏）。 */
+  private readonly taskExclusionLogged = new Set<string>();
 
-  constructor(private readonly deps: RuntimeRegistryDeps) {}
+  constructor(private readonly deps: RuntimeRegistryDeps) {
+    this.taskModeExclusionEnabled = deps.taskModeExclusionEnabled ?? resolveTaskModeSchedulingExclusionEnabled();
+  }
+
+  /**
+   * 任务模式调度排除判定（期1-3）：开关开启且该连接 mode='task' 时为 true。
+   * 首次排除记日志（环境 / 账号 / 原因），同会话后续枚举路径重命中不再重复记录。
+   */
+  private isTaskModeExcluded(rt: ConnectionRuntime, path: string): boolean {
+    if (!this.taskModeExclusionEnabled || rt.mode !== 'task') return false;
+    if (!this.taskExclusionLogged.has(rt.sessionId)) {
+      this.taskExclusionLogged.add(rt.sessionId);
+      this.deps.logger?.log?.(
+        `[runtime] 调度排除：sessionId=${rt.sessionId} edgeId=${rt.edgeId ?? '-'} account=${rt.accountId} mode=task（${path}；同会话后续排除不再重复记录）`,
+      );
+    }
+    return true;
+  }
 
   /** 该连接的私有事件总线（pre-hello / 无运行时 → 回落全局观测总线，仅作安全兜底）。 */
   busFor(session: EdgeSession): EventBus {
@@ -213,6 +244,8 @@ export class ConnectionRuntimeRegistry {
       accountId,
       platform: accountPlatform,
       capabilities: session.capabilities,
+      // 会话模式快照（期1-3）：handler onHello 已归一登记；防御性再归一（直连测试/旧装配缺字段=orchestration）。
+      mode: resolveSessionMode(session.mode),
       bus,
       controller,
       dispatcher: undefined,
@@ -337,6 +370,15 @@ export class ConnectionRuntimeRegistry {
       return;
     }
 
+    // 任务模式调度排除（期1-3，开关保护）：task 会话不激活浏览编排运行时（RoleDispatcher 及其
+    // 会话/预算/续场全链），连接保持 transport-only 供托管自动化执行引擎驱动。开关关闭时不判 mode。
+    if (this.taskModeExclusionEnabled && runtime.mode === 'task') {
+      this.deps.logger?.log?.(
+        `[runtime] 调度排除：sessionId=${runtime.sessionId} edgeId=${runtime.edgeId ?? '-'} account=${runtime.accountId} mode=task，不激活编排调度（RoleDispatcher），保持 transport-only`,
+      );
+      return;
+    }
+
     let dispatcher: RoleDispatcher | undefined;
     try {
       dispatcher = this.deps.buildDispatcher({
@@ -377,6 +419,7 @@ export class ConnectionRuntimeRegistry {
     if (!rt) return;
     rt.teardown();
     this.bySession.delete(session.sessionId);
+    this.taskExclusionLogged.delete(session.sessionId);
     this.deps.logger?.log?.(
       `[runtime] 连接断开，运行时已拆除 sessionId=${session.sessionId} account=${rt.accountId}（在线连接=${this.bySession.size}）`,
     );
@@ -447,6 +490,8 @@ export class ConnectionRuntimeRegistry {
     for (const rt of this.bySession.values()) {
       if (!rt.welcomed) continue;
       if (rt.accountId !== accountId) continue;
+      // 任务模式调度排除（期1-3，开关保护）：评论/委托任务接管不得命中任务态连接。
+      if (this.isTaskModeExcluded(rt, 'runtimeForAccount 接管连接解析')) continue;
       if (rt.edgeId) return { bus: rt.bus, edgeId: rt.edgeId };
       fallback ??= { bus: rt.bus, edgeId: rt.edgeId };
     }
@@ -515,7 +560,10 @@ export class ConnectionRuntimeRegistry {
   onlineAccountIds(): string[] {
     const ids = new Set<string>();
     for (const rt of this.bySession.values()) {
-      if (rt.welcomed && rt.edgeId) ids.add(rt.accountId);
+      if (!rt.welcomed || !rt.edgeId) continue;
+      // 任务模式调度排除（期1-3，开关保护）：任务态连接不进 ContentScheduler 排期扇出。
+      if (this.isTaskModeExcluded(rt, 'onlineAccountIds 排期扇出')) continue;
+      ids.add(rt.accountId);
     }
     return [...ids];
   }
@@ -528,6 +576,8 @@ export class ConnectionRuntimeRegistry {
     const identities = new Map<string, { accountId: string; envKey: string | null }>();
     for (const rt of this.bySession.values()) {
       if (!rt.welcomed || !rt.edgeId) continue;
+      // 任务模式调度排除（期1-3，开关保护）：任务态环境不进自动发帖扫描身份。
+      if (this.isTaskModeExcluded(rt, 'onlineAccountIdentities 自动排期身份')) continue;
       const parsedEnvKey = rt.edgeId.startsWith('ads-') ? rt.edgeId.slice('ads-'.length).trim() : '';
       const envKey = parsedEnvKey || null;
       const identity = { accountId: rt.accountId, envKey };

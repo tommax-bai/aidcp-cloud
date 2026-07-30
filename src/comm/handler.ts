@@ -78,6 +78,7 @@ import type { WritingLanguage } from '../kernel/soul-types.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountPausePort } from '../kernel/account-pause-port.js';
 import type { ConfigMirrorGatePort } from '../kernel/config-mirror-bump-types.js';
+import { resolveSessionMode } from '../managed-automation/contracts/session-mode.js';
 import {
   parseAuthStatusPayload,
   parseOffboardResultPayload,
@@ -1010,6 +1011,12 @@ export class DefaultMessageHandler implements MessageHandler {
     session.accountId = p.accountId;
     session.accountNickname = typeof p.accountNickname === 'string' ? p.accountNickname.trim() || undefined : undefined;
     session.machineLabel = p.machineLabel;
+    // 会话模式权威登记（期1-3）：契约纯函数归一（缺字段/undefined → 'orchestration'，旧端行为不变）。
+    // 模式随会话生命周期，断开即失效；任务态登记记日志（后续调度排除动作可观测、可对账）。
+    session.mode = resolveSessionMode(p.mode);
+    if (session.mode === 'task') {
+      this.logger.log(`[comm] 会话登记为任务模式 edgeId=${p.edgeId} account=${p.accountId ?? '-'}（专供托管自动化运行时驱动）`);
+    }
     // 多租户握手（multi-account-node-support）：校验账号身份、登记新账号、建该连接运行时（私有总线 + RoleDispatcher）。
     // 缺/空 accountId → 配置错误拒绝握手（不回 welcome、不建会话、绝不偷映射成 default 开跑，D4）。
     const outcome = (await this.deps.onHandshake?.(session)) ?? ({ ok: true } as const);

@@ -10,6 +10,9 @@
  * 该文件是边-云两侧的唯一契约来源（edge 侧可复制或引用同名定义）。
  */
 
+// 会话模式契约（期1-3）：type-only 引用冻结契约，缺省语义（undefined → 'orchestration'）见该文件。
+import type { SessionMode } from '../managed-automation/contracts/session-mode.js';
+
 /** 协议版本号 */
 export const PROTOCOL_VERSION = 2;
 
@@ -160,6 +163,12 @@ export interface HelloPayload {
   edgeId: string;
   /** 运行时平台标识（如 "xiaohongshu"）；缺省按历史 xhs 处理 */
   platform?: string;
+  /**
+   * 会话模式（期1-3 任务模式通道；契约见 managed-automation/contracts/session-mode.ts）。
+   * 可选：旧 Edge 不发送即缺省 'orchestration'，行为与今天逐字节一致（滚动兼容，§24.2 C7）。
+   * mode='task' 声明该会话专供托管自动化运行时驱动，云端权威登记、随会话生命周期（断开失效）。
+   */
+  mode?: SessionMode;
   /** 业务/站点标识（如 "xhs"） */
   app?: string;
   /** 边缘端能力声明 */

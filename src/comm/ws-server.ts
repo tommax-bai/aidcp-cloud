@@ -23,6 +23,8 @@ import {
   type PageCardsPayload,
 } from './protocol.js';
 import { automationOperationDescriptorFor } from './operation-registry.js';
+import type { SessionMode } from '../managed-automation/contracts/session-mode.js';
+import { resolveTaskModeSchedulingExclusionEnabled } from '../managed-automation/task-mode-exclusion.js';
 
 /** 单条边缘连接的会话上下文 */
 export interface EdgeSession {
@@ -37,6 +39,12 @@ export interface EdgeSession {
   accountNickname?: string;
   /** 人类可读机器标签（hello 上报，验证码卡片告诉运维去哪台机器） */
   machineLabel?: string;
+  /**
+   * 会话模式（期1-3 任务模式通道）：hello 上报、经 resolveSessionMode 归一后登记。
+   * 'task' = 专供托管自动化运行时驱动；缺省/undefined 按 'orchestration' 处理（旧端不带字段）。
+   * 权威登记随会话生命周期——连接断开即失效，不落库、不跨连接残留。
+   */
+  mode?: SessionMode;
   /**
    * 当前会话正在浏览的笔记 id（随 note.detail / note.content 戳；V1 task 9.2）。
    * 用于在 action.completed 发射 interaction.occurred 时补 noteId（编排已知当前笔记），
@@ -189,6 +197,12 @@ export interface WsServerOptions {
   onEdgeRegistered?: (session: EdgeSession) => void;
   /** Cloud 内部同步出站闸；返回 false 时命中 0，绝不把删除环境的自动化命令推到 Edge。 */
   canPushToEdge?: (env: Envelope, edgeId: string) => boolean;
+  /**
+   * 任务模式调度排除总开关（期1-3）：开启时 mode='task' 的会话不参与 account→edge 解析
+   * （resolveEdgeIdForAccount 跳过并记日志）。缺省读 env `AIDCP_TASK_MODE_SCHEDULING_EXCLUSION`
+   * （默认关闭 → 过滤短路、行为与主干一致）；测试可注入。
+   */
+  taskModeExclusionEnabled?: boolean;
 }
 
 let sessionSeq = 0;
@@ -221,6 +235,8 @@ export class EdgeCloudServer implements EdgePusher {
   private readonly onCloseCb?: (session: EdgeSession) => void;
   private readonly onEdgeRegisteredCb?: (session: EdgeSession) => void;
   private readonly canPushToEdge?: (env: Envelope, edgeId: string) => boolean;
+  /** 任务模式调度排除总开关（期1-3）；默认关闭（读 env，只认字面 'true'）。 */
+  private readonly taskModeExclusionEnabled: boolean;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: WsServerOptions) {
@@ -234,6 +250,7 @@ export class EdgeCloudServer implements EdgePusher {
     this.onCloseCb = options.onClose;
     this.onEdgeRegisteredCb = options.onEdgeRegistered;
     this.canPushToEdge = options.canPushToEdge;
+    this.taskModeExclusionEnabled = options.taskModeExclusionEnabled ?? resolveTaskModeSchedulingExclusionEnabled();
   }
 
   /** 启动监听 */
@@ -440,6 +457,14 @@ export class EdgeCloudServer implements EdgePusher {
       if (!eid) continue;
       if (conn.ws.readyState !== WebSocket.OPEN || now - conn.lastSeen >= this.staleAfterMs) continue;
       if (conn.session.accountId !== accountId) continue;
+      // 任务模式调度排除（期1-3，开关保护）：task 会话专供托管自动化运行时，不作为编排/发布派工目标。
+      // 开关关闭时不判 mode——行为与主干逐字节一致。
+      if (this.taskModeExclusionEnabled && conn.session.mode === 'task') {
+        console.log(
+          `[ws-server] 调度排除：edgeId=${eid} account=${accountId} 会话为任务模式（mode=task），不参与 account→edge 派工解析`,
+        );
+        continue;
+      }
       if (requiredCapability && !(conn.session.capabilities ?? []).includes(requiredCapability)) continue;
       matches.push(eid);
     }
@@ -448,6 +473,21 @@ export class EdgeCloudServer implements EdgePusher {
       console.warn(`[ws-server] 账号 ${accountId} 有 ${matches.length} 条在线连接，定向发布取最早登记者 edgeId=${matches[0]}（其余=${matches.slice(1).join(',')}）`);
     }
     return matches[0];
+  }
+
+  /**
+   * 「该环境当前是否任务态」查询（期1-3；托管自动化执行引擎据此选择任务态环境下发）。
+   * 只认 OPEN + 非 stale 连接（与 onlineEdgeCount 同口径）；无在线连接返回 false。
+   * 报告的是**登记事实**，不受调度排除开关影响——开关只控制既有调度路径是否消费该事实。
+   */
+  isTaskModeEdge(edgeId: string): boolean {
+    const now = this.clock();
+    for (const conn of this.edges.values()) {
+      if (conn.session.edgeId !== edgeId) continue;
+      if (conn.ws.readyState !== WebSocket.OPEN || now - conn.lastSeen >= this.staleAfterMs) continue;
+      if (conn.session.mode === 'task') return true;
+    }
+    return false;
   }
 
   edgeCapabilities(edgeId: string): string[] | undefined {

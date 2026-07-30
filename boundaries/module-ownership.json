@@ -1775,6 +1775,11 @@
     "note": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增的目录：托管自动化运行时（六层运行对象模型），期1-1 先落契约层 contracts/（纯类型 + 冻结字面数组 + 纯归一函数，零运行时副作用，只 type-only 引 kernel 契约），后续期次在同目录扩展 typed store / 入口操作 / 执行引擎，全部属自动化执行域。整目录归 automation、新文件 inherit。MUST 回写 §4.7"
   },
   {
+    "path": "src/managed-automation/task-mode-exclusion.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增的目录：托管自动化运行时（六层运行对象模型），期1-1 先落契约层 contracts/（纯类型 + 冻结字面数组 + 纯归一函数，零运行时副作用，只 type-only 引 kernel 契约），后续期次在同目录扩展 typed store / 入口操作 / 执行引擎，全部属自动化执行域。整目录归 automation、新文件 inherit。MUST 回写 §4.7"
+  },
+  {
     "path": "src/metrics/billing-price-refresh.ts",
     "layer": "content",
     "note": "§4.6.6：用量与成本两张表归 aidcp-content（2/2）"
