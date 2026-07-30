@@ -14,6 +14,7 @@ import {
   operatorCommandId,
   parseOperatorCommandId,
 } from '../src/kernel/operator-command-port.js';
+import { DelegatedTaskServiceError } from '../src/kernel/delegated-task-types.js';
 
 test('splitCommandBatch: 只在已支持 slash 命令边界拆 ASCII/全角分号', () => {
   assert.deepEqual(
@@ -722,4 +723,38 @@ test('CommandRouter: 非管理群自然语言委托被权限闸拒绝，delegate
   assert.equal(result.ok, false);
   assert.match(result.title, /无权/);
   assert.equal(delegated, 0);
+});
+
+test('委托异常分流：业务原因码 → 「需要补充信息」（黄）', async () => {
+  const router = new CommandRouter({
+    ...makeActions().actions,
+    delegate: async () => {
+      throw new DelegatedTaskServiceError('account_name_required', '请指明账号昵称', 400);
+    },
+  });
+  const result = await router.handle('让某人完成 3 条评论', { chatId: 'oc_admin', messageId: 'om_1' });
+  assert.equal(result.ok, false);
+  assert.equal(result.level, 'warning');
+  assert.match(result.title, /需要补充信息/);
+  assert.match(result.message, /请指明账号昵称/);
+});
+
+test('委托异常分流：非业务抛出物 → 「结果未知」（红），MUST NOT 说成没说清楚', async () => {
+  // 拆进程后 api 侧的常态就是这一类：处理器不在 / 够不着 / 超时。
+  // 画成「你的话没说清楚」会让运营去改措辞重发——对「没接线」无效，对「超时」则可能真的发第二次。
+  for (const thrown of [
+    new Error('automation_operator_command_unavailable:delegate'),
+    { name: 'ApiDirectHttpError', code: 'api_authority_result_unknown', message: 'call timed out' },
+  ]) {
+    const router = new CommandRouter({
+      ...makeActions().actions,
+      delegate: async () => { throw thrown; },
+    });
+    const result = await router.handle('让晚风完成 3 条评论', { chatId: 'oc_admin', messageId: 'om_1' });
+    assert.equal(result.ok, false);
+    assert.equal(result.level, 'error', '未知结果不得降级成黄色提示');
+    assert.match(result.title, /结果未知/);
+    assert.doesNotMatch(result.title, /补充信息/);
+    assert.match(result.message, /未知/);
+  }
 });

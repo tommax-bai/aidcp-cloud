@@ -19,6 +19,7 @@ import type { CommandResult, CommandResultLevel, PublishApprovalPayload } from '
 import { buildPublishApprovalCard } from './cards.js';
 import { FeishuMessenger } from './messenger.js';
 import type { BotChatRecord } from '../cache/bot-chat-store.js';
+import { isDelegatedTaskServiceError } from '../kernel/operator-command-port.js';
 
 /** 已识别的指令动作 */
 export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'publish' | 'comment' | 'bind' | 'help';
@@ -449,16 +450,40 @@ export class CommandRouter {
     }
   }
 
+  /**
+   * 受理自由文本 / 旧写命令。
+   *
+   * **异常必须分流，不能一律画成「你的话没说清楚」。** 此前这里把**所有**抛出物统一渲染成黄色的
+   * 「委托任务需要补充信息」，于是三件性质完全不同的事在运营眼里长得一模一样：
+   *   ① 解析器真的看不懂这句话（**这条才是「需要补充信息」**）；
+   *   ② 这台机器上压根没接委托处理器（拆进程后 api 侧的常态）——它是**未送达**，不是没说清楚；
+   *   ③ 够不着处理器 / 超时——它是**结果未知**，而委托可能已经落了、甚至已经在跑了。
+   *
+   * ②③ 被画成①的代价是运营会去改措辞重发，而重发对②无效、对③则可能真的发第二次。
+   * 判据用结构化守卫（**不用 `instanceof`**：跨进程后错误是 JSON 反序列化出来的裸对象）：
+   * 认得出业务原因码的才是①，其余一律如实说「未受理 / 结果未知」并把原文带出来。
+   */
   private async runDelegated(text: string, context?: { chatId?: string; messageId?: string }): Promise<CommandResult> {
     try {
       return await this.actions.delegate!(text, context);
     } catch (err) {
+      const detail = (err as Error)?.message ?? String(err);
+      if (isDelegatedTaskServiceError(err)) {
+        return {
+          command: text,
+          ok: false,
+          level: 'warning',
+          title: '委托任务需要补充信息',
+          message: detail,
+        };
+      }
       return {
         command: text,
         ok: false,
-        level: 'warning',
-        title: '委托任务需要补充信息',
-        message: (err as Error).message ?? String(err),
+        level: 'error',
+        title: '委托未受理，结果未知',
+        message:
+          `这条委托没能送到处理器，**本次是否已生效未知**——请先查任务列表再决定是否重发。\n\n原因：${detail}`,
       };
     }
   }
