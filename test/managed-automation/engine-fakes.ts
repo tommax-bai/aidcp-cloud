@@ -209,6 +209,14 @@ export class InMemoryRunState implements RunStatePort {
       .map((row) => cloneRun(row.run));
   }
 
+  /** 期1-4 入口操作补充（对齐真实 store listRunsByTask：按 created_at 升序）。 */
+  async listRunsByTask(executionTarget: ExecutionTarget, taskId: string): Promise<TaskRun[]> {
+    return [...this.runs.values()]
+      .filter((row) => row.run.executionTarget === executionTarget && row.run.taskId === taskId)
+      .sort((a, b) => a.run.createdAt - b.run.createdAt)
+      .map((row) => cloneRun(row.run));
+  }
+
   async insertStepRun(executionTarget: ExecutionTarget, step: StepRunInsert): Promise<boolean> {
     assertOrthogonalInvariants(step);
     if (this.steps.has(this.key(executionTarget, step.stepRunId))) return false;
@@ -315,6 +323,18 @@ export class InMemoryDecisionTrace implements DecisionTracePort {
     if (this.traces.some((existing) => existing.traceId === trace.traceId)) return false;
     this.traces.push(structuredClone({ ...trace, executionTarget, createdAt: this.now() }));
     return true;
+  }
+
+  /** 期1-4 入口操作补充（对齐真实 store listByCorrelation：按写入序升序）。 */
+  async listByCorrelation(
+    executionTarget: ExecutionTarget,
+    correlationId: string,
+    limit = 200,
+  ): Promise<DecisionTrace[]> {
+    return this.traces
+      .filter((trace) => trace.executionTarget === executionTarget && trace.correlationId === correlationId)
+      .slice(0, limit)
+      .map((trace) => structuredClone(trace));
   }
 }
 
