@@ -496,6 +496,7 @@ test('content-scheduler/join: join 与 comment 共用账号级单飞，join 在�
     joinDailyCap: () => 3,
     getPlatform: () => 'facebook',
     joinAutomationFor: () => ({ enabled: true, dailyCap: 3, weekMask: null }),
+    effectiveFacebookOperationMode: async () => 'persona',
     triggerComment: (id) => {
       fired.push(`comment:${id}`);
       return Promise.resolve();
@@ -563,6 +564,7 @@ test('content-scheduler/join: per-account config defaults off, only Facebook, an
       joinDailyCap: () => 3,
       getPlatform: () => options.platform ?? 'facebook',
       ...(options.config === null ? {} : { joinAutomationFor: () => options.config! }),
+      effectiveFacebookOperationMode: async () => 'persona',
       now: () => joinNow.getTime(),
       logger: { warn: () => {} },
     };
@@ -597,6 +599,7 @@ test('content-scheduler/join: effective daily cap is min(operator cap, RiskContr
       joinDailyCap: () => riskCap,
       getPlatform: () => 'facebook',
       joinAutomationFor: () => ({ enabled: true, dailyCap: operatorCap, weekMask: null }),
+      effectiveFacebookOperationMode: async () => 'persona',
       now: () => joinNow.getTime(),
       logger: { warn: () => {} },
     };
@@ -608,6 +611,38 @@ test('content-scheduler/join: effective daily cap is min(operator cap, RiskContr
   assert.deepEqual(await run(3, 1, 1), [], '风控 cap 更小时不得被运营 cap 抬高');
   assert.deepEqual(await run(3, 0, 0), [], '全局 kill switch 关闭由 risk-cap 适配器返回 0，完全不触发');
   assert.deepEqual(await run(2, 3, 1), [ACC]);
+});
+
+test('content-scheduler/join: only persona admits standalone joins and a mode skip does not consume the hour cell', async () => {
+  const joinNow = new Date(2026, 0, 5, 10, offsetMinute(ACC, BASE_DAY, 'join'), 0);
+  const fired: string[] = [];
+  let mode: 'persona' | 'rule' = 'rule';
+  const scheduler = new ContentScheduler({
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () => scheduleView({ postEnabled: false, postDailyCap: 0 }),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: () => Promise.resolve(),
+    triggerJoin: async (id) => { fired.push(id); },
+    isJoinBusy: () => false,
+    joinedTodayCount: () => Promise.resolve(0),
+    joinDailyCap: () => 3,
+    getPlatform: () => 'facebook',
+    joinAutomationFor: () => ({ enabled: true, dailyCap: 3, weekMask: null }),
+    effectiveFacebookOperationMode: async () => mode,
+    now: () => joinNow.getTime(),
+    logger: { warn: () => {} },
+  });
+
+  await scheduler.onTick();
+  assert.deepEqual(fired, [], 'rule 模式由规则执行器拥有加群节奏，独立排期不得重复触发');
+
+  mode = 'persona';
+  await scheduler.onTick();
+  assert.deepEqual(fired, [ACC], '同一小时切回 persona 后仍可使用未消费的排期格');
 });
 
 test('content-scheduler/cross-guard: 正在加群（isJoinBusy）→ 后台自动评论本 tick 跳过（change facebook-manual-join-comment）', async () => {

@@ -148,6 +148,34 @@ test('4a composition: API mode owns reply resolution and delegates persona gener
   );
 });
 
+test('4a composition: exact-environment slow-start arbitration is wired in segA for API policy writes', async () => {
+  const source = await serverSource();
+  const foundation = between(
+    source,
+    'async function segAApiFoundation(',
+    'async function segBContent(',
+  );
+  const operationPolicy = between(
+    foundation,
+    'const facebookOperationPolicyStore = new FacebookOperationPolicyStore({',
+    '\n  const facebookGroupCommentPolicyStore =',
+  );
+  assert.match(operationPolicy, /environmentSlowStartResolver:\s*async \(\{ since \}\)/);
+  assert.match(operationPolicy, /AIDCP_SLOW_START_DISABLED/);
+  assert.match(operationPolicy, /SLOW_START_TOTAL_DAYS \* 86_400_000/);
+
+  const automation = between(
+    source,
+    'async function segCAutomation(',
+    'async function segDApiServing(',
+  );
+  assert.doesNotMatch(
+    automation,
+    /bindEnvironmentSlowStartResolver/,
+    'split API mode skips segC, so exact-environment arbitration must not be wired there',
+  );
+});
+
 test('4a composition: Publish UI command has automation route/receiver and API client/producer', async () => {
   const source = await serverSource();
   const automationInternal = between(

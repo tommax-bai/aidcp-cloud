@@ -905,7 +905,8 @@ export class DefaultMessageHandler implements MessageHandler {
         if (emitActionCompleted) this.bus(session).emit('action.completed', { ...result, ts: this.clock() });
         // 真实发生的动作 → 驱动 RiskController 按账号计数（record 订在 interaction.occurred）。
         // 判据分三轴（change fb-join-quota-counts-attempts）：
-        //   · like/collect/follow/comment_like —— ok=true 才算真实互动（already_followed 是良性 no-op，不计）。
+        //   · like/collect/follow/comment_like —— 通常 ok=true 才算真实互动（already_followed 是良性 no-op，不计）；
+        //     FB like 的 verify_indeterminate/state_unchanged 是提交后真值未知的例外：保守消耗风险预算，但不写目标血缘。
         //   · comment —— ok=true 或 verification_ambiguous（提交已派发但未确认）消耗一次配额；明确待审批/
         //     已拒绝不计。计入用量不把 ambiguous 染成成功，action.completed 仍按原终态下游处理。
         //   · join_group —— 配额是**风控预算**，计的是「真的抵达 Facebook 的入群动作」，故判据是 clicked 而非 ok：
@@ -913,19 +914,28 @@ export class DefaultMessageHandler implements MessageHandler {
         //     （批了 / 待管理员审批 / 要答题），MUST NOT 决定这次动作算不算数。于是点了但待审批（ok:false,
         //     clicked:true）照计；没抵达平台的（点前就已待审批 / already_member / observation_only / 导航登录
         //     在点击前先失败）clicked 非 true，天然不计——无需任何 reason 分支。
-        //   注：`ok` 这一轴仍逐位管着其余五个动作，MUST NOT 整条删除（删了 = 失败的点赞/评论被记成真互动，
-        //   直接踩「绝不静默假成功」红线）。这里只把 join_group 从它的合取下解出来。
+        //   注：`ok` 这一轴仍逐位管着其余五个动作，MUST NOT 整条删除（删了 = 普通失败的点赞/评论被记成真互动，
+        //   直接踩「绝不静默假成功」红线）。这里只显式列出 join_group 与两种 FB like unknown 例外。
         //   注：本闸只决定 emit；真正的计数在 interaction.occurred 的订阅者里。**emit 即落数**——
         //   record 已改为无条件写入既成事实（change risk-record-actuated-facts），账号被限 / 配额已耗尽
         //   时它照样记下（只是返回 false 表示「超策略」）。此前它会在那两种情况下静默丢弃，那是本闸
         //   上一层的同一个病：拿「该不该」去回答「有没有」。
         const commentSubmittedUnknown =
           result.action === 'comment' && result.reason === 'verification_ambiguous';
+        const facebookLikeWriteUnknown =
+          result.action === 'like'
+          && normalizePlatformId(session.platform) === 'facebook'
+          && (result.reason === 'verify_indeterminate' || result.reason === 'state_unchanged');
         const commentKnownNotLive =
           result.action === 'comment'
           && (result.reason === 'pending_group_approval' || result.reason === 'comment_rejected');
         if (
-          (result.ok || result.action === 'join_group' || commentSubmittedUnknown) &&
+          (
+            result.ok
+            || result.action === 'join_group'
+            || commentSubmittedUnknown
+            || facebookLikeWriteUnknown
+          ) &&
           (result.action === 'like' || result.action === 'collect' || result.action === 'follow' || result.action === 'comment' || result.action === 'comment_like' || result.action === 'join_group') &&
           !commentKnownNotLive &&
           result.reason !== 'already_followed' &&
@@ -936,14 +946,17 @@ export class DefaultMessageHandler implements MessageHandler {
           // 阶段 0（readSurface 恒 detail、无派生 id、无 observation）⇒ 仲裁恒回落 currentNoteId ⇒ 零回归。
           const readSurface = resolveReadSurface(session.platform);
           const attributedNoteId =
-            result.action === 'like' || result.action === 'collect'
+            facebookLikeWriteUnknown
+              ? undefined
+              : result.action === 'like' || result.action === 'collect'
               ? this.attributeNoteScopedNoteId(session, result, readSurface)
               : session.currentNoteId;
           // 展示账本目标 id（change interaction-feed-enrichment）：关注按作者（currentAuthorId），其余按笔记。
-          // verification_ambiguous 只消费用量，不是平台确认成功；不带 targetId，避免下游 interaction_feed
-          // 把一条 unknown 评论展示成已完成互动。
+          // 提交后未知只消费用量，不是平台确认成功；不带 targetId，避免下游 interaction_feed 把 unknown
+          // 评论/点赞展示成已完成互动。FB state_unchanged 兼有点前异常，但也无法排除已点击后读回不变；
+          // 因而按保守未知计风险，同时刻意不写 noteId/targetId，绝不生成 liked target lineage。
           const targetId =
-            commentSubmittedUnknown
+            commentSubmittedUnknown || facebookLikeWriteUnknown
               ? undefined
               : result.action === 'follow'
               ? session.currentAuthorId

@@ -1,6 +1,6 @@
 # generated from boundaries/table-ownership.json — DO NOT EDIT BY HAND
 # regenerate: npx tsx scripts/db-split/generate-owner-table-lists.ts
-# owner=automation count=52
+# owner=automation count=56
 alerts
 anchor_staging
 anchors
@@ -15,6 +15,10 @@ event_outbox
 event_outbox_cursor
 event_outbox_topic_cursor
 facebook_comment_audit
+facebook_consumption_action
+facebook_consumption_action_result_fact
+facebook_consumption_progress
+facebook_consumption_view_fact
 facebook_group_join_audit
 facebook_group_membership
 facebook_group_target

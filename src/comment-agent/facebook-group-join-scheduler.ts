@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { EventBus } from '../event-bus/index.js';
 import type { EdgePusher } from './edge-steps.js';
 import {
@@ -45,6 +47,51 @@ export interface FacebookGroupJoinTriggerResult {
   groupUrl?: string;
   outcome?: string;
 }
+
+export interface FacebookGroupJoinModeAssignment {
+  accountId: string;
+  groupUrl: string;
+  source: 'consumption';
+}
+
+export interface FacebookGroupJoinModeTriggerOptions {
+  source: 'consumption';
+  /**
+   * Called after the scheduler has selected and scope-revalidated the exact
+   * membership row, but before it advances that row to joining.
+   */
+  onAssigned: (
+    assignment: FacebookGroupJoinModeAssignment,
+  ) => boolean | void | Promise<boolean | void>;
+  /**
+   * Called after markJoining succeeds and immediately before the first Edge
+   * navigation. The caller uses this boundary to durably mark its action
+   * dispatched. Returning false or throwing suppresses every platform action.
+   */
+  onBeforeDispatch: (
+    assignment: FacebookGroupJoinModeAssignment,
+  ) => boolean | void | Promise<boolean | void>;
+}
+
+export interface FacebookGroupJoinModeReconcileOptions {
+  source: 'consumption';
+}
+
+export type FacebookGroupJoinModeReconcileResult =
+  | {
+      reconciled: true;
+      groupUrl: string;
+      outcome: 'confirmed_member';
+      reason: string;
+      observation: FacebookGroupJoinObservation;
+    }
+  | {
+      reconciled: false;
+      groupUrl?: string;
+      outcome: 'still_pending' | 'unknown';
+      reason: string;
+      observation?: FacebookGroupJoinObservation;
+    };
 
 function statusForEdgeReason(reason?: string): FacebookGroupMembershipStatus {
   switch (reason) {
@@ -163,6 +210,293 @@ export class FacebookGroupJoinScheduler {
   }
 
   /**
+   * Mode-owned automatic join entry. It intentionally has no ContentScheduler
+   * persona hour-cell semantics, while retaining the scheduler's account
+   * single-flight, platform/connection checks, risk and session admission,
+   * scoped target claim, judge, receipt, and membership accounting.
+   *
+   * The two callbacks form the consumption runner's durable hand-off:
+   * onAssigned binds the exact target; onBeforeDispatch marks the action
+   * dispatched. Neither callback may be skipped, and either can veto before
+   * the first Edge navigation/click.
+   */
+  async triggerForMode(
+    accountId: string,
+    options: FacebookGroupJoinModeTriggerOptions,
+  ): Promise<FacebookGroupJoinTriggerResult> {
+    if (!accountId || accountId === 'default') {
+      return { triggered: false, reason: 'account_required' };
+    }
+    if (options.source !== 'consumption') {
+      return { triggered: false, reason: 'unsupported_mode_source' };
+    }
+    if (this.running.has(accountId)) return { triggered: false, reason: 'running' };
+    this.running.add(accountId);
+    this.triggerSources.set(accountId, 'consumption');
+    try {
+      if (this.deps.isFacebookAccount && !(await this.deps.isFacebookAccount(accountId))) {
+        return { triggered: false, reason: 'not_facebook_account' };
+      }
+      const conn = this.deps.resolveConnection(accountId);
+      if (!conn || !conn.edgeId) {
+        await this.audit({
+          accountId,
+          outcome: 'join_failed',
+          phase: 'scheduler',
+          reason: 'edge_offline',
+          shadow: false,
+        });
+        return { triggered: false, reason: 'edge_offline' };
+      }
+      if (this.deps.canJoin && !(await this.deps.canJoin(accountId))) {
+        await this.audit({
+          accountId,
+          outcome: 'quota_denied',
+          phase: 'scheduler',
+          reason: 'canDo',
+          shadow: false,
+        });
+        return { triggered: false, reason: 'quota_denied' };
+      }
+      if (
+        this.deps.canUseSessionJoin
+        && !(await this.deps.canUseSessionJoin(accountId, conn.edgeId))
+      ) {
+        await this.audit({
+          accountId,
+          outcome: 'quota_denied',
+          phase: 'scheduler',
+          reason: 'session_budget',
+          shadow: false,
+        });
+        return { triggered: false, reason: 'session_budget' };
+      }
+      return await this.runReal(
+        accountId,
+        conn.bus,
+        conn.edgeId,
+        'automatic',
+        options,
+      );
+    } finally {
+      this.triggerSources.delete(accountId);
+      this.running.delete(accountId);
+    }
+  }
+
+  /**
+   * Read-only reconciliation for a mode action that was durably dispatched but
+   * whose join receipt remained pending across a restart.
+   *
+   * The exact canonical group is observed once with `group.join(click:false)`.
+   * Only an explicit pre-click `already_member` verdict may repair the joined
+   * membership projection. Every other verdict remains pending/unknown and
+   * this method never calls clickJoin, quota admission, or session accounting.
+   */
+  async reconcileForMode(
+    accountId: string,
+    groupUrlInput: string,
+    options: FacebookGroupJoinModeReconcileOptions,
+  ): Promise<FacebookGroupJoinModeReconcileResult> {
+    if (!accountId || accountId === 'default') {
+      return {
+        reconciled: false,
+        outcome: 'unknown',
+        reason: 'account_required',
+      };
+    }
+    if (options.source !== 'consumption') {
+      return {
+        reconciled: false,
+        outcome: 'unknown',
+        reason: 'unsupported_mode_source',
+      };
+    }
+    const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
+    if (!groupUrl) {
+      return {
+        reconciled: false,
+        outcome: 'unknown',
+        reason: 'invalid_group_url',
+      };
+    }
+    if (this.running.has(accountId)) {
+      return {
+        reconciled: false,
+        groupUrl,
+        outcome: 'still_pending',
+        reason: 'running',
+      };
+    }
+    this.running.add(accountId);
+    this.triggerSources.set(accountId, 'consumption');
+    try {
+      if (
+        this.deps.isFacebookAccount
+        && !(await this.deps.isFacebookAccount(accountId))
+      ) {
+        return {
+          reconciled: false,
+          groupUrl,
+          outcome: 'unknown',
+          reason: 'not_facebook_account',
+        };
+      }
+      const conn = this.deps.resolveConnection(accountId);
+      if (!conn?.edgeId) {
+        await this.audit({
+          accountId,
+          groupUrl,
+          outcome: 'join_failed',
+          phase: 'scheduler',
+          reason: 'reconciliation_edge_offline',
+          shadow: false,
+        });
+        return {
+          reconciled: false,
+          groupUrl,
+          outcome: 'unknown',
+          reason: 'edge_offline',
+        };
+      }
+
+      let observed: FacebookGroupJoinStepResult;
+      try {
+        observed = await this.deps.edgeTaskLeases.withLease(
+          {
+            edgeId: conn.edgeId,
+            kind: 'group_join',
+            priority: 'automatic',
+            leaseMs: 270_000,
+          },
+          (lease) => this.steps(
+            conn.bus,
+            conn.edgeId!,
+            lease.taskId,
+          ).observeGroup(groupUrl),
+        );
+      } catch (error) {
+        const reason = leaseFailureReason(error);
+        await this.audit({
+          accountId,
+          groupUrl,
+          outcome: 'join_failed',
+          phase: 'scheduler',
+          reason: `reconciliation_${reason}`,
+          shadow: false,
+        });
+        return {
+          reconciled: false,
+          groupUrl,
+          outcome: 'unknown',
+          reason,
+        };
+      }
+
+      const observation = observed.observation;
+      if (!observation) {
+        return {
+          reconciled: false,
+          groupUrl,
+          outcome: 'unknown',
+          reason: observed.reason ?? 'no_observation',
+        };
+      }
+      if (observed.clicked === true) {
+        await this.audit({
+          accountId,
+          groupUrl,
+          outcome: 'join_failed',
+          phase: 'scheduler',
+          reason: 'reconciliation_observation_reported_click',
+          shadow: false,
+          observation,
+        });
+        return {
+          reconciled: false,
+          groupUrl,
+          outcome: 'unknown',
+          reason: 'observation_reported_click',
+          observation,
+        };
+      }
+      const observedGroupUrl = canonicalFacebookGroupUrl(
+        observation.groupUrl ?? observation.pageUrl ?? observed.groupUrl ?? '',
+      );
+      if (observedGroupUrl !== groupUrl) {
+        await this.audit({
+          accountId,
+          groupUrl,
+          outcome: 'join_failed',
+          phase: 'scheduler',
+          reason: 'reconciliation_target_mismatch',
+          shadow: false,
+          observation,
+        });
+        return {
+          reconciled: false,
+          groupUrl,
+          outcome: 'unknown',
+          reason: 'target_mismatch',
+          observation,
+        };
+      }
+
+      const verdict = await this.judge(accountId).evaluatePreClick(observation);
+      if (verdict.phase === 'pre_click' && verdict.verdict === 'already_member') {
+        await this.deps.memberships.markJoined(
+          accountId,
+          groupUrl,
+          `reconciled:${verdict.reason}`,
+        );
+        await this.audit({
+          accountId,
+          groupUrl,
+          outcome: 'already_member',
+          phase: 'pre_click',
+          verdict: verdict.verdict,
+          reason: `reconciled:${verdict.reason}`,
+          shadow: false,
+          observation,
+        });
+        return {
+          reconciled: true,
+          groupUrl,
+          outcome: 'confirmed_member',
+          reason: verdict.reason,
+          observation,
+        };
+      }
+
+      const stillPending = verdict.phase === 'pre_click'
+        && (
+          verdict.verdict === 'instant_join'
+          || verdict.verdict === 'gated_skip'
+        );
+      await this.audit({
+        accountId,
+        groupUrl,
+        outcome: stillPending ? 'pending' : 'ambiguous_skip',
+        phase: 'pre_click',
+        verdict: verdict.verdict,
+        reason: `reconciliation_${verdict.reason}`,
+        shadow: false,
+        observation,
+      });
+      return {
+        reconciled: false,
+        groupUrl,
+        outcome: stillPending ? 'still_pending' : 'unknown',
+        reason: verdict.reason,
+        observation,
+      };
+    } finally {
+      this.triggerSources.delete(accountId);
+      this.running.delete(accountId);
+    }
+  }
+
+  /**
    * 加入**指定 url** 的群，只归该账号（change facebook-comment-review-and-targeted-join，`/comment --join=<url>`）。
    * 守 triggerScheduled 同序物理闸：account_required / url 合法 / 单飞 running / 非 FB / edge_offline；
    * **绕**配额闸（canJoin 风控速率状态 + 会话额度，人工授权，与 --join manual 契约一致，成功仍照记 recordSessionJoin，账本不漏）。
@@ -217,13 +551,19 @@ export class FacebookGroupJoinScheduler {
     }
   }
 
-  private async runReal(accountId: string, bus: EventBus, edgeId: string, gear: EdgeTaskPriority): Promise<FacebookGroupJoinTriggerResult> {
+  private async runReal(
+    accountId: string,
+    bus: EventBus,
+    edgeId: string,
+    gear: EdgeTaskPriority,
+    modeHooks?: FacebookGroupJoinModeTriggerOptions,
+  ): Promise<FacebookGroupJoinTriggerResult> {
     const assigned = (await this.deps.memberships.currentAssignment(accountId)) ?? (await this.deps.memberships.claimNext(accountId));
     if (!assigned) {
       await this.audit({ accountId, outcome: 'no_targets', phase: 'scheduler', shadow: false, reason: 'no_candidate' });
       return { triggered: false, reason: 'no_targets' };
     }
-    return this.runAssignedJoin(accountId, bus, edgeId, assigned, gear, true);
+    return this.runAssignedJoin(accountId, bus, edgeId, assigned, gear, true, modeHooks);
   }
 
   /**
@@ -237,6 +577,7 @@ export class FacebookGroupJoinScheduler {
     assigned: FacebookGroupMembershipRow,
     gear: EdgeTaskPriority,
     revalidateScope: boolean,
+    modeHooks?: FacebookGroupJoinModeTriggerOptions,
   ): Promise<FacebookGroupJoinTriggerResult> {
     await this.audit({ accountId, groupUrl: assigned.groupUrl, outcome: 'claimed', phase: 'scheduler', shadow: false });
     if (revalidateScope) {
@@ -261,7 +602,35 @@ export class FacebookGroupJoinScheduler {
         return { triggered: false, groupUrl: assigned.groupUrl, reason };
       }
     }
-    const marked = await this.deps.memberships.markJoining(accountId, assigned.groupUrl);
+    const modeAssignment = modeHooks
+      ? {
+          accountId,
+          groupUrl: assigned.groupUrl,
+          source: modeHooks.source,
+        } satisfies FacebookGroupJoinModeAssignment
+      : null;
+    if (
+      modeHooks
+      && !(await this.acceptModeCallback(
+        modeHooks.onAssigned,
+        modeAssignment!,
+        'assigned',
+      ))
+    ) {
+      return {
+        triggered: false,
+        groupUrl: assigned.groupUrl,
+        reason: 'dispatch_suppressed:assigned_callback_rejected',
+      };
+    }
+    const modeAttemptReason = modeHooks
+      ? `mode:${modeHooks.source}:${randomUUID()}`
+      : undefined;
+    const marked = await this.deps.memberships.markJoining(
+      accountId,
+      assigned.groupUrl,
+      modeAttemptReason ?? 'attempting',
+    );
     if (!marked) {
       await this.audit({
         accountId,
@@ -272,6 +641,38 @@ export class FacebookGroupJoinScheduler {
         shadow: false,
       });
       return { triggered: false, groupUrl: assigned.groupUrl, reason: 'assignment_not_executable' };
+    }
+    if (
+      modeHooks
+      && !(await this.acceptModeCallback(
+        modeHooks.onBeforeDispatch,
+        modeAssignment!,
+        'before_dispatch',
+      ))
+    ) {
+      const released = await this.deps.memberships.releaseModeJoining(
+        accountId,
+        assigned.groupUrl,
+        modeAttemptReason!,
+        'dispatch_suppressed:before_dispatch_callback_rejected',
+      );
+      await this.audit({
+        accountId,
+        groupUrl: assigned.groupUrl,
+        outcome: 'join_failed',
+        phase: 'scheduler',
+        reason: released
+          ? 'dispatch_suppressed:before_dispatch_callback_rejected'
+          : 'dispatch_suppressed:before_dispatch_callback_rejected:membership_release_conflict',
+        shadow: false,
+      });
+      return {
+        triggered: false,
+        groupUrl: assigned.groupUrl,
+        reason: released
+          ? 'dispatch_suppressed:before_dispatch_callback_rejected'
+          : 'dispatch_suppressed:before_dispatch_callback_rejected:membership_release_conflict',
+      };
     }
 
     // 租约异常必须在本次目标上诚实收敛，否则成员账本会留在 joining。慢页面恢复只覆盖明确未点击的
@@ -341,6 +742,25 @@ export class FacebookGroupJoinScheduler {
     // postObservation 若回落为 clicked.observation（无 post），则 pre===post、跃迁不成立、结构不误 joined。
     const post = await this.judge(accountId).evaluatePostClick(postObservation, clicked.observation);
     return this.handlePostVerdict(accountId, assigned, post, postObservation, clicked.ok, edgeId);
+  }
+
+  private async acceptModeCallback(
+    callback: (
+      assignment: FacebookGroupJoinModeAssignment,
+    ) => boolean | void | Promise<boolean | void>,
+    assignment: FacebookGroupJoinModeAssignment,
+    phase: 'assigned' | 'before_dispatch',
+  ): Promise<boolean> {
+    try {
+      return (await callback(assignment)) !== false;
+    } catch (error) {
+      this.deps.logger?.warn?.(
+        `[fb-group-join-scheduler] mode callback rejected phase=${phase} account=${assignment.accountId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
   }
 
   private async handlePreVerdict(

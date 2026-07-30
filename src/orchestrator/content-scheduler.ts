@@ -165,6 +165,13 @@ export interface ContentSchedulerDeps {
   /** 每账号 Facebook 自动加群领域配置；未注入/无行均默认关闭。 */
   joinAutomationFor?(accountId: string): { enabled: boolean; dailyCap: number; weekMask: string | null };
   /**
+   * Independent scheduled join admission reads the authoritative effective Facebook
+   * operation mode. Missing/unknown is fail-closed; lower-level join executors remain reusable.
+   */
+  effectiveFacebookOperationMode?(
+    accountId: string,
+  ): Promise<'persona' | 'slow_start' | 'rule' | 'consumption' | 'blocked'>;
+  /**
    * 联系评论两件套（change content-schedule-group-comments）。可选：任一未注入 → 该动作整体跳过（零回归）。
    * change decouple-scheduled-contact-comment-from-group-join 起**全平台一致**：triggerManual(injectContact:true)，
    * 不带 joinFirst。Facebook 不再在本动作里加群——加群由独立自动加群动作驱动，走它自己的开关 / 日上限 / 时段闸。
@@ -398,6 +405,13 @@ export class ContentScheduler {
               if (!this.deps.triggerJoin || !this.deps.isJoinBusy || !this.deps.joinedTodayCount || !this.deps.joinDailyCap) continue;
               const platform = this.deps.getPlatform ? await this.deps.getPlatform(accountId) : 'xiaohongshu';
               if (platform !== 'facebook') continue;
+              if (!this.deps.effectiveFacebookOperationMode) continue;
+              if (await this.deps.effectiveFacebookOperationMode(accountId) !== 'persona') {
+                this.deps.logger?.info?.(
+                  `[content-scheduler] 独立排期加群因 operation mode 非 persona 跳过 account=${accountId}`,
+                );
+                continue;
+              }
               joinAutomation = this.deps.joinAutomationFor?.(accountId) ?? null;
               if (!joinAutomation?.enabled || joinAutomation.dailyCap <= 0) continue;
               if (joinAutomation.weekMask !== null) {
@@ -509,6 +523,11 @@ export class ContentScheduler {
               const effectiveCap = Math.min(joinAutomation?.dailyCap ?? 0, riskCap);
               if (effectiveCap <= 0 || joined >= effectiveCap) continue;
 
+              // JIT mode gate: still before fire-key consumption and before the lower
+              // scheduler may assign a group target.
+              if (await this.deps.effectiveFacebookOperationMode!(accountId) !== 'persona') {
+                continue;
+              }
               this.fire(accountId, action, fireKey, cell, () => this.deps.triggerJoin!(accountId));
             } else {
               // 联系评论：单飞复用评论机器（同一 isRunning，评论/联系评论互斥天然成立）。

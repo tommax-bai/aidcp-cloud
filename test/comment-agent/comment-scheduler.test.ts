@@ -896,6 +896,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     audits: Audit[];
     posted: string[];
     envelopes: Envelope[];
+    dedupChecked: string[];
     dedupRecorded: string[];
     resolvedNames: Array<{ url: string; name: string }>;
     composeArgs: Array<{ keyword: string; container: string; postText?: string; comments?: string[] }>;
@@ -904,6 +905,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     const audits: Audit[] = [];
     const posted: string[] = [];
     const envelopes: Envelope[] = [];
+    const dedupChecked: string[] = [];
     const dedupRecorded: string[] = [];
     const resolvedNames: Array<{ url: string; name: string }> = [];
     const composeArgs: Array<{ keyword: string; container: string; postText?: string; comments?: string[] }> = [];
@@ -966,7 +968,10 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       stepTimeoutMs: 60, // 有界超时；任何未 emit 的等待 60ms 后诚实超时（不 28s 挂死测试）
       random: () => 0,
       dedupFor: () => ({
-        hasInteracted: async (noteId: string) => seen.has(noteId),
+        hasInteracted: async (noteId: string) => {
+          dedupChecked.push(noteId);
+          return seen.has(noteId);
+        },
         recordInteraction: async (noteId: string) => {
           dedupRecorded.push(noteId);
           seen.add(noteId);
@@ -1012,6 +1017,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       audits,
       posted,
       envelopes,
+      dedupChecked,
       dedupRecorded,
       resolvedNames,
       composeArgs,
@@ -1079,6 +1085,163 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.deepEqual(approvals, [targetRef]);
     assert.equal(envelopes.find((env) => env.type === 'interaction.comment')?.payload.noteId, targetRef);
     assert.deepEqual(dedupRecorded, [targetRef]);
+  });
+
+  it('consumption mode pins one historical group, ignores configured keywords, and requires both exact-target hooks before submit', async () => {
+    const { deps, posted, envelopes } = fbFlowDeps({
+      keywords: ['must-not-search'],
+      submit: { ok: true },
+      postText: 'historical group first post',
+    });
+    const phases: string[] = [];
+    let genericCoverageWrites = 0;
+    const result = await new CommentScheduler({
+      ...deps,
+      facebookCoverageOnCommented: async () => {
+        genericCoverageWrites += 1;
+      },
+    }).triggerForMode('fb-1', {
+      source: 'consumption',
+      groupUrl: 'https://www.facebook.com/groups/historical-1',
+      selection: 'first_commentable_group_post',
+      actionGate: () => ({ allowed: true }),
+      onTargetSelected: (target) => {
+        phases.push('target');
+        assert.deepEqual(posted, ['note.open']);
+        assert.deepEqual(target, {
+          accountId: 'fb-1',
+          groupUrl: 'https://www.facebook.com/groups/historical-1',
+          contentKey: '2',
+          contentUrl: PERMALINK,
+          selection: 'first_commentable_group_post',
+        });
+      },
+      onBeforeSubmit: (target) => {
+        phases.push('dispatch');
+        assert.equal(target.contentUrl, PERMALINK);
+        assert.deepEqual(posted, ['note.open']);
+      },
+    });
+
+    assert.equal(result.triggered, true);
+    if (!result.triggered) return;
+    assert.equal(result.result.outcome, 'commented');
+    assert.deepEqual(phases, ['target', 'dispatch']);
+    assert.deepEqual(posted, ['note.open', 'interaction.comment']);
+    assert.equal(envelopes.some((env) => env.type === 'search.execute'), false);
+    const open = envelopes.find((env) => env.type === 'note.open');
+    assert.equal(open?.payload.selection, 'first_commentable_group_post');
+    assert.equal(open?.payload.container, 'https://www.facebook.com/groups/historical-1');
+    assert.equal(open?.payload.joinFirst, undefined);
+    assert.equal(
+      genericCoverageWrites,
+      0,
+      'consumption coordinator owns the awaited membership cooldown write',
+    );
+  });
+
+  it('consumption mode fails closed when the bound first commentable item is already deduped', async () => {
+    const {
+      deps,
+      posted,
+      envelopes,
+      dedupChecked,
+      dedupRecorded,
+      composeArgs,
+    } = fbFlowDeps({
+      keywords: ['must-not-search'],
+      seen: [PERMALINK],
+      submit: { ok: true },
+    });
+    let selected = 0;
+    let beforeSubmit = 0;
+    const result = await new CommentScheduler(deps).triggerForMode('fb-1', {
+      source: 'consumption',
+      groupUrl: 'https://www.facebook.com/groups/historical-dedup',
+      selection: 'first_commentable_group_post',
+      actionGate: () => ({ allowed: true }),
+      onTargetSelected: (target) => {
+        selected += 1;
+        assert.equal(target.contentUrl, PERMALINK);
+      },
+      onBeforeSubmit: () => {
+        beforeSubmit += 1;
+      },
+    });
+
+    assert.equal(result.triggered, true);
+    if (!result.triggered) return;
+    assert.equal(result.result.outcome, 'no_strong_candidate');
+    assert.equal(result.result.reason, 'all_deduped');
+    assert.equal(selected, 1, 'the exact first item is bound before its dedupe gate runs');
+    assert.equal(beforeSubmit, 0);
+    assert.deepEqual(dedupChecked, [PERMALINK]);
+    assert.deepEqual(posted, ['note.open']);
+    assert.equal(envelopes.some((env) => env.type === 'interaction.comment'), false);
+    assert.deepEqual(composeArgs, [], 'dedupe rejection must stop before composition');
+    assert.deepEqual(dedupRecorded, [], 'a read-side dedupe hit must not write another marker');
+  });
+
+  it('consumption mode before-submit veto performs zero comment writes for a page-scoped exact targetRef', async () => {
+    const targetRef = `aidcp:facebook-group-feed-post:v1:${'d4'.repeat(32)}`;
+    const { deps, posted, envelopes } = fbFlowDeps({
+      keywords: ['must-not-search'],
+      firstPostTarget: targetRef,
+      submit: { ok: true },
+    });
+    let selected = '';
+    const result = await new CommentScheduler(deps).triggerForMode('fb-1', {
+      source: 'consumption',
+      groupUrl: 'https://www.facebook.com/groups/historical-2',
+      selection: 'first_commentable_group_post',
+      actionGate: () => ({ allowed: true }),
+      onTargetSelected: (target) => {
+        selected = target.contentKey;
+        assert.equal(target.contentUrl, targetRef);
+      },
+      onBeforeSubmit: () => false,
+    });
+
+    assert.equal(result.triggered, true);
+    if (!result.triggered) return;
+    assert.equal(selected, targetRef);
+    assert.equal(result.result.outcome, 'submit_failed');
+    assert.equal(
+      result.result.reason,
+      'dispatch_suppressed:consumption_before_submit_rejected',
+    );
+    assert.deepEqual(posted, ['note.open']);
+    assert.equal(envelopes.some((env) => env.type === 'interaction.comment'), false);
+    assert.equal(envelopes.some((env) => env.type === 'search.execute'), false);
+  });
+
+  it('consumption mode re-reads the final risk gate after target selection and sends zero submit commands when it closes', async () => {
+    const { deps, posted } = fbFlowDeps({
+      keywords: ['must-not-search'],
+      submit: { ok: true },
+    });
+    let targetSelected = false;
+    let beforeSubmit = false;
+    const result = await new CommentScheduler(deps).triggerForMode('fb-1', {
+      source: 'consumption',
+      groupUrl: 'https://www.facebook.com/groups/historical-risk',
+      selection: 'first_commentable_group_post',
+      actionGate: () => ({ allowed: false, reason: 'quota:day' }),
+      onTargetSelected: () => {
+        targetSelected = true;
+      },
+      onBeforeSubmit: () => {
+        beforeSubmit = true;
+      },
+    });
+
+    assert.equal(result.triggered, true);
+    if (!result.triggered) return;
+    assert.equal(targetSelected, true);
+    assert.equal(beforeSubmit, false, 'risk gate must run before durable dispatch CAS');
+    assert.equal(result.result.outcome, 'quota_denied');
+    assert.equal(result.result.reason, 'quota:day');
+    assert.deepEqual(posted, ['note.open']);
   });
 
   it('空关键词首帖已评过：不顺延第二帖、不搜索、不提交', async () => {

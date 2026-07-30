@@ -9,7 +9,6 @@ import {
 const base = {
   platform: 'facebook',
   ruleEnabled: true,
-  activeWeek: true,
   personaBinding: 'bound' as const,
   slowStart: { state: 'off' },
 };
@@ -63,15 +62,32 @@ describe('facebook rule mode arbitration', () => {
     }
   });
 
+  it('admits explicit consumption mode independently of persona and below slow start', () => {
+    assert.deepEqual(
+      decideFacebookBrowseMode({
+        ...base,
+        operationMode: 'consumption',
+        ruleEnabled: false,
+        personaBinding: 'unbound',
+      }),
+      { mode: 'consumption', blocker: null },
+    );
+    assert.deepEqual(
+      decideFacebookBrowseMode({
+        ...base,
+        operationMode: 'consumption',
+        ruleEnabled: false,
+        personaBinding: 'unbound',
+        slowStart: { state: 'active' },
+      }),
+      { mode: 'slow_start', blocker: 'slow_start_active' },
+    );
+  });
+
   it('keeps the persona browse loop gated for an unbound account when rule mode is not admitted', () => {
     // 规则模式关闭 → 该账号回到人设浏览闭环，人设闸逐字不变。
     assert.deepEqual(
       decideFacebookBrowseMode({ ...base, ruleEnabled: false, personaBinding: 'unbound' }),
-      { mode: 'blocked', blocker: 'no_persona' },
-    );
-    // 规则模式开着但不在活跃周 → 同样不是规则模式，仍不得让人设闭环空跑。
-    assert.deepEqual(
-      decideFacebookBrowseMode({ ...base, activeWeek: false, personaBinding: 'unbound' }),
       { mode: 'blocked', blocker: 'no_persona' },
     );
     assert.deepEqual(
@@ -80,14 +96,18 @@ describe('facebook rule mode arbitration', () => {
     );
   });
 
-  it('returns persona mode outside an eligible enabled rule window and rejects other platforms', () => {
+  it('keeps operation modes independent from persona scheduling and rejects other platforms', () => {
     assert.deepEqual(
       decideFacebookBrowseMode({ ...base, ruleEnabled: false }),
       { mode: 'persona', blocker: null },
     );
     assert.deepEqual(
-      decideFacebookBrowseMode({ ...base, activeWeek: false }),
-      { mode: 'persona', blocker: 'outside_active_window' },
+      decideFacebookBrowseMode({ ...base, operationMode: 'rule' }),
+      { mode: 'facebook_rule', blocker: null },
+    );
+    assert.deepEqual(
+      decideFacebookBrowseMode({ ...base, operationMode: 'consumption' }),
+      { mode: 'consumption', blocker: null },
     );
     assert.deepEqual(
       decideFacebookBrowseMode({ ...base, platform: 'xiaohongshu', personaBinding: 'unbound' }),

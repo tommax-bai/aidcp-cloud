@@ -758,6 +758,9 @@ test('completeProvisioningIntent atomically stores Facebook slow start at Shangh
         completed_env_key: null,
         completed_at: null,
       }] };
+      if (/nextval\('facebook_operation_policy_revision_seq'\)/.test(sql)) {
+        return { rows: [{ revision: 41 }] };
+      }
       if (/INSERT INTO client_environments/.test(sql)) return { rows: [{ env_key: 'fb-new' }] };
       if (/INSERT INTO client_env_scope/.test(sql)) return { rows: [{
         env_key: 'fb-new', label: 'FB new', platform: 'facebook', assigned_at: assignedAt,
@@ -825,6 +828,9 @@ function provisioningClient(calls: { sql: string; params?: unknown[] }[], proofH
         completed_env_key: null,
         completed_at: null,
       }] };
+      if (/nextval\('facebook_operation_policy_revision_seq'\)/.test(sql)) {
+        return { rows: [{ revision: 41 }] };
+      }
       if (/INSERT INTO client_environments/.test(sql)) return { rows: [{ env_key: 'fb-new' }] };
       if (/INSERT INTO client_env_scope/.test(sql)) return { rows: [{
         env_key: 'fb-new', label: 'FB new', platform: 'facebook', assigned_at: new Date(),
@@ -879,7 +885,60 @@ test('创建意图：规则模式 + 免审与环境登记、归属、intent 完�
   assert.ok(bumps.includes('content_schedule'), '规则模式落库必须同事务推进配置镜像版本');
 });
 
-test('创建意图：省略两个字段的旧客户端请求保持兼容，一行配置都不写', async () => {
+test('创建意图：旧客户端省略运行字段时写 persona 统一策略，但不写 legacy 覆盖行', async () => {
+  const intentId = '11111111-1111-4111-8111-111111111111';
+  const proof = 'A'.repeat(43);
+  const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const pool = { connect: async () => provisioningClient(calls, proofHash) } as unknown as pg.Pool;
+  let authorityRevision = 0;
+  const readImmediateAuthority = () => authorityRevision;
+  const result = await new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    refreshFacebookOperationPolicyAuthority: async () => {
+      assert.ok(
+        calls.some((call) => call.sql === 'COMMIT'),
+        'authority refresh must run after the provisioning transaction commits',
+      );
+      const policyInsert = calls.find(
+        (call) => /INSERT INTO facebook_operation_policy\s/.test(call.sql),
+      );
+      authorityRevision = Number(policyInsert?.params?.[7] ?? 0);
+    },
+  })
+    .completeProvisioningIntent('user-a', {
+      intentId, proof, envKey: 'fb-new', label: 'FB new', platform: 'facebook',
+      proxyAuthority: { state: 'no_proxy' },
+    });
+  assert.equal(result.ok, true);
+  assert.equal(
+    readImmediateAuthority(),
+    41,
+    'complete must await refresh so an immediate authority read sees the committed revision',
+  );
+  const policyInsert = calls.find(
+    (call) => /INSERT INTO facebook_operation_policy\s/.test(call.sql),
+  );
+  assert.ok(policyInsert, '每个新 Facebook 环境都必须有统一策略');
+  assert.equal(policyInsert.params?.[1], 'persona');
+  assert.equal(policyInsert.params?.[7], 41);
+  assert.ok(
+    calls.some((call) => /INSERT INTO facebook_operation_policy_audit/.test(call.sql)),
+    '初始策略与初始 audit 必须同事务',
+  );
+  assert.equal(
+    calls.some((call) => /INSERT INTO facebook_rule_mode_environment_config/.test(call.sql)),
+    false,
+    'legacy 规则覆盖仍保持省略',
+  );
+  assert.equal(
+    calls.some((call) => /INSERT INTO environment_comment_approval_policy/.test(call.sql)),
+    false,
+  );
+});
+
+test('创建意图：consumption 使用一次全局 revision 写 policy + audit 并返回 cadence-free 投影', async () => {
   const intentId = '11111111-1111-4111-8111-111111111111';
   const proof = 'A'.repeat(43);
   const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
@@ -887,19 +946,171 @@ test('创建意图：省略两个字段的旧客户端请求保持兼容，一�
   const pool = { connect: async () => provisioningClient(calls, proofHash) } as unknown as pg.Pool;
   const result = await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool })
     .completeProvisioningIntent('user-a', {
-      intentId, proof, envKey: 'fb-new', label: 'FB new', platform: 'facebook',
+      intentId,
+      proof,
+      envKey: 'fb-new',
+      label: 'FB new',
+      platform: 'facebook',
+      facebookOperationMode: 'consumption',
       proxyAuthority: { state: 'no_proxy' },
     });
-  assert.equal(result.ok, true);
+  assert.deepEqual(result, {
+    ok: true,
+    idempotent: false,
+    environment: {
+      envKey: 'fb-new',
+      label: 'FB new',
+      platform: 'facebook',
+      source: 'admin',
+      assignedAt: result.ok ? result.environment.assignedAt : 0,
+    },
+    facebookOperationPolicy: {
+      baseMode: 'consumption',
+      effectiveMode: null,
+      policyRevision: 41,
+      slowStart: { state: 'off' },
+      blocker: null,
+    },
+  });
   assert.equal(
-    calls.some((call) => /INSERT INTO facebook_rule_mode_environment_config/.test(call.sql)),
-    false,
-    '不写一行 enabled=false 的配置：「没有行」才是「未配置」的权威表达',
+    calls.filter((call) => /nextval\('facebook_operation_policy_revision_seq'\)/.test(call.sql)).length,
+    1,
   );
+  const policyInsert = calls.find(
+    (call) => /INSERT INTO facebook_operation_policy\s/.test(call.sql),
+  )!;
+  assert.deepEqual(policyInsert.params, [
+    'fb-new',
+    'consumption',
+    5,
+    2,
+    5,
+    2,
+    2,
+    41,
+    `client-provision:${intentId}`,
+  ]);
+  const auditInsert = calls.find(
+    (call) => /INSERT INTO facebook_operation_policy_audit/.test(call.sql),
+  )!;
+  assert.equal(auditInsert.params?.[0], 'fb-new');
+  assert.equal(auditInsert.params?.[1], 41);
+  assert.equal(auditInsert.params?.[3], intentId);
+  assert.equal(auditInsert.params?.[4], intentId);
+  const after = JSON.parse(String(auditInsert.params?.[2])) as {
+    baseMode: string;
+    policyRevision: number;
+    rule: Record<string, number>;
+    consumption: Record<string, number>;
+  };
+  assert.deepEqual(after, {
+    baseMode: 'consumption',
+    rule: { viewsPerLike: 5, joinEveryNRounds: 2 },
+    consumption: {
+      viewsPerLike: 5,
+      confirmedLikesPerJoin: 2,
+      confirmedJoinsPerComment: 2,
+    },
+    policySchemaVersion: 1,
+    policyRevision: 41,
+  });
+  assert.ok(calls.indexOf(policyInsert) < calls.findIndex((call) => call.sql === 'COMMIT'));
+  assert.ok(calls.indexOf(auditInsert) < calls.findIndex((call) => call.sql === 'COMMIT'));
+});
+
+test('创建意图：统一模式与任一 legacy 布尔共存（包括 false）在触库前拒绝', async () => {
+  const pool = {
+    connect: async () => assert.fail('新旧运行意图冲突 MUST 在触库前被拒绝'),
+  } as unknown as pg.Pool;
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  const base = {
+    intentId: '11111111-1111-4111-8111-111111111111',
+    proof: 'A'.repeat(43),
+    envKey: 'fb-new',
+    platform: 'facebook',
+    facebookOperationMode: 'consumption' as const,
+    proxyAuthority: { state: 'no_proxy' } as const,
+  };
+  for (const legacy of [
+    { slowStartEnabled: false },
+    { facebookRuleModeEnabled: false },
+    { slowStartEnabled: true },
+    { facebookRuleModeEnabled: true },
+  ]) {
+    assert.deepEqual(
+      await store.completeProvisioningIntent('user-a', { ...base, ...legacy }),
+      { ok: false, reason: 'conflicting_run_mode' },
+    );
+  }
+});
+
+test('创建意图：0099 policy capability 缺失时整事务回滚且 intent 不消耗', async () => {
+  const intentId = '11111111-1111-4111-8111-111111111111';
+  const proof = 'A'.repeat(43);
+  const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const client = provisioningClient(calls, proofHash);
+  const originalQuery = client.query;
+  client.query = async (sql: string, params?: unknown[]) => {
+    if (/INSERT INTO facebook_operation_policy\s/.test(sql)) {
+      calls.push({ sql, params });
+      throw Object.assign(new Error('relation does not exist'), { code: '42P01' });
+    }
+    return originalQuery(sql, params);
+  };
+  const pool = { connect: async () => client } as unknown as pg.Pool;
+  const result = await new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool })
+    .completeProvisioningIntent('user-a', {
+      intentId,
+      proof,
+      envKey: 'fb-new',
+      platform: 'facebook',
+      proxyAuthority: { state: 'no_proxy' },
+    });
+  assert.deepEqual(result, { ok: false, reason: 'schema_unavailable' });
+  assert.ok(calls.some((call) => call.sql === 'ROLLBACK'));
+  assert.equal(calls.some((call) => call.sql === 'COMMIT'), false);
   assert.equal(
-    calls.some((call) => /INSERT INTO environment_comment_approval_policy/.test(call.sql)),
+    calls.some((call) => /SET state='completed'/.test(call.sql)),
     false,
+    'policy failure must happen before intent completion mutation',
   );
+});
+
+test('创建意图：提交后 authority refresh 失败不回成功，重试可走 completed readback', async () => {
+  const intentId = '11111111-1111-4111-8111-111111111111';
+  const proof = 'A'.repeat(43);
+  const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
+  const calls: { sql: string; params?: unknown[] }[] = [];
+  const pool = {
+    connect: async () => provisioningClient(calls, proofHash),
+  } as unknown as pg.Pool;
+  const result = await new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool,
+    refreshFacebookOperationPolicyAuthority: async () => {
+      throw new Error('refresh_failed');
+    },
+  }).completeProvisioningIntent('user-a', {
+    intentId,
+    proof,
+    envKey: 'fb-new',
+    platform: 'facebook',
+    facebookOperationMode: 'consumption',
+    proxyAuthority: { state: 'no_proxy' },
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    reason: 'operation_policy_refresh_unavailable',
+    currentFacebookOperationPolicy: {
+      baseMode: 'consumption',
+      effectiveMode: null,
+      policyRevision: 41,
+      slowStart: { state: 'off' },
+      blocker: null,
+    },
+  });
+  assert.ok(calls.some((call) => call.sql === 'COMMIT'), 'policy transaction is already durable');
 });
 
 test('创建意图：慢启动与规则模式同时为真整请求拒绝，MUST NOT 静默取其一', async () => {
@@ -978,6 +1189,9 @@ test('创建意图：已完成 intent 的幂等重试只回既成归属，MUST N
         env_key: 'fb-new', state: 'no_proxy', proxy_type: null, proxy_host: null, proxy_port: null,
         proxy_user: null, proxy_password: null, revision: 1, source: 'provisioning', updated_at: new Date(0),
       }] };
+      if (/FROM facebook_operation_policy p/.test(sql)) return { rows: [{
+        base_mode: 'rule', policy_revision: 41, slow_start_since: null,
+      }] };
       return { rows: [] };
     },
     release() {},
@@ -1006,6 +1220,96 @@ test('创建意图：已完成 intent 的幂等重试只回既成归属，MUST N
   }
 });
 
+test('创建意图：completed intent 读回真实 policy，模式碰撞返回 current 而不伪装幂等成功', async () => {
+  const intentId = '11111111-1111-4111-8111-111111111111';
+  const proof = 'A'.repeat(43);
+  const proofHash = createHash('sha256').update(proof, 'utf8').digest('hex');
+  const makePool = (calls: { sql: string; params?: unknown[] }[]) => ({
+    connect: async () => ({
+      query: async (sql: string, params?: unknown[]) => {
+        calls.push({ sql, params });
+        if (/SELECT status FROM client_users/.test(sql)) return { rows: [{ status: 'enabled' }] };
+        if (/FROM client_env_provisioning_intents/.test(sql)) return { rows: [{
+          proof_hash: proofHash,
+          state: 'completed',
+          expires_at: new Date(Date.now() + 60_000),
+          completed_env_key: 'fb-new',
+          completed_at: new Date(),
+        }] };
+        if (/FROM client_env_scope/.test(sql)) return { rows: [{
+          env_key: 'fb-new', label: 'FB new', platform: 'facebook', assigned_at: new Date(0),
+        }] };
+        if (/FROM client_environment_proxy_authorities/.test(sql)) return { rows: [{
+          env_key: 'fb-new',
+          state: 'no_proxy',
+          proxy_type: null,
+          proxy_host: null,
+          proxy_port: null,
+          proxy_user: null,
+          proxy_password: null,
+          revision: 1,
+          source: 'provisioning',
+          updated_at: new Date(0),
+        }] };
+        if (/FROM facebook_operation_policy p/.test(sql)) return { rows: [{
+          base_mode: 'consumption',
+          policy_revision: 73,
+          slow_start_since: null,
+        }] };
+        return { rows: [] };
+      },
+      release() {},
+    }),
+  }) as unknown as pg.Pool;
+  const base = {
+    intentId,
+    proof,
+    envKey: 'fb-new',
+    platform: 'facebook',
+    proxyAuthority: { state: 'no_proxy' } as const,
+  };
+
+  const matchingCalls: { sql: string; params?: unknown[] }[] = [];
+  const matching = await new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: makePool(matchingCalls),
+  }).completeProvisioningIntent('user-a', {
+    ...base,
+    facebookOperationMode: 'consumption',
+  });
+  assert.equal(matching.ok, true);
+  if (matching.ok) {
+    assert.equal(matching.idempotent, true);
+    assert.equal(matching.facebookOperationPolicy?.policyRevision, 73);
+    assert.equal(matching.facebookOperationPolicy?.baseMode, 'consumption');
+  }
+
+  const collisionCalls: { sql: string; params?: unknown[] }[] = [];
+  const collision = await new ClientUserStore({
+    schemaEnsurer: ensureCapabilitySchema,
+    pool: makePool(collisionCalls),
+  }).completeProvisioningIntent('user-a', {
+    ...base,
+    facebookOperationMode: 'rule',
+  });
+  assert.deepEqual(collision, {
+    ok: false,
+    reason: 'intent_operation_mode_mismatch',
+    currentFacebookOperationPolicy: {
+      baseMode: 'consumption',
+      effectiveMode: null,
+      policyRevision: 73,
+      slowStart: { state: 'off' },
+      blocker: null,
+    },
+  });
+  assert.ok(collisionCalls.some((call) => call.sql === 'ROLLBACK'));
+  assert.equal(
+    collisionCalls.some((call) => /UPDATE facebook_operation_policy/.test(call.sql)),
+    false,
+  );
+});
+
 /**
  * 账号 → 唯一绑定环境的反查镜像（本 change 新增）。三条判据：
  * 唯一绑定才解析得出；多环境 = 绑定冲突；同一环境归属多客户 = 跨客户争用。
@@ -1014,6 +1318,11 @@ test('创建意图：已完成 intent 的幂等重试只回既成归属，MUST N
 test('账号→环境反查：唯一绑定解析成功，多环境与跨客户争用都 fail-closed', async () => {
   const pool = fakePool((sql) => {
     if (/FROM client_environments e/.test(sql) && /owner_count/.test(sql)) {
+      assert.match(sql, /COALESCE\(e\.lifecycle_state, 'active'\) = 'active'/);
+      assert.match(
+        sql,
+        /lower\(btrim\(COALESCE\(e\.platform, ''\)\)\) IN \('facebook', 'fb'\)/,
+      );
       return { rows: [
         { env_key: 'env-solo', account_id: 'acct-solo', slow_start_since: null, owner_count: 1 },
         { env_key: 'env-a', account_id: 'acct-dup', slow_start_since: null, owner_count: 1 },
@@ -1044,6 +1353,35 @@ test('账号→环境反查：唯一绑定解析成功，多环境与跨客户�
   // 慢启动那份镜像只看环境个数：跨客户争用的账号在它眼里仍是唯一绑定（既有语义，本 change 不改）。
   assert.equal(store.hasAmbiguousEnvironmentBinding('acct-dup'), true);
   assert.equal(store.hasAmbiguousEnvironmentBinding('acct-contended'), false);
+});
+
+test('账号→环境反查不让已删除或非 Facebook 环境制造冲突', async () => {
+  const pool = fakePool((sql) => {
+    if (/FROM client_environments e/.test(sql) && /owner_count/.test(sql)) {
+      assert.match(sql, /COALESCE\(e\.lifecycle_state, 'active'\) = 'active'/);
+      assert.match(
+        sql,
+        /lower\(btrim\(COALESCE\(e\.platform, ''\)\)\) IN \('facebook', 'fb'\)/,
+      );
+      // The database predicate has removed a deleted historical binding and a
+      // non-Facebook binding for this account; only current Facebook authority remains.
+      return { rows: [{
+        env_key: 'env-current',
+        account_id: 'acct-rebound',
+        slow_start_since: null,
+        owner_count: 1,
+      }] };
+    }
+    return { rows: [] };
+  });
+  const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  await store.refreshEnvironmentSlowStartMirror();
+
+  assert.deepEqual(
+    store.resolveEnvironmentKeyForAccount('acct-rebound'),
+    { ok: true, envKey: 'env-current' },
+  );
+  assert.equal(store.hasAmbiguousEnvironmentBinding('acct-rebound'), false);
 });
 
 test('listEnvScope ignores client self-claims and revoked assignments', async () => {

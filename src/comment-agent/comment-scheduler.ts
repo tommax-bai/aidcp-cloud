@@ -44,6 +44,7 @@ import {
   type PlatformId,
   type CommentPlatformProfile,
 } from '../platform/index.js';
+import { facebookPostKey } from '../platform/facebook-presented-video.js';
 import { validateFacebookComment } from './facebook-comment-validators.js';
 import type { EffectiveFacebookCommentConfig } from '../kernel/facebook-comment-config-types.js';
 import type { ResolveFacebookRegionCommentTemplatesResult } from '../kernel/facebook-group-types.js';
@@ -86,6 +87,45 @@ export interface FacebookCommentRunResult {
   /** 本次是「要求带联系方式但账号没配、按显式声明降级发出的普通评论」。 */
   contactFallbackApplied?: boolean;
 }
+
+export interface FacebookCommentModeExactTarget {
+  accountId: string;
+  groupUrl: string;
+  contentKey: string;
+  contentUrl: string;
+  selection: 'first_commentable_group_post';
+}
+
+export interface FacebookCommentModeTriggerOptions {
+  source: 'consumption';
+  groupUrl: string;
+  selection: 'first_commentable_group_post';
+  approvalMode?: ContentScheduleApprovalMode;
+  /**
+   * Same RiskController-backed just-in-time gate used by the normal comment
+   * path. It is re-read after approval and before the durable dispatch CAS.
+   */
+  actionGate: (action: 'comment') => { allowed: boolean; reason?: string };
+  /**
+   * Runs immediately after Edge resolves the exact first commentable item and
+   * before dedupe/composition/approval. Returning false leaves the platform
+   * untouched.
+   */
+  onTargetSelected: (
+    target: FacebookCommentModeExactTarget,
+  ) => boolean | void | Promise<boolean | void>;
+  /**
+   * Last pre-write boundary. Cloud must atomically bind the exact target and
+   * mark its durable action dispatched here. Only true/void authorizes submit.
+   */
+  onBeforeSubmit: (
+    target: FacebookCommentModeExactTarget,
+  ) => boolean | void | Promise<boolean | void>;
+}
+
+export type FacebookCommentModeTriggerResult =
+  | { triggered: false; reason: string }
+  | { triggered: true; result: FacebookCommentRunResult };
 
 /**
  * 本次评论的联系方式**实际**处置（change facebook-rule-comment-plain-fallback）。
@@ -471,6 +511,74 @@ export class CommentScheduler {
   /** 是否该账号已有任务在跑（观测用）。 */
   isRunning(accountId: string): boolean {
     return this.running.has(accountId);
+  }
+
+  /**
+   * Mode-owned automatic Facebook group comment.
+   *
+   * This is deliberately narrower than triggerManual: the caller supplies one
+   * already-selected historical group, keyword search is disabled, contact
+   * injection and join-first are unavailable, and both durable target hooks
+   * must authorize the exact first-commentable item before submission.
+   */
+  async triggerForMode(
+    accountId: string,
+    options: FacebookCommentModeTriggerOptions,
+  ): Promise<FacebookCommentModeTriggerResult> {
+    if (!accountId || accountId === 'default') {
+      return { triggered: false, reason: 'account_required' };
+    }
+    if (options.source !== 'consumption') {
+      return { triggered: false, reason: 'unsupported_mode_source' };
+    }
+    const groupUrl = options.groupUrl.trim();
+    if (!groupUrl || options.selection !== 'first_commentable_group_post') {
+      return { triggered: false, reason: 'invalid_exact_group_target' };
+    }
+    if (!this.deps.facebookConfigFor || !this.deps.facebookCanComment) {
+      return { triggered: false, reason: 'facebook_comment_runtime_unavailable' };
+    }
+    if (this.running.has(accountId)) {
+      return { triggered: false, reason: 'running' };
+    }
+
+    // Check + add contains no await, so every local comment source shares the
+    // same account single-flight boundary.
+    this.running.add(accountId);
+    try {
+      const profile = await this.platformProfileFor(accountId);
+      if (profile.platform !== 'facebook') {
+        return { triggered: false, reason: 'not_facebook_account' };
+      }
+      const approvalMode = await this.effectiveApprovalMode(
+        accountId,
+        options.approvalMode ?? 'review',
+      );
+      const result = await this.runFacebookTargetedTask(accountId, {
+        contact: { kind: 'not_requested' },
+        overrideContainerUrl: groupUrl,
+        approvalMode,
+        ignoreKeywords: true,
+        source: 'facebook_consumption',
+        actionGate: (action) => action === 'comment'
+          ? options.actionGate('comment')
+          : { allowed: false, reason: 'consumption_join_not_authorized' },
+        modeHooks: {
+          onTargetSelected: options.onTargetSelected,
+          onBeforeSubmit: options.onBeforeSubmit,
+        },
+      });
+      return { triggered: true, result };
+    } catch (error) {
+      (this.deps.logger ?? console).warn?.(
+        `[comment-scheduler] consumption mode comment failed account=${accountId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { triggered: false, reason: 'comment_runtime_exception' };
+    } finally {
+      this.running.delete(accountId);
+    }
   }
 
   /**
@@ -899,7 +1007,13 @@ export class CommentScheduler {
       originChatId?: string;
       actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
       /** 触发来源；`facebook_rule_batch` 时评论段只允许模板正文。 */
-      source?: 'facebook_rule_batch';
+      source?: 'facebook_rule_batch' | 'facebook_consumption';
+      /** Consumption uses the explicit first-commentable selector regardless of account keywords. */
+      ignoreKeywords?: boolean;
+      modeHooks?: Pick<
+        FacebookCommentModeTriggerOptions,
+        'onTargetSelected' | 'onBeforeSubmit'
+      >;
     } = {},
   ): Promise<FacebookCommentRunResult> {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
@@ -954,7 +1068,13 @@ export class CommentScheduler {
       originChatId?: string;
       actionGate?: (action: 'join_group' | 'comment') => { allowed: boolean; reason?: string };
       /** 触发来源；`facebook_rule_batch` 时评论段只允许模板正文。 */
-      source?: 'facebook_rule_batch';
+      source?: 'facebook_rule_batch' | 'facebook_consumption';
+      /** Consumption uses the explicit first-commentable selector regardless of account keywords. */
+      ignoreKeywords?: boolean;
+      modeHooks?: Pick<
+        FacebookCommentModeTriggerOptions,
+        'onTargetSelected' | 'onBeforeSubmit'
+      >;
     },
     audit: (row: FacebookCommentAuditRow) => void,
   ): Promise<void> {
@@ -965,7 +1085,7 @@ export class CommentScheduler {
 
     const cfg = d.facebookConfigFor!(accountId);
     // 关键词是定位策略而非启用闸：有词走群内搜索；空词直接打开群讨论流第一条可评论帖。
-    const keyword = cfg.keywords.length > 0
+    const keyword = !options.ignoreKeywords && cfg.keywords.length > 0
       ? (cfg.keywords[Math.floor(rand() * cfg.keywords.length)] ?? cfg.keywords[0] ?? '')
       : '';
     // 规则批次的正文方案硬闸（change facebook-rule-mode-without-persona）：只有模板这条链路不读人设。
@@ -1111,7 +1231,11 @@ export class CommentScheduler {
               if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
               return;
             }
-            if (!options.force && await dedup.hasInteracted(target, 'comment').catch(() => false)) {
+            if (
+              !options.modeHooks
+              && !options.force
+              && await dedup.hasInteracted(target, 'comment').catch(() => false)
+            ) {
               // “首帖”是确定目标；已评过也不顺延第二帖、不偷偷改走搜索。
               audit({ accountId, outcome: 'no_strong_candidate', reason: 'all_deduped', shadow, container });
               return;
@@ -1123,6 +1247,48 @@ export class CommentScheduler {
           if (!open.ok) {
             audit({ accountId, outcome: mapFacebookOpenOutcome(open.reason), reason: open.reason, shadow, keyword, container });
             if (usingCoverage && open.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, open.reason);
+            return;
+          }
+          const exactModeTarget: FacebookCommentModeExactTarget | null = options.modeHooks
+            ? {
+                accountId,
+                groupUrl: containerUrl,
+                contentKey: facebookPostKey(target) || target,
+                contentUrl: target,
+                selection: 'first_commentable_group_post',
+              }
+            : null;
+          if (
+            exactModeTarget
+            && !(await this.acceptFacebookCommentModeHook(
+              options.modeHooks!.onTargetSelected,
+              exactModeTarget,
+              'target_selected',
+            ))
+          ) {
+            audit({
+              accountId,
+              outcome: 'submit_failed',
+              reason: 'dispatch_suppressed:consumption_target_rejected',
+              shadow: false,
+              container,
+            });
+            return;
+          }
+          if (
+            exactModeTarget
+            && !options.force
+            && await dedup.hasInteracted(target, 'comment').catch(() => false)
+          ) {
+            // The exact first item is durable at this point. A dedupe hit ends
+            // this attempt; it never advances to the second item.
+            audit({
+              accountId,
+              outcome: 'no_strong_candidate',
+              reason: 'all_deduped',
+              shadow,
+              container,
+            });
             return;
           }
           const postText = open.postText;
@@ -1196,6 +1362,25 @@ export class CommentScheduler {
             });
             return;
           }
+          if (
+            exactModeTarget
+            && !(await this.acceptFacebookCommentModeHook(
+              options.modeHooks!.onBeforeSubmit,
+              exactModeTarget,
+              'before_submit',
+            ))
+          ) {
+            audit({
+              accountId,
+              outcome: 'submit_failed',
+              reason: 'dispatch_suppressed:consumption_before_submit_rejected',
+              shadow: false,
+              keyword,
+              container,
+              textLength: v.text.length,
+            });
+            return;
+          }
           // 提交被更高优先级任务抢占 / 边端失配 taskId 静默丢弃 → submitComment 超时回 ok:false → 走 else 诚实非提交（不打去重、可重试）。
           const submit = await steps.submitComment(target, v.text, groupChatCode, options.fastReturnToFeed === true);
           // 防重复真发（BLOCKING §5.4）：仅在**真提交了**（成功 或 提交后确认不了 verification_ambiguous）时打去重标记——
@@ -1209,7 +1394,9 @@ export class CommentScheduler {
           if (reallySubmitted) await dedup.recordInteraction(target, 'comment').catch(() => {});
           if (submit.ok) {
             audit({ accountId, outcome: 'commented', shadow: false, keyword, container, textLength: v.text.length });
-            if (usingCoverage) void d.facebookCoverageOnCommented?.(accountId, containerUrl);
+            if (usingCoverage && !options.modeHooks) {
+              void d.facebookCoverageOnCommented?.(accountId, containerUrl);
+            }
           } else {
             audit({
               accountId,
@@ -1232,6 +1419,25 @@ export class CommentScheduler {
         return;
       }
       throw err;
+    }
+  }
+
+  private async acceptFacebookCommentModeHook(
+    hook: (
+      target: FacebookCommentModeExactTarget,
+    ) => boolean | void | Promise<boolean | void>,
+    target: FacebookCommentModeExactTarget,
+    phase: 'target_selected' | 'before_submit',
+  ): Promise<boolean> {
+    try {
+      return (await hook(target)) !== false;
+    } catch (error) {
+      (this.deps.logger ?? console).warn?.(
+        `[comment-scheduler] mode hook rejected phase=${phase} account=${target.accountId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
     }
   }
 

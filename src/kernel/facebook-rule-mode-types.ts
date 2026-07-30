@@ -12,6 +12,30 @@ export const FACEBOOK_RULE_DEFINITION_VERSION = 2;
 export const FACEBOOK_RULE_VIEW_THRESHOLD = 5;
 export const FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS = 2;
 
+/** Stable runtime algorithm identity. Cadence numbers live in a revisioned policy snapshot. */
+export const FACEBOOK_RULE_RUNTIME_DEFINITION_ID = 'facebook_rule_cadence';
+export const FACEBOOK_RULE_RUNTIME_DEFINITION_VERSION = 3;
+
+export interface FacebookRulePolicySnapshot {
+  viewsPerLike: number;
+  joinEveryNRounds: number;
+}
+
+export interface FacebookRuleRuntimePolicy {
+  policyRevision: number;
+  snapshot: FacebookRulePolicySnapshot;
+}
+
+export const DEFAULT_FACEBOOK_RULE_POLICY_SNAPSHOT: Readonly<FacebookRulePolicySnapshot> = {
+  viewsPerLike: FACEBOOK_RULE_VIEW_THRESHOLD,
+  joinEveryNRounds: FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
+};
+
+export const DEFAULT_FACEBOOK_RULE_RUNTIME_POLICY: Readonly<FacebookRuleRuntimePolicy> = {
+  policyRevision: 0,
+  snapshot: DEFAULT_FACEBOOK_RULE_POLICY_SNAPSHOT,
+};
+
 /** 上一版单轴定义（10 浏览 → 1 批次含点赞+加群联系评论）。仅用于识别存量行，不再写入。 */
 export const FACEBOOK_RULE_LEGACY_DEFINITION_ID = 'facebook_browse_10_like_1_join_contact_1';
 export const FACEBOOK_RULE_LEGACY_DEFINITION_VERSION = 1;
@@ -23,15 +47,20 @@ export const FACEBOOK_RULE_LEGACY_DEFINITION_VERSION = 1;
  * 判据是**轮次序号**而不是「已确认点赞数」：点赞被风控抑制 / 结构性跳过 / 已赞 / 结果不明一律照常
  * 推进周期。若改成只数成功点赞，点赞日配额或冷却一旦耗尽，加群与联系评论会静默全停。
  */
-export function facebookRuleRoundIncludesJoin(sequence: number): boolean {
+export function facebookRuleRoundIncludesJoin(
+  sequence: number,
+  joinEveryNRounds = FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
+): boolean {
   if (!Number.isFinite(sequence) || sequence < 1) return false;
-  return Math.trunc(sequence) % FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS === 0;
+  if (!Number.isInteger(joinEveryNRounds) || joinEveryNRounds < 1) return false;
+  return Math.trunc(sequence) % joinEveryNRounds === 0;
 }
 
 export type FacebookBrowseMode =
   | 'facebook_rule'
   | 'persona'
   | 'slow_start'
+  | 'consumption'
   | 'blocked'
   | 'unsupported';
 
@@ -53,6 +82,8 @@ export type FacebookRuleActionState =
    * 与「节奏规定本轮不做」是不同事实，混用会让后台把一半轮次显示成两个假失败。
    */
   | 'not_scheduled'
+  /** The policy changed before this action reached irreversible dispatch. */
+  | 'policy_superseded'
   /**
    * 评论已确认上墙，但**不带联系方式**——账号没配联系方式、按显式声明降级发的普通评论
    * （change facebook-rule-comment-plain-fallback）。
@@ -79,6 +110,8 @@ export interface FacebookRuleModeConfig {
 
 export interface FacebookRuleModeBatchView {
   batchId: string;
+  policyRevision: number;
+  policySnapshot: FacebookRulePolicySnapshot;
   sequence: number;
   /** 本轮是否包含加群联系评论（由 sequence 派生，二级节奏的真态）。 */
   includesJoin: boolean;
@@ -93,6 +126,7 @@ export interface FacebookRuleModeBatchView {
 }
 
 export interface FacebookRuleModeRuntimeView {
+  policyRevision: number;
   viewCount: number;
   threshold: number;
   joinEveryNRounds: number;
@@ -138,4 +172,10 @@ export type ApplyFacebookRuleViewResult =
   | { kind: 'counted'; viewCount: number }
   | { kind: 'duplicate'; viewCount: number }
   | { kind: 'batch_active'; batchId: string }
+  /**
+   * A policy switch terminalized one or more old-revision batches before any
+   * irreversible dispatch. The view that observed the switch is deliberately
+   * not credited to the new revision; its collection starts at zero.
+   */
+  | { kind: 'policy_superseded'; batchIds: string[] }
   | { kind: 'batch_created'; batch: FacebookRuleModeBatchView };

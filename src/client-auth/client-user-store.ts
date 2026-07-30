@@ -56,6 +56,12 @@ import {
   FACEBOOK_RULE_DEFINITION_ID,
   FACEBOOK_RULE_DEFINITION_VERSION,
 } from '../kernel/facebook-rule-mode-types.js';
+import {
+  FACEBOOK_OPERATION_POLICY_BOUNDS,
+  type FacebookBaseOperationMode,
+  type FacebookEffectiveOperationMode,
+  type FacebookRequestedOperationMode,
+} from '../config/facebook-operation-policy-store.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import type { ClientEnvAutomationReader, OffboardProjection } from '../kernel/client-env-automation-types.js';
 import type { OffboardCleanupGrantOperations } from '../kernel/offboard-cleanup-grant-types.js';
@@ -517,13 +523,31 @@ export type WriteEnvironmentProxyAuthorityResult =
       currentRevision?: number;
     };
 
+export interface ClientProvisionedFacebookOperationPolicy {
+  baseMode: FacebookBaseOperationMode;
+  effectiveMode: FacebookEffectiveOperationMode | null;
+  policyRevision: number;
+  slowStart: { state: 'active' | 'off' };
+  blocker: string | null;
+}
+
 export type CompleteProvisioningIntentResult =
-  | { ok: true; environment: ClientEnvScopeRow; idempotent: boolean }
-  | { ok: false; reason: 'disabled' | 'invalid_intent' | 'intent_expired' | 'intent_target_mismatch' |
-      'invalid_environment' | 'invalid_proxy_authority' | 'proxy_authority_mismatch' |
-      /** 慢启动与规则模式开启意图同时为真：互斥，整请求拒绝，MUST NOT 静默取其一。 */
-      'conflicting_run_mode' |
-      'environment_already_registered' | 'env_already_assigned' | 'schema_unavailable' };
+  | {
+      ok: true;
+      environment: ClientEnvScopeRow;
+      idempotent: boolean;
+      facebookOperationPolicy?: ClientProvisionedFacebookOperationPolicy;
+    }
+  | {
+      ok: false;
+      reason: 'disabled' | 'invalid_intent' | 'intent_expired' | 'intent_target_mismatch' |
+        'invalid_environment' | 'invalid_proxy_authority' | 'proxy_authority_mismatch' |
+        /** 慢启动与规则模式开启意图同时为真：互斥，整请求拒绝，MUST NOT 静默取其一。 */
+        'conflicting_run_mode' | 'intent_operation_mode_mismatch' |
+        'operation_policy_refresh_unavailable' |
+        'environment_already_registered' | 'env_already_assigned' | 'schema_unavailable';
+      currentFacebookOperationPolicy?: ClientProvisionedFacebookOperationPolicy;
+    };
 
 /**
  * 一条离场的对外视图。
@@ -605,6 +629,12 @@ const ENV_KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const PROVISIONING_INTENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROVISIONING_PROOF_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const PROVISIONING_PLATFORMS = new Set(['xiaohongshu', 'facebook', 'wechat_channels']);
+const FACEBOOK_OPERATION_MODES = new Set<FacebookRequestedOperationMode>([
+  'persona',
+  'slow_start',
+  'rule',
+  'consumption',
+]);
 const ENVIRONMENT_PROXY_TYPES = new Set<EnvironmentProxyType>(['http', 'https', 'socks5']);
 
 interface EnvironmentProxyAuthorityDbRow {
@@ -618,6 +648,32 @@ interface EnvironmentProxyAuthorityDbRow {
   revision: number;
   source: EnvironmentProxyAuthorityRecord['source'];
   updated_at: Date;
+}
+
+interface ProvisioningOperationPolicyDbRow {
+  base_mode: string;
+  policy_revision: number | string;
+  slow_start_since: Date | string | null;
+}
+
+function projectProvisioningOperationPolicy(
+  row: ProvisioningOperationPolicyDbRow | undefined,
+): ClientProvisionedFacebookOperationPolicy | null {
+  if (
+    !row
+    || (row.base_mode !== 'persona' && row.base_mode !== 'rule' && row.base_mode !== 'consumption')
+  ) {
+    return null;
+  }
+  const policyRevision = Number(row.policy_revision);
+  if (!Number.isSafeInteger(policyRevision) || policyRevision < 1) return null;
+  return {
+    baseMode: row.base_mode,
+    effectiveMode: null,
+    policyRevision,
+    slowStart: { state: row.slow_start_since == null ? 'off' : 'active' },
+    blocker: null,
+  };
 }
 
 export function normalizeEnvironmentProxyAuthority(value: unknown): EnvironmentProxyAuthorityValue | null {
@@ -716,6 +772,12 @@ export interface ClientUserStoreOptions {
    */
   mirrorVersionBumper?: MirrorVersionBumper;
   /**
+   * Provisioning writes the operation-policy tables directly in its ownership
+   * transaction. Await this post-commit authority refresh before reporting
+   * success so same-process reads/arbitration cannot observe the old cache.
+   */
+  refreshFacebookOperationPolicyAuthority?: () => Promise<void>;
+  /**
    * 离场**执行台账**的属主侧操作端口（Block③ L3 最终一致改造）。生产由组合根 server.ts 注入
    * automation 的实现（持 automation 池、自开事务）；缺省 = 不注入，只有真正走到物化路径时才当场
    * 抛错（fail-loud，绝非静默假成功）。不触发离场路径的调用方无需注入。
@@ -768,6 +830,7 @@ export interface ClientApprovalGroupCoverage {
 export class ClientUserStore {
   private readonly pool: pg.Pool;
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
+  private readonly refreshFacebookOperationPolicyAuthority?: () => Promise<void>;
   private readonly offboardMaterialization?: OffboardMaterializationOperations;
   private readonly automationReads?: ClientEnvAutomationReader;
   private readonly cleanupGrantOperations?: OffboardCleanupGrantOperations;
@@ -793,11 +856,23 @@ export class ClientUserStore {
   constructor(options: ClientUserStoreOptions) {
     this.schemaEnsurer = options.schemaEnsurer;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
+    this.refreshFacebookOperationPolicyAuthority =
+      options.refreshFacebookOperationPolicyAuthority;
     this.pool = options.pool ?? new Pool(resolveEnvPgConfig());
     this.offboardMaterialization = options.offboardMaterialization;
     this.automationReads = options.automationReads;
     this.cleanupGrantOperations = options.cleanupGrantOps;
     this.executionTarget = options.executionTarget;
+  }
+
+  private async refreshFacebookOperationPolicyAfterProvisioning(): Promise<boolean> {
+    if (!this.refreshFacebookOperationPolicyAuthority) return true;
+    try {
+      await this.refreshFacebookOperationPolicyAuthority();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -1162,6 +1237,8 @@ export class ClientUserStore {
                  WHERE s.env_key = e.env_key AND s.source = 'admin') AS owner_count
           FROM client_environments e
          WHERE e.account_id IS NOT NULL
+           AND COALESCE(e.lifecycle_state, 'active') = 'active'
+           AND lower(btrim(COALESCE(e.platform, ''))) IN ('facebook', 'fb')
          ORDER BY e.account_id, e.env_key`);
     const grouped = new Map<string, { envKey: string; since: number | null; ownerCount: number }[]>();
     for (const row of rows) {
@@ -1686,6 +1763,8 @@ export class ClientUserStore {
       slowStartEnabled?: boolean;
       /** Facebook 专属创建意图：环境规则模式（change environment-level-rule-mode-and-approval）。 */
       facebookRuleModeEnabled?: boolean;
+      /** Facebook 专属统一运行模式；与两个 legacy 运行意图字段互斥。 */
+      facebookOperationMode?: FacebookRequestedOperationMode;
       /** Facebook 专属创建意图：环境评论审批覆盖模式。省略 = 不写策略行（= 按来源规则）。 */
       commentApprovalMode?: string;
       proxyAuthority: unknown;
@@ -1706,11 +1785,18 @@ export class ClientUserStore {
       return { ok: false, reason: 'invalid_environment' };
     }
     if (!proxyAuthority) return { ok: false, reason: 'invalid_proxy_authority' };
-    // 三条创建意图闸，全部**先于任何写入**判定，任一不过整请求拒绝、不部分登记环境：
-    //   ① 三个 Facebook 专属字段只在 platform=facebook 时接受；
+    if (
+      input.facebookOperationMode !== undefined
+      && !FACEBOOK_OPERATION_MODES.has(input.facebookOperationMode)
+    ) {
+      return { ok: false, reason: 'invalid_environment' };
+    }
+    // 创建意图闸全部**先于任何写入**判定，任一不过整请求拒绝、不部分登记环境：
+    //   ① Facebook 专属字段只在 platform=facebook 时接受；
     //   ② 审批模式只接受两个枚举值；
-    //   ③ 慢启动与规则模式不得同时为真——同时提交 MUST fail-closed，MUST NOT 静默取其一。
-    const facebookOnlyIntent = input.slowStartEnabled === true
+    //   ③ 统一模式不得与任一 legacy 运行布尔共存，legacy 慢启动与规则也不得同时为真。
+    const facebookOnlyIntent = input.facebookOperationMode !== undefined
+      || input.slowStartEnabled === true
       || input.facebookRuleModeEnabled === true
       || input.commentApprovalMode !== undefined;
     if (facebookOnlyIntent && platform !== 'facebook') {
@@ -1721,12 +1807,26 @@ export class ClientUserStore {
         && input.commentApprovalMode !== 'auto_approve_all') {
       return { ok: false, reason: 'invalid_environment' };
     }
-    if (input.slowStartEnabled === true && input.facebookRuleModeEnabled === true) {
+    if (
+      (input.facebookOperationMode !== undefined
+        && (input.slowStartEnabled !== undefined || input.facebookRuleModeEnabled !== undefined))
+      || (input.slowStartEnabled === true && input.facebookRuleModeEnabled === true)
+    ) {
       return { ok: false, reason: 'conflicting_run_mode' };
     }
-    const slowStartSince = input.slowStartEnabled === true
+    const resolvedFacebookOperationMode: FacebookRequestedOperationMode =
+      input.facebookOperationMode
+      ?? (input.slowStartEnabled === true
+        ? 'slow_start'
+        : input.facebookRuleModeEnabled === true
+          ? 'rule'
+          : 'persona');
+    const slowStartSince = platform === 'facebook'
+      && resolvedFacebookOperationMode === 'slow_start'
       ? new Date(shanghaiDayStartMs(Date.now()))
       : null;
+    const provisioningActor = `client-provision:${intentId}`;
+    let provisionedFacebookOperationPolicy: ClientProvisionedFacebookOperationPolicy | undefined;
 
     const client = await this.pool.connect();
     try {
@@ -1779,11 +1879,69 @@ export class ClientUserStore {
           await client.query('ROLLBACK');
           return { ok: false, reason: 'proxy_authority_mismatch' };
         }
-        await client.query('COMMIT');
         const row = existing.rows[0];
-        if (!row) return { ok: false, reason: 'env_already_assigned' };
-        return { ok: true, idempotent: true, environment: { envKey: row.env_key, label: row.label,
-          platform: row.platform, source: 'admin', assignedAt: row.assigned_at.getTime() } };
+        if (!row) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'env_already_assigned' };
+        }
+        if ((row.platform ?? '').trim().toLowerCase() !== platform) {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'intent_target_mismatch' };
+        }
+        let currentFacebookOperationPolicy: ClientProvisionedFacebookOperationPolicy | undefined;
+        if (platform === 'facebook') {
+          const policyResult = await client.query<ProvisioningOperationPolicyDbRow>(
+            `SELECT p.base_mode,p.policy_revision,e.slow_start_since
+               FROM facebook_operation_policy p
+               JOIN client_environments e ON e.env_key=p.env_key
+              WHERE p.env_key=$1`,
+            [envKey],
+          );
+          const policyRow = policyResult.rows[0];
+          const projected = projectProvisioningOperationPolicy(policyRow);
+          if (!projected) {
+            await client.query('ROLLBACK');
+            return { ok: false, reason: 'schema_unavailable' };
+          }
+          currentFacebookOperationPolicy = projected;
+          const currentMode: FacebookRequestedOperationMode =
+            policyRow.slow_start_since != null ? 'slow_start' : projected.baseMode;
+          if (currentMode !== resolvedFacebookOperationMode) {
+            await client.query('ROLLBACK');
+            return {
+              ok: false,
+              reason: 'intent_operation_mode_mismatch',
+              currentFacebookOperationPolicy,
+            };
+          }
+        }
+        await client.query('COMMIT');
+        if (
+          platform === 'facebook'
+          && !(await this.refreshFacebookOperationPolicyAfterProvisioning())
+        ) {
+          return {
+            ok: false,
+            reason: 'operation_policy_refresh_unavailable',
+            ...(currentFacebookOperationPolicy
+              ? { currentFacebookOperationPolicy }
+              : {}),
+          };
+        }
+        return {
+          ok: true,
+          idempotent: true,
+          environment: {
+            envKey: row.env_key,
+            label: row.label,
+            platform: row.platform,
+            source: 'admin',
+            assignedAt: row.assigned_at.getTime(),
+          },
+          ...(currentFacebookOperationPolicy
+            ? { facebookOperationPolicy: currentFacebookOperationPolicy }
+            : {}),
+        };
       }
       if (intent.state === 'expired' || intent.expires_at.getTime() <= Date.now()) {
         await client.query(
@@ -1814,10 +1972,85 @@ export class ClientUserStore {
          VALUES ($1,$2,$3,$4,$5,$6,$7,1,'provisioning',$8,now())`,
         [envKey, proxyAuthority.state, ...proxyValues, userId],
       );
-      // 创建当刻的两项环境配置（change environment-level-rule-mode-and-approval）：与环境登记、
-      // 归属、intent 完成态**同一事务**。省略意图时一行都不写——「没有行」本身就是
-      // 「规则模式关 / 按来源规则」的权威表达，写一行 false 反而会把「未配置」伪装成「配置过」。
-      if (input.facebookRuleModeEnabled === true) {
+      if (platform === 'facebook') {
+        const baseMode: FacebookBaseOperationMode =
+          resolvedFacebookOperationMode === 'slow_start'
+            ? 'persona'
+            : resolvedFacebookOperationMode;
+        const revisionResult = await client.query<{ revision: number | string }>(
+          `SELECT nextval('facebook_operation_policy_revision_seq') AS revision`,
+        );
+        const policyRevision = Number(revisionResult.rows[0]?.revision);
+        if (!Number.isSafeInteger(policyRevision) || policyRevision < 1) {
+          throw new Error('facebook_operation_policy_revision_unavailable');
+        }
+        const rule = {
+          viewsPerLike: FACEBOOK_OPERATION_POLICY_BOUNDS.rule.viewsPerLike.default,
+          joinEveryNRounds: FACEBOOK_OPERATION_POLICY_BOUNDS.rule.joinEveryNRounds.default,
+        };
+        const consumption = {
+          viewsPerLike: FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.viewsPerLike.default,
+          confirmedLikesPerJoin:
+            FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedLikesPerJoin.default,
+          confirmedJoinsPerComment:
+            FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedJoinsPerComment.default,
+        };
+        await client.query(
+          `INSERT INTO facebook_operation_policy
+             (env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
+              consumption_views_per_like,consumption_confirmed_likes_per_join,
+              consumption_confirmed_joins_per_comment,policy_schema_version,
+              policy_revision,updated_at,updated_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,now(),$9)`,
+          [
+            envKey,
+            baseMode,
+            rule.viewsPerLike,
+            rule.joinEveryNRounds,
+            consumption.viewsPerLike,
+            consumption.confirmedLikesPerJoin,
+            consumption.confirmedJoinsPerComment,
+            policyRevision,
+            provisioningActor,
+          ],
+        );
+        const afterPolicy = {
+          baseMode,
+          rule,
+          consumption,
+          policySchemaVersion: 1,
+          policyRevision,
+        };
+        await client.query(
+          `INSERT INTO facebook_operation_policy_audit
+             (env_key,prior_revision,new_revision,before_policy,after_policy,
+              actor_class,actor_id,request_id,reason,created_at)
+           VALUES ($1,0,$2,NULL,$3::jsonb,'client-provision',$4,$5,
+                   'provision_initial_operation_policy',now())`,
+          [
+            envKey,
+            policyRevision,
+            JSON.stringify(afterPolicy),
+            intentId,
+            intentId,
+          ],
+        );
+        await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+        provisionedFacebookOperationPolicy = {
+          baseMode,
+          effectiveMode: null,
+          policyRevision,
+          slowStart: {
+            state: resolvedFacebookOperationMode === 'slow_start'
+              ? 'active'
+              : 'off',
+          },
+          blocker: null,
+        };
+      }
+      // Legacy 规则表只做兼容双写；统一 operation policy 才是运行方式权威。
+      // 评论审批覆盖仍与环境登记、归属和 intent 完成态同一事务。
+      if (resolvedFacebookOperationMode === 'rule') {
         await client.query(
           `INSERT INTO facebook_rule_mode_environment_config
              (env_key,enabled,definition_id,definition_version,updated_at,updated_by)
@@ -1827,12 +2060,11 @@ export class ClientUserStore {
             envKey,
             FACEBOOK_RULE_DEFINITION_ID,
             FACEBOOK_RULE_DEFINITION_VERSION,
-            `client-provision:${intentId}`,
+            provisioningActor,
           ],
         );
         // 规则模式配置落库 = content_schedule 这份配置镜像变了；同事务推进版本，
         // 否则另一进程到重启前都把这个新环境当「没开规则模式」。
-        await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
       }
       if (input.commentApprovalMode !== undefined) {
         await client.query(
@@ -1864,12 +2096,36 @@ export class ClientUserStore {
       this.mirrorVersionBumper?.notifyAfterCommit?.(
         'client_environment_slow_start',
       );
-      if (input.facebookRuleModeEnabled === true) {
+      if (platform === 'facebook') {
         this.mirrorVersionBumper?.notifyAfterCommit?.('content_schedule');
       }
+      if (
+        platform === 'facebook'
+        && !(await this.refreshFacebookOperationPolicyAfterProvisioning())
+      ) {
+        return {
+          ok: false,
+          reason: 'operation_policy_refresh_unavailable',
+          ...(provisionedFacebookOperationPolicy
+            ? { currentFacebookOperationPolicy: provisionedFacebookOperationPolicy }
+            : {}),
+        };
+      }
       const row = assigned.rows[0];
-      return { ok: true, idempotent: false, environment: { envKey: row.env_key, label: row.label,
-        platform: row.platform, source: 'admin', assignedAt: row.assigned_at.getTime() } };
+      return {
+        ok: true,
+        idempotent: false,
+        environment: {
+          envKey: row.env_key,
+          label: row.label,
+          platform: row.platform,
+          source: 'admin',
+          assignedAt: row.assigned_at.getTime(),
+        },
+        ...(provisionedFacebookOperationPolicy
+          ? { facebookOperationPolicy: provisionedFacebookOperationPolicy }
+          : {}),
+      };
     } catch (error) {
       await client.query('ROLLBACK');
       if (isMissingTable(error)) return { ok: false, reason: 'schema_unavailable' };

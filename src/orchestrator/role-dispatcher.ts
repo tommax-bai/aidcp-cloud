@@ -119,12 +119,25 @@ import {
 import type {
   ApplyFacebookRuleViewResult,
   FacebookRuleActionState,
+  FacebookRuleRuntimePolicy,
 } from '../kernel/facebook-rule-mode-types.js';
 import {
   selectFacebookRuleCard,
   stableFacebookRuleContentKey,
   type FacebookRuleModeDecision,
 } from './facebook-rule-mode.js';
+import {
+  classifyFacebookConsumptionLikeReceipt,
+} from './facebook-consumption-mode.js';
+import type {
+  ApplyFacebookConsumptionViewResult,
+  ClaimFacebookConsumptionActionResult,
+  FacebookConsumptionActionReceiptInput,
+  FacebookConsumptionActionView,
+  FacebookConsumptionRuntimePolicy,
+  MutateFacebookConsumptionActionResult,
+  SettleFacebookConsumptionActionResult,
+} from './facebook-consumption-mode-types.js';
 
 export {
   FACEBOOK_REELS_FOLLOW_PROBABILITY,
@@ -351,6 +364,7 @@ export interface RoleDispatcherOptions {
     contentKey: string;
     sourceDedupeKey: string;
     occurredAt: number;
+    policy?: FacebookRuleRuntimePolicy;
   }) => Promise<ApplyFacebookRuleViewResult>;
   /** 规则批次动作终态持久化。缺失时规则模式 fail-closed。 */
   updateFacebookRuleBatch?: (
@@ -378,6 +392,52 @@ export interface RoleDispatcherOptions {
    * 也绝不以模板顶替（fail-closed，两个方向都不猜）。
    */
   facebookRuleCommentBodyScheme?: (accountId: string) => 'template' | 'generated' | 'unavailable';
+  /** Consumption-mode confirmed-view reducer. Missing wiring is fail-closed. */
+  applyFacebookConsumptionView?: (input: {
+    accountId: string;
+    policy: FacebookConsumptionRuntimePolicy;
+    contentKey: string;
+    contentUrl: string;
+    sourceDedupeKey: string;
+    occurredAt: number;
+  }) => Promise<ApplyFacebookConsumptionViewResult>;
+  /** Lease one durable consumption action before authorizing its platform write. */
+  claimFacebookConsumptionAction?: (input: {
+    actionId: string;
+    accountId: string;
+    policyRevision: number;
+    ownerId: string;
+    leaseMs: number;
+  }) => Promise<ClaimFacebookConsumptionActionResult>;
+  /** Commit the dispatch phase immediately before handing a like to Edge. */
+  markFacebookConsumptionActionDispatched?: (input: {
+    actionId: string;
+    accountId: string;
+    policyRevision: number;
+    ownerId: string;
+    expectedVersion: number;
+    blocker?: string | null;
+  }) => Promise<MutateFacebookConsumptionActionResult>;
+  /** Persist a receipt and atomically advance confirmed-only counters. */
+  settleFacebookConsumptionAction?: (
+    input: FacebookConsumptionActionReceiptInput,
+  ) => Promise<SettleFacebookConsumptionActionResult>;
+  /**
+   * Join/comment actions are executed by the mode-specific server coordinator.
+   * It reuses the atomic executors but never enters persona time scheduling.
+   */
+  triggerFacebookConsumptionAction?: (
+    action: FacebookConsumptionActionView,
+  ) => Promise<void>;
+  /**
+   * Reconcile old consumption revisions before this dispatcher admits work.
+   * Rule-mode revision reconciliation is atomic inside applyFacebookRuleView.
+   */
+  supersedeFacebookOperationRuntime?: (input: {
+    accountId: string;
+    policyRevision: number;
+    mode: FacebookRuleModeDecision['mode'];
+  }) => Promise<void>;
   /**
    * 硬暂停闸（验证码/人工接管）：边缘是否处于硬暂停态。缺省始终 false。
    * 由 server 接线为读 ws-server 的 pausedEdges（isEdgePaused）。通知准入角色据此放弃巡视——
@@ -479,19 +539,6 @@ export interface RoleDispatcherOptions {
    * 讲成一件需要人去补配置的事）。
    */
   personaBinding?: (accountId: string) => PersonaBinding;
-  /**
-   * 会话启动闸的**唯一一处人设豁免**（change facebook-rule-mode-without-persona）：现读该账号的
-   * 权威规则模式配置——已启用 → 未绑人设 MUST NOT 被短路为 `needs_persona_setup`、MUST NOT 告警。
-   * 判据与规则模式裁决同源（同一个按账号读的权威入口），MUST NOT 依赖客户端自报 / 环境变量 / 缓存猜测。
-   *
-   * **fail-closed**：未注入、读抛错、返回非 `true`、或本连接平台未确认为 Facebook → 一律按未豁免
-   * 处理（未绑人设仍被短路）。绑定判据为 `unknown`（人设副本陈旧）时同样不豁免——那是「读不到」
-   * 而不是「确认未绑」，两者不能混为一谈。
-   *
-   * 本豁免**只**解除这一道闸：能不能真的浏览仍由模式裁决决定，未绑人设的账号在非规则模式下
-   * 仍是 `blocked/no_persona`，绝不会让人设浏览闭环空跑。
-   */
-  facebookRuleModeEnabled?: (accountId: string) => boolean;
   /**
    * 配置副本停手闸（change cloud-coupling-phase4-runtime-ports）：由组合根注入 api 侧实现。
    * 未注入 = 恒不停手，逐位等于「未安装新鲜度事实源 → fresh」的既有语义。
@@ -646,6 +693,12 @@ export class RoleDispatcher {
   private readonly explainRuleJoin: () => ViewQuotaDecision;
   private readonly triggerFacebookRuleJoinContact?: RoleDispatcherOptions['triggerFacebookRuleJoinContact'];
   private readonly facebookRuleCommentBodyScheme?: RoleDispatcherOptions['facebookRuleCommentBodyScheme'];
+  private readonly applyFacebookConsumptionView?: RoleDispatcherOptions['applyFacebookConsumptionView'];
+  private readonly claimFacebookConsumptionAction?: RoleDispatcherOptions['claimFacebookConsumptionAction'];
+  private readonly markFacebookConsumptionActionDispatched?: RoleDispatcherOptions['markFacebookConsumptionActionDispatched'];
+  private readonly settleFacebookConsumptionAction?: RoleDispatcherOptions['settleFacebookConsumptionAction'];
+  private readonly triggerFacebookConsumptionAction?: RoleDispatcherOptions['triggerFacebookConsumptionAction'];
+  private readonly supersedeFacebookOperationRuntime?: RoleDispatcherOptions['supersedeFacebookOperationRuntime'];
   private readonly commentApproval?: CommentApprovalPort;
   private readonly commentAutoApproveNotify?: (input: CommentApprovalNoticeInput) => Promise<void>;
   private readonly resolveCommentApprovalMode?: RoleDispatcherOptions['resolveCommentApprovalMode'];
@@ -713,7 +766,6 @@ export class RoleDispatcher {
   private notificationTaskEnding = false;
   private pendingNotificationCommands: EdgeCommand[] = [];
   private readonly personaBinding?: (accountId: string) => PersonaBinding;
-  private readonly facebookRuleModeEnabled?: (accountId: string) => boolean;
   private readonly configMirrorGate?: ConfigMirrorGatePort;
   private readonly onSessionRejected?: (accountId: string, reason: string) => void | Promise<void>;
   private readonly isDispatchActive: () => boolean;
@@ -822,6 +874,8 @@ export class RoleDispatcher {
   private facebookRuleViewChain: Promise<void> = Promise.resolve();
   private pendingFacebookRuleBatch: {
     batchId: string;
+    /** Revision pinned when this durable batch was created. */
+    policyRevision: number;
     /** 轮次序号（1 起、稠密），二级节奏判据的输入。 */
     sequence: number;
     /** 本轮是否包含加群联系评论（由 sequence 派生，建轮次时定死、不随后续状态变化）。 */
@@ -833,6 +887,13 @@ export class RoleDispatcher {
     likeDispatched: boolean;
     likeTerminal: boolean;
   } | null = null;
+  /** One Edge like may be outstanding for consumption mode; terminal receipts upgrade the same durable fact. */
+  private pendingFacebookConsumptionLike: {
+    action: FacebookConsumptionActionView;
+    source: 'detail' | 'reels' | 'feed_video';
+  } | null = null;
+  private readonly facebookConsumptionOwnerId = `role-dispatcher:${randomUUID()}`;
+  private facebookOperationRuntimeRevisionKey: string | null = null;
   /** 当前会话剩余互动预算（从全局单场上限提供者派生，会话开始/重置时刷新）。 */
   private budget!: SessionInteractionBudget;
   /** 会话开始/重置时的预算快照（供比率闸：init−剩余；会话中途改预算不漂移）。 */
@@ -874,6 +935,12 @@ export class RoleDispatcher {
     this.explainRuleJoin = options.explainRuleJoin ?? (() => ({ allowed: true }));
     this.triggerFacebookRuleJoinContact = options.triggerFacebookRuleJoinContact;
     this.facebookRuleCommentBodyScheme = options.facebookRuleCommentBodyScheme;
+    this.applyFacebookConsumptionView = options.applyFacebookConsumptionView;
+    this.claimFacebookConsumptionAction = options.claimFacebookConsumptionAction;
+    this.markFacebookConsumptionActionDispatched = options.markFacebookConsumptionActionDispatched;
+    this.settleFacebookConsumptionAction = options.settleFacebookConsumptionAction;
+    this.triggerFacebookConsumptionAction = options.triggerFacebookConsumptionAction;
+    this.supersedeFacebookOperationRuntime = options.supersedeFacebookOperationRuntime;
     this.commentApproval = options.commentApproval;
     this.commentAutoApproveNotify = options.commentAutoApproveNotify;
     this.resolveCommentApprovalMode = options.resolveCommentApprovalMode;
@@ -896,7 +963,6 @@ export class RoleDispatcher {
     this.fireAutoContactComment = options.fireAutoContactComment;
     this.isHardPaused = options.isHardPaused ?? (() => false);
     this.personaBinding = options.personaBinding;
-    this.facebookRuleModeEnabled = options.facebookRuleModeEnabled;
     this.configMirrorGate = options.configMirrorGate;
     this.onSessionRejected = options.onSessionRejected;
     this.isDispatchActive = options.isDispatchActive ?? (() => true);
@@ -975,11 +1041,12 @@ export class RoleDispatcher {
     }
   }
 
-  private isFacebookRuleMode(): boolean {
-    return this.facebookRuleDecision().mode === 'facebook_rule';
+  private isFacebookAutomatedBrowseMode(): boolean {
+    const mode = this.facebookRuleDecision().mode;
+    return mode === 'facebook_rule' || mode === 'consumption';
   }
 
-  private queueFacebookRuleView(payload: {
+  private queueFacebookOperationView(payload: {
     accountId: string;
     noteId: string;
     sourceDedupeKey: string;
@@ -987,23 +1054,50 @@ export class RoleDispatcher {
     occurredAt: number;
   }): void {
     this.facebookRuleViewChain = this.facebookRuleViewChain
-      .then(() => this.handleFacebookRuleView(payload))
+      .then(() => this.handleFacebookOperationView(payload))
       .catch((err) => {
-        console.error(`[facebook-rule] durable progression failed account=${payload.accountId}:`, err);
-        if (this.sessionActive) this.endSession('facebook_rule_persistence_failed');
+        console.error(`[facebook-operation] durable progression failed account=${payload.accountId}:`, err);
+        if (this.sessionActive) this.endSession('facebook_operation_persistence_failed');
       });
   }
 
-  private async handleFacebookRuleView(payload: {
+  private async handleFacebookOperationView(payload: {
     accountId: string;
     noteId: string;
     sourceDedupeKey: string;
     source: 'detail' | 'reels' | 'feed_video';
     occurredAt: number;
   }): Promise<void> {
-    if (payload.accountId !== this.currentAccountId || !this.isFacebookRuleMode()) return;
+    if (payload.accountId !== this.currentAccountId) return;
+    const decision = this.facebookRuleDecision();
+    if (
+      decision.mode === 'consumption'
+      && Number.isSafeInteger(decision.policyRevision)
+      && (decision.policyRevision ?? 0) >= 1
+    ) {
+      const revisionKey = `${payload.accountId}:${decision.policyRevision}:${decision.mode}`;
+      if (
+        this.supersedeFacebookOperationRuntime
+        && this.facebookOperationRuntimeRevisionKey !== revisionKey
+      ) {
+        await this.supersedeFacebookOperationRuntime({
+          accountId: payload.accountId,
+          policyRevision: decision.policyRevision!,
+          mode: decision.mode,
+        });
+        this.facebookOperationRuntimeRevisionKey = revisionKey;
+      }
+    }
+    if (decision.mode === 'consumption') {
+      await this.handleFacebookConsumptionView(payload, decision);
+      return;
+    }
+    if (decision.mode !== 'facebook_rule') return;
     if (!this.applyFacebookRuleView || !this.updateFacebookRuleBatch) {
       throw new Error('facebook_rule_runtime_unavailable');
+    }
+    if (decision.policyRevision === undefined || !decision.rulePolicy) {
+      throw new Error('facebook_rule_policy_projection_unavailable');
     }
     const contentKey = stableFacebookRuleContentKey(payload.noteId);
     if (!contentKey) {
@@ -1023,6 +1117,10 @@ export class RoleDispatcher {
       contentKey,
       sourceDedupeKey: payload.sourceDedupeKey,
       occurredAt: payload.occurredAt,
+      policy: {
+        policyRevision: decision.policyRevision,
+        snapshot: decision.rulePolicy,
+      },
     });
     if (applied.kind !== 'batch_created') {
       if (applied.kind !== 'batch_active') {
@@ -1032,6 +1130,7 @@ export class RoleDispatcher {
     }
     this.pendingFacebookRuleBatch = {
       batchId: applied.batch.batchId,
+      policyRevision: applied.batch.policyRevision,
       sequence: applied.batch.sequence,
       includesJoin: applied.batch.includesJoin,
       noteId: payload.noteId,
@@ -1042,6 +1141,291 @@ export class RoleDispatcher {
       likeTerminal: false,
     };
     await this.attemptFacebookRuleLike();
+  }
+
+  private async handleFacebookConsumptionView(
+    payload: {
+      accountId: string;
+      noteId: string;
+      sourceDedupeKey: string;
+      source: 'detail' | 'reels' | 'feed_video';
+      occurredAt: number;
+    },
+    decision: FacebookRuleModeDecision,
+  ): Promise<void> {
+    if (
+      !this.applyFacebookConsumptionView
+      || !this.claimFacebookConsumptionAction
+      || !this.markFacebookConsumptionActionDispatched
+      || !this.settleFacebookConsumptionAction
+    ) {
+      throw new Error('facebook_consumption_runtime_unavailable');
+    }
+    if (
+      !Number.isSafeInteger(decision.policyRevision)
+      || (decision.policyRevision ?? 0) < 1
+      || !decision.consumptionPolicy
+    ) {
+      throw new Error('facebook_consumption_policy_projection_unavailable');
+    }
+    const contentKey = stableFacebookRuleContentKey(payload.noteId);
+    if (!contentKey) {
+      this.continueAfterFacebookRuleView(payload.source, 'consumption_unstable_content_key');
+      return;
+    }
+    const observedText = payload.source === 'detail'
+      ? `${this.currentNote?.title ?? ''} ${this.currentNote?.content ?? ''}`.trim()
+      : this.visibleCards.find((card) => card.noteId && facebookPostKey(card.noteId) === contentKey)?.title ?? '';
+    if (observedText && hasObviousHighRiskFacebookCaption(observedText)) {
+      console.log(`[facebook-consumption] skip unsafe content account=${payload.accountId} key=${contentKey}`);
+      this.continueAfterFacebookRuleView(payload.source, 'consumption_content_safety_reject');
+      return;
+    }
+    const policy: FacebookConsumptionRuntimePolicy = {
+      policyRevision: decision.policyRevision!,
+      snapshot: decision.consumptionPolicy,
+    };
+    const applied = await this.applyFacebookConsumptionView({
+      accountId: payload.accountId,
+      policy,
+      contentKey,
+      contentUrl: payload.noteId,
+      sourceDedupeKey: payload.sourceDedupeKey,
+      occurredAt: payload.occurredAt,
+    });
+    if (applied.kind === 'counted' || applied.kind === 'duplicate') {
+      this.continueAfterFacebookRuleView(payload.source, `consumption_view_${applied.kind}`);
+      return;
+    }
+    if (applied.kind === 'policy_superseded' || applied.kind === 'policy_snapshot_mismatch') {
+      throw new Error(`facebook_consumption_${applied.kind}`);
+    }
+
+    const action = applied.action;
+    if (action.actionType !== 'like') {
+      if (!this.triggerFacebookConsumptionAction) {
+        throw new Error('facebook_consumption_downstream_runtime_unavailable');
+      }
+      await this.triggerFacebookConsumptionAction(action);
+      this.continueAfterFacebookRuleView(payload.source, `consumption_${action.actionType}_coordinator_returned`);
+      return;
+    }
+    if (action.dispatchPhase === 'dispatched') {
+      // A dispatched write is never replayed. If this process still owns the in-flight
+      // correlation, its later terminal receipt will upgrade the same durable fact.
+      if (this.pendingFacebookConsumptionLike?.action.actionId !== action.actionId) {
+        console.warn(
+          `[facebook-consumption] dispatched like awaits reconciliation action=${action.actionId}`,
+        );
+      }
+      return;
+    }
+    // The stable post key is the target identity. Facebook may canonicalize the
+    // URL spelling between list and detail surfaces; requiring byte-identical
+    // URLs here would keep reopening the same post forever even though the
+    // platform identity is unchanged.
+    if (action.target.contentKey !== contentKey) {
+      const targetUrl = action.target.contentUrl;
+      if (!targetUrl) throw new Error('facebook_consumption_like_target_missing');
+      const sent = this.sendCommand({
+        action: 'open_note',
+        reason: 'facebook_consumption_restore_exact_like_target',
+        params: { noteId: targetUrl, purpose: 'navigate', thinkMs: this.thinkNow() },
+      });
+      if (!sent) {
+        console.warn(
+          `[facebook-consumption] exact like target navigation suppressed action=${action.actionId}`,
+        );
+      }
+      return;
+    }
+    await this.attemptFacebookConsumptionLike(action, payload.source);
+  }
+
+  private async attemptFacebookConsumptionLike(
+    action: FacebookConsumptionActionView,
+    source: 'detail' | 'reels' | 'feed_video',
+  ): Promise<void> {
+    if (
+      !this.claimFacebookConsumptionAction
+      || !this.markFacebookConsumptionActionDispatched
+      || !this.settleFacebookConsumptionAction
+    ) return;
+    const decision = this.facebookRuleDecision();
+    if (
+      decision.mode !== 'consumption'
+      || decision.policyRevision !== action.policyRevision
+    ) {
+      await this.settleFacebookConsumptionAction({
+        actionId: action.actionId,
+        accountId: action.accountId,
+        policyRevision: action.policyRevision,
+        sourceDedupeKey: `${action.actionId}:mode-preempted`,
+        outcome: 'policy_superseded',
+        occurredAt: this.clock(),
+        expectedContentKey: action.target.contentKey,
+        expectedContentUrl: action.target.contentUrl,
+      });
+      this.continueAfterFacebookRuleView(source, 'consumption_mode_preempted');
+      return;
+    }
+    const risk = this.explainInteract('like');
+    const blocker = !risk.allowed
+      ? risk.reason ?? 'like_risk_suppressed'
+      : this.remainingBudget('like') <= 0
+        ? 'like_session_budget'
+        : !this.cooldownPasses('like')
+          ? 'like_cooldown'
+          : null;
+    if (blocker) {
+      await this.settleFacebookConsumptionAction({
+        actionId: action.actionId,
+        accountId: action.accountId,
+        policyRevision: action.policyRevision,
+        sourceDedupeKey: `${action.actionId}:gate:${blocker}`,
+        outcome: 'gated',
+        occurredAt: this.clock(),
+        expectedContentKey: action.target.contentKey,
+        expectedContentUrl: action.target.contentUrl,
+        evidence: { blocker },
+      });
+      this.continueAfterFacebookRuleView(source, `consumption_like_${blocker}`);
+      return;
+    }
+
+    const claimed = await this.claimFacebookConsumptionAction({
+      actionId: action.actionId,
+      accountId: action.accountId,
+      policyRevision: action.policyRevision,
+      ownerId: this.facebookConsumptionOwnerId,
+      leaseMs: 60_000,
+    });
+    if (claimed.kind === 'owned_elsewhere' || claimed.kind === 'not_found') return;
+    const owned = claimed.action;
+    if (owned.dispatchPhase === 'dispatched') return;
+    const dispatched = await this.markFacebookConsumptionActionDispatched({
+      actionId: owned.actionId,
+      accountId: owned.accountId,
+      policyRevision: owned.policyRevision,
+      ownerId: this.facebookConsumptionOwnerId,
+      expectedVersion: owned.version,
+    });
+    if (dispatched.kind !== 'updated') return;
+    const dispatchedAction = dispatched.action;
+    this.pendingFacebookConsumptionLike = { action: dispatchedAction, source };
+    const sent = this.sendNoteScopedCommand('like', {
+      action: 'like',
+      reason: 'facebook_consumption_like',
+      params: {
+        noteId: dispatchedAction.target.contentUrl,
+        thinkMs: this.thinkNow(),
+      },
+    });
+    if (sent) return;
+
+    this.pendingFacebookConsumptionLike = null;
+    const settled = await this.settleFacebookConsumptionAction({
+      actionId: dispatchedAction.actionId,
+      accountId: dispatchedAction.accountId,
+      policyRevision: dispatchedAction.policyRevision,
+      sourceDedupeKey: `${dispatchedAction.actionId}:dispatch-suppressed`,
+      outcome: 'not_started',
+      occurredAt: this.clock(),
+      expectedContentKey: dispatchedAction.target.contentKey,
+      expectedContentUrl: dispatchedAction.target.contentUrl,
+    });
+    await this.afterFacebookConsumptionLikeSettlement(settled, source);
+  }
+
+  private async finishFacebookConsumptionLike(payload: {
+    ok: boolean;
+    reason?: string;
+    noteId?: string;
+    observation?: unknown;
+    ts: number;
+  }): Promise<void> {
+    const pending = this.pendingFacebookConsumptionLike;
+    if (!pending || !this.settleFacebookConsumptionAction) return;
+    const echoedContentKey = stableFacebookRuleContentKey(payload.noteId);
+    // Current Facebook Edge builds derive and echo a fresh noteId for inline
+    // Feed/Reels likes. Detail-surface receipts intentionally omit that echo;
+    // their existing Cloud attribution contract is the dispatcher/session's
+    // current detail note. Accept that fallback only for the one outstanding
+    // detail action and only when its stable identity still equals the durable
+    // target. Inline surfaces remain fail-closed without an Edge witness.
+    const detailContentKey = pending.source === 'detail'
+      ? stableFacebookRuleContentKey(this.currentNote?.noteId)
+      : null;
+    const observedContentKey = echoedContentKey ?? detailContentKey;
+    const targetWitness = echoedContentKey
+      ? 'edge_echo'
+      : detailContentKey
+        ? 'current_detail'
+        : 'missing';
+    const targetMatches =
+      observedContentKey !== null
+      && observedContentKey === pending.action.target.contentKey;
+    const classified = classifyFacebookConsumptionLikeReceipt(payload);
+    const outcome = targetMatches
+      ? classified
+      : classified === 'pending'
+        ? 'pending'
+        : 'ambiguous';
+    const settled = await this.settleFacebookConsumptionAction({
+      actionId: pending.action.actionId,
+      accountId: pending.action.accountId,
+      policyRevision: pending.action.policyRevision,
+      sourceDedupeKey: `${pending.action.actionId}:edge-like`,
+      outcome,
+      occurredAt: payload.ts,
+      expectedContentKey: pending.action.target.contentKey,
+      expectedContentUrl: pending.action.target.contentUrl,
+      evidence: {
+        reason: payload.reason ?? null,
+        observedContentKey,
+        observedNoteId: payload.noteId ?? null,
+        targetWitness,
+        targetMatches,
+        observation: payload.observation ?? null,
+      },
+    });
+    if (settled.kind === 'pending') return;
+
+    this.pendingFacebookConsumptionLike = null;
+    if (outcome === 'confirmed_new_like') {
+      this.markCooldown('like');
+      this.consumeBudget('like');
+    }
+    const key = this.pendingInteractionKeys.get('like');
+    if (key && this.interactionGuard) {
+      if (
+        outcome === 'confirmed_new_like'
+        || outcome === 'ambiguous'
+        || outcome === 'submitted_unknown'
+      ) {
+        // Unknown post-dispatch receipts are non-success for cadence, but terminal
+        // for duplicate prevention: retrying the same target could create a second
+        // platform write. Pending remains in-flight above; known failures release.
+        this.interactionGuard.complete(key);
+      } else {
+        this.interactionGuard.releaseFailed(key);
+      }
+      this.pendingInteractionKeys.delete('like');
+    }
+    await this.afterFacebookConsumptionLikeSettlement(settled, pending.source);
+  }
+
+  private async afterFacebookConsumptionLikeSettlement(
+    settled: SettleFacebookConsumptionActionResult,
+    source: 'detail' | 'reels' | 'feed_video',
+  ): Promise<void> {
+    if (settled.kind === 'settled' && settled.nextAction) {
+      if (!this.triggerFacebookConsumptionAction) {
+        throw new Error('facebook_consumption_downstream_runtime_unavailable');
+      }
+      await this.triggerFacebookConsumptionAction(settled.nextAction);
+    }
+    this.continueAfterFacebookRuleView(source, `consumption_like_${settled.kind}`);
   }
 
   private continueAfterFacebookRuleView(
@@ -1065,16 +1449,22 @@ export class RoleDispatcher {
     const pending = this.pendingFacebookRuleBatch;
     if (!pending || !this.updateFacebookRuleBatch) return;
     const decision = this.facebookRuleDecision();
-    if (decision.mode !== 'facebook_rule') {
+    if (
+      decision.mode !== 'facebook_rule'
+      || decision.policyRevision !== pending.policyRevision
+    ) {
       await this.updateFacebookRuleBatch(pending.batchId, {
-        likeState: 'not_started',
-        joinState: 'not_started',
-        commentState: 'not_started',
+        likeState: 'policy_superseded',
+        joinState: 'policy_superseded',
+        commentState: 'policy_superseded',
         terminal: true,
-        blocker: decision.blocker ?? decision.mode,
+        blocker: 'policy_superseded',
       });
       this.pendingFacebookRuleBatch = null;
-      this.continueAfterFacebookRuleView(pending.source, 'rule_mode_preempted');
+      this.continueAfterFacebookRuleView(
+        pending.source,
+        'rule_policy_superseded_before_like',
+      );
       return;
     }
     const risk = this.explainInteract('like');
@@ -1163,11 +1553,14 @@ export class RoleDispatcher {
     if (!pending || pending.joinStarted || !this.updateFacebookRuleBatch) return;
     pending.joinStarted = true;
     const decision = this.facebookRuleDecision();
-    if (decision.mode !== 'facebook_rule') {
+    if (
+      decision.mode !== 'facebook_rule'
+      || decision.policyRevision !== pending.policyRevision
+    ) {
       await this.finishFacebookRuleBatch({
-        joinState: 'not_started',
-        commentState: 'not_started',
-        blocker: decision.blocker ?? decision.mode,
+        joinState: 'policy_superseded',
+        commentState: 'policy_superseded',
+        blocker: 'policy_superseded',
       });
       return;
     }
@@ -1253,6 +1646,18 @@ export class RoleDispatcher {
       commentState: 'pending',
       blocker: null,
     });
+    const dispatchDecision = this.facebookRuleDecision();
+    if (
+      dispatchDecision.mode !== 'facebook_rule'
+      || dispatchDecision.policyRevision !== pending.policyRevision
+    ) {
+      await this.finishFacebookRuleBatch({
+        joinState: 'policy_superseded',
+        commentState: 'policy_superseded',
+        blocker: 'policy_superseded',
+      });
+      return;
+    }
     const triggered = await this.triggerFacebookRuleJoinContact(
       this.currentAccountId,
       pending.batchId,
@@ -1323,6 +1728,15 @@ export class RoleDispatcher {
         err,
       );
     });
+  }
+
+  private detachFacebookConsumptionLikeOnSessionBoundary(reason: string): void {
+    const pending = this.pendingFacebookConsumptionLike;
+    if (!pending) return;
+    this.pendingFacebookConsumptionLike = null;
+    console.warn(
+      `[facebook-consumption] detached dispatched like without replay action=${pending.action.actionId} reason=${reason}`,
+    );
   }
 
   /** 通知巡视命令（巡视期放行，浏览类命令被暂停出口扣住）。 */
@@ -1917,6 +2331,9 @@ export class RoleDispatcher {
 
   /** 设置该连接（运行时）的当前账号（multi-account-node-support D4：去掉 default 钉死，由连接真实账号设入）。 */
   setCurrentAccountId(accountId: string): void {
+    if (this.currentAccountId !== accountId) {
+      this.facebookOperationRuntimeRevisionKey = null;
+    }
     this.currentAccountId = accountId;
   }
 
@@ -2036,7 +2453,7 @@ export class RoleDispatcher {
       new ContentCuratorRole({
         ...commonOptions,
         sessionContext: this.sessionContext,
-        shouldEvaluate: () => !this.isFacebookRuleMode(),
+        shouldEvaluate: () => !this.isFacebookAutomatedBrowseMode(),
       }),
       new InteractionAppraiserRole({
         ...commonOptions,
@@ -2347,8 +2764,8 @@ export class RoleDispatcher {
     }
     // 人设三态：只有权威的「未绑」才允许 needs_persona_setup。
     const binding = this.personaBinding?.(this.currentAccountId) ?? 'bound';
-    // 规则模式豁免（change facebook-rule-mode-without-persona）：平台确认为 Facebook 且权威规则模式
-    // 配置现读为启用时，「确认未绑人设」不再短路——那条路全程不读人设，绑定不是它的前提。
+    // 规则/消费模式豁免：平台确认为 Facebook 且权威操作模式现读为自动浏览时，
+    // 「确认未绑人设」不再短路——这两条路全程不读人设，绑定不是它们的前提。
     // 只豁免 `unbound`：`unknown` 是云端此刻读不到，仍走 persona_unavailable（fail-closed）。
     if (binding === 'unbound' && !this.facebookRuleModeExemptsPersonaGate()) return 'needs_persona_setup';
     if (binding === 'unknown') return PERSONA_UNAVAILABLE_REASON;
@@ -2360,9 +2777,9 @@ export class RoleDispatcher {
   }
 
   /**
-   * 会话启动闸的规则模式豁免判据（change facebook-rule-mode-without-persona）。
+   * 会话启动闸的规则/消费模式豁免判据。
    *
-   * 三个条件全部成立才豁免：本连接平台**已确认**为 Facebook、权威规则模式配置**现读**为启用、
+   * 三个条件全部成立才豁免：本连接平台**已确认**为 Facebook、权威操作模式配置**现读**为规则或消费、
    * 且读取本身没有出错。任何一条不成立（含未注入权威入口）都 fail-closed 回到未豁免行为——
    * MUST NOT 把「读不到配置」猜成「已启用规则模式」。
    *
@@ -2370,12 +2787,12 @@ export class RoleDispatcher {
    */
   private facebookRuleModeExemptsPersonaGate(): boolean {
     if (this.accountPlatform !== 'facebook') return false; // 平台未确认为 Facebook → 不豁免
-    if (!this.facebookRuleModeEnabled) return false; // 权威入口未接线 → 不豁免
     try {
-      return this.facebookRuleModeEnabled(this.currentAccountId) === true;
+      const mode = this.facebookRuleDecision().mode;
+      return mode === 'facebook_rule' || mode === 'consumption';
     } catch (err) {
       console.warn(
-        `[facebook-rule] session-start exemption unavailable account=${this.currentAccountId}: ${(err as Error).message} → 按未豁免处理`,
+        `[facebook-operation] session-start exemption unavailable account=${this.currentAccountId}: ${(err as Error).message} → 按未豁免处理`,
       );
       return false;
     }
@@ -2425,6 +2842,7 @@ export class RoleDispatcher {
   /** 启动会话：接线角色 / 指令翻译 / Edge 事件（看门狗在此随 SessionMonitor.subscribe 启动），再发 feed.entered。 */
   startSession(): void {
     this.reconcileFacebookRuleBatchOnSessionBoundary('session_restarted');
+    this.detachFacebookConsumptionLikeOnSessionBoundary('session_restarted');
     // 会话开始 → 取消任何待发休息计时器 + 窗口唤醒计时器（已重开，无需续场 / 唤醒）。
     this.cancelRestTimer();
     this.cancelWakeTimer();
@@ -2537,6 +2955,7 @@ export class RoleDispatcher {
    */
   restartSession(): void {
     this.reconcileFacebookRuleBatchOnSessionBoundary('edge_reconnected');
+    this.detachFacebookConsumptionLikeOnSessionBoundary('edge_reconnected');
     // 「可活跃时间」闸（change weekly-active-window）：当前本地时刻不在后台配置的可活跃时段内 → 不开会话、保持休眠。
     // 此处为所有会话(重)启动的统一收口（边缘 hello / 绑人设自启 / 续场 / 面板手动），缺配置 / 非法掩码 = 全天活跃（零回归）。
     // 续场路径已先经 canAutoResume 同闸（此为防御性二次拦）。被拦后排一个窗口唤醒计时器：到下一个活跃整点
@@ -2614,6 +3033,7 @@ export class RoleDispatcher {
     this.cancelViewQuotaSleep(false);
     this.settlePendingMandatoryCommentAsUnknown(`session_ended:${reason ?? 'manual'}`);
     this.reconcileFacebookRuleBatchOnSessionBoundary(`session_ended:${reason ?? 'manual'}`);
+    this.detachFacebookConsumptionLikeOnSessionBoundary(`session_ended:${reason ?? 'manual'}`);
     this.clearCommentSublineHold(false);
     void this.endNotificationTask();
     this.pendingSearchKeywords.clear();
@@ -2936,7 +3356,7 @@ export class RoleDispatcher {
     cards: PageCardsData[],
     listKind: 'feed' | 'reels' | undefined,
   ): void {
-    if (this.accountPlatform !== 'facebook' || this.isFacebookRuleMode()) return;
+    if (this.accountPlatform !== 'facebook' || this.isFacebookAutomatedBrowseMode()) return;
     let card: PageCardsData | undefined;
     let source: 'reels' | 'feed_video';
     if (listKind === 'reels' && cards.length === 1) {
@@ -3027,7 +3447,7 @@ export class RoleDispatcher {
   ): void {
     if (
       this.accountPlatform !== 'facebook'
-      || this.isFacebookRuleMode()
+      || this.isFacebookAutomatedBrowseMode()
       || listKind !== 'reels'
       || cards.length !== 1
     ) return;
@@ -3590,7 +4010,7 @@ export class RoleDispatcher {
         // 诚实收尾。这也覆盖会话中途被解绑的账号（原先只会让取值口一路抛错空转）。
         if (
           this.personaBinding?.(this.currentAccountId) === 'unbound'
-          && !this.isFacebookRuleMode()
+          && !this.isFacebookAutomatedBrowseMode()
         ) {
           console.warn(
             `[RoleDispatcher] 账号 ${this.currentAccountId} 未绑人设且此刻非规则模式 → 诚实收尾（no_persona_outside_rule_mode）：不评估本批卡、不下发任何指令`,
@@ -3662,7 +4082,7 @@ export class RoleDispatcher {
             return; // 已发回首页指令：跳过对本批搜索卡的评估（正离开搜索页）
           }
         }
-        if (this.isFacebookRuleMode()) {
+        if (this.isFacebookAutomatedBrowseMode()) {
           const videos = payload.cards.filter((card) => card.isVideo === true);
           const presentedViewWillDrive =
             (payload.listKind === 'reels' && payload.cards.length === 1)
@@ -3682,7 +4102,7 @@ export class RoleDispatcher {
               index: card.index,
               noteId: card.noteId,
               title: card.title,
-              reason: 'facebook_rule_feed_order',
+              reason: 'facebook_automated_feed_order',
               confidence: 1,
               sourcePageType: this.sessionContext.sourcePageType,
               ts: this.clock(),
@@ -3690,7 +4110,7 @@ export class RoleDispatcher {
           } else {
             this.eventBus.emit('content.no_valuable', {
               pageType: this.sessionContext.sourcePageType,
-              reason: 'facebook_rule_no_structural_candidate',
+              reason: 'facebook_automated_no_structural_candidate',
               ts: this.clock(),
             });
           }
@@ -3705,7 +4125,7 @@ export class RoleDispatcher {
       }),
 
       this.eventBus.on('facebook.rule.view.confirmed', (payload) => {
-        this.queueFacebookRuleView(payload);
+        this.queueFacebookOperationView(payload);
       }),
 
       // Edge 上报作者主页资料 → ProfileBrowser 直接消费 profile.detail.arrived 产出 profile.browsed
@@ -3738,6 +4158,31 @@ export class RoleDispatcher {
           if (payload.action === 'like' && this.pendingFacebookRuleBatch) {
             void this.finishFacebookRuleLike(false, 'preempted_by_task');
           }
+          if (payload.action === 'like' && this.pendingFacebookConsumptionLike) {
+            void this.finishFacebookConsumptionLike({
+              ok: false,
+              reason: 'preempted_by_task',
+              noteId: payload.noteId,
+              observation: payload.observation,
+              ts: payload.ts,
+            });
+          }
+          return;
+        }
+        // Consumption likes own their receipt from this point onward. Intercept before
+        // the generic stale-target recovery so every terminal state settles the durable
+        // action, and so already_liked never burns a consumption counter.
+        if (payload.action === 'like' && this.pendingFacebookConsumptionLike) {
+          void this.finishFacebookConsumptionLike({
+            ok: payload.ok,
+            reason: payload.reason,
+            noteId: payload.noteId,
+            observation: payload.observation,
+            ts: payload.ts,
+          }).catch((err) => {
+            console.error('[facebook-consumption] like settlement failed:', err);
+            if (this.sessionActive) this.endSession('facebook_consumption_settlement_failed');
+          });
           return;
         }
         if (
@@ -3956,10 +4401,17 @@ export class RoleDispatcher {
           const texts = payload.candidates.map((c) => c.text).filter((t): t is string => Boolean(t && t.trim()));
           if (texts.length) this.currentNote.comments = texts;
         }
-        // 冷却时间戳（engagement-restraint）：仅在真实成功（ok:true）时落；下发失败不起算（不白占冷却窗）。
-        // follow 排除 already_followed 良性 no-op（与「no-op 不烧配额」同口径，不算一次真关注）。
+        const confirmedNewLike =
+          payload.action === 'like'
+          && payload.ok === true
+          && payload.reason !== 'already_liked'
+          && payload.reason !== 'already_reacted';
+        // 冷却时间戳（engagement-restraint）：仅在真实成功时落；下发失败不起算（不白占冷却窗）。
+        // already_liked/already_reacted 与 already_followed 同为良性 no-op，不算一次新平台动作。
         if (payload.ok === true) {
-          if (payload.action === 'like' || payload.action === 'collect' || payload.action === 'comment') {
+          if (confirmedNewLike) {
+            this.markCooldown('like');
+          } else if (payload.action === 'collect' || payload.action === 'comment') {
             this.markCooldown(payload.action);
           } else if (payload.action === 'follow' && payload.reason !== 'already_followed') {
             this.markCooldown('follow');
@@ -3967,15 +4419,22 @@ export class RoleDispatcher {
         }
         // change fix-interaction-and-comment-capture：like/collect 预算按真成功回执扣（对齐 follow/comment）。
         // 下发时不再乐观扣；失败/去重跳过不烧预算；重试成功也只在此扣一次（失败回执 ok:false 不进此分支）。
-        if (payload.ok === true && (payload.action === 'like' || payload.action === 'collect')) {
-          this.consumeBudget(payload.action);
+        if (confirmedNewLike) {
+          this.consumeBudget('like');
+        } else if (payload.ok === true && payload.action === 'collect') {
+          this.consumeBudget('collect');
         }
         // 同账号并行（N:1）：释放该动作的在途去重坑。成功且非 already_followed no-op → 记已完成（不再重复对同目标动作）；
         // 失败 / already_followed → 仅释放在途坑（允许后续重试）。靠边缘 FIFO 回执与 per-动作单坑对齐，TTL 兜底防丢回执永久占坑。
         if (this.interactionGuard && isGuardedInteraction(payload.action)) {
           const key = this.pendingInteractionKeys.get(payload.action);
           if (key) {
-            if (payload.ok === true && payload.reason !== 'already_followed') this.interactionGuard.complete(key);
+            if (
+              payload.ok === true
+              && payload.reason !== 'already_followed'
+              && payload.reason !== 'already_liked'
+              && payload.reason !== 'already_reacted'
+            ) this.interactionGuard.complete(key);
             else this.interactionGuard.releaseFailed(key);
             this.pendingInteractionKeys.delete(payload.action);
           }

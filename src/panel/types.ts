@@ -38,6 +38,12 @@ import type {
   SetFacebookRuleModeResult,
 } from '../config/facebook-rule-mode-store.js';
 import type {
+  FacebookOperationPolicyStore,
+} from '../config/facebook-operation-policy-store.js';
+import type {
+  FacebookGroupCommentPolicyStore,
+} from '../config/facebook-group-comment-policy-store.js';
+import type {
   FacebookPublishImageInput,
   FacebookPublishMediaListView,
   FacebookPublishSetPatch,
@@ -302,6 +308,16 @@ export interface PanelDeps {
       updatedBy: string,
     ): Promise<SetFacebookRuleModeResult>;
   };
+  /** Environment-scoped Facebook base/effective mode authority. */
+  facebookOperationPolicy?: Pick<
+    FacebookOperationPolicyStore,
+    'isReady' | 'getForEnv' | 'writeEnvironment' | 'writeLegacySlowStart'
+  >;
+  /** Deployment-target-scoped join-to-first-comment wait authority. */
+  facebookGroupCommentPolicy?: Pick<
+    FacebookGroupCommentPolicyStore,
+    'get' | 'write'
+  >;
   /**
    * 每账号 Facebook 发帖素材池（manual upload only）。未注入则 `/api/accounts/:id/facebook-publish-media`
    * 返回 503；上传经对象存储，写前必须校验账号存在且 platform=facebook。

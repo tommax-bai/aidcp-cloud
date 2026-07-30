@@ -98,6 +98,8 @@
     { "path": "src/config/session-config-store.ts", "layer": "automation", "basis": "§4.6.8：四类限频配置随消费方走" },
     { "path": "src/config/resume-config-store.ts", "layer": "automation", "basis": "§4.6.8：四类限频配置随消费方走" },
     { "path": "src/config/facebook-rule-mode-store.ts", "layer": "api", "basis": "change facebook-rule-mode-cadence：Facebook 规则开关、账号平台校验、审计回读与配置镜像失效均属于 api 配置权威；运行计数和批次已拆到 automation store，本文件只读写 api 属主表" },
+    { "path": "src/config/facebook-operation-policy-store.ts", "layer": "api", "basis": "change add-configurable-facebook-consumption-mode：环境基础模式、规则/消费节奏、慢启动锚点与策略审计是 api 配置权威；本文件只写 api 属主表并在同一事务推进配置镜像" },
+    { "path": "src/config/facebook-group-comment-policy-store.ts", "layer": "api", "basis": "change add-configurable-facebook-consumption-mode：目标环境的入群后首次评论等待与审计是 api 配置权威；运行时只消费其 target-scoped 投影" },
 
     { "path": "src/kernel/config-mirror-bump-types.ts", "layer": "kernel", "basis": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 抬入：跨域配置镜像失效通道的契约段（ConfigMirrorKey 闭集合纯类型 + MirrorQueryable/MirrorVersionBumper 接口 + writeWithMirrorBump「同一笔提交」包装 + ConfigMirrorBumpSink 消费端口）。原分散在 src/config-mirror-freshness.ts（ConfigMirrorKey）与 src/config/mirror-version-store.ts（api）；automation 属主的四个限频配置 store 与 api 属主的十余个配置 store 都要引用它们，留在任一属主域都必然造出跨域 import（原状即 4 条 automation->api 豁免）。只 import type pg 与同层 pg-owner-connection-resolver，无 SQL 字面量（BEGIN/COMMIT/ROLLBACK 是事务控制、不是 DML/DDL）、无 HTTP 路由、无 LLM、无进程内活状态、不反向依赖业务层。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch" },
     { "path": "src/config/api-sync-read-checkpoint-store.ts", "layer": "api", "basis": "change split-cloud-api-composition-root-4b task 2.6：api consumer 自己的 target-scoped sync-read cursor/readiness/health PG adapter，只写 api_sync_read_consumer_checkpoint；owner payload 与共享业务 version 不落表。公共校验/恢复状态机在 kernel，automation 使用独立 owner-local adapter，避免拆库后跨池写。" },
@@ -126,6 +128,10 @@
     { "path": "src/onboarding/first-post-onboarding-coordinator.ts", "layer": "content", "basis": "§4.7：创作桥接归 content（105 行）" },
 
     { "path": "src/orchestrator/content-scheduler.ts", "layer": "api", "basis": "§4.7 / §4.6.5 第 12 项：内容排期调度器归 api" },
+    { "path": "src/orchestrator/facebook-consumption-mode.ts", "layer": "automation", "basis": "change add-configurable-facebook-consumption-mode：消费模式收据分类、阈值推进与 revision 仲裁直接服务 automation 浏览闭环，不持配置写权" },
+    { "path": "src/orchestrator/facebook-consumption-mode-coordinator.ts", "layer": "automation", "basis": "change add-configurable-facebook-consumption-mode：消费模式的 like/join/comment 单飞编排、提交前复核与恢复直接驱动真实平台动作，归 automation" },
+    { "path": "src/orchestrator/facebook-consumption-mode-runtime-store.ts", "layer": "automation", "basis": "change add-configurable-facebook-consumption-mode：target-scoped 唯一浏览事实、进度、动作义务、回执去重与终态是 automation 运行权威；本文件只写 automation 属主表" },
+    { "path": "src/orchestrator/facebook-consumption-mode-types.ts", "layer": "automation", "basis": "change add-configurable-facebook-consumption-mode：消费运行进度、动作义务与回执形状只描述 automation 域内编排与持久运行事实" },
     { "path": "src/orchestrator/facebook-rule-mode.ts", "layer": "automation", "basis": "change facebook-rule-mode-cadence：有效模式仲裁与规则浏览卡片选择直接服务 automation 浏览闭环，不持配置权威、不写数据库" },
     { "path": "src/orchestrator/facebook-rule-mode-runtime-store.ts", "layer": "automation", "basis": "change facebook-rule-mode-cadence：target-scoped 浏览事实、进度、批次和动作终态是 automation 运行权威，本文件只读写 automation 属主表" },
 

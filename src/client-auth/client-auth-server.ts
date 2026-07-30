@@ -47,6 +47,7 @@ import type {
 import type { PersonaAutoFillService } from '../agents/persona-auto-fill.js';
 import type { AccountPersonaService } from '../config/account-persona-service.js';
 import { isWritingLanguage } from '../kernel/writing-language.js';
+import { normalizePlatformId } from '../kernel/platform-types.js';
 import { loadSoulFromYaml } from '../soul/index.js';
 import type { RiskStatus } from '../kernel/risk-contract.js';
 import type { SetOperatorAliasResult } from '../account-store.js';
@@ -61,10 +62,17 @@ import {
   type ClientPublishQueueView,
 } from './client-publish-queue.js';
 import type { ClientEnvironmentScheduleView } from './client-environment-schedule.js';
-import type {
-  FacebookRuleModeConfig,
-  SetFacebookRuleModeResult,
+import {
+  FACEBOOK_RULE_RUNTIME_DEFINITION_ID,
+  FACEBOOK_RULE_RUNTIME_DEFINITION_VERSION,
 } from '../kernel/facebook-rule-mode-types.js';
+import type {
+  FacebookOperationPolicyLegacyRuleWriteResult,
+  FacebookOperationPolicyLegacySlowStartWriteResult,
+  FacebookOperationPolicyView,
+  FacebookOperationPolicyWriteResult,
+  FacebookRequestedOperationMode,
+} from '../config/facebook-operation-policy-store.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
@@ -86,6 +94,41 @@ export type EnvironmentCommentApprovalPolicyResult =
       };
     }
   | { ok: false; reason: 'invalid_mode' | 'environment_not_owned' | 'policy_unavailable' };
+
+export interface ClientFacebookOperationPolicyPort {
+  getForEnv(envKey: string): Promise<FacebookOperationPolicyView | null>;
+  writeEnvironment(
+    envKey: string,
+    input: {
+      expectedRevision: number;
+      mode: FacebookRequestedOperationMode;
+      requestId: string;
+      requiredOwnerUserId?: string;
+    },
+    actor: string,
+  ): Promise<FacebookOperationPolicyWriteResult>;
+  writeLegacyRuleMode(
+    envKey: string,
+    input: {
+      enabled: boolean;
+      expectedRevision: number;
+      requestId: string;
+      reason?: string | null;
+      requiredOwnerUserId?: string;
+    },
+    actor: string,
+  ): Promise<FacebookOperationPolicyLegacyRuleWriteResult>;
+  writeLegacySlowStart(
+    envKey: string,
+    input: {
+      enabled: boolean;
+      requestId: string;
+      reason?: string | null;
+      requiredOwnerUserId?: string;
+    },
+    actor: string,
+  ): Promise<FacebookOperationPolicyLegacySlowStartWriteResult>;
+}
 
 export interface ClientAuthDeps {
   store: ClientUserStore;
@@ -160,17 +203,11 @@ export interface ClientAuthDeps {
     >;
   };
   /**
-   * 客户环境的 Facebook 规则模式（change environment-level-rule-mode-and-approval：改为**环境键**）。
-   * 平台由环境自己的权威字段判定，读写都不依赖账号绑定；响应使用最小投影，永不含 accountId。
+   * Unified Facebook operation-policy authority. The customer route performs
+   * ownership/platform admission first, then delegates CAS/audit/slow-start
+   * mutation here without accepting cadence parameters.
    */
-  facebookRuleMode?: {
-    getForEnv(envKey: string): Promise<FacebookRuleModeConfig>;
-    setForEnv(
-      envKey: string,
-      enabled: boolean,
-      updatedBy: string,
-    ): Promise<SetFacebookRuleModeResult>;
-  };
+  facebookOperationPolicy?: ClientFacebookOperationPolicyPort;
   /**
    * 客户对**自有环境**的评论审批覆盖读写（change environment-level-rule-mode-and-approval）。
    * ownership 与写入同一条语句；客户来源署名与后台管理员可区分（`client:<userId>` vs `panel:<sub>`）。
@@ -228,16 +265,11 @@ export interface ClientEnvironmentRiskState {
 
 export interface ClientFacebookRuleModeConfig {
   enabled: boolean;
-  /** 权威行里持久化的定义身份原值，**不是**本构建的定义常量。 */
-  definitionId: FacebookRuleModeConfig['definitionId'];
-  definitionVersion: FacebookRuleModeConfig['definitionVersion'];
+  /** 兼容投影只标识当前运行算法；节奏与 revision 仍只存在于统一 policy。 */
+  definitionId: typeof FACEBOOK_RULE_RUNTIME_DEFINITION_ID;
+  definitionVersion: typeof FACEBOOK_RULE_RUNTIME_DEFINITION_VERSION;
   updatedAt: string | null;
-  /**
-   * 具名投影问题；`null` = 无问题。
-   * `stored_definition_mismatch` = 该行存的定义身份不是本构建的当前定义，它的节奏不可按当前定义解读。
-   * MUST NOT 用「顶替成当前定义并不报」来消掉这个值。
-   */
-  problem: 'stored_definition_mismatch' | null;
+  problem: null;
 }
 
 /**
@@ -613,27 +645,53 @@ async function resolveOwnedFacebookEnvironment(
     sendBindingFailure(res, owned.reason);
     return null;
   }
-  if ((owned.platform ?? '').trim().toLowerCase() !== 'facebook') {
+  try {
+    if (normalizePlatformId(owned.platform) !== 'facebook') {
+      sendJson(res, 409, { error: 'unsupported_platform' });
+      return null;
+    }
+  } catch {
     sendJson(res, 409, { error: 'unsupported_platform' });
     return null;
   }
   return { envKey: owned.envKey, binding: owned.binding };
 }
 
-/**
- * 客户投影**如实带出行里存的定义身份**，并在它与本构建的定义常量不一致时具名报出。
- *
- * MUST NOT 用编译期常量顶替存量行的定义身份：配置表没有部署目标维度、dev 与 ol 又共库，
- * 单侧部署会让一批行停在旧定义；顶替之后客户端读到的是「当前定义」，两套节奏各自在跑却没有
- * 任何机械手段能发现。具名问题让这件事在回包里就暴露，而不是等到行为对不上再去猜。
- */
-function projectClientFacebookRuleMode(config: FacebookRuleModeConfig): ClientFacebookRuleModeConfig {
+function projectClientLegacyRuleModeFromOperation(
+  view: FacebookOperationPolicyView,
+): ClientFacebookRuleModeConfig {
   return {
-    enabled: config.enabled,
-    definitionId: config.definitionId,
-    definitionVersion: config.definitionVersion,
-    updatedAt: config.updatedAt,
-    problem: config.definitionMismatch ? 'stored_definition_mismatch' : null,
+    enabled: view.baseMode === 'rule',
+    definitionId: FACEBOOK_RULE_RUNTIME_DEFINITION_ID,
+    definitionVersion: FACEBOOK_RULE_RUNTIME_DEFINITION_VERSION,
+    updatedAt: view.updatedAt,
+    problem: null,
+  };
+}
+
+function projectClientBindingFromOperation(
+  view: FacebookOperationPolicyView,
+): 'bound' | 'binding_unknown' | 'binding_conflict' {
+  if (view.binding.state === 'bound') return 'bound';
+  if (view.binding.state === 'conflict') return 'binding_conflict';
+  return 'binding_unknown';
+}
+
+function projectClientFacebookOperationPolicy(
+  view: FacebookOperationPolicyView,
+): {
+  baseMode: FacebookOperationPolicyView['baseMode'];
+  effectiveMode: FacebookOperationPolicyView['effectiveMode'];
+  policyRevision: number;
+  slowStart: { state: FacebookOperationPolicyView['slowStart']['state'] };
+  blocker: string | null;
+} {
+  return {
+    baseMode: view.baseMode,
+    effectiveMode: view.effectiveMode,
+    policyRevision: view.policyRevision,
+    slowStart: { state: view.slowStart.state },
+    blocker: view.blocker,
   };
 }
 
@@ -1723,13 +1781,153 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       return;
     }
 
+    const facebookOperationPolicyMatch =
+      /^\/environments\/([^/]+)\/facebook-operation-policy$/.exec(url);
+    if ((method === 'GET' || method === 'PUT') && facebookOperationPolicyMatch) {
+      if (!deps.facebookOperationPolicy) {
+        sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(facebookOperationPolicyMatch[1]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+
+      let writeInput: { expectedRevision: number; mode: FacebookRequestedOperationMode } | null = null;
+      if (method === 'PUT') {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const raw = body as Record<string, unknown>;
+        const keys = Object.keys(raw);
+        if (
+          keys.length !== 2
+          || !keys.includes('expectedRevision')
+          || !keys.includes('mode')
+          || typeof raw.expectedRevision !== 'number'
+          || !Number.isSafeInteger(raw.expectedRevision)
+          || raw.expectedRevision < 0
+          || (
+            raw.mode !== 'persona'
+            && raw.mode !== 'slow_start'
+            && raw.mode !== 'rule'
+            && raw.mode !== 'consumption'
+          )
+        ) {
+          sendJson(res, 422, {
+            error: 'validation_failed',
+            reason: 'only_expected_revision_and_mode_accepted',
+          });
+          return;
+        }
+        writeInput = {
+          expectedRevision: raw.expectedRevision,
+          mode: raw.mode,
+        };
+      }
+
+      const owned = await resolveOwnedFacebookEnvironment(deps, res, userId, envKey);
+      if (!owned) return;
+      if (owned.binding === 'binding_conflict') {
+        sendJson(res, 409, { error: 'binding_conflict' });
+        return;
+      }
+
+      try {
+        if (method === 'GET') {
+          const view = await deps.facebookOperationPolicy.getForEnv(owned.envKey);
+          if (!view || view.envKey !== owned.envKey) {
+            sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+            return;
+          }
+          sendJson(res, 200, {
+            data: {
+              envKey: owned.envKey,
+              facebookOperationPolicy: projectClientFacebookOperationPolicy(view),
+            },
+            meta: { requestId: randomUUID(), asOf: Date.now() },
+          });
+          return;
+        }
+
+        const result = await deps.facebookOperationPolicy.writeEnvironment(
+          owned.envKey,
+          {
+            expectedRevision: writeInput!.expectedRevision,
+            mode: writeInput!.mode,
+            requestId: randomUUID(),
+            requiredOwnerUserId: userId,
+          },
+          `client:${userId}`,
+        );
+        if (!result.ok) {
+          const current = result.current?.envKey === owned.envKey
+            ? {
+                envKey: owned.envKey,
+                facebookOperationPolicy: projectClientFacebookOperationPolicy(result.current),
+              }
+            : null;
+          if (result.reason === 'revision_conflict' && !current) {
+            sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+            return;
+          }
+          const status = result.reason === 'environment_not_found'
+            ? 404
+            : result.reason === 'environment_not_owned'
+              ? 403
+            : result.reason === 'policy_unavailable'
+              ? 503
+              : result.reason === 'revision_conflict'
+                  || result.reason === 'unsupported_platform'
+                  || result.reason === 'binding_conflict'
+                ? 409
+                : 422;
+          sendJson(res, status, {
+            error: result.reason,
+            ...(current ? { current } : {}),
+          });
+          return;
+        }
+        if (result.view.envKey !== owned.envKey) {
+          sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+          return;
+        }
+        sendJson(res, 200, {
+          data: {
+            envKey: owned.envKey,
+            facebookOperationPolicy: projectClientFacebookOperationPolicy(result.view),
+          },
+          meta: { requestId: randomUUID(), asOf: Date.now() },
+        });
+      } catch (error) {
+        logger.warn('[client-auth] Facebook operation policy unavailable', {
+          userId,
+          envKey: owned.envKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+      }
+      return;
+    }
+
     // Facebook 规则模式是**环境级** Cloud 配置（change environment-level-rule-mode-and-approval）：
     // 客户只提交自己拥有的 envKey，ownership 与环境权威平台由 Cloud 解析，客户端永不提交 accountId。
     // 这条纯 Cloud 配置链不依赖 Edge / 浏览器在线，也**不再依赖账号绑定**——环境是稳定的产品对象，
     // 客户在批量创建那一刻还没有账号就要能预设；回包如实标注当前有没有执行对象，不编造绑定或进度。
     const facebookRuleModeMatch = /^\/environments\/([^/]+)\/facebook-rule-mode$/.exec(url);
     if ((method === 'GET' || method === 'PUT') && facebookRuleModeMatch) {
-      if (!deps.facebookRuleMode) {
+      if (!deps.facebookOperationPolicy) {
         sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
         return;
       }
@@ -1769,32 +1967,58 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
       if (!owned) return;
 
       try {
+        const currentView = await deps.facebookOperationPolicy.getForEnv(owned.envKey);
+        if (!currentView || currentView.envKey !== owned.envKey) {
+          sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
+          return;
+        }
+        let view = currentView;
         if (method === 'PUT') {
-          const result = await deps.facebookRuleMode.setForEnv(
+          const result = await deps.facebookOperationPolicy.writeLegacyRuleMode(
             owned.envKey,
-            enabled!,
-            `client:${userId}`,
+            {
+              enabled: enabled!,
+              expectedRevision: currentView.policyRevision,
+              requestId: randomUUID(),
+              reason: 'legacy_customer_rule_toggle',
+              requiredOwnerUserId: userId,
+            },
+            `client_rule_compat:${userId}`,
           );
           if (!result.ok) {
-            if (result.reason === 'unsupported_platform') {
-              sendJson(res, 409, { error: 'unsupported_platform' });
-            } else if (result.reason === 'environment_not_found') {
-              sendJson(res, 404, { error: 'environment_not_found' });
-            } else if (result.reason === 'environment_unavailable') {
-              sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
-            } else {
-              sendJson(res, 422, { error: 'validation_failed', reason: result.reason });
-            }
+            const latest = result.current?.envKey === owned.envKey
+              ? {
+                  envKey: owned.envKey,
+                  facebookRuleMode: projectClientLegacyRuleModeFromOperation(result.current),
+                  facebookOperationPolicy: projectClientFacebookOperationPolicy(result.current),
+                  binding: projectClientBindingFromOperation(result.current),
+                }
+              : null;
+            const status = result.reason === 'environment_not_found'
+              ? 404
+              : result.reason === 'environment_not_owned'
+                ? 403
+                : result.reason === 'policy_unavailable'
+                  ? 503
+                  : result.reason === 'invalid_value'
+                    ? 422
+                    : 409;
+            sendJson(res, status, {
+              error: result.reason === 'mode_conflict'
+                ? 'facebook_operation_mode_conflict'
+                : result.reason,
+              ...(latest ? { current: latest } : {}),
+            });
             return;
           }
+          view = result.view;
         }
-        const config = await deps.facebookRuleMode.getForEnv(owned.envKey);
         sendJson(res, 200, {
           data: {
             envKey: owned.envKey,
-            facebookRuleMode: projectClientFacebookRuleMode(config),
+            facebookRuleMode: projectClientLegacyRuleModeFromOperation(view),
             // 配置已保存 ≠ 此刻有东西在跑。绑定三态如实回传，MUST NOT 伪造执行对象或进度。
-            binding: owned.binding,
+            binding: projectClientBindingFromOperation(view),
           },
           meta: { requestId: randomUUID(), asOf: Date.now() },
         });
@@ -1905,7 +2129,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
     // env_key 为 PK ⇒ 至多一个账号），不再要求边缘在线；离线时卡上仍诚实呈现「真态新鲜 + 用量标注为可能陈旧」。
     if (method === 'PUT' && /^\/environments\/[^/]+\/slow-start$/.test(url)) {
       const envKey = decodeURIComponent(url.split('/')[2] ?? '').trim();
-      if (!deps.slowStart) {
+      if (!deps.slowStart || !deps.facebookOperationPolicy) {
         sendJson(res, 503, { error: 'slow_start_unavailable' });
         return;
       }
@@ -1928,9 +2152,36 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendJson(res, 422, { error: 'validation_failed', reason: 'only_enabled_boolean_accepted' });
         return;
       }
-      // 单写目标就是环境：ownership 与 UPDATE 同一语句。账号绑定只决定能否追加 controller 生效投影，
-      // 不再是保存环境配置的前置；未绑定也不能把已写成误报为失败。
-      const stored = await deps.store.setEnvironmentSlowStart(userId, envKey, enabled, Date.now());
+      // Legacy endpoint delegates to the unified policy writer so the slow-start
+      // anchor, policy revision, audit row, and both mirrors commit atomically.
+      // Customer ownership is locked in that same transaction.
+      const written = await deps.facebookOperationPolicy.writeLegacySlowStart(
+        envKey,
+        {
+          enabled,
+          requestId: randomUUID(),
+          reason: 'legacy_customer_slow_start_toggle',
+          requiredOwnerUserId: userId,
+        },
+        `client:${userId}`,
+      );
+      if (!written.ok) {
+        if (
+          written.reason === 'environment_not_owned'
+          || written.reason === 'environment_not_found'
+        ) {
+          sendBindingFailure(res, 'environment_not_owned');
+          return;
+        }
+        const status = written.reason === 'policy_unavailable'
+          ? 503
+          : written.reason === 'invalid_value'
+            ? 422
+            : 409;
+        sendJson(res, status, { error: written.reason });
+        return;
+      }
+      const stored = await deps.store.getEnvironmentSlowStart(userId, envKey);
       if (!stored.ok) {
         sendBindingFailure(res, stored.reason);
         return;
@@ -1944,7 +2195,9 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         }
         view = controllerView;
       } else {
-        view = { slowStart: environmentOnlySlowStartView(stored.slowStartSince, stored.binding) };
+        view = {
+          slowStart: environmentOnlySlowStartView(written.slowStartSince, stored.binding),
+        };
       }
       // 回执带写后真态 + 生效后的当日上限。**不做「已保存 vs 已下发本机」二态**：慢启动的执行体
       // 就在云端 effectiveQuotas 内，provider 现读做对了 → PUT 200 = 本云端已生效。
@@ -2290,15 +2543,16 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         return;
       }
       const raw = body as Record<string, unknown>;
-      // 白名单严格：夹带任何一个白名单之外的键 MUST 整块拒绝且不写入（既有行为，本变更只加两个可选键）。
-      // 新增的两个 Facebook 专属创建意图（change environment-level-rule-mode-and-approval）：
+      // 白名单严格：夹带任何一个白名单之外的键 MUST 整块拒绝且不写入。
+      // 两个 legacy Facebook 创建意图（change environment-level-rule-mode-and-approval）：
       //   facebookRuleModeEnabled  运行方式 = 规则；
       //   commentApprovalMode      全局免审覆盖（source_rules|auto_approve_all）。
-      // 平台门禁、枚举合法性与「慢启动 ∧ 规则模式」互斥都在 store 里**先于注册环境**判定，
+      // facebookOperationMode 是统一互斥运行意图；与任一 legacy 运行布尔共存即拒绝。
+      // 平台门禁、枚举合法性与运行意图互斥都在 store 里**先于注册环境**判定，
       // 保证拒绝时环境、归属与 intent 均不发生部分写入。
       const allowed = new Set([
         'intentId', 'proof', 'envKey', 'label', 'platform', 'slowStartEnabled', 'proxyAuthority',
-        'facebookRuleModeEnabled', 'commentApprovalMode',
+        'facebookRuleModeEnabled', 'facebookOperationMode', 'commentApprovalMode',
       ]);
       const proxyAuthority = normalizeEnvironmentProxyAuthority(raw.proxyAuthority);
       if (Object.keys(raw).some((key) => !allowed.has(key)) ||
@@ -2308,6 +2562,11 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
           (raw.slowStartEnabled !== undefined && typeof raw.slowStartEnabled !== 'boolean') ||
           (raw.facebookRuleModeEnabled !== undefined
             && typeof raw.facebookRuleModeEnabled !== 'boolean') ||
+          (raw.facebookOperationMode !== undefined
+            && raw.facebookOperationMode !== 'persona'
+            && raw.facebookOperationMode !== 'slow_start'
+            && raw.facebookOperationMode !== 'rule'
+            && raw.facebookOperationMode !== 'consumption') ||
           (raw.commentApprovalMode !== undefined
             && raw.commentApprovalMode !== 'source_rules'
             && raw.commentApprovalMode !== 'auto_approve_all') ||
@@ -2323,21 +2582,39 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         platform: raw.platform,
         slowStartEnabled: raw.slowStartEnabled as boolean | undefined,
         facebookRuleModeEnabled: raw.facebookRuleModeEnabled as boolean | undefined,
+        facebookOperationMode: raw.facebookOperationMode as FacebookRequestedOperationMode | undefined,
         commentApprovalMode: raw.commentApprovalMode as string | undefined,
         proxyAuthority,
       });
       if (!result.ok) {
         const status = result.reason === 'disabled' ? 401 :
-          result.reason === 'schema_unavailable' ? 503 :
+          result.reason === 'schema_unavailable'
+            || result.reason === 'operation_policy_refresh_unavailable' ? 503 :
           result.reason === 'invalid_intent' ? 404 :
               result.reason === 'intent_expired' ? 410 :
               result.reason === 'invalid_environment' || result.reason === 'invalid_proxy_authority'
                 || result.reason === 'conflicting_run_mode' ? 400 : 409;
-        sendJson(res, status, { error: result.reason });
+        sendJson(res, status, {
+          error: result.reason,
+          ...(result.currentFacebookOperationPolicy
+            ? {
+                current: {
+                  envKey: raw.envKey.trim(),
+                  facebookOperationPolicy: result.currentFacebookOperationPolicy,
+                },
+              }
+            : {}),
+        });
         return;
       }
       sendJson(res, result.idempotent ? 200 : 201, {
-        data: { environment: result.environment, idempotent: result.idempotent },
+        data: {
+          environment: result.environment,
+          idempotent: result.idempotent,
+          ...(result.facebookOperationPolicy
+            ? { facebookOperationPolicy: result.facebookOperationPolicy }
+            : {}),
+        },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;

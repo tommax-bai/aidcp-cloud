@@ -12,6 +12,7 @@
  */
 
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { signJwt, verifyJwt } from './jwt.js';
 import { parseBearer, verifyCredentials } from './auth.js';
 import { buildVersionPayload } from './version.js';
@@ -866,8 +867,8 @@ function createRequestHandler(
     }
     const slowStartMatch = url.match(/^\/api\/environments\/([^/]+)\/slow-start$/);
     if (method === 'PUT' && slowStartMatch) {
-      if (!deps.clientUsers) {
-        sendJson(res, 503, { error: 'client_users_unavailable' });
+      if (!deps.facebookOperationPolicy || !deps.facebookOperationPolicy.isReady()) {
+        sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
         return;
       }
       let envKey: string;
@@ -883,20 +884,31 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request' });
         return;
       }
-      const result = await deps.clientUsers.setAdminEnvironmentSlowStart(envKey, body.enabled, Date.now());
+      const result = await deps.facebookOperationPolicy.writeLegacySlowStart(
+        envKey,
+        {
+          enabled: body.enabled,
+          requestId: randomUUID(),
+          reason: 'legacy_panel_slow_start_toggle',
+        },
+        `panel:${verified.payload.sub}`,
+      );
       if (!result.ok) {
         const status = result.reason === 'environment_not_found'
           ? 404
-          : result.reason === 'environment_unavailable'
+          : result.reason === 'policy_unavailable'
             ? 503
-            : 409;
+            : result.reason === 'invalid_value'
+              ? 422
+              : 409;
         sendJson(res, status, { error: result.reason });
         return;
       }
       sendJson(res, 200, {
-        envKey: result.envKey,
+        envKey,
         slowStart: {
-          ...result.slowStart,
+          enabled: result.slowStartSince !== null,
+          since: result.slowStartSince,
           globallyDisabled: deps.slowStartDisabled ?? false,
         },
       });
@@ -994,6 +1006,202 @@ function createRequestHandler(
         );
         sendJson(res, 503, { error: 'comment_approval_unavailable' });
       }
+      return;
+    }
+
+    const facebookOperationPolicyMatch =
+      url.match(/^\/api\/environments\/([^/]+)\/facebook-operation-policy$/);
+    if ((method === 'GET' || method === 'PUT') && facebookOperationPolicyMatch) {
+      if (!deps.facebookOperationPolicy) {
+        sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+        return;
+      }
+      if (!deps.facebookOperationPolicy.isReady()) {
+        sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(facebookOperationPolicyMatch[1]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      if (!envKey) {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+      if (method === 'GET') {
+        const view = await deps.facebookOperationPolicy.getForEnv(envKey);
+        if (!view) {
+          sendJson(res, 404, { error: 'environment_not_found_or_unsupported' });
+          return;
+        }
+        sendJson(res, 200, view);
+        return;
+      }
+
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!isRecord(body)) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_payload' });
+        return;
+      }
+      const allowed = new Set(['expectedRevision', 'mode', 'rule', 'consumption', 'reason']);
+      if (
+        Object.keys(body).some((key) => !allowed.has(key))
+        || !Number.isInteger(body.expectedRevision)
+        || !['persona', 'slow_start', 'rule', 'consumption'].includes(String(body.mode))
+        || (
+          body.reason !== undefined
+          && (typeof body.reason !== 'string' || body.reason.length > 500)
+        )
+      ) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_payload' });
+        return;
+      }
+      const mode = body.mode as 'persona' | 'slow_start' | 'rule' | 'consumption';
+      if (
+        (mode === 'persona' || mode === 'slow_start')
+          ? body.rule !== undefined || body.consumption !== undefined
+          : mode === 'rule'
+            ? (
+                body.consumption !== undefined
+                || (
+                  body.rule !== undefined
+                  && (
+                    !isRecord(body.rule)
+                    || !hasExactlyKeys(body.rule, ['viewsPerLike', 'joinEveryNRounds'])
+                  )
+                )
+              )
+            : (
+                body.rule !== undefined
+                || (
+                  body.consumption !== undefined
+                  && (
+                    !isRecord(body.consumption)
+                    || !hasExactlyKeys(body.consumption, [
+                      'viewsPerLike',
+                      'confirmedLikesPerJoin',
+                      'confirmedJoinsPerComment',
+                    ])
+                  )
+                )
+              )
+      ) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'mode_parameter_mismatch' });
+        return;
+      }
+      const result = await deps.facebookOperationPolicy.writeEnvironment(
+        envKey,
+        {
+          expectedRevision: Number(body.expectedRevision),
+          mode,
+          ...(body.rule ? {
+            rule: body.rule as {
+              viewsPerLike: number;
+              joinEveryNRounds: number;
+            },
+          } : {}),
+          ...(body.consumption ? {
+            consumption: body.consumption as {
+              viewsPerLike: number;
+              confirmedLikesPerJoin: number;
+              confirmedJoinsPerComment: number;
+            },
+          } : {}),
+          requestId: randomUUID(),
+          ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+        },
+        `panel:${verified.payload.sub}`,
+      );
+      if (!result.ok) {
+        const status = result.reason === 'environment_not_found'
+          ? 404
+          : result.reason === 'policy_unavailable'
+            ? 503
+          : result.reason === 'revision_conflict'
+                || result.reason === 'unsupported_platform'
+                || result.reason === 'binding_conflict'
+              ? 409
+              : 422;
+        sendJson(res, status, {
+          error: result.reason,
+          ...(result.current ? { current: result.current } : {}),
+        });
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
+    if (
+      (method === 'GET' || method === 'PUT')
+      && url === '/api/facebook/groups/comment-policy'
+    ) {
+      if (!deps.facebookGroupCommentPolicy) {
+        sendJson(res, 503, { error: 'facebook_group_comment_policy_unavailable' });
+        return;
+      }
+      if (method === 'GET') {
+        const view = deps.facebookGroupCommentPolicy.get();
+        if (!view) {
+          sendJson(res, 503, { error: 'facebook_group_comment_policy_unavailable' });
+          return;
+        }
+        sendJson(res, 200, view);
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (
+        !isRecord(body)
+        || Object.keys(body).some(
+          (key) => !['expectedRevision', 'joinToFirstCommentHours', 'reason'].includes(key),
+        )
+        || !Number.isInteger(body.expectedRevision)
+        || !Number.isInteger(body.joinToFirstCommentHours)
+        || (
+          body.reason !== undefined
+          && (typeof body.reason !== 'string' || body.reason.length > 500)
+        )
+      ) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_payload' });
+        return;
+      }
+      const result = await deps.facebookGroupCommentPolicy.write(
+        {
+          expectedRevision: Number(body.expectedRevision),
+          joinToFirstCommentHours: Number(body.joinToFirstCommentHours),
+          requestId: randomUUID(),
+          ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+        },
+        `panel:${verified.payload.sub}`,
+      );
+      if (!result.ok) {
+        const status = result.reason === 'revision_conflict'
+          ? 409
+          : result.reason === 'policy_unavailable'
+            ? 503
+            : 422;
+        sendJson(res, status, {
+          error: result.reason,
+          ...(result.current ? { current: result.current } : {}),
+        });
+        return;
+      }
+      sendJson(res, 200, result.view);
       return;
     }
 

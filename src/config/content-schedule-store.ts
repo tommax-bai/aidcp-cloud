@@ -42,10 +42,38 @@ import type {
   AutomationConfigCommandsPort,
   ContactCommentAttemptAudit,
 } from '../kernel/api-direct-port.js';
-import type { FacebookRuleModeView } from './facebook-rule-mode-store.js';
-import type { FacebookBrowseMode } from '../kernel/facebook-rule-mode-types.js';
+import type { FacebookRuleActionState } from '../kernel/facebook-rule-mode-types.js';
+import type {
+  FacebookBaseOperationMode,
+  FacebookEffectiveOperationMode,
+} from './facebook-operation-policy-store.js';
 
 const { Pool } = pg;
+
+type FacebookConsumptionActionState =
+  | 'waiting_target'
+  | 'waiting_gate'
+  | 'ready'
+  | 'dispatched'
+  | 'terminal';
+type FacebookConsumptionDispatchPhase = 'not_started' | 'dispatched' | 'settled';
+type FacebookConsumptionOutcome =
+  | 'confirmed_new_like'
+  | 'confirmed_new_join'
+  | 'confirmed_comment'
+  | 'already_liked'
+  | 'already_reacted'
+  | 'already_member'
+  | 'pending'
+  | 'ambiguous'
+  | 'submitted_unknown'
+  | 'gated'
+  | 'not_started'
+  | 'structural'
+  | 'rejected'
+  | 'failed'
+  | 'no_target'
+  | 'policy_superseded';
 
 /** 发帖日上限防御性上界（与 console CAP_MAX 对齐；防异常大值）。 */
 export const CONTENT_POST_DAILY_CAP_MAX = SCHEDULED_CONTENT_DAILY_CAP_MAX;
@@ -130,11 +158,53 @@ export interface ContentScheduleCatalogRow {
   updatedBy: string | null;
   /** 仅 Facebook 行聚合；领域配置仍由独立 store 持久化。 */
   joinGroupAutomation?: FacebookJoinGroupAutomationCatalogView;
-  /** 仅 Facebook 行聚合；配置、计数与平台动作终态保持分层。 */
-  facebookRuleMode?: FacebookRuleModeView & {
-    effectiveMode: FacebookBrowseMode;
-    blocker: string | null;
-  };
+  /** 仅 Facebook 行聚合；模式配置、计数与平台动作终态保持无损分层。 */
+  facebookOperation?: FacebookOperationCatalogView;
+}
+
+export interface FacebookOperationCatalogView {
+  baseMode: FacebookBaseOperationMode;
+  effectiveMode: FacebookEffectiveOperationMode | null;
+  policyRevision: number;
+  blocker: string | null;
+  rule: {
+    viewsPerLike: number;
+    joinEveryNRounds: number;
+    viewCount: number;
+    collectingSequence: number;
+    collectingRoundIncludesJoin: boolean;
+    currentBatch: {
+      sequence: number;
+      includesJoin: boolean;
+      likeState: FacebookRuleActionState;
+      joinState: FacebookRuleActionState;
+      commentState: FacebookRuleActionState;
+      terminal: boolean;
+      blocker: string | null;
+      updatedAt: string;
+    } | null;
+  } | null;
+  consumption: {
+    viewsPerLike: number;
+    confirmedLikesPerJoin: number;
+    confirmedJoinsPerComment: number;
+    viewsSinceLike: number;
+    confirmedNewLikesSinceJoin: number;
+    confirmedNewJoinsSinceComment: number;
+    activeAction: {
+      actionType: 'like' | 'join' | 'comment';
+      state: FacebookConsumptionActionState;
+      dispatchPhase: FacebookConsumptionDispatchPhase;
+      outcome: FacebookConsumptionOutcome | null;
+      blocker: string | null;
+      target: {
+        groupUrl: string | null;
+        contentKey: string | null;
+      };
+      updatedAt: string | null;
+    } | null;
+  } | null;
+  updatedAt: string | null;
 }
 
 export interface FacebookJoinGroupAutomationCatalogView {

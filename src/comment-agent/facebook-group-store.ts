@@ -108,7 +108,12 @@ export function facebookCoverageRelaxEnabled(raw: string | undefined | null): bo
   return raw === 'true';
 }
 
-export type FacebookGroupJoinTriggerSource = 'scheduled' | 'manual_pool' | 'manual_specific' | 'shadow';
+export type FacebookGroupJoinTriggerSource =
+  | 'scheduled'
+  | 'manual_pool'
+  | 'manual_specific'
+  | 'consumption'
+  | 'shadow';
 
 export interface FacebookGroupJoinAuditRow {
   accountId: string;
@@ -434,7 +439,7 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'facebook_group_join_audit_trigger_source_check') THEN
     ALTER TABLE facebook_group_join_audit
       ADD CONSTRAINT facebook_group_join_audit_trigger_source_check
-      CHECK (trigger_source IS NULL OR trigger_source IN ('scheduled','manual_pool','manual_specific','shadow'));
+      CHECK (trigger_source IS NULL OR trigger_source IN ('scheduled','manual_pool','manual_specific','consumption','shadow'));
   END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_fb_group_join_audit_account
@@ -1363,6 +1368,36 @@ export class FacebookGroupMembershipStore {
     return (result.rowCount ?? 0) > 0;
   }
 
+  /**
+   * Undo only the mode attempt that just crossed assigned -> joining but whose
+   * caller-owned pre-dispatch callback rejected. Matching the unique attempt
+   * reason is the CAS token: a later/other join may not be released here.
+   */
+  async releaseModeJoining(
+    accountId: string,
+    groupUrlInput: string,
+    expectedAttemptReason: string,
+    reason = 'mode_dispatch_rejected',
+  ): Promise<boolean> {
+    const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
+    const expected = expectedAttemptReason.trim();
+    if (!groupUrl || !expected) return false;
+    const result = await this.pool.query(
+      `UPDATE facebook_group_membership
+       SET status = 'assigned',
+           attempts = GREATEST(attempts - 1, 0),
+           last_reason = $4,
+           cooldown_until = NULL,
+           updated_at = now()
+       WHERE account_id = $1
+         AND group_url = $2
+         AND status = 'joining'
+         AND last_reason = $3`,
+      [accountId, groupUrl, expected, reason],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async markJoined(accountId: string, groupUrlInput: string, reason = 'joined'): Promise<void> {
     const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
     if (!groupUrl) return;
@@ -1479,15 +1514,51 @@ export class FacebookGroupMembershipStore {
     return rows.map(toMembershipRow);
   }
 
-  async markCoverageCommented(
+  async coverageProjectionState(
+    accountId: string,
+  ): Promise<'ready' | 'projection_stale' | 'account_missing'> {
+    if (!(await this.accountProjectionFresh())) return 'projection_stale';
+    const { rows } = await this.pool.query<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM automation_account_projection
+          WHERE account_id = $1
+       ) AS present`,
+      [accountId],
+    );
+    return rows[0]?.present === true ? 'ready' : 'account_missing';
+  }
+
+  async findMembership(
+    accountId: string,
+    groupUrlInput: string,
+  ): Promise<FacebookGroupMembershipRow | null> {
+    const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
+    if (!groupUrl) return null;
+    const { rows } = await this.pool.query<MembershipDbRow>(
+      `SELECT account_id, group_url, status, assigned_at, joined_at,
+              last_attempt_at, attempts, last_reason, last_commented_at,
+              cooldown_until, comments_total, left_confirmations, updated_at
+         FROM facebook_group_membership
+        WHERE account_id = $1 AND group_url = $2
+        LIMIT 1`,
+      [accountId, groupUrl],
+    );
+    return rows[0] ? toMembershipRow(rows[0]) : null;
+  }
+
+  async recordCoverageCommented(
     accountId: string,
     groupUrlInput: string,
     options: { cooldownMs?: number; reason?: string } = {},
-  ): Promise<void> {
+  ): Promise<FacebookGroupMembershipRow | null> {
     const groupUrl = canonicalFacebookGroupUrl(groupUrlInput);
-    if (!groupUrl) return;
-    const cooldownSeconds = Math.max(0, Math.floor((options.cooldownMs ?? 72 * 60 * 60 * 1000) / 1000));
-    await this.pool.query(
+    if (!groupUrl) return null;
+    const cooldownSeconds = Math.max(
+      0,
+      Math.floor((options.cooldownMs ?? 72 * 60 * 60 * 1000) / 1000),
+    );
+    const { rows } = await this.pool.query<MembershipDbRow>(
       `UPDATE facebook_group_membership
        SET last_commented_at = now(),
            comments_total = comments_total + 1,
@@ -1495,9 +1566,26 @@ export class FacebookGroupMembershipStore {
            left_confirmations = 0,
            last_reason = $4,
            updated_at = now()
-       WHERE account_id = $1 AND group_url = $2 AND status = 'joined'`,
-      [accountId, groupUrl, cooldownSeconds, options.reason ?? 'coverage_commented'],
+       WHERE account_id = $1 AND group_url = $2 AND status = 'joined'
+       RETURNING account_id, group_url, status, assigned_at, joined_at,
+                 last_attempt_at, attempts, last_reason, last_commented_at,
+                 cooldown_until, comments_total, left_confirmations, updated_at`,
+      [
+        accountId,
+        groupUrl,
+        cooldownSeconds,
+        options.reason ?? 'coverage_commented',
+      ],
     );
+    return rows[0] ? toMembershipRow(rows[0]) : null;
+  }
+
+  async markCoverageCommented(
+    accountId: string,
+    groupUrlInput: string,
+    options: { cooldownMs?: number; reason?: string } = {},
+  ): Promise<void> {
+    await this.recordCoverageCommented(accountId, groupUrlInput, options);
   }
 
   async recordCoverageLeftSignal(

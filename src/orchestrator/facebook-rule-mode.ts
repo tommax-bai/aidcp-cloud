@@ -1,5 +1,9 @@
 import type { PageCardsData } from '../event-bus/types.js';
-import type { FacebookBrowseMode } from '../kernel/facebook-rule-mode-types.js';
+import type {
+  FacebookBrowseMode,
+  FacebookRulePolicySnapshot,
+} from '../kernel/facebook-rule-mode-types.js';
+import type { FacebookConsumptionPolicySnapshot } from './facebook-consumption-mode-types.js';
 import { facebookPostKey, hasObviousHighRiskFacebookCaption } from '../platform/facebook-presented-video.js';
 
 export type { FacebookBrowseMode } from '../kernel/facebook-rule-mode-types.js';
@@ -7,6 +11,10 @@ export type { FacebookBrowseMode } from '../kernel/facebook-rule-mode-types.js';
 export interface FacebookRuleModeDecision {
   mode: FacebookBrowseMode;
   blocker: string | null;
+  /** Present only when the environment operation-policy projection is authoritative. */
+  policyRevision?: number;
+  rulePolicy?: FacebookRulePolicySnapshot;
+  consumptionPolicy?: FacebookConsumptionPolicySnapshot;
 }
 
 /**
@@ -27,7 +35,7 @@ export interface FacebookRuleModeDecision {
 export function decideFacebookBrowseMode(input: {
   platform: string | undefined;
   ruleEnabled: boolean;
-  activeWeek: boolean;
+  operationMode?: 'persona' | 'rule' | 'consumption';
   personaBinding: 'bound' | 'unbound' | 'unknown';
   slowStart: { state: string; ineligibleReason?: string };
 }): FacebookRuleModeDecision {
@@ -41,14 +49,20 @@ export function decideFacebookBrowseMode(input: {
   ) {
     return { mode: 'blocked', blocker: input.slowStart.ineligibleReason };
   }
-  if (input.ruleEnabled && input.activeWeek) return { mode: 'facebook_rule', blocker: null };
+  const operationMode = input.operationMode ?? (input.ruleEnabled ? 'rule' : 'persona');
+  if (operationMode === 'rule') {
+    return { mode: 'facebook_rule', blocker: null };
+  }
+  if (operationMode === 'consumption') {
+    return { mode: 'consumption', blocker: null };
+  }
   if (input.personaBinding !== 'bound') {
     return {
       mode: 'blocked',
       blocker: input.personaBinding === 'unbound' ? 'no_persona' : 'persona_unavailable',
     };
   }
-  return { mode: 'persona', blocker: input.ruleEnabled ? 'outside_active_window' : null };
+  return { mode: 'persona', blocker: null };
 }
 
 export function selectFacebookRuleCard(

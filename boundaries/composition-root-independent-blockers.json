@@ -4,12 +4,12 @@
   "claimBlocked": true,
   "claim": "api, automation, and content are independently bootable without foreign owner pools, stores, or synchronous in-process dependencies",
   "summary": {
-    "total": 54,
+    "total": 56,
     "byCategory": {
       "4b-mirror": 14,
       "operator-command": 3,
       "content-owner": 10,
-      "composition-root": 27
+      "composition-root": 29
     }
   },
   "blockers": [
@@ -405,6 +405,16 @@
       ]
     },
     {
+      "id": "seg-a-api-owner-facebook-group-comment-policy-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:FacebookGroupCommentPolicyStore:api:src/config/facebook-group-comment-policy-store.ts"
+      ]
+    },
+    {
       "id": "seg-a-api-owner-facebook-group-join-automation-store",
       "category": "composition-root",
       "owner": "api",
@@ -412,6 +422,16 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:FacebookGroupJoinAutomationStore:api:src/config/facebook-group-join-automation-store.ts"
+      ]
+    },
+    {
+      "id": "seg-a-api-owner-facebook-operation-policy-store",
+      "category": "composition-root",
+      "owner": "api",
+      "consumer": "automation and content roots through shared segA",
+      "closingChange": "future",
+      "evidence": [
+        "src/server.ts#segAApiFoundation:new:FacebookOperationPolicyStore:api:src/config/facebook-operation-policy-store.ts"
       ]
     },
     {

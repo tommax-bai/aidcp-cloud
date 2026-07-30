@@ -70,6 +70,7 @@ import {
   InteractionGuardRegistry,
   ActionCooldownGate,
   PacingSaturationAlerter,
+  SLOW_START_TOTAL_DAYS,
   // change risk-state-cross-process-integrity：跨进程单写四件套
   AutomationWriterLock,
   resolveWriterLockConnection,
@@ -613,14 +614,20 @@ import {
   type AccountCommentApprovalMode,
 } from './config/approval-policy-store.js';
 import { FacebookCommentConfigStore } from './config/facebook-comment-config-store.js';
+import { FacebookRuleModeStore } from './config/facebook-rule-mode-store.js';
 import {
-  FacebookRuleModeStore,
-} from './config/facebook-rule-mode-store.js';
+  FacebookOperationPolicyStore,
+  type FacebookOperationPolicySlowStartResolver,
+} from './config/facebook-operation-policy-store.js';
+import { FacebookGroupCommentPolicyStore } from './config/facebook-group-comment-policy-store.js';
 import { FacebookRuleModeRuntimeStore } from './orchestrator/facebook-rule-mode-runtime-store.js';
+import { FacebookConsumptionModeRuntimeStore } from './orchestrator/facebook-consumption-mode-runtime-store.js';
+import {
+  FacebookConsumptionModeCoordinator,
+  createStrictFacebookConsumptionGroupSelector,
+} from './orchestrator/facebook-consumption-mode-coordinator.js';
 import type {
   FacebookRuleActionState,
-  FacebookRuleContactFallbackState,
-  FacebookRuleModeView,
 } from './kernel/facebook-rule-mode-types.js';
 import { decideFacebookBrowseMode } from './orchestrator/facebook-rule-mode.js';
 import { FacebookCommentAuditStore } from './comment-agent/facebook-comment-audit-store.js';
@@ -1042,8 +1049,11 @@ interface CompositionContext {
   eventBus: EventBus;
   facebookCommentAuditStore: FacebookCommentAuditStore;
   facebookCommentConfigStore: FacebookCommentConfigStore;
+  facebookOperationPolicyStore?: FacebookOperationPolicyStore;
+  facebookGroupCommentPolicyStore?: FacebookGroupCommentPolicyStore;
   facebookRuleModeStore?: FacebookRuleModeStore;
   facebookRuleModeRuntimeStore?: FacebookRuleModeRuntimeStore;
+  facebookConsumptionModeRuntimeStore?: FacebookConsumptionModeRuntimeStore;
   facebookGroupJoinAuditStore: FacebookGroupJoinAuditStore;
   facebookGroupJoinAutomationStore: FacebookGroupJoinAutomationStore;
   facebookGroupMembershipStore: FacebookGroupMembershipStore;
@@ -2197,6 +2207,30 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     pool: configMirrorPool,
     mirrorVersionBumper: mirrorVersionStore,
   });
+  const facebookOperationPolicyStore = new FacebookOperationPolicyStore({
+    pool: configMirrorPool,
+    schemaProber: probeSchemaShape,
+    mirrorVersionBumper: mirrorVersionStore,
+    // segA runs in every service mode, including the split API process that
+    // owns customer policy writes. Resolve the locked environment anchor here
+    // instead of relying on segC's account projection.
+    environmentSlowStartResolver: async ({ since }) => {
+      if (process.env.AIDCP_SLOW_START_DISABLED === 'true') return 'inactive';
+      return Date.now() - since >= SLOW_START_TOTAL_DAYS * 86_400_000
+        ? 'inactive'
+        : 'active';
+    },
+  });
+  const facebookGroupCommentPolicyStore = deploymentTarget
+    ? new FacebookGroupCommentPolicyStore({
+        pool: configMirrorPool,
+        executionTarget: deploymentTarget,
+        schemaProber: probeSchemaShape,
+        mirrorVersionBumper: mirrorVersionStore,
+        legacyWarmupHours: () => process.env.AIDCP_FB_GROUP_COVERAGE_WARMUP_HOURS,
+        legacyRecommentCooldownHours: () => process.env.AIDCP_FB_GROUP_COVERAGE_COOLDOWN_HOURS,
+      })
+    : undefined;
   const facebookRuleModeStore = deploymentTarget
     ? new FacebookRuleModeStore({
         configPool: configMirrorPool,
@@ -2206,6 +2240,13 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     : undefined;
   const facebookRuleModeRuntimeStore = deploymentTarget
     ? new FacebookRuleModeRuntimeStore({
+        runtimePool: automationPool,
+        executionTarget: deploymentTarget,
+        schemaProber: probeSchemaShape,
+      })
+    : undefined;
+  const facebookConsumptionModeRuntimeStore = deploymentTarget
+    ? new FacebookConsumptionModeRuntimeStore({
         runtimePool: automationPool,
         executionTarget: deploymentTarget,
         schemaProber: probeSchemaShape,
@@ -2295,6 +2336,8 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     pool: apiPool,
     schemaEnsurer: ensureCapabilitySchema,
     mirrorVersionBumper: mirrorVersionStore,
+    refreshFacebookOperationPolicyAuthority: () =>
+      facebookOperationPolicyStore.refreshFromAuthority(),
     offboardMaterialization,
     automationReads: clientEnvAutomationRead,
     cleanupGrantOps: offboardCleanupGrantOps,
@@ -2306,6 +2349,12 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   // 而反查必须走同一个 ClientUserStore 实例，MUST NOT 另开一份会各自陈旧的副本。
   facebookRuleModeStore?.bindEnvironmentResolver(
     (accountId) => clientUserStore.resolveEnvironmentKeyForAccount(accountId),
+  );
+  facebookOperationPolicyStore.bindEnvironmentResolver(
+    (accountId) => clientUserStore.resolveEnvironmentKeyForAccount(accountId),
+  );
+  facebookOperationPolicyStore.bindSlowStartRefresh(
+    () => clientUserStore.refreshSlowStartFromAuthority(),
   );
   try {
     await mirrorVersionStore.init();
@@ -2321,8 +2370,11 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     await contentScheduleStore.init();
     await facebookGroupJoinAutomationStore.init();
     await facebookCommentConfigStore.init();
+    await facebookOperationPolicyStore.init();
+    await facebookGroupCommentPolicyStore?.init();
     await facebookRuleModeStore?.init();
     await facebookRuleModeRuntimeStore?.init();
+    await facebookConsumptionModeRuntimeStore?.init();
     await facebookCommentAuditStore.init();
     await facebookGroupTargetStore.init();
     await facebookGroupMembershipStore.init();
@@ -3289,8 +3341,11 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ctx.draftRefinementStore = draftRefinementStore;
   ctx.facebookCommentAuditStore = facebookCommentAuditStore;
   ctx.facebookCommentConfigStore = facebookCommentConfigStore;
+  ctx.facebookOperationPolicyStore = facebookOperationPolicyStore;
+  ctx.facebookGroupCommentPolicyStore = facebookGroupCommentPolicyStore;
   ctx.facebookRuleModeStore = facebookRuleModeStore;
   ctx.facebookRuleModeRuntimeStore = facebookRuleModeRuntimeStore;
+  ctx.facebookConsumptionModeRuntimeStore = facebookConsumptionModeRuntimeStore;
   ctx.facebookGroupJoinAuditStore = facebookGroupJoinAuditStore;
   ctx.facebookGroupJoinAutomationStore = facebookGroupJoinAutomationStore;
   ctx.facebookGroupMembershipStore = facebookGroupMembershipStore;
@@ -3959,7 +4014,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountState, accountStore, apiPool, automationPool, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookRuleModeStore, facebookRuleModeRuntimeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore } = ctx;
+  const { accountDisplayName, accountState, accountStore, apiPool, automationPool, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookOperationPolicyStore, facebookGroupCommentPolicyStore, facebookRuleModeStore, facebookRuleModeRuntimeStore, facebookConsumptionModeRuntimeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore } = ctx;
   const seamMode = serviceModeFromEnv();
   let apiDirectPorts = ctx.apiDirectAuthorities ?? {};
   if (seamMode === 'automation') {
@@ -4403,12 +4458,40 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     },
     logger: console,
   });
+  facebookOperationPolicyStore?.bindSlowStartResolver((async (accountId) => {
+    const view = (await riskRegistry.getController(accountId)).slowStartView();
+    if (
+      view.ineligibleReason
+      && view.ineligibleReason !== 'globally_disabled'
+    ) {
+      return {
+        state: 'unknown',
+        since: view.since ?? null,
+        globallyDisabled: false,
+        blocker: `slow_start_${view.ineligibleReason}`,
+      };
+    }
+    return {
+      state: view.state,
+      since: view.since ?? null,
+      globallyDisabled: view.ineligibleReason === 'globally_disabled',
+    };
+  }) satisfies FacebookOperationPolicySlowStartResolver);
   console.log(`[aidcp-cloud] 冷启动配额爬坡 ${coldStartRampEnabled ? '已开启(AIDCP_COLDSTART_RAMP=true)' : '已禁用(默认·直接走安全限额配置)'}`);
   if (slowStartDisabled) {
     console.log('[aidcp-cloud] 环境级慢启动 已被全局停用(AIDCP_SLOW_START_DISABLED=true·无视所有环境开关)');
   }
   // retire-default-account：不再建单租户全局 'default' controller；风控一律经 registry 按真实账号懒解析。
-  const resolveController = (accountId: string): Promise<RiskController> => riskRegistry.getController(accountId);
+  // Consumption comment has a synchronous final actionGate inside the held
+  // Edge lease. Its preceding async policy check always materializes this same
+  // per-account controller first; the cache lets the last pre-write boundary
+  // fail closed without creating a second controller authority.
+  const resolvedRiskControllers = new Map<string, RiskController>();
+  const resolveController = async (accountId: string): Promise<RiskController> => {
+    const controller = await riskRegistry.getController(accountId);
+    resolvedRiskControllers.set(accountId, controller);
+    return controller;
+  };
   const listAccountAutomationCatalog = async (): Promise<ContentScheduleCatalogRow[]> => {
     const rows = await contentScheduleStore.listCatalog();
     const projected = await projectFacebookGroupJoinAutomationCatalog(rows, {
@@ -4418,59 +4501,103 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       loadScopes: (accountIds) => facebookGroupTargetStore.scopedTargetCountsForAccounts(accountIds),
       loadRecentResults: (accountIds) => facebookGroupJoinAuditStore.latestScheduledResults(accountIds),
     });
-  /**
-   * 读时派生「这个账号的加群联系评论会不会降级」（change facebook-rule-comment-plain-fallback）。
-   * MUST NOT 缓存成配置值：账号随时可能补上联系方式。读不到就如实报 unknown，绝不猜成「不会降级」。
-   */
-  const resolveRuleContactFallback = async (
-    accountId: string,
-  ): Promise<FacebookRuleContactFallbackState> => {
-    if (!accountStore?.getContactInfo) return 'unknown';
-    try {
-      const contact = await accountStore.getContactInfo(accountId);
-      return contact ? 'not_pending' : 'pending';
-    } catch (err) {
-      console.warn(`[facebook-rule] 联系方式读取失败 account=${accountId}: ${(err as Error).message}`);
-      return 'unknown';
-    }
-  };
-    if (!facebookRuleModeStore || !facebookRuleModeRuntimeStore) return projected;
+    if (!facebookOperationPolicyStore?.isReady()) return projected;
     if (configMirrorGate.isStale('content_schedule')) {
-      console.warn('[facebook-rule] catalog projection unavailable: content_schedule mirror stale');
+      console.warn('[facebook-operation] catalog projection unavailable: content_schedule mirror stale');
       return projected;
     }
     return Promise.all(projected.map(async (row) => {
       if (row.platform !== 'facebook') return row;
       try {
-        const [view, controller] = await Promise.all([
-          Promise.all([
-            Promise.resolve(facebookRuleModeStore.getConfig(row.accountId)),
-            facebookRuleModeRuntimeStore.getRuntimeView(row.accountId),
-            resolveRuleContactFallback(row.accountId),
-          ]).then(([config, runtime, contactFallback]): FacebookRuleModeView => ({
-            config,
-            runtime,
-            contactFallback,
-          })),
-          resolveController(row.accountId),
-        ]);
+        const policy = facebookOperationPolicyStore.resolveBaseForAccount(row.accountId);
+        if (!policy.ok) return row;
+        const controller = await resolveController(row.accountId);
         const decision = decideFacebookBrowseMode({
           platform: row.platform,
-          ruleEnabled: view.config.enabled,
-          activeWeek: isWeekActiveAt(row.effectiveActiveWeekMask, new Date()),
+          ruleEnabled: false,
+          operationMode: policy.baseMode,
           personaBinding: personaStore.bindingFor(row.accountId),
           slowStart: controller.slowStartView(),
         });
+        const ruleRuntime = policy.baseMode === 'rule'
+          ? await facebookRuleModeRuntimeStore?.getRuntimeView(row.accountId, {
+              policyRevision: policy.policyRevision,
+              snapshot: policy.rule,
+            })
+          : null;
+        if (policy.baseMode === 'rule' && !ruleRuntime) return row;
+        const consumptionRuntime = policy.baseMode === 'consumption'
+          ? await facebookConsumptionModeRuntimeStore?.getRuntimeView(
+              row.accountId,
+              policy.policyRevision,
+            )
+          : null;
+        if (policy.baseMode === 'consumption' && !facebookConsumptionModeRuntimeStore) {
+          return row;
+        }
         return {
           ...row,
-          facebookRuleMode: {
-            ...view,
-            effectiveMode: decision.mode,
+          facebookOperation: {
+            baseMode: policy.baseMode,
+            effectiveMode: decision.mode === 'facebook_rule'
+              ? 'rule'
+              : decision.mode === 'unsupported'
+                ? null
+                : decision.mode,
+            policyRevision: policy.policyRevision,
             blocker: decision.blocker,
+            rule: ruleRuntime
+              ? {
+                  viewsPerLike: policy.rule.viewsPerLike,
+                  joinEveryNRounds: policy.rule.joinEveryNRounds,
+                  viewCount: ruleRuntime.viewCount,
+                  collectingSequence: ruleRuntime.collectingSequence,
+                  collectingRoundIncludesJoin: ruleRuntime.collectingRoundIncludesJoin,
+                  currentBatch: ruleRuntime.currentBatch
+                    ? {
+                        sequence: ruleRuntime.currentBatch.sequence,
+                        includesJoin: ruleRuntime.currentBatch.includesJoin,
+                        likeState: ruleRuntime.currentBatch.likeState,
+                        joinState: ruleRuntime.currentBatch.joinState,
+                        commentState: ruleRuntime.currentBatch.commentState,
+                        terminal: ruleRuntime.currentBatch.terminal,
+                        blocker: ruleRuntime.currentBatch.blocker,
+                        updatedAt: ruleRuntime.currentBatch.updatedAt,
+                      }
+                    : null,
+                }
+              : null,
+            consumption: policy.baseMode === 'consumption'
+              ? {
+                  viewsPerLike: policy.consumption.viewsPerLike,
+                  confirmedLikesPerJoin: policy.consumption.confirmedLikesPerJoin,
+                  confirmedJoinsPerComment: policy.consumption.confirmedJoinsPerComment,
+                  viewsSinceLike: consumptionRuntime?.viewsSinceLike ?? 0,
+                  confirmedNewLikesSinceJoin:
+                    consumptionRuntime?.confirmedNewLikesSinceJoin ?? 0,
+                  confirmedNewJoinsSinceComment:
+                    consumptionRuntime?.confirmedNewJoinsSinceComment ?? 0,
+                  activeAction: consumptionRuntime?.activeAction
+                    ? {
+                        actionType: consumptionRuntime.activeAction.actionType,
+                        state: consumptionRuntime.activeAction.state,
+                        dispatchPhase: consumptionRuntime.activeAction.dispatchPhase,
+                        outcome: consumptionRuntime.activeAction.outcome,
+                        blocker: consumptionRuntime.activeAction.blocker,
+                        target: {
+                          groupUrl: consumptionRuntime.activeAction.target.groupUrl,
+                          contentKey: consumptionRuntime.activeAction.target.contentKey,
+                        },
+                        updatedAt: consumptionRuntime.activeAction.updatedAt,
+                      }
+                    : null,
+                }
+              : null,
+            updatedAt: policy.updatedAt,
           },
         };
       } catch (err) {
-        console.warn(`[facebook-rule] catalog projection unavailable account=${row.accountId}: ${(err as Error).message}`);
+        console.warn(`[facebook-operation] catalog projection unavailable account=${row.accountId}: ${(err as Error).message}`);
         return row;
       }
     }));
@@ -5160,6 +5287,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       content_schedule: async () => {
         await Promise.all([
           contentScheduleStore.refreshFromAuthority(),
+          facebookOperationPolicyStore?.refreshFromAuthority(),
+          facebookGroupCommentPolicyStore?.refreshFromAuthority(),
           facebookRuleModeStore?.refreshFromAuthority(),
         ]);
       },
@@ -5217,6 +5346,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // A 阶段4 发帖触发器已在发布日志之后前向声明；actions.publish / 首作精选回调运行时引用。
   // 按需评论触发器（change comment-search-command；下方实例化，actions.comment 运行时引用，前向安全）。
   let commentScheduler: CommentScheduler | undefined;
+  // Dispatcher is built before the group/comment executors below; consumption
+  // actions call through this late-bound coordinator only after composition.
+  let facebookConsumptionCoordinator: FacebookConsumptionModeCoordinator | undefined;
   /**
    * 晚绑定的排期调度器引用（change browser-slot-scheduling）：评论管线要在任务跑完、发现「根本没开始」时
    * 把这一小时的名额还回去；但它构造得比 ContentScheduler 早（后者依赖它），只能这样回指。
@@ -6601,6 +6733,38 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     const commentCorpusLookupTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_CORPUS_LOOKUP_TIMEOUT_MS');
     const commentLlmTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_LLM_TIMEOUT_MS');
     const commentSublineTimeoutMs = readEnvNumberOrUndefined('AIDCP_COMMENT_SUBLINE_TIMEOUT_MS');
+    const resolveFacebookOperationDecision = (accountId: string) => {
+      if (ctx.platform !== 'facebook') {
+        return { mode: 'unsupported' as const, blocker: 'rule_mode_unsupported' };
+      }
+      if (!facebookOperationPolicyStore?.isReady()) {
+        return { mode: 'blocked' as const, blocker: 'facebook_operation_policy_unavailable' };
+      }
+      if (configMirrorGate.isStale('content_schedule')) {
+        configMirrorGate.noteStaleRefusal(
+          'content_schedule',
+          `facebook_operation_policy:${accountId}`,
+        );
+        return { mode: 'blocked' as const, blocker: 'facebook_operation_policy_stale' };
+      }
+      const policy = facebookOperationPolicyStore.resolveBaseForAccount(accountId);
+      if (!policy.ok) {
+        return { mode: 'blocked' as const, blocker: policy.blocker };
+      }
+      const decision = decideFacebookBrowseMode({
+        platform: ctx.platform,
+        ruleEnabled: false,
+        operationMode: policy.baseMode,
+        personaBinding: personaStore.bindingFor(accountId),
+        slowStart: ctx.controller.slowStartView(),
+      });
+      return {
+        ...decision,
+        policyRevision: policy.policyRevision,
+        rulePolicy: policy.rule,
+        consumptionPolicy: policy.consumption,
+      };
+    };
     return new RoleDispatcher({
       configMirrorGate,
       getSoul: opts?.getSoul ?? getSoul,
@@ -6636,38 +6800,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       explainSearch: () => ctx.controller.explain('search'),
       // 浏览前风控闸：view 配额耗尽时不再打开下一篇笔记，按窗口释放时间休眠后重驱。
       explainView: () => ctx.controller.explain('view'),
-      facebookRuleModeDecision: (accountId) => {
-        if (!facebookRuleModeStore) return { mode: 'blocked', blocker: 'rule_runtime_unavailable' };
-        if (configMirrorGate.isStale('content_schedule')) {
-          configMirrorGate.noteStaleRefusal('content_schedule', `facebook_rule_mode:${accountId}`);
-          return { mode: 'blocked', blocker: 'rule_projection_unavailable' };
-        }
-        // change environment-level-rule-mode-and-approval：配置在环境上，getConfig 内部按当前绑定
-        // 账号反查环境；反查不出唯一环境（绑定未知 / 绑定冲突 / 跨客户争用 / 绑定副本陈旧）时它已经
-        // fail-closed 成 enabled=false，MUST NOT 回落任何账号键存量值。
-        const environmentBlocker = facebookRuleModeStore.resolveEnvironmentBlocker(accountId);
-        const config = facebookRuleModeStore.getConfig(accountId);
-        const decision = decideFacebookBrowseMode({
-          platform: ctx.platform,
-          ruleEnabled: config.enabled,
-          activeWeek: isWeekActiveAt(contentScheduleStore.effectiveActiveWeekMaskFor(accountId), new Date()),
-          personaBinding: personaStore.bindingFor(accountId),
-          slowStart: ctx.controller.slowStartView(),
-        });
-        // 反查失败只影响「跑不跑规则」，MUST NOT 升级成「整个账号停手」——那不是收紧，是误伤。
-        // 这里只在裁决本身没有别的原因时，把**为什么没跑规则**具名说出来。
-        return environmentBlocker && decision.blocker === null
-          ? { ...decision, blocker: environmentBlocker }
-          : decision;
-      },
-      // 会话启动闸的规则模式豁免判据（change facebook-rule-mode-without-persona）：与模式裁决**同源**——
-      // 同一个按账号读的权威规则模式入口、同一道副本新鲜度闸。store 未装配 / 副本陈旧 → 返回 false，
-      // 启动闸 fail-closed 回到「未绑人设即短路」的既有行为，绝不把「读不到」猜成「已启用」。
-      facebookRuleModeEnabled: (accountId) => {
-        if (!facebookRuleModeStore) return false;
-        if (configMirrorGate.isStale('content_schedule')) return false;
-        return facebookRuleModeStore.getConfig(accountId).enabled === true;
-      },
+      facebookRuleModeDecision: resolveFacebookOperationDecision,
+      // 会话启动的人设豁免直接复用上面的 operation-policy 决策；不再注入第二条旧 rule bool 读链。
       // 规则批次评论段的有效正文方案（同上 change）：直接取 FB 评论配置的权威有效值——
       // 显式模板 / 未显式选择（默认模板）→ 'template'；显式生成 → 'generated'。
       // 该配置副本陈旧时如实报 'unavailable'：评论段不执行，绝不猜成模板、也绝不猜成生成。
@@ -6680,7 +6814,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           ? 'template'
           : 'generated';
       },
-      ...(facebookRuleModeStore && facebookRuleModeRuntimeStore
+      ...(facebookOperationPolicyStore && facebookRuleModeRuntimeStore
         ? {
             applyFacebookRuleView: (input) => facebookRuleModeRuntimeStore.applyConfirmedView(input),
             updateFacebookRuleBatch: (batchId, patch) => facebookRuleModeRuntimeStore.updateBatch(batchId, patch),
@@ -6729,29 +6863,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                 // 分流——规则批次的模板正文放行，其余来源与生成式正文逐字保持既有拒绝行为。
                 source: 'facebook_rule_batch',
                 actionGate: (action) => {
-                  const decision = (() => {
-                    if (!facebookRuleModeStore) {
-                      return { mode: 'blocked' as const, blocker: 'rule_runtime_unavailable' };
-                    }
-                    // 同上：配置按「账号 → 唯一绑定环境」解析，反查失败已 fail-closed 成未启用；
-                    // 这里把具名 blocker 带出来，让拒绝理由不是笼统的 persona。
-                    const environmentBlocker =
-                      facebookRuleModeStore.resolveEnvironmentBlocker(accountId);
-                    const config = facebookRuleModeStore.getConfig(accountId);
-                    const resolved = decideFacebookBrowseMode({
-                      platform: ctx.platform,
-                      ruleEnabled: config.enabled,
-                      activeWeek: isWeekActiveAt(
-                        contentScheduleStore.effectiveActiveWeekMaskFor(accountId),
-                        new Date(),
-                      ),
-                      personaBinding: personaStore.bindingFor(accountId),
-                      slowStart: ctx.controller.slowStartView(),
-                    });
-                    return environmentBlocker && resolved.blocker === null
-                      ? { ...resolved, blocker: environmentBlocker }
-                      : resolved;
-                  })();
+                  const decision = resolveFacebookOperationDecision(accountId);
                   if (decision.mode !== 'facebook_rule') {
                     return { allowed: false, reason: decision.blocker ?? decision.mode };
                   }
@@ -6804,6 +6916,31 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               return receipt.ok
                 ? { started: true, onTerminal }
                 : { started: false, reason: receipt.code ?? receipt.message };
+            },
+          }
+        : {}),
+      ...(facebookConsumptionModeRuntimeStore
+        ? {
+            applyFacebookConsumptionView: (input) =>
+              facebookConsumptionModeRuntimeStore.applyConfirmedView(input),
+            claimFacebookConsumptionAction: (input) =>
+              facebookConsumptionModeRuntimeStore.claimAction(input),
+            markFacebookConsumptionActionDispatched: (input) =>
+              facebookConsumptionModeRuntimeStore.markDispatched(input),
+            settleFacebookConsumptionAction: (input) =>
+              facebookConsumptionModeRuntimeStore.settleAction(input),
+            triggerFacebookConsumptionAction: async (action) => {
+              if (!facebookConsumptionCoordinator) {
+                throw new Error('facebook_consumption_coordinator_unavailable');
+              }
+              await facebookConsumptionCoordinator.trigger(action);
+            },
+            supersedeFacebookOperationRuntime: async (input) => {
+              await facebookConsumptionModeRuntimeStore.supersedeAccount({
+                accountId: input.accountId,
+                keepPolicyRevision: input.policyRevision,
+                reason: 'policy_superseded',
+              });
             },
           }
         : {}),
@@ -7183,11 +7320,23 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       // FB 配置不再手填群组；正常评论目标统一来自该账号已加入群组账本。仍保留原 warmup/cooldown
       // 与 relaxed 兜底（最久没评优先），但不再要求 AIDCP_FB_GROUP_COVERAGE_ALL / allowlist 选中。
       const base = facebookCommentConfigStore.effectiveConfigFor(accountId);
+      const timingPolicy = facebookGroupCommentPolicyStore?.get() ?? null;
+      if (!timingPolicy) {
+        return {
+          coverageEnabled: true,
+          enabled: false,
+          keywords: base.keywords,
+          containers: [],
+          commentMode: base.commentMode,
+          commentTemplates: base.commentTemplates,
+          relaxed: false,
+        };
+      }
       const pickWindow = readEnvNumber('AIDCP_FB_GROUP_COVERAGE_PICK_WINDOW', 5);
       let candidates = await facebookGroupMembershipStore.coverageCandidates(accountId, {
         limit: pickWindow,
-        cooldownMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_COOLDOWN_HOURS', 72) * 60 * 60 * 1000,
-        warmupMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_WARMUP_HOURS', 24) * 60 * 60 * 1000,
+        cooldownMs: (timingPolicy.sameGroupRecommentCooldownHours ?? 72) * 60 * 60 * 1000,
+        warmupMs: timingPolicy.joinToFirstCommentHours * 60 * 60 * 1000,
       });
       // 放开时限兜底（change facebook-coverage-relax-and-keyword-space）：正常约束下无可评群时，放开预热/冷却，
       // 选「最久没评」的加入群，仍守日上限与人审；relaxed pick 会在飞书审核卡标注「未满足冷却/预热」交人把关。
@@ -7219,7 +7368,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     },
     facebookCoverageOnCommented: (accountId, groupUrl) =>
       facebookGroupMembershipStore.markCoverageCommented(accountId, groupUrl, {
-        cooldownMs: readEnvNumber('AIDCP_FB_GROUP_COVERAGE_COOLDOWN_HOURS', 72) * 60 * 60 * 1000,
+        cooldownMs: (
+          facebookGroupCommentPolicyStore?.get()?.sameGroupRecommentCooldownHours
+          ?? readEnvNumber('AIDCP_FB_GROUP_COVERAGE_COOLDOWN_HOURS', 72)
+        ) * 60 * 60 * 1000,
       }),
     facebookCoverageOnFailure: (accountId, groupUrl, reason) => {
       if (reason === 'permission_gated' || reason === 'nav_error' || reason.startsWith('nav_error')) {
@@ -7276,6 +7428,85 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     maxAttempts: Math.max(1, Math.trunc(readEnvNumber('AIDCP_FB_GROUP_JOIN_MAX_ATTEMPTS', 3))),
     logger: console,
   });
+  if (facebookConsumptionModeRuntimeStore && facebookOperationPolicyStore) {
+    const currentGroupCommentPolicy = () => {
+      if (configMirrorGate.isStale('content_schedule')) return null;
+      return facebookGroupCommentPolicyStore?.get() ?? null;
+    };
+    const selectHistoricalGroup = createStrictFacebookConsumptionGroupSelector({
+      commentPolicy: { get: currentGroupCommentPolicy },
+      memberships: facebookGroupMembershipStore,
+    });
+    facebookConsumptionCoordinator = new FacebookConsumptionModeCoordinator({
+      runtimeStore: facebookConsumptionModeRuntimeStore,
+      joinExecutor: facebookGroupJoinScheduler,
+      commentExecutor: commentScheduler,
+      selectHistoricalGroup,
+      resolveOperationPolicy: async (accountId) => {
+        if (configMirrorGate.isStale('content_schedule')) {
+          configMirrorGate.noteStaleRefusal(
+            'content_schedule',
+            `facebook_consumption_policy:${accountId}`,
+          );
+          return {
+            effectiveMode: 'blocked',
+            policyRevision: null,
+            blocker: 'facebook_operation_policy_stale',
+          };
+        }
+        // Materialize the same controller used by the final synchronous
+        // pre-comment action gate before any coordinator-owned dispatch.
+        await resolveController(accountId);
+        const decision = await facebookOperationPolicyStore.resolveForAccount(accountId);
+        return {
+          effectiveMode: decision.mode,
+          policyRevision: decision.policyRevision,
+          ...(decision.blocker ? { blocker: decision.blocker } : {}),
+        };
+      },
+      commentActionGate: (accountId) => {
+        const controller = resolvedRiskControllers.get(accountId);
+        if (!controller) {
+          return { allowed: false, reason: 'risk_controller_unavailable' };
+        }
+        const decision = controller.explain('comment');
+        return decision.allowed
+          ? { allowed: true }
+          : {
+              allowed: false,
+              reason: decision.reason ?? 'comment_risk_suppressed',
+            };
+      },
+      resolveGroupCommentPolicy: currentGroupCommentPolicy,
+      readGroupMembership: (accountId, groupUrl) =>
+        facebookGroupMembershipStore.findMembership(accountId, groupUrl),
+      recordConfirmedComment: (accountId, groupUrl, options) =>
+        facebookGroupMembershipStore.recordCoverageCommented(
+          accountId,
+          groupUrl,
+          options,
+        ),
+      logger: console,
+    });
+
+    const recoverConsumptionActions = () => {
+      void facebookConsumptionCoordinator!.recoverActiveActions().then((result) => {
+        if (result.driven > 0) {
+          console.log(
+            `[facebook-consumption] recovery scanned=${result.scanned} driven=${result.driven}`,
+          );
+        }
+      }).catch((error) => {
+        console.warn(
+          '[facebook-consumption] recovery failed:',
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+    };
+    recoverConsumptionActions();
+    const consumptionRecoveryTimer = setInterval(recoverConsumptionActions, 60_000);
+    consumptionRecoveryTimer.unref();
+  }
   console.log(
     `[aidcp-cloud] CommentScheduler 已就绪（飞书 /comment 即用${commentApprovalEnabled ? '' : '；⚠️ AIDCP_COMMENT_APPROVAL 未开 → 人审口未接线、评论一律不发'}）`,
   );
@@ -7520,6 +7751,21 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         joinedTodayCount: (accountId: string) => facebookGroupMembershipStore.countJoinedToday(accountId),
         joinDailyCap: async (accountId: string) => (await resolveController(accountId)).effectiveQuotas().day.join_group,
         joinAutomationFor: (accountId: string) => facebookGroupJoinAutomationStore.getForAccount(accountId),
+        effectiveFacebookOperationMode: async (accountId: string) => {
+          if (
+            !facebookOperationPolicyStore
+            || configMirrorGate.isStale('content_schedule')
+          ) {
+            if (configMirrorGate.isStale('content_schedule')) {
+              configMirrorGate.noteStaleRefusal(
+                'content_schedule',
+                `scheduled_join_operation_mode:${accountId}`,
+              );
+            }
+            return 'blocked';
+          }
+          return (await facebookOperationPolicyStore.resolveForAccount(accountId)).mode;
+        },
         /**
          * 本小时格的有界重试用尽 → 发**一张**放弃卡（change browser-slot-scheduling）。
          * 重试期间刻意不发卡，否则边端离线一小时就是一串每分钟的告警噪声。
@@ -7882,7 +8128,7 @@ function crossSegment<T>(
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, apiFeishuOwner, approvalPolicyStore, approvePublishForClient, automationPool, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookRuleModeStore, facebookRuleModeRuntimeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, apiFeishuOwner, approvalPolicyStore, approvePublishForClient, automationPool, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookOperationPolicyStore, facebookGroupCommentPolicyStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
   // ── Block④ 三仓提取 · 批次 0c：面板配置外观从 segC 上提到本段 ────────────────────────
   // 判据＝**构造只依赖 segA**（llm / modelConfigStore / 六个配置 store 全在 segA）。它们只被本段消费，
   // 原先建在 segC 再经 ctx 绕一圈回来 —— 那让 api 模式白白依赖 automation 段。就地建，零跨段依赖。
@@ -8877,27 +9123,12 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             set: (accountId, patch, updatedBy) =>
               facebookCommentConfigStore.setAccount(accountId, patch, updatedBy),
           },
-          facebookRuleMode: facebookRuleModeStore
-            ? {
-                ...(facebookRuleModeRuntimeStore
-                  ? {
-                      get: async (accountId: string) => ({
-                        config: facebookRuleModeStore.getConfig(accountId),
-                        runtime: await facebookRuleModeRuntimeStore.getRuntimeView(accountId),
-                        contactFallback: accountStore?.getContactInfo
-                          ? await accountStore.getContactInfo(accountId).then(
-                            (contact) => (contact ? 'not_pending' as const : 'pending' as const),
-                            () => 'unknown' as const,
-                          )
-                          : 'unknown' as const,
-                      }),
-                    }
-                  : {}),
-                getConfigForEnv: async (envKey) => facebookRuleModeStore.getConfigForEnv(envKey),
-                setEnvironment: (envKey, patch, updatedBy) =>
-                  facebookRuleModeStore.setEnvironment(envKey, patch, updatedBy),
-              }
-            : undefined,
+          // The account-keyed rule endpoint is intentionally not composed in
+          // production. It would be a second write authority beside the
+          // environment operation policy. Released customer compatibility is
+          // mapped separately below through the bounded env-key adapter.
+          facebookOperationPolicy: facebookOperationPolicyStore,
+          facebookGroupCommentPolicy: facebookGroupCommentPolicyStore,
           facebookGroupTargets: {
             importTargets: async (inputs, importBatch, options) => {
               if (mode !== 'api') {
@@ -9430,15 +9661,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
               }
             },
           },
-          // change environment-level-rule-mode-and-approval：规则模式配置改为环境键，
-          // 平台校验取 client_environments.platform（store 内做），故不再需要 platformForAccount。
-          facebookRuleMode: facebookRuleModeStore
-            ? {
-                getForEnv: async (envKey) => facebookRuleModeStore.getConfigForEnv(envKey),
-                setForEnv: (envKey, enabled, updatedBy) =>
-                  facebookRuleModeStore.setEnvironment(envKey, { enabled }, updatedBy),
-              }
-            : undefined,
+          facebookOperationPolicy: facebookOperationPolicyStore,
           // 客户对自有环境的评论审批覆盖：ownership 与写入同一条 SQL，署名 client:<userId>。
           commentApprovalPolicy: approvalPolicyStore
             ? {

@@ -525,7 +525,7 @@ test('facebook group schemas include explicit scope mode, one-group-one-account 
   assert.match(FACEBOOK_GROUP_MEMBERSHIP_SCHEMA_SQL, /idx_fb_group_membership_coverage/);
   assert.match(FACEBOOK_GROUP_JOIN_AUDIT_SCHEMA_SQL, /CREATE TABLE IF NOT EXISTS facebook_group_join_audit/);
   assert.match(FACEBOOK_GROUP_JOIN_AUDIT_SCHEMA_SQL, /observation JSONB/);
-  assert.match(FACEBOOK_GROUP_JOIN_AUDIT_SCHEMA_SQL, /trigger_source IN \('scheduled','manual_pool','manual_specific','shadow'\)/);
+  assert.match(FACEBOOK_GROUP_JOIN_AUDIT_SCHEMA_SQL, /trigger_source IN \('scheduled','manual_pool','manual_specific','consumption','shadow'\)/);
 });
 
 test('claimNext admits global targets independent of labels, keeps restricted matching, and retains the atomic group lock', async () => {
@@ -559,6 +559,35 @@ test('claimNext admits global targets independent of labels, keeps restricted ma
   assert.match(capturedSql, /mine\.status IN \('assigned','joining'\)/, '只有未完成行占用账号单飞位');
   assert.doesNotMatch(capturedSql, /mine\.status IN \([^)]*failed/, '终态 failed 不得阻塞账号选择下一目标');
   assert.doesNotMatch(capturedSql, /LEFT JOIN facebook_group_target_scope/, '不得回退全局目录');
+});
+
+test('releaseModeJoining CAS restores assigned and only rolls back its own just-added attempt', async () => {
+  let capturedSql = '';
+  let capturedParams: unknown[] = [];
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      capturedSql = sql;
+      capturedParams = params;
+      return { rows: [], rowCount: 1 };
+    },
+  } as unknown as pg.Pool;
+  const store = new FacebookGroupMembershipStore({ pool, executionTarget: 'dev' });
+  assert.equal(await store.releaseModeJoining(
+    'acc-fb',
+    'https://m.facebook.com/groups/123/posts/9',
+    'mode:consumption:attempt-1',
+    'dispatch_suppressed:before_dispatch_callback_rejected',
+  ), true);
+  assert.deepEqual(capturedParams, [
+    'acc-fb',
+    'https://www.facebook.com/groups/123',
+    'mode:consumption:attempt-1',
+    'dispatch_suppressed:before_dispatch_callback_rejected',
+  ]);
+  assert.match(capturedSql, /SET status = 'assigned'/);
+  assert.match(capturedSql, /attempts = GREATEST\(attempts - 1, 0\)/);
+  assert.match(capturedSql, /status = 'joining'/);
+  assert.match(capturedSql, /last_reason = \$3/, 'unique mode attempt reason is the release CAS token');
 });
 
 test('revalidateScopedAssignment releases only unfinished mismatches and preserves terminal facts', async () => {
@@ -763,4 +792,77 @@ test('coverageCandidates: relaxed=true 放开时限——丢弃预热/冷却/coo
   assert.match(capturedSql, /status = 'joined'/);
   assert.match(capturedSql, /ORDER BY last_commented_at ASC NULLS FIRST/);
   assert.deepEqual(capturedParams, ['acc-fb', 5, 'dev']);
+});
+
+test('coverageProjectionState exposes stale projection instead of collapsing it into an empty candidate set', async () => {
+  const calls: string[] = [];
+  const pool = {
+    query: async (sql: string) => {
+      calls.push(sql);
+      return { rows: [{ fresh: false }] };
+    },
+  } as unknown as pg.Pool;
+  const store = new FacebookGroupMembershipStore({
+    pool,
+    executionTarget: 'dev',
+  });
+
+  assert.equal(
+    await store.coverageProjectionState('acc-fb'),
+    'projection_stale',
+  );
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!, /automation_sync_read_consumer_checkpoint/);
+});
+
+test('recordCoverageCommented returns the exact joined row so callers can await and verify cooldown persistence', async () => {
+  let capturedSql = '';
+  let capturedParams: unknown[] = [];
+  const now = '2026-07-30T08:00:00.000Z';
+  const pool = {
+    query: async (sql: string, params: unknown[]) => {
+      capturedSql = sql;
+      capturedParams = params;
+      return {
+        rows: [{
+          account_id: 'acc-fb',
+          group_url: 'https://www.facebook.com/groups/123',
+          status: 'joined',
+          assigned_at: '2026-07-01T00:00:00.000Z',
+          joined_at: '2026-07-02T00:00:00.000Z',
+          last_attempt_at: null,
+          attempts: 1,
+          last_reason: 'consumption_confirmed_comment:action-1',
+          last_commented_at: now,
+          cooldown_until: '2026-08-02T08:00:00.000Z',
+          comments_total: 3,
+          left_confirmations: 0,
+          updated_at: now,
+        }],
+      };
+    },
+  } as unknown as pg.Pool;
+  const store = new FacebookGroupMembershipStore({ pool });
+
+  const recorded = await store.recordCoverageCommented(
+    'acc-fb',
+    'https://m.facebook.com/groups/123/posts/9',
+    {
+      cooldownMs: 72 * 60 * 60 * 1000,
+      reason: 'consumption_confirmed_comment:action-1',
+    },
+  );
+
+  assert.equal(recorded?.status, 'joined');
+  assert.equal(recorded?.lastCommentedAt, now);
+  assert.equal(recorded?.commentsTotal, 3);
+  assert.deepEqual(capturedParams, [
+    'acc-fb',
+    'https://www.facebook.com/groups/123',
+    72 * 60 * 60,
+    'consumption_confirmed_comment:action-1',
+  ]);
+  assert.match(capturedSql, /status = 'joined'/);
+  assert.match(capturedSql, /last_commented_at = now\(\)/);
+  assert.match(capturedSql, /RETURNING account_id, group_url, status/);
 });

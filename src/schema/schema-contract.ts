@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0097_environment_level_rule_mode_and_approval';
+export const REQUIRED_SCHEMA_VERSION = '0102_facebook_consumption_runtime';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -168,7 +168,7 @@ export const REQUIRED_SCHEMA_VERSION = '0097_environment_level_rule_mode_and_app
  * 裁定有意保留它）。用它补完，表在库里、门读的账本却还停在旧版本 ⇒ 照样判 behind，
  * 而现场看起来「表明明建好了」，是最费时间的一种排查。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0099_operator_command_receipt';
+export const KNOWN_MAX_SCHEMA_VERSION = '0102_facebook_consumption_runtime';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

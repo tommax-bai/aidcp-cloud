@@ -615,6 +615,11 @@
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
+    "path": "src/config/facebook-group-comment-policy-store.ts",
+    "layer": "api",
+    "note": "change add-configurable-facebook-consumption-mode：目标环境的入群后首次评论等待与审计是 api 配置权威；运行时只消费其 target-scoped 投影"
+  },
+  {
     "path": "src/config/facebook-group-join-automation-store.ts",
     "layer": "api",
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
@@ -623,6 +628,11 @@
     "path": "src/config/facebook-group-join-automation-view.ts",
     "layer": "api",
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
+  },
+  {
+    "path": "src/config/facebook-operation-policy-store.ts",
+    "layer": "api",
+    "note": "change add-configurable-facebook-consumption-mode：环境基础模式、规则/消费节奏、慢启动锚点与策略审计是 api 配置权威；本文件只写 api 属主表并在同一事务推进配置镜像"
   },
   {
     "path": "src/config/facebook-rule-mode-store.ts",
@@ -1653,6 +1663,26 @@
     "path": "src/orchestrator/content-scheduler.ts",
     "layer": "api",
     "note": "§4.7 / §4.6.5 第 12 项：内容排期调度器归 api"
+  },
+  {
+    "path": "src/orchestrator/facebook-consumption-mode-coordinator.ts",
+    "layer": "automation",
+    "note": "change add-configurable-facebook-consumption-mode：消费模式的 like/join/comment 单飞编排、提交前复核与恢复直接驱动真实平台动作，归 automation"
+  },
+  {
+    "path": "src/orchestrator/facebook-consumption-mode-runtime-store.ts",
+    "layer": "automation",
+    "note": "change add-configurable-facebook-consumption-mode：target-scoped 唯一浏览事实、进度、动作义务、回执去重与终态是 automation 运行权威；本文件只写 automation 属主表"
+  },
+  {
+    "path": "src/orchestrator/facebook-consumption-mode-types.ts",
+    "layer": "automation",
+    "note": "change add-configurable-facebook-consumption-mode：消费运行进度、动作义务与回执形状只描述 automation 域内编排与持久运行事实"
+  },
+  {
+    "path": "src/orchestrator/facebook-consumption-mode.ts",
+    "layer": "automation",
+    "note": "change add-configurable-facebook-consumption-mode：消费模式收据分类、阈值推进与 revision 仲裁直接服务 automation 浏览闭环，不持配置写权"
   },
   {
     "path": "src/orchestrator/facebook-rule-mode-runtime-store.ts",

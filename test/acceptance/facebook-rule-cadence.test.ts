@@ -17,6 +17,8 @@ import { test } from 'node:test';
 import {
   FACEBOOK_RULE_DEFINITION_ID,
   FACEBOOK_RULE_DEFINITION_VERSION,
+  FACEBOOK_RULE_RUNTIME_DEFINITION_ID,
+  FACEBOOK_RULE_RUNTIME_DEFINITION_VERSION,
   FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
   FACEBOOK_RULE_LEGACY_DEFINITION_ID,
   FACEBOOK_RULE_VIEW_THRESHOLD,
@@ -26,22 +28,24 @@ import {
 const migration = (name: string) =>
   readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8');
 
-test('AC-FBRULE-01 定义号自身编码节奏，且与常量逐位一致', () => {
-  // 定义号是三张表的主键与去重键组成部分。它一旦与实际常量对不上，进度会按一套节奏收集、
-  // 按另一套节奏解读，而且没有任何机械手段会报错——所以这条对账必须在验收层钉死。
+test('AC-FBRULE-01 新运行时定义号稳定且不再编码节奏', () => {
+  assert.equal(FACEBOOK_RULE_RUNTIME_DEFINITION_ID, 'facebook_rule_cadence');
+  assert.doesNotMatch(FACEBOOK_RULE_RUNTIME_DEFINITION_ID, /5|2|every/);
+  assert.ok(FACEBOOK_RULE_RUNTIME_DEFINITION_VERSION > FACEBOOK_RULE_DEFINITION_VERSION);
+  // 旧配置定义保留只为迁移与回滚读取，不再作为新运行时 cadence identity。
   assert.match(
     FACEBOOK_RULE_DEFINITION_ID,
     new RegExp(`_${FACEBOOK_RULE_VIEW_THRESHOLD}_like_1_join_contact_every_${FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS}$`),
-    `定义号 ${FACEBOOK_RULE_DEFINITION_ID} 未编码当前节奏 ${FACEBOOK_RULE_VIEW_THRESHOLD}/${FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS}`,
   );
   assert.notEqual(FACEBOOK_RULE_DEFINITION_ID, FACEBOOK_RULE_LEGACY_DEFINITION_ID);
-  assert.ok(FACEBOOK_RULE_DEFINITION_VERSION > 1, '换节奏 MUST 抬定义版本');
 });
 
 test('AC-FBRULE-02 二级节奏按轮次序号推进，不按成功点赞数', () => {
   // 只数成功点赞的话，点赞日配额 / 冷却一耗尽，加群与联系评论会静默全停——
   // 界面上看不出任何异常，正是「静默假成功」的形态。
-  const cycle = [1, 2, 3, 4, 5, 6].map(facebookRuleRoundIncludesJoin);
+  const cycle = [1, 2, 3, 4, 5, 6].map((sequence) =>
+    facebookRuleRoundIncludesJoin(sequence),
+  );
   assert.deepEqual(cycle, [false, true, false, true, false, true]);
   // 非法输入不得被当成「该加群」。
   assert.equal(facebookRuleRoundIncludesJoin(0), false);
@@ -75,11 +79,23 @@ test('AC-FBRULE-04 只点赞的轮次终结为 not_scheduled、释放单飞、�
     llm: { complete: async () => '{"verdict":"skip"}' },
     sendCommand: () => {},
     accountPlatform: 'facebook',
-    facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+    facebookRuleModeDecision: () => ({
+      mode: 'facebook_rule',
+      blocker: null,
+      policyRevision: 7,
+      rulePolicy: { viewsPerLike: 5, joinEveryNRounds: 2 },
+      consumptionPolicy: {
+        viewsPerLike: 5,
+        confirmedLikesPerJoin: 2,
+        confirmedJoinsPerComment: 2,
+      },
+    }),
     applyFacebookRuleView: async () => ({
       kind: 'batch_created',
       batch: {
         batchId: '00000000-0000-4000-8000-0000000000ac',
+        policyRevision: 7,
+        policySnapshot: { viewsPerLike: 5, joinEveryNRounds: 2 },
         sequence: likeOnlySequence,
         includesJoin: facebookRuleRoundIncludesJoin(likeOnlySequence),
         triggerContentKey: 'post-5',
@@ -162,4 +178,13 @@ test('AC-FBRULE-06 节奏迁移只放宽不收缩，且旧定义仍可写（回�
     );
     assert.match(sql, new RegExp(FACEBOOK_RULE_DEFINITION_ID));
   }
+});
+
+test('AC-FBRULE-07 policy revision 迁移允许稳定定义与 1..100 浏览计数', async () => {
+  const raw = await migration('0101_facebook_rule_policy_revision_runtime.sql');
+  assert.match(raw, /facebook_rule_cadence/);
+  assert.match(raw, /policy_revision/);
+  assert.match(raw, /policy_snapshot/);
+  assert.match(raw, /view_count BETWEEN 0 AND 99/);
+  assert.match(raw, /policy_superseded/);
 });

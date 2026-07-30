@@ -108,12 +108,17 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   // 运营指令幂等台账是 automation 属主的新表，故只能落在 automation 那一侧。
   assert.ok(automation.includes('0099_operator_command_receipt'));
   assert.ok(!api.includes('0099_operator_command_receipt'));
-  // 每加一条迁移都要在这里同步抬（→ 0099：change split-cloud-automation-production-runtime）。
-  // **注意这是第二处写死该常量的地方**：test/schema/schema-contract.test.ts 那条是从 migrations/
-  // 目录**算**出最大版本再比，这条是逐字写死。加迁移时两处都会红，别以为改完一处就完了。
+  // 操作策略与群评论等待是 API 配置权威；规则/消费进度是 automation 运行事实。
+  assert.ok(api.includes('0100_facebook_operation_and_group_comment_policy'));
+  assert.ok(!automation.includes('0100_facebook_operation_and_group_comment_policy'));
+  assert.ok(automation.includes('0101_facebook_rule_policy_revision_runtime'));
+  assert.ok(!api.includes('0101_facebook_rule_policy_revision_runtime'));
+  assert.ok(automation.includes('0102_facebook_consumption_runtime'));
+  assert.ok(!api.includes('0102_facebook_consumption_runtime'));
+  // 每加一条迁移都要在这里同步抬。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0099_operator_command_receipt',
+    '0102_facebook_consumption_runtime',
   );
 });
 

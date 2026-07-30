@@ -20,6 +20,8 @@ const soul: Soul = {
 function makeBatch(overrides: Partial<FacebookRuleModeBatchView> & { sequence: number }): FacebookRuleModeBatchView {
   return {
     batchId: '00000000-0000-4000-8000-000000000001',
+    policyRevision: 7,
+    policySnapshot: { viewsPerLike: 5, joinEveryNRounds: 2 },
     triggerContentKey: 'post-5',
     likeState: 'pending' as FacebookRuleActionState,
     joinState: 'pending' as FacebookRuleActionState,
@@ -37,6 +39,17 @@ function makeBatch(overrides: Partial<FacebookRuleModeBatchView> & { sequence: n
 const joinRound = makeBatch({ sequence: 2 });
 /** 只点赞的那一轮（周期第 1 位）。 */
 const likeOnlyRound = makeBatch({ sequence: 1 });
+const RULE_DECISION = {
+  mode: 'facebook_rule',
+  blocker: null,
+  policyRevision: 7,
+  rulePolicy: { viewsPerLike: 5, joinEveryNRounds: 2 },
+  consumptionPolicy: {
+    viewsPerLike: 5,
+    confirmedLikesPerJoin: 2,
+    confirmedJoinsPerComment: 2,
+  },
+} as const;
 
 const waitForAsyncChain = () => new Promise((resolve) => setTimeout(resolve, 35));
 
@@ -54,6 +67,7 @@ describe('RoleDispatcher facebook rule mode', () => {
     const commands: EdgeCommand[] = [];
     const patches: Array<Record<string, unknown>> = [];
     const joinCalls: Array<{ accountId: string; batchId: string }> = [];
+    let appliedPolicy: unknown;
     let llmCalls = 0;
     const dispatcher = new RoleDispatcher({
       soul,
@@ -65,8 +79,11 @@ describe('RoleDispatcher facebook rule mode', () => {
       },
       sendCommand: (command) => { commands.push(command); },
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
-      applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
+      facebookRuleModeDecision: () => RULE_DECISION,
+      applyFacebookRuleView: async (input) => {
+        appliedPolicy = input.policy;
+        return { kind: 'batch_created', batch: joinRound };
+      },
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: true }),
       explainRuleJoin: () => ({ allowed: true }),
@@ -121,6 +138,10 @@ describe('RoleDispatcher facebook rule mode', () => {
 
     const like = commands.find((command) => command.action === 'like');
     assert.equal(like?.params?.noteId, 'https://www.facebook.com/posts/post-10');
+    assert.deepEqual(appliedPolicy, {
+      policyRevision: 7,
+      snapshot: { viewsPerLike: 5, joinEveryNRounds: 2 },
+    });
     assert.equal(like?.reason, 'facebook_rule_batch_like');
     assert.equal(joinCalls.length, 0, '点赞未终态前不得启动加群联系');
 
@@ -138,6 +159,188 @@ describe('RoleDispatcher facebook rule mode', () => {
     dispatcher.endSession();
   });
 
+  it('supersedes an undispatched batch when the rule revision changes before like dispatch', async () => {
+    const commands: EdgeCommand[] = [];
+    const patches: Array<Record<string, unknown>> = [];
+    let policyRevision = 7;
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm: { complete: async () => '{"verdict":"skip"}' },
+      sendCommand: (command) => { commands.push(command); },
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({
+        ...RULE_DECISION,
+        policyRevision,
+      }),
+      applyFacebookRuleView: async () => {
+        policyRevision = 8;
+        return { kind: 'batch_created', batch: joinRound };
+      },
+      updateFacebookRuleBatch: async (_batchId, patch) => {
+        patches.push(patch);
+      },
+      explainInteract: () => ({ allowed: true }),
+      explainRuleJoin: () => ({ allowed: true }),
+    });
+    dispatcher.setCurrentAccountId('fb-1');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-1',
+      noteId: 'https://www.facebook.com/posts/post-revision-before-like',
+      sourceDedupeKey: 'receipt-revision-before-like',
+      source: 'detail',
+      occurredAt: Date.now(),
+    });
+    await waitForAsyncChain();
+
+    assert.equal(commands.some((command) => command.action === 'like'), false);
+    assert.deepEqual(patches.at(-1), {
+      likeState: 'policy_superseded',
+      joinState: 'policy_superseded',
+      commentState: 'policy_superseded',
+      terminal: true,
+      blocker: 'policy_superseded',
+    });
+    dispatcher.endSession();
+  });
+
+  it('keeps a dispatched like receipt truthful but supersedes join and comment after a rule revision change', async () => {
+    const commands: EdgeCommand[] = [];
+    const patches: Array<Record<string, unknown>> = [];
+    let policyRevision = 7;
+    let joinCalls = 0;
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm: { complete: async () => '{"verdict":"skip"}' },
+      sendCommand: (command) => { commands.push(command); },
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({
+        ...RULE_DECISION,
+        policyRevision,
+      }),
+      applyFacebookRuleView: async () => ({
+        kind: 'batch_created',
+        batch: joinRound,
+      }),
+      updateFacebookRuleBatch: async (_batchId, patch) => {
+        patches.push(patch);
+      },
+      explainInteract: () => ({ allowed: true }),
+      explainRuleJoin: () => ({ allowed: true }),
+      facebookRuleCommentBodyScheme: () => 'template',
+      triggerFacebookRuleJoinContact: async () => {
+        joinCalls += 1;
+        return {
+          started: true,
+          onTerminal: Promise.resolve({
+            joinState: 'confirmed' as const,
+            commentState: 'confirmed' as const,
+          }),
+        };
+      },
+    });
+    dispatcher.setCurrentAccountId('fb-1');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-1',
+      noteId: 'https://www.facebook.com/posts/post-revision-before-join',
+      sourceDedupeKey: 'receipt-revision-before-join',
+      source: 'detail',
+      occurredAt: Date.now(),
+    });
+    await waitForAsyncChain();
+    assert.equal(commands.some((command) => command.action === 'like'), true);
+
+    policyRevision = 8;
+    dispatcher.bus.emit('action.completed', {
+      action: 'like',
+      ok: true,
+      ts: Date.now(),
+    });
+    await waitForAsyncChain();
+
+    assert.equal(joinCalls, 0);
+    assert.ok(patches.some((patch) => patch.likeState === 'confirmed'));
+    assert.deepEqual(patches.at(-1), {
+      joinState: 'policy_superseded',
+      commentState: 'policy_superseded',
+      terminal: true,
+      blocker: 'policy_superseded',
+    });
+    dispatcher.endSession();
+  });
+
+  it('rechecks the rule revision immediately before the join-contact write', async () => {
+    const commands: EdgeCommand[] = [];
+    const patches: Array<Record<string, unknown>> = [];
+    let policyRevision = 7;
+    let joinCalls = 0;
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm: { complete: async () => '{"verdict":"skip"}' },
+      sendCommand: (command) => { commands.push(command); },
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({
+        ...RULE_DECISION,
+        policyRevision,
+      }),
+      applyFacebookRuleView: async () => ({
+        kind: 'batch_created',
+        batch: joinRound,
+      }),
+      updateFacebookRuleBatch: async (_batchId, patch) => {
+        patches.push(patch);
+        if (patch.joinState === 'dispatched') policyRevision = 8;
+      },
+      explainInteract: () => ({ allowed: true }),
+      explainRuleJoin: () => ({ allowed: true }),
+      facebookRuleCommentBodyScheme: () => 'template',
+      triggerFacebookRuleJoinContact: async () => {
+        joinCalls += 1;
+        return {
+          started: true,
+          onTerminal: Promise.resolve({
+            joinState: 'confirmed' as const,
+            commentState: 'confirmed' as const,
+          }),
+        };
+      },
+    });
+    dispatcher.setCurrentAccountId('fb-1');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-1',
+      noteId: 'https://www.facebook.com/posts/post-revision-at-join',
+      sourceDedupeKey: 'receipt-revision-at-join',
+      source: 'detail',
+      occurredAt: Date.now(),
+    });
+    await waitForAsyncChain();
+    assert.equal(commands.some((command) => command.action === 'like'), true);
+
+    dispatcher.bus.emit('action.completed', {
+      action: 'like',
+      ok: true,
+      ts: Date.now(),
+    });
+    await waitForAsyncChain();
+
+    assert.equal(joinCalls, 0);
+    assert.deepEqual(patches.at(-1), {
+      joinState: 'policy_superseded',
+      commentState: 'policy_superseded',
+      terminal: true,
+      blocker: 'policy_superseded',
+    });
+    dispatcher.endSession();
+  });
+
   it('runs a like-only round without join-contact and still terminalizes it', async () => {
     const commands: EdgeCommand[] = [];
     const patches: Array<Record<string, unknown>> = [];
@@ -147,7 +350,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: (command) => { commands.push(command); },
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: likeOnlyRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: true }),
@@ -194,7 +397,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: () => {},
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: likeOnlyRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: false, reason: 'daily_like_quota' }),
@@ -238,7 +441,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: () => {},
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       // 每次确认浏览都产生一个新的「只点赞」轮次（序号 1/3/5…），模拟连续的周期第 1 位。
       applyFacebookRuleView: async () => {
         sequence += 2;
@@ -287,7 +490,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       sendCommand: (command) => { commands.push(command); },
       accountPlatform: 'facebook',
       facebookRuleModeDecision: () => mode === 'facebook_rule'
-        ? { mode: 'facebook_rule', blocker: null }
+        ? RULE_DECISION
         : { mode: 'slow_start', blocker: 'slow_start_active' },
       applyFacebookRuleView: async () => {
         mode = 'slow_start';
@@ -309,11 +512,11 @@ describe('RoleDispatcher facebook rule mode', () => {
 
     assert.equal(commands.some((command) => command.action === 'like'), false);
     assert.ok(patches.some((patch) =>
-      patch.likeState === 'not_started'
-      && patch.joinState === 'not_started'
-      && patch.commentState === 'not_started'
+      patch.likeState === 'policy_superseded'
+      && patch.joinState === 'policy_superseded'
+      && patch.commentState === 'policy_superseded'
       && patch.terminal === true
-      && patch.blocker === 'slow_start_active',
+      && patch.blocker === 'policy_superseded',
     ));
     dispatcher.endSession();
   });
@@ -328,7 +531,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: (command) => { commands.push(command); },
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: (action) => action === 'like' && !likeAllowed
@@ -390,7 +593,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: () => {},
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: (action) => action === 'comment'
@@ -439,7 +642,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: () => {},
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: (action) => action === 'like'
@@ -509,7 +712,7 @@ describe('RoleDispatcher facebook rule mode', () => {
         llm: { complete: async () => '{"verdict":"skip"}' },
         sendCommand: (command) => { commands.push(command); },
         accountPlatform: 'facebook',
-        facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+        facebookRuleModeDecision: () => RULE_DECISION,
         applyFacebookRuleView: async () => ({
           kind: 'batch_created',
           batch: makeBatch({ sequence: 2, batchId: `00000000-0000-4000-8000-00000000001${index}` }),
@@ -558,8 +761,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       sendCommand: (command) => { commands.push(command); },
       accountPlatform: 'facebook',
       personaBinding: () => 'unbound',
-      facebookRuleModeEnabled: () => true,
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: true }),
@@ -611,7 +813,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: () => {},
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: true }),
@@ -665,7 +867,7 @@ describe('RoleDispatcher facebook rule mode', () => {
         llm: { complete: async () => '{"verdict":"skip"}' },
         sendCommand: () => {},
         accountPlatform: 'facebook',
-        facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+        facebookRuleModeDecision: () => RULE_DECISION,
         applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
         updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
         explainInteract: () => ({ allowed: true }),
@@ -707,7 +909,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: () => {},
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: likeOnlyRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: true }),
@@ -759,7 +961,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: (command) => { commands.push(command); },
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: joinRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: true }),
@@ -803,7 +1005,7 @@ describe('RoleDispatcher facebook rule mode', () => {
       llm: { complete: async () => '{"verdict":"skip"}' },
       sendCommand: () => {},
       accountPlatform: 'facebook',
-      facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+      facebookRuleModeDecision: () => RULE_DECISION,
       applyFacebookRuleView: async () => ({ kind: 'batch_created', batch: likeOnlyRound }),
       updateFacebookRuleBatch: async (_batchId, patch) => { patches.push(patch); },
       explainInteract: () => ({ allowed: true }),

@@ -197,9 +197,15 @@ function makeFb(opts: {
     sendCommand: () => {},
     accountPlatform: opts.platform ?? 'facebook',
     personaBinding: opts.personaBinding,
-    ...(opts.facebookRuleModeEnabled ? { facebookRuleModeEnabled: opts.facebookRuleModeEnabled } : {}),
-    // 未绑人设账号在规则模式下才能真的浏览；此处只验启动闸，模式裁决固定为规则模式。
-    facebookRuleModeDecision: () => ({ mode: 'facebook_rule', blocker: null }),
+    // 启动闸与浏览裁决读取同一个 operation-mode 决策，不再另接一条 rule bool 旁路。
+    facebookRuleModeDecision: (accountId) => {
+      if (!opts.facebookRuleModeEnabled) {
+        return { mode: 'blocked', blocker: 'facebook_operation_policy_unavailable' };
+      }
+      return opts.facebookRuleModeEnabled(accountId)
+        ? { mode: 'facebook_rule', blocker: null }
+        : { mode: 'persona', blocker: null };
+    },
     onSessionRejected: (accountId, reason) => { rejected.push({ accountId, reason }); },
   });
   d.setup();
@@ -266,7 +272,6 @@ test('豁免只解除启动闸：会话中途裁决不再是规则模式 → 未
     sendCommand: (c) => commands.push(c),
     accountPlatform: 'facebook',
     personaBinding: () => 'unbound',
-    facebookRuleModeEnabled: () => true,
     facebookRuleModeDecision: () => mode === 'facebook_rule'
       ? { mode: 'facebook_rule', blocker: null }
       : { mode: 'slow_start', blocker: 'slow_start_active' },

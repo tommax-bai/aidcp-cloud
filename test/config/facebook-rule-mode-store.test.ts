@@ -11,6 +11,7 @@ import {
 import {
   FACEBOOK_RULE_LEGACY_DEFINITION_ID,
   FACEBOOK_RULE_LEGACY_DEFINITION_VERSION,
+  type FacebookRuleRuntimePolicy,
 } from '../../src/kernel/facebook-rule-mode-types.js';
 import { FacebookRuleModeRuntimeStore } from '../../src/orchestrator/facebook-rule-mode-runtime-store.js';
 import type { SchemaProber } from '../../src/kernel/schema-capability-contract.js';
@@ -18,6 +19,8 @@ import type { SchemaProber } from '../../src/kernel/schema-capability-contract.j
 interface ProgressRow {
   accountId: string;
   target: string;
+  policyRevision: number;
+  policySnapshot: { viewsPerLike: number; joinEveryNRounds: number };
   sequence: number;
   viewCount: number;
   activeBatchId: string | null;
@@ -28,6 +31,8 @@ interface BatchRow {
   batch_id: string;
   accountId: string;
   target: string;
+  policy_revision: number;
+  policy_snapshot: { viewsPerLike: number; joinEveryNRounds: number };
   sequence: number;
   trigger_content_key: string;
   like_state: string;
@@ -58,7 +63,13 @@ function memoryDatabase(accounts: Record<string, string>) {
   const batches = new Map<string, BatchRow>();
   let lockTail = Promise.resolve();
 
-  const progressKey = (accountId: string, target: string) => `${accountId}|${target}`;
+  const progressKey = (accountId: string, target: string, policyRevision = 0) =>
+    `${accountId}|${target}|${policyRevision}`;
+  const parseSnapshot = (value: unknown) =>
+    (typeof value === 'string' ? JSON.parse(value) : value) as {
+      viewsPerLike: number;
+      joinEveryNRounds: number;
+    };
   const acquire = async () => {
     let release!: () => void;
     const previous = lockTail;
@@ -90,6 +101,42 @@ function memoryDatabase(accounts: Record<string, string>) {
       configs.set(row.env_key, row);
       return { rows: [row], rowCount: 1 };
     }
+    if (
+      sql.startsWith('UPDATE facebook_rule_batch SET like_state=CASE')
+      && sql.includes('policy_revision<>')
+    ) {
+      const accountId = String(params[0]);
+      const target = String(params[1]);
+      const policyRevision = Number(params[4]);
+      const transitioned: { batch_id: string; terminal: boolean }[] = [];
+      for (const row of batches.values()) {
+        if (
+          row.accountId !== accountId
+          || row.target !== target
+          || row.policy_revision === policyRevision
+          || row.terminal
+        ) {
+          continue;
+        }
+        const dispatched = row.like_state === 'dispatched'
+          || row.join_state === 'dispatched'
+          || row.comment_state === 'dispatched';
+        if (row.like_state === 'pending' || row.like_state === 'not_started') {
+          row.like_state = 'policy_superseded';
+        }
+        if (row.join_state === 'pending' || row.join_state === 'not_started') {
+          row.join_state = 'policy_superseded';
+        }
+        if (row.comment_state === 'pending' || row.comment_state === 'not_started') {
+          row.comment_state = 'policy_superseded';
+        }
+        row.terminal = !dispatched;
+        row.blocker = 'policy_superseded';
+        row.updated_at = new Date();
+        transitioned.push({ batch_id: row.batch_id, terminal: row.terminal });
+      }
+      return { rows: transitioned, rowCount: transitioned.length };
+    }
     if (sql.startsWith('UPDATE facebook_rule_batch SET like_state=CASE')) {
       const target = String(params[0]);
       const recovered: { batch_id: string }[] = [];
@@ -111,20 +158,34 @@ function memoryDatabase(accounts: Record<string, string>) {
       }
       return { rows: recovered, rowCount: recovered.length };
     }
-    if (sql.startsWith('UPDATE facebook_rule_progress p SET active_batch_id=NULL')) {
-      const target = String(params[0]);
-      const ids = new Set(params[1] as string[]);
+    if (
+      sql.startsWith('UPDATE facebook_rule_progress SET active_batch_id=NULL')
+      && sql.includes('active_batch_id=ANY')
+    ) {
+      const scopedByAccount = sql.includes('WHERE account_id=$1');
+      const accountId = scopedByAccount ? String(params[0]) : null;
+      const target = String(params[scopedByAccount ? 1 : 0]);
+      const ids = new Set(params[scopedByAccount ? 2 : 1] as string[]);
       for (const row of progress.values()) {
-        if (row.target === target && row.activeBatchId && ids.has(row.activeBatchId)) row.activeBatchId = null;
+        if (
+          row.target === target
+          && (accountId === null || row.accountId === accountId)
+          && row.activeBatchId
+          && ids.has(row.activeBatchId)
+        ) {
+          row.activeBatchId = null;
+        }
       }
       return { rows: [], rowCount: 0 };
     }
     if (sql.startsWith('INSERT INTO facebook_rule_progress')) {
-      const key = progressKey(String(params[0]), String(params[1]));
+      const key = progressKey(String(params[0]), String(params[1]), Number(params[4]));
       if (!progress.has(key)) {
         progress.set(key, {
           accountId: String(params[0]),
           target: String(params[1]),
+          policyRevision: Number(params[4]),
+          policySnapshot: parseSnapshot(params[5]),
           sequence: 1,
           viewCount: 0,
           activeBatchId: null,
@@ -134,12 +195,13 @@ function memoryDatabase(accounts: Record<string, string>) {
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('FROM facebook_rule_progress') && sql.includes('FOR UPDATE')) {
-      const row = progress.get(progressKey(String(params[0]), String(params[1])));
+      const row = progress.get(progressKey(String(params[0]), String(params[1]), Number(params[4])));
       return {
         rows: row ? [{
           collecting_sequence: row.sequence,
           view_count: row.viewCount,
           active_batch_id: row.activeBatchId,
+          policy_snapshot: row.policySnapshot,
         }] : [],
         rowCount: row ? 1 : 0,
       };
@@ -147,11 +209,12 @@ function memoryDatabase(accounts: Record<string, string>) {
     if (sql.startsWith('INSERT INTO facebook_rule_view_fact')) {
       const accountId = String(params[0]);
       const target = String(params[1]);
-      const sequence = Number(params[4]);
-      const contentKey = String(params[5]);
-      const sourceKey = String(params[6]);
-      const contentFact = `${accountId}|${target}|${sequence}|${contentKey}`;
-      const sourceFact = `${accountId}|${target}|${sourceKey}`;
+      const policyRevision = Number(params[4]);
+      const sequence = Number(params[5]);
+      const contentKey = String(params[6]);
+      const sourceKey = String(params[7]);
+      const contentFact = `${accountId}|${target}|${policyRevision}|${sequence}|${contentKey}`;
+      const sourceFact = `${accountId}|${target}|${policyRevision}|${sourceKey}`;
       if (contentFacts.has(contentFact) || sourceFacts.has(sourceFact)) {
         return { rows: [], rowCount: 0 };
       }
@@ -160,17 +223,21 @@ function memoryDatabase(accounts: Record<string, string>) {
       return { rows: [{ content_key: contentKey }], rowCount: 1 };
     }
     if (sql.startsWith('UPDATE facebook_rule_progress SET view_count=')) {
-      const row = progress.get(progressKey(String(params[0]), String(params[1])))!;
-      row.viewCount = Number(params[4]);
+      const row = progress.get(progressKey(String(params[0]), String(params[1]), Number(params[4])))!;
+      row.viewCount = Number(params[5]);
       row.updatedAt = new Date();
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO facebook_rule_batch')) {
       const accountId = String(params[1]);
       const target = String(params[2]);
-      const sequence = Number(params[5]);
+      const policyRevision = Number(params[5]);
+      const sequence = Number(params[7]);
       const existing = [...batches.values()].find(
-        (row) => row.accountId === accountId && row.target === target && row.sequence === sequence,
+        (row) => row.accountId === accountId
+          && row.target === target
+          && row.policy_revision === policyRevision
+          && row.sequence === sequence,
       );
       if (existing) return { rows: [existing], rowCount: 1 };
       const now = new Date();
@@ -178,8 +245,10 @@ function memoryDatabase(accounts: Record<string, string>) {
         batch_id: String(params[0]),
         accountId,
         target,
+        policy_revision: policyRevision,
+        policy_snapshot: parseSnapshot(params[6]),
         sequence,
-        trigger_content_key: String(params[6]),
+        trigger_content_key: String(params[8]),
         like_state: 'pending',
         join_state: 'pending',
         comment_state: 'pending',
@@ -192,10 +261,10 @@ function memoryDatabase(accounts: Record<string, string>) {
       return { rows: [row], rowCount: 1 };
     }
     if (sql.startsWith('UPDATE facebook_rule_progress SET collecting_sequence=')) {
-      const row = progress.get(progressKey(String(params[0]), String(params[1])))!;
-      row.sequence = Number(params[4]);
+      const row = progress.get(progressKey(String(params[0]), String(params[1]), Number(params[4])))!;
+      row.sequence = Number(params[5]);
       row.viewCount = 0;
-      row.activeBatchId = String(params[5]);
+      row.activeBatchId = String(params[6]);
       row.updatedAt = new Date();
       return { rows: [], rowCount: 1 };
     }
@@ -219,13 +288,14 @@ function memoryDatabase(accounts: Record<string, string>) {
       }
       return { rows: [], rowCount: 1 };
     }
-    if (sql.startsWith('SELECT view_count, collecting_sequence, updated_at FROM facebook_rule_progress')) {
-      const row = progress.get(progressKey(String(params[0]), String(params[1])));
+    if (sql.startsWith('SELECT view_count, collecting_sequence, policy_snapshot, updated_at FROM facebook_rule_progress')) {
+      const row = progress.get(progressKey(String(params[0]), String(params[1]), Number(params[4])));
       return {
         rows: row
           ? [{
             view_count: row.viewCount,
             collecting_sequence: row.sequence,
+            policy_snapshot: row.policySnapshot,
             updated_at: row.updatedAt,
           }]
           : [],
@@ -234,7 +304,10 @@ function memoryDatabase(accounts: Record<string, string>) {
     }
     if (sql.includes('FROM facebook_rule_batch') && sql.includes('ORDER BY sequence DESC')) {
       const rows = [...batches.values()]
-        .filter((row) => row.accountId === String(params[0]) && row.target === String(params[1]))
+        .filter((row) =>
+          row.accountId === String(params[0])
+          && row.target === String(params[1])
+          && row.policy_revision === Number(params[4]))
         .sort((a, b) => b.sequence - a.sequence)
         .slice(0, 1);
       return { rows, rowCount: rows.length };
@@ -269,16 +342,18 @@ const schemaColumns: Record<string, string[]> = {
   ],
   facebook_rule_progress: [
     'account_id', 'execution_target', 'definition_id', 'definition_version',
-    'collecting_sequence', 'view_count', 'active_batch_id', 'updated_at',
+    'policy_revision', 'policy_snapshot', 'collecting_sequence', 'view_count',
+    'active_batch_id', 'updated_at',
   ],
   facebook_rule_view_fact: [
     'account_id', 'execution_target', 'definition_id', 'definition_version',
-    'collecting_sequence', 'content_key', 'source_dedupe_key', 'occurred_at', 'created_at',
+    'policy_revision', 'collecting_sequence', 'content_key', 'source_dedupe_key',
+    'occurred_at', 'created_at',
   ],
   facebook_rule_batch: [
     'batch_id', 'account_id', 'execution_target', 'definition_id', 'definition_version',
-    'sequence', 'trigger_content_key', 'like_state', 'join_state', 'comment_state',
-    'terminal', 'blocker', 'created_at', 'updated_at',
+    'policy_revision', 'policy_snapshot', 'sequence', 'trigger_content_key', 'like_state',
+    'join_state', 'comment_state', 'terminal', 'blocker', 'created_at', 'updated_at',
   ],
 };
 const readySchema: SchemaProber = async (_client, tables) => ({
@@ -328,10 +403,10 @@ function store(pool: pg.Pool, target: 'dev' | 'ol') {
       patch: { enabled?: boolean },
       updatedBy: string,
     ) => configStore.setAccount(accountId, patch, updatedBy),
-    async getView(accountId: string) {
+    async getView(accountId: string, policy?: FacebookRuleRuntimePolicy) {
       return {
         config: configStore.getConfig(accountId),
-        runtime: await runtimeStore.getRuntimeView(accountId),
+        runtime: await runtimeStore.getRuntimeView(accountId, policy),
       };
     },
     applyConfirmedView: (input: {
@@ -339,6 +414,7 @@ function store(pool: pg.Pool, target: 'dev' | 'ol') {
       contentKey: string;
       sourceDedupeKey: string;
       occurredAt: number;
+      policy?: FacebookRuleRuntimePolicy;
     }) => runtimeStore.applyConfirmedView(input),
     updateBatch: (
       batchId: string,
@@ -350,13 +426,19 @@ function store(pool: pg.Pool, target: 'dev' | 'ol') {
 async function apply(
   targetStore: ReturnType<typeof store>,
   index: number,
-  overrides: Partial<{ accountId: string; contentKey: string; sourceDedupeKey: string }> = {},
+  overrides: Partial<{
+    accountId: string;
+    contentKey: string;
+    sourceDedupeKey: string;
+    policy: FacebookRuleRuntimePolicy;
+  }> = {},
 ) {
   return targetStore.applyConfirmedView({
     accountId: overrides.accountId ?? 'fb-1',
     contentKey: overrides.contentKey ?? `post-${index}`,
     sourceDedupeKey: overrides.sourceDedupeKey ?? `receipt-${index}`,
     occurredAt: 1_700_000_000_000 + index,
+    ...(overrides.policy ? { policy: overrides.policy } : {}),
   });
 }
 
@@ -509,6 +591,36 @@ describe('FacebookRuleModeStore config authority', () => {
 });
 
 describe('FacebookRuleModeStore durable cadence', () => {
+  it('pins non-default cadence by policy revision and starts a new revision from zero', async () => {
+    const db = memoryDatabase({ 'fb-1': 'facebook' });
+    const target = store(db.pool, 'dev');
+    await target.init();
+    const revision7: FacebookRuleRuntimePolicy = {
+      policyRevision: 7,
+      snapshot: { viewsPerLike: 3, joinEveryNRounds: 3 },
+    };
+    let created;
+    for (let i = 1; i <= 3; i += 1) {
+      created = await apply(target, i, { policy: revision7 });
+    }
+    if (created?.kind !== 'batch_created') throw new Error('expected revision 7 batch');
+    assert.equal(created.batch.policyRevision, 7);
+    assert.deepEqual(created.batch.policySnapshot, revision7.snapshot);
+    assert.equal(created.batch.sequence, 1);
+    assert.equal(created.batch.includesJoin, false);
+    assert.equal((await target.getView('fb-1', revision7)).runtime.threshold, 3);
+
+    const revision8: FacebookRuleRuntimePolicy = {
+      policyRevision: 8,
+      snapshot: { viewsPerLike: 4, joinEveryNRounds: 1 },
+    };
+    const next = await target.getView('fb-1', revision8);
+    assert.equal(next.runtime.policyRevision, 8);
+    assert.equal(next.runtime.viewCount, 0);
+    assert.equal(next.runtime.threshold, 4);
+    assert.equal(next.runtime.collectingRoundIncludesJoin, true);
+  });
+
   it('resumes at 3/5, dedupes content and receipts, then atomically creates one fifth-view round', async () => {
     const db = memoryDatabase({ 'fb-1': 'facebook' });
     const first = store(db.pool, 'dev');
@@ -617,6 +729,102 @@ describe('FacebookRuleModeStore durable cadence', () => {
       db.batches.get(created.batch.batchId)?.blocker,
       'daily_like_quota',
       '省略 blocker 键时 MUST 保留点赞阶段的抑制原因',
+    );
+  });
+
+  it('blocks a new revision at zero while an old-revision action is already dispatched', async () => {
+    const db = memoryDatabase({ 'fb-1': 'facebook' });
+    const target = store(db.pool, 'dev');
+    await target.init();
+    const revision1: FacebookRuleRuntimePolicy = {
+      policyRevision: 1,
+      snapshot: { viewsPerLike: 1, joinEveryNRounds: 2 },
+    };
+    const revision2: FacebookRuleRuntimePolicy = {
+      policyRevision: 2,
+      snapshot: { viewsPerLike: 2, joinEveryNRounds: 2 },
+    };
+
+    const first = await apply(target, 1, { policy: revision1 });
+    if (first.kind !== 'batch_created') throw new Error('expected revision 1 batch');
+    await target.updateBatch(first.batch.batchId, { likeState: 'dispatched' });
+
+    assert.deepEqual(
+      await apply(target, 2, { policy: revision2 }),
+      { kind: 'batch_active', batchId: first.batch.batchId },
+    );
+    assert.equal((await target.getView('fb-1', revision2)).runtime.viewCount, 0);
+    assert.deepEqual(
+      {
+        like: db.batches.get(first.batch.batchId)?.like_state,
+        join: db.batches.get(first.batch.batchId)?.join_state,
+        comment: db.batches.get(first.batch.batchId)?.comment_state,
+        terminal: db.batches.get(first.batch.batchId)?.terminal,
+        blocker: db.batches.get(first.batch.batchId)?.blocker,
+      },
+      {
+        like: 'dispatched',
+        join: 'policy_superseded',
+        comment: 'policy_superseded',
+        terminal: false,
+        blocker: 'policy_superseded',
+      },
+    );
+
+    await target.updateBatch(first.batch.batchId, {
+      likeState: 'ambiguous',
+      terminal: true,
+    });
+    assert.deepEqual(
+      await apply(target, 3, { policy: revision2 }),
+      { kind: 'counted', viewCount: 1 },
+      'the new revision starts collecting only after the old dispatched batch reaches terminal',
+    );
+  });
+
+  it('terminalizes an undispatched old revision and leaves the new revision at zero', async () => {
+    const db = memoryDatabase({ 'fb-1': 'facebook' });
+    const target = store(db.pool, 'dev');
+    await target.init();
+    const revision1: FacebookRuleRuntimePolicy = {
+      policyRevision: 11,
+      snapshot: { viewsPerLike: 1, joinEveryNRounds: 2 },
+    };
+    const revision2: FacebookRuleRuntimePolicy = {
+      policyRevision: 12,
+      snapshot: { viewsPerLike: 2, joinEveryNRounds: 2 },
+    };
+
+    const first = await apply(target, 1, { policy: revision1 });
+    if (first.kind !== 'batch_created') throw new Error('expected revision 1 batch');
+    assert.deepEqual(
+      await apply(target, 2, { policy: revision2 }),
+      { kind: 'policy_superseded', batchIds: [first.batch.batchId] },
+    );
+    assert.equal((await target.getView('fb-1', revision2)).runtime.viewCount, 0);
+    assert.deepEqual(
+      {
+        like: db.batches.get(first.batch.batchId)?.like_state,
+        join: db.batches.get(first.batch.batchId)?.join_state,
+        comment: db.batches.get(first.batch.batchId)?.comment_state,
+        terminal: db.batches.get(first.batch.batchId)?.terminal,
+        blocker: db.batches.get(first.batch.batchId)?.blocker,
+      },
+      {
+        like: 'policy_superseded',
+        join: 'policy_superseded',
+        comment: 'policy_superseded',
+        terminal: true,
+        blocker: 'policy_superseded',
+      },
+    );
+    assert.equal(
+      db.progress.get(`fb-1|dev|${revision1.policyRevision}`)?.activeBatchId,
+      null,
+    );
+    assert.deepEqual(
+      await apply(target, 3, { policy: revision2 }),
+      { kind: 'counted', viewCount: 1 },
     );
   });
 

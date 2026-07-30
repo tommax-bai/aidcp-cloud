@@ -46,6 +46,8 @@ function makeHarness(opts: {
   claimNext?: () => FacebookGroupMembershipRow | null;
   isFacebookAccount?: boolean;
   scopeEligibility?: 'eligible' | 'scope_mismatch' | 'terminal' | 'missing';
+  /** Tracks the membership row across repeated mode triggers. */
+  statefulModeMembership?: boolean;
 } = {}) {
   const bus = new EventBus();
   const sent: Env[] = [];
@@ -57,6 +59,7 @@ function makeHarness(opts: {
   const paused: string[] = [];
   const retryBackoffs: number[] = [];
   let llmIndex = 0;
+  let modeMembership = membership();
 
   const targets = {
     nextJoinCandidate: async () => ({
@@ -87,10 +90,17 @@ function makeHarness(opts: {
     },
   };
   const memberships = {
-    currentAssignment: async () => null,
+    currentAssignment: async () => opts.statefulModeMembership
+      && (modeMembership.status === 'assigned' || modeMembership.status === 'joining')
+      ? { ...modeMembership }
+      : null,
     claimNext: async () => {
       membershipCalls.push('claim');
-      return opts.claimNext ? opts.claimNext() : membership();
+      return opts.claimNext
+        ? opts.claimNext()
+        : opts.statefulModeMembership
+          ? { ...modeMembership }
+          : membership();
     },
     claimSpecific: async (accountId: string, url: string) => {
       membershipCalls.push(`claimSpecific:${url}`);
@@ -98,9 +108,39 @@ function makeHarness(opts: {
         ? opts.claimSpecific(accountId, url)
         : { row: membership({ groupUrl: url, status: 'assigned' }), ownedByOther: false };
     },
-    markJoining: async (_accountId: string, groupUrl: string) => {
+    markJoining: async (_accountId: string, groupUrl: string, reason = 'attempting') => {
       membershipCalls.push(`joining:${groupUrl}`);
+      if (opts.statefulModeMembership) {
+        modeMembership = {
+          ...modeMembership,
+          status: 'joining',
+          attempts: modeMembership.attempts + 1,
+          lastReason: reason,
+        };
+      }
       return true;
+    },
+    releaseModeJoining: async (
+      _accountId: string,
+      groupUrl: string,
+      expectedAttemptReason: string,
+      reason: string,
+    ) => {
+      membershipCalls.push(`releaseModeJoining:${groupUrl}`);
+      if (
+        opts.statefulModeMembership
+        && modeMembership.status === 'joining'
+        && modeMembership.lastReason === expectedAttemptReason
+      ) {
+        modeMembership = {
+          ...modeMembership,
+          status: 'assigned',
+          attempts: Math.max(0, modeMembership.attempts - 1),
+          lastReason: reason,
+        };
+        return true;
+      }
+      return !opts.statefulModeMembership;
     },
     revalidateScopedAssignment: async (_accountId: string, groupUrl: string) => {
       membershipCalls.push(`revalidate:${groupUrl}`);
@@ -165,10 +205,238 @@ function makeHarness(opts: {
     stepTimeoutMs: 20,
     logger: { warn: () => {}, log: () => {} },
   });
-  return { scheduler, sent, auditRows, membershipCalls, targetCalls, sessionBudgetCalls, leasePriorities, paused, retryBackoffs, bus };
+  return {
+    scheduler,
+    sent,
+    auditRows,
+    membershipCalls,
+    targetCalls,
+    sessionBudgetCalls,
+    leasePriorities,
+    paused,
+    retryBackoffs,
+    bus,
+    modeMembership: () => ({ ...modeMembership }),
+  };
 }
 
 describe('FacebookGroupJoinScheduler', () => {
+  it('consumption mode binds the exact assigned target and marks dispatch before any Edge action', async () => {
+    let assigned = false;
+    let dispatched = false;
+    const h = makeHarness({
+      edge: (env, bus) => {
+        assert.equal(assigned, true);
+        assert.equal(dispatched, true);
+        assert.equal(env.payload.groupUrl, GROUP);
+        bus.emit('action.completed', {
+          action: 'join_group',
+          ok: false,
+          reason: 'observation_only',
+          groupUrl: env.payload.groupUrl,
+          clicked: false,
+          observation: { groupUrl: env.payload.groupUrl, mainCtaText: 'Request to join' },
+          ts: 0,
+        } as never);
+      },
+    });
+
+    const result = await h.scheduler.triggerForMode('acc-fb', {
+      source: 'consumption',
+      onAssigned: ({ accountId, groupUrl, source }) => {
+        assert.deepEqual({ accountId, groupUrl, source }, {
+          accountId: 'acc-fb',
+          groupUrl: GROUP,
+          source: 'consumption',
+        });
+        assigned = true;
+      },
+      onBeforeDispatch: ({ groupUrl }) => {
+        assert.equal(groupUrl, GROUP);
+        dispatched = true;
+      },
+    });
+
+    assert.equal(result.triggered, true);
+    assert.equal(h.sent.length, 1);
+    assert.ok(h.membershipCalls.includes(`joining:${GROUP}`));
+    assert.ok(h.auditRows.length > 0);
+    assert.equal(
+      h.auditRows.every((row) => row.triggerSource === 'consumption'),
+      true,
+    );
+  });
+
+  it('reconciles a dispatched mode join by exact-group no-click observation only', async () => {
+    const h = makeHarness({
+      edge: (env, bus) => {
+        assert.equal(env.type, 'group.join');
+        assert.equal(env.payload.groupUrl, GROUP);
+        assert.equal(env.payload.click, false);
+        bus.emit('action.completed', {
+          action: 'join_group',
+          ok: false,
+          reason: 'observation_only',
+          groupUrl: GROUP,
+          clicked: false,
+          observation: {
+            groupUrl: GROUP,
+            mainCtaText: 'Joined',
+            membershipSignals: ['You are now a member'],
+          },
+          ts: 0,
+        } as never);
+      },
+    });
+
+    const result = await h.scheduler.reconcileForMode(
+      'acc-fb',
+      `${GROUP}/posts/42`,
+      { source: 'consumption' },
+    );
+
+    assert.equal(result.reconciled, true);
+    assert.equal(result.outcome, 'confirmed_member');
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent.some((env) => env.payload.click === true), false);
+    assert.ok(
+      h.membershipCalls.includes(`joined:${GROUP}:reconciled:member_signal`),
+    );
+    assert.equal(
+      h.auditRows.every((row) => row.triggerSource === 'consumption'),
+      true,
+    );
+  });
+
+  it('keeps reconciliation pending when exact-group observation is not membership proof', async () => {
+    const h = makeHarness({
+      edge: (env, bus) => {
+        assert.equal(env.payload.click, false);
+        bus.emit('action.completed', {
+          action: 'join_group',
+          ok: false,
+          reason: 'observation_only',
+          groupUrl: GROUP,
+          clicked: false,
+          observation: {
+            groupUrl: GROUP,
+            mainCtaText: 'Cancel request',
+            pendingRequest: true,
+          },
+          ts: 0,
+        } as never);
+      },
+    });
+
+    const result = await h.scheduler.reconcileForMode(
+      'acc-fb',
+      GROUP,
+      { source: 'consumption' },
+    );
+
+    assert.deepEqual(result, {
+      reconciled: false,
+      groupUrl: GROUP,
+      outcome: 'still_pending',
+      reason: 'gated_or_questionnaire_signal',
+      observation: {
+        groupUrl: GROUP,
+        mainCtaText: 'Cancel request',
+        pendingRequest: true,
+      },
+    });
+    assert.equal(h.sent.length, 1);
+    assert.equal(h.sent.some((env) => env.payload.click === true), false);
+    assert.equal(
+      h.membershipCalls.some((call) => call.startsWith('joined:')),
+      false,
+    );
+  });
+
+  it('consumption mode callback vetoes leave the exact assignment undispatched and perform no Edge action', async () => {
+    const h = makeHarness({ statefulModeMembership: true });
+    let assignedCalls = 0;
+    const result = await h.scheduler.triggerForMode('acc-fb', {
+      source: 'consumption',
+      onAssigned: ({ groupUrl }) => {
+        assignedCalls += 1;
+        assert.equal(groupUrl, GROUP);
+      },
+      onBeforeDispatch: ({ groupUrl }) => {
+        assert.equal(groupUrl, GROUP);
+        return false;
+      },
+    });
+
+    assert.deepEqual(result, {
+      triggered: false,
+      groupUrl: GROUP,
+      reason: 'dispatch_suppressed:before_dispatch_callback_rejected',
+    });
+    assert.deepEqual(h.sent, []);
+    assert.ok(h.membershipCalls.includes(`joining:${GROUP}`));
+    assert.ok(h.membershipCalls.includes(`releaseModeJoining:${GROUP}`));
+    assert.equal(h.modeMembership().status, 'assigned');
+    assert.equal(h.modeMembership().attempts, 0);
+
+    // The same row remains selectable because the veto did not consume an
+    // attempt or leave a joining placeholder.
+    await h.scheduler.triggerForMode('acc-fb', {
+      source: 'consumption',
+      onAssigned: () => { assignedCalls += 1; },
+      onBeforeDispatch: () => false,
+    });
+    assert.equal(assignedCalls, 2);
+    assert.equal(h.modeMembership().status, 'assigned');
+    assert.equal(h.modeMembership().attempts, 0);
+    assert.deepEqual(h.sent, []);
+  });
+
+  it('consumption mode callback throws release its exact joining CAS and remain selectable', async () => {
+    const h = makeHarness({ statefulModeMembership: true });
+    const result = await h.scheduler.triggerForMode('acc-fb', {
+      source: 'consumption',
+      onAssigned: () => true,
+      onBeforeDispatch: () => {
+        throw new Error('policy_changed');
+      },
+    });
+
+    assert.deepEqual(result, {
+      triggered: false,
+      groupUrl: GROUP,
+      reason: 'dispatch_suppressed:before_dispatch_callback_rejected',
+    });
+    assert.equal(h.modeMembership().status, 'assigned');
+    assert.equal(h.modeMembership().attempts, 0);
+    assert.deepEqual(h.sent, []);
+
+    let selectedAgain = false;
+    await h.scheduler.triggerForMode('acc-fb', {
+      source: 'consumption',
+      onAssigned: () => { selectedAgain = true; },
+      onBeforeDispatch: () => false,
+    });
+    assert.equal(selectedAgain, true);
+    assert.equal(h.modeMembership().status, 'assigned');
+    assert.equal(h.modeMembership().attempts, 0);
+  });
+
+  it('consumption mode retains automatic risk admission before target callbacks', async () => {
+    const h = makeHarness({ canJoin: false });
+    let callbacks = 0;
+    const result = await h.scheduler.triggerForMode('acc-fb', {
+      source: 'consumption',
+      onAssigned: () => { callbacks += 1; },
+      onBeforeDispatch: () => { callbacks += 1; },
+    });
+
+    assert.deepEqual(result, { triggered: false, reason: 'quota_denied' });
+    assert.equal(callbacks, 0);
+    assert.deepEqual(h.sent, []);
+    assert.deepEqual(h.membershipCalls, []);
+  });
+
   it('旧 auto/shadow 环境值不再阻断账号级加群调度', async () => {
     const previousAuto = process.env.AIDCP_FB_GROUP_JOIN_AUTO;
     const previousShadow = process.env.AIDCP_FB_GROUP_JOIN_SHADOW;

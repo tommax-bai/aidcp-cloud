@@ -164,6 +164,7 @@ test('Facebook 规则模式保留账号 runtime GET，配置 PUT 只按环境写
   const view = (accountId: string) => ({
     config: configForEnv(`env-of-${accountId}`),
     runtime: {
+      policyRevision: 0,
       viewCount: 0,
       threshold: FACEBOOK_RULE_VIEW_THRESHOLD,
       joinEveryNRounds: FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
@@ -294,6 +295,285 @@ test('Facebook 规则模式 API 未接 authority 时返回 unavailable，不伪�
   }
 });
 
+test('Facebook operation/group policy APIs expose CAS truth and unified slow-start writes', async () => {
+  let operationRevision = 0;
+  let baseMode: 'persona' | 'rule' | 'consumption' = 'persona';
+  let effectiveMode: 'persona' | 'slow_start' | 'rule' | 'consumption' = 'persona';
+  let groupRevision: number | null = null;
+  let joinToFirstCommentHours = 24;
+  const operationWrites: Array<{
+    envKey: string;
+    input: { requestId: string; mode: string };
+    actor: string;
+  }> = [];
+  const groupWrites: Array<{
+    input: { requestId: string; joinToFirstCommentHours: number };
+    actor: string;
+  }> = [];
+  const operationView = () => ({
+    envKey: 'env-fb',
+    baseMode,
+    effectiveMode,
+    policyRevision: operationRevision,
+    schemaVersion: 'facebook_operation_policy@1',
+    rule: { viewsPerLike: 5, joinEveryNRounds: 2 },
+    consumption: {
+      viewsPerLike: 5,
+      confirmedLikesPerJoin: 2,
+      confirmedJoinsPerComment: 2,
+    },
+    bounds: {
+      rule: {
+        viewsPerLike: { min: 1, max: 100, default: 5 },
+        joinEveryNRounds: { min: 1, max: 20, default: 2 },
+      },
+      consumption: {
+        viewsPerLike: { min: 1, max: 100, default: 5 },
+        confirmedLikesPerJoin: { min: 1, max: 20, default: 2 },
+        confirmedJoinsPerComment: { min: 1, max: 20, default: 2 },
+      },
+    } as const,
+    slowStart: {
+      state: effectiveMode === 'slow_start' ? ('active' as const) : ('off' as const),
+      since: effectiveMode === 'slow_start' ? 123 : null,
+      globallyDisabled: false,
+    },
+    binding: {
+      state: 'bound' as const,
+      accountId: 'acc-fb',
+      accountDisplayName: null,
+    },
+    blocker: null,
+    updatedAt: operationRevision > 0 ? '2026-07-30T00:00:00.000Z' : null,
+    updatedBy: operationRevision > 0 ? 'panel:alice' : null,
+  });
+  const groupView = () => ({
+    joinToFirstCommentHours,
+    revision: groupRevision,
+    source: groupRevision === null ? ('default' as const) : ('db' as const),
+    bounds: {
+      joinToFirstCommentHours: { min: 1, max: 168, default: 24 },
+    } as const,
+    sameGroupRecommentCooldownHours: 72,
+    sameGroupRecommentCooldownSource: 'default' as const,
+    updatedAt: groupRevision === null ? null : '2026-07-30T00:00:00.000Z',
+    updatedBy: groupRevision === null ? null : 'panel:alice',
+  });
+  const facebookOperationPolicy: NonNullable<PanelDeps['facebookOperationPolicy']> = {
+    isReady: () => true,
+    getForEnv: async (envKey) => envKey === 'env-fb' ? operationView() : null,
+    writeEnvironment: async (envKey, input, actor) => {
+      operationWrites.push({ envKey, input, actor });
+      if (input.expectedRevision !== operationRevision) {
+        return { ok: false, reason: 'revision_conflict', current: operationView() };
+      }
+      operationRevision += 1;
+      baseMode = input.mode === 'slow_start' ? 'persona' : input.mode;
+      effectiveMode = input.mode;
+      return { ok: true, view: operationView() };
+    },
+    writeLegacySlowStart: async (envKey, input) => {
+      if (envKey !== 'env-fb') return { ok: false, reason: 'environment_not_found' };
+      operationRevision += 1;
+      effectiveMode = input.enabled ? 'slow_start' : baseMode;
+      return {
+        ok: true,
+        view: operationView(),
+        slowStartSince: input.enabled ? 123 : null,
+      };
+    },
+  };
+  const facebookGroupCommentPolicy: NonNullable<PanelDeps['facebookGroupCommentPolicy']> = {
+    get: () => groupView(),
+    write: async (input, actor) => {
+      groupWrites.push({ input, actor });
+      if (input.joinToFirstCommentHours < 1 || input.joinToFirstCommentHours > 168) {
+        return { ok: false, reason: 'invalid_value' };
+      }
+      if (input.expectedRevision !== (groupRevision ?? 0)) {
+        return { ok: false, reason: 'revision_conflict', current: groupView() };
+      }
+      groupRevision = (groupRevision ?? 0) + 1;
+      joinToFirstCommentHours = input.joinToFirstCommentHours;
+      return { ok: true, view: groupView() };
+    },
+  };
+  const h = await startPanelApi({
+    ...deps,
+    facebookOperationPolicy,
+    facebookGroupCommentPolicy,
+  } as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    assert.equal(
+      (await fetch(`${base}/api/environments/env-fb/facebook-operation-policy`)).status,
+      401,
+    );
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = await login.json() as { token: string };
+    const auth = {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    };
+
+    const initial = await fetch(
+      `${base}/api/environments/env-fb/facebook-operation-policy`,
+      { headers: auth },
+    );
+    assert.equal(initial.status, 200);
+    assert.equal(
+      ((await initial.json()) as { policyRevision: number }).policyRevision,
+      0,
+    );
+
+    const mismatched = await fetch(
+      `${base}/api/environments/env-fb/facebook-operation-policy`,
+      {
+        method: 'PUT',
+        headers: auth,
+        body: JSON.stringify({
+          expectedRevision: 0,
+          mode: 'slow_start',
+          rule: { viewsPerLike: 5, joinEveryNRounds: 2 },
+        }),
+      },
+    );
+    assert.equal(mismatched.status, 422);
+    assert.equal(operationWrites.length, 0);
+
+    const slowStart = await fetch(
+      `${base}/api/environments/env-fb/facebook-operation-policy`,
+      {
+        method: 'PUT',
+        headers: auth,
+        body: JSON.stringify({
+          expectedRevision: 0,
+          mode: 'slow_start',
+          reason: 'operator selected slow start',
+        }),
+      },
+    );
+    assert.equal(slowStart.status, 200);
+    assert.deepEqual(
+      ((await slowStart.json()) as {
+        baseMode: string;
+        effectiveMode: string;
+        policyRevision: number;
+      }),
+      {
+        ...operationView(),
+        baseMode: 'persona',
+        effectiveMode: 'slow_start',
+        policyRevision: 1,
+      },
+    );
+    assert.equal(operationWrites[0]?.envKey, 'env-fb');
+    assert.equal(operationWrites[0]?.actor, 'panel:alice');
+    assert.match(operationWrites[0]?.input.requestId ?? '', /^[0-9a-f-]{36}$/);
+
+    const staleOperation = await fetch(
+      `${base}/api/environments/env-fb/facebook-operation-policy`,
+      {
+        method: 'PUT',
+        headers: auth,
+        body: JSON.stringify({ expectedRevision: 0, mode: 'persona' }),
+      },
+    );
+    assert.equal(staleOperation.status, 409);
+    assert.equal(
+      ((await staleOperation.json()) as { current: { policyRevision: number } })
+        .current.policyRevision,
+      1,
+    );
+
+    const initialGroup = await fetch(
+      `${base}/api/facebook/groups/comment-policy`,
+      { headers: auth },
+    );
+    assert.equal(initialGroup.status, 200);
+    assert.equal(
+      ((await initialGroup.json()) as { source: string }).source,
+      'default',
+    );
+    const savedGroup = await fetch(`${base}/api/facebook/groups/comment-policy`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        expectedRevision: 0,
+        joinToFirstCommentHours: 12,
+      }),
+    });
+    assert.equal(savedGroup.status, 200);
+    assert.equal(
+      ((await savedGroup.json()) as { joinToFirstCommentHours: number })
+        .joinToFirstCommentHours,
+      12,
+    );
+    assert.equal(groupWrites[0]?.actor, 'panel:alice');
+    assert.match(groupWrites[0]?.input.requestId ?? '', /^[0-9a-f-]{36}$/);
+
+    const staleGroup = await fetch(`${base}/api/facebook/groups/comment-policy`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        expectedRevision: 0,
+        joinToFirstCommentHours: 18,
+      }),
+    });
+    assert.equal(staleGroup.status, 409);
+    assert.equal(
+      ((await staleGroup.json()) as { current: { revision: number } })
+        .current.revision,
+      1,
+    );
+
+    const invalidGroup = await fetch(`${base}/api/facebook/groups/comment-policy`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        expectedRevision: 1,
+        joinToFirstCommentHours: 0,
+      }),
+    });
+    assert.equal(invalidGroup.status, 422);
+  } finally {
+    await h.close();
+  }
+});
+
+test('Facebook operation/group policy APIs report unavailable authorities as 503', async () => {
+  const h = await startPanelApi(deps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = await login.json() as { token: string };
+    const headers = { authorization: `Bearer ${token}` };
+    assert.equal(
+      (await fetch(
+        `${base}/api/environments/env-fb/facebook-operation-policy`,
+        { headers },
+      )).status,
+      503,
+    );
+    assert.equal(
+      (await fetch(`${base}/api/facebook/groups/comment-policy`, { headers })).status,
+      503,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
 test('环境管理 API 展示资产/账号摘要并按环境写慢启动，旧删除路径保持不可用', async () => {
   const writes: Array<{ envKey: string; enabled: boolean; now: number }> = [];
   const clientUsers = {
@@ -323,7 +603,37 @@ test('环境管理 API 展示资产/账号摘要并按环境写慢启动，旧�
       };
     },
   };
-  const environmentDeps = { ...deps, clientUsers, slowStartDisabled: true } as unknown as PanelDeps;
+  const environmentDeps = {
+    ...deps,
+    clientUsers,
+    slowStartDisabled: true,
+    facebookOperationPolicy: {
+      isReady: () => true,
+      writeLegacySlowStart: async (
+        envKey: string,
+        input: { enabled: boolean },
+      ) => {
+        const result = await clientUsers.setAdminEnvironmentSlowStart(
+          envKey,
+          input.enabled,
+          Date.now(),
+        );
+        if (!result.ok) {
+          return {
+            ok: false as const,
+            reason: result.reason === 'platform_unsupported'
+              ? 'unsupported_platform' as const
+              : 'environment_not_found' as const,
+          };
+        }
+        return {
+          ok: true as const,
+          view: {} as never,
+          slowStartSince: result.slowStart.since,
+        };
+      },
+    },
+  } as unknown as PanelDeps;
   const h = await startPanelApi(environmentDeps, makeConfig());
   assert.equal(h.started, true);
   const base = `http://127.0.0.1:${h.port}`;
@@ -376,7 +686,7 @@ test('环境管理 API 展示资产/账号摘要并按环境写慢启动，旧�
       method: 'PUT', headers: auth, body: JSON.stringify({ enabled: true }),
     });
     assert.equal(unsupported.status, 409);
-    assert.deepEqual(await unsupported.json(), { error: 'platform_unsupported' });
+    assert.deepEqual(await unsupported.json(), { error: 'unsupported_platform' });
 
     const removed = await fetch(`${base}/api/environments/profile-1/deletion`, {
       method: 'POST', headers: auth,
