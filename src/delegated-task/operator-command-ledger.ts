@@ -257,3 +257,37 @@ export class InMemoryOperatorCommandLedger implements OperatorCommandLedger {
     this.rows.set(commandId, { state: 'in_flight', scope });
   }
 }
+
+/**
+ * 台账不可用时用的**具名 fail-closed 台账**：三个方法一律抛。
+ *
+ * 存在理由是一次显式的取舍，别当防御性代码：台账不可用时，只剩「收下但不判重」与「不收」两条路。
+ * 收下的代价是**一次重投就真的发第二次**（落第二条委托任务并可能自动入队）——那正是这张台账存在
+ * 要挡的事；不收的代价只是运营看到一句「这条现在受理不了」。**两者不对称，所以选不收。**
+ *
+ * **它刻意只掐带台账的那条入口，不连累既有 7 方法**：那 7 个方法压根不用台账
+ * （各自有版本号乐观锁），让「台账表没跑迁移」把面板与客户端的委托任务管理一起拖下水，
+ * 是把一个无关能力的故障放大成一片。
+ */
+export class OperatorCommandLedgerUnavailableError extends Error {
+  readonly code = 'operator_command_ledger_unavailable';
+
+  constructor(readonly reason: string) {
+    super(
+      `operator command ledger is unavailable (${reason});`
+      + ' refusing the command rather than accepting it without once-only protection',
+    );
+    this.name = 'OperatorCommandLedgerUnavailableError';
+  }
+}
+
+export function unavailableOperatorCommandLedger(reason: string): OperatorCommandLedger {
+  const fail = (): never => {
+    throw new OperatorCommandLedgerUnavailableError(reason);
+  };
+  return {
+    claim: async () => fail(),
+    settleApplied: async () => fail(),
+    settleRejected: async () => fail(),
+  };
+}

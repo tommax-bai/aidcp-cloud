@@ -18,7 +18,11 @@
  * 由此：网关在 api 层但只连 kernel，边界棘轮不升。
  */
 import type { CuratedContentReader } from '../kernel/curated-content-types.js';
-import type { DelegatedTaskServicePort } from '../kernel/delegated-task-types.js';
+// 委托任务面从「7 方法读写窄面」放宽到 kernel 已有的 **7+1 合并接口**（含自由文本入口）。
+// 放宽而不是新增第二个 getter / 第二条 remote 闭包：两者方法集零重叠，kernel 自己就把它们并成了
+// 一个交集接口，多开一条通道等于让同一个域出现两套注入点。
+// 仍只 import kernel（`to === kernel` 恒 allowed），本文件不新增任何需豁免的跨层边。
+import type { DelegatedTaskCommandPort } from '../kernel/operator-command-port.js';
 import type { InteractionStoreReaderPort } from '../kernel/interaction-types.js';
 import type { PublishStatusReader } from '../kernel/publish-status-types.js';
 import type { PublishGenerationPort } from '../kernel/publish-generation-types.js';
@@ -47,7 +51,7 @@ export function gatewayModeFromEnv(
 /** 每个读端口的 HTTP 客户端构造 thunk（由组合根提供；仅 http 模式调用）。 */
 export interface DataGatewayRemote {
   curatedContentReader?: () => CuratedContentReader;
-  delegatedTaskService?: () => DelegatedTaskServicePort;
+  delegatedTaskService?: () => DelegatedTaskCommandPort;
   interactionReader?: () => InteractionStoreReaderPort;
   publishStatusReader?: () => PublishStatusReader;
   publishGenerationPort?: () => PublishGenerationPort;
@@ -56,8 +60,8 @@ export interface DataGatewayRemote {
 export interface DataGatewayOptions {
   /** content 域：精选库读侧窄面本地实例（CuratedContentStore 结构兼容）。 */
   curatedContentLocal?: CuratedContentReader;
-  /** automation 域：委托任务读写窄面本地实例（DelegatedTaskService 结构兼容）。 */
-  delegatedTaskLocal?: DelegatedTaskServicePort;
+  /** automation 域：委托任务**指令面**本地实例（7 方法 + 自由文本入口；由组装根注入接收方）。 */
+  delegatedTaskLocal?: DelegatedTaskCommandPort;
   /** automation 域：收件箱读侧窄面本地实例（InteractionStore 结构兼容）。 */
   interactionReaderLocal?: InteractionStoreReaderPort;
   /** content 域：发布队列状态读侧窄面本地实例（PublishOrchestrator.getStatus 适配为异步端口）。 */
@@ -76,7 +80,7 @@ export interface DataGatewayOptions {
  */
 export class DataGateway {
   private readonly curated: CuratedContentReader | undefined;
-  private readonly delegated: DelegatedTaskServicePort | undefined;
+  private readonly delegated: DelegatedTaskCommandPort | undefined;
   private readonly interaction: InteractionStoreReaderPort | undefined;
   private readonly publishStatus: PublishStatusReader | undefined;
   private readonly publishGeneration: PublishGenerationPort | undefined;
@@ -97,8 +101,8 @@ export class DataGateway {
     return this.curated;
   }
 
-  /** automation 域读写窄面（委托任务）。 */
-  get delegatedTaskService(): DelegatedTaskServicePort | undefined {
+  /** automation 域读写窄面 + 自由文本入口（委托任务指令面，7+1）。 */
+  get delegatedTaskService(): DelegatedTaskCommandPort | undefined {
     return this.delegated;
   }
 

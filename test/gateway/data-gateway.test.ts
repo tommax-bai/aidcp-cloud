@@ -2,12 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DataGateway, gatewayModeFromEnv } from '../../src/gateway/data-gateway.js';
 import type { CuratedContentReader } from '../../src/kernel/curated-content-types.js';
-import type { DelegatedTaskServicePort } from '../../src/kernel/delegated-task-types.js';
+import type { DelegatedTaskCommandPort } from '../../src/kernel/operator-command-port.js';
 import type { InteractionStoreReaderPort } from '../../src/kernel/interaction-types.js';
 
 // 桩：只需引用同一性，方法体不被调用。
 const curatedLocal = { tag: 'curated-local' } as unknown as CuratedContentReader;
-const delegatedLocal = { tag: 'delegated-local' } as unknown as DelegatedTaskServicePort;
+// 委托任务面已放宽到 7+1（含自由文本入口）：本桩跟着改类型，**不用 `as any` 绕过**——
+// 那样就把「聚合口注入的到底是哪个面」这件事从编译器手里拿走了。
+const delegatedLocal = { tag: 'delegated-local' } as unknown as DelegatedTaskCommandPort;
 const interactionLocal = { tag: 'interaction-local' } as unknown as InteractionStoreReaderPort;
 
 test('默认 mode=local：三个 getter 返回的就是传入的本地实例本身（===），零行为变更', () => {

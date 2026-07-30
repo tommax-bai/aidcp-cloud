@@ -339,6 +339,31 @@ import {
 } from './kernel/scheduled-automation-catalog.js';
 import { ensureCapabilitySchema, probeSchemaShape } from './schema/schema-capability.js';
 import { DelegatedTaskNotificationGate, delegatedTaskFailureReceipt } from './delegated-task/notification.js';
+// 运营指令通道接线（change split-cloud-automation-production-runtime，1.3 步骤 3–5）。
+// 接收方是「本地注入」与「HTTP 路由」共用的**同一份实现**，所以幂等语义 / 拒绝翻译 / 作用域校验
+// 不可能在两条路径上长歪。
+import {
+  AutomationDispatchCommandReceiver,
+  DelegatedTaskCommandReceiver,
+} from './delegated-task/operator-command-receiver.js';
+import {
+  PgOperatorCommandLedger,
+  unavailableOperatorCommandLedger,
+} from './delegated-task/operator-command-ledger.js';
+import {
+  DelegatedTaskHttpClient,
+  registerDelegatedTaskRoutes,
+} from './transport/delegated-task-http.js';
+import {
+  DelegatedTaskTextCommandHttpClient,
+  registerAutomationDispatchCommandRoutes,
+  registerDelegatedTaskTextCommandRoutes,
+} from './transport/operator-command-http.js';
+import {
+  delegatedTaskRejectionToError,
+  operatorCommandId,
+  type DelegatedTaskCommandPort,
+} from './kernel/operator-command-port.js';
 import {
   omitUnsupportedUsageMetrics,
   platformRegistryEntry,
@@ -355,7 +380,7 @@ import { createEnvironmentHandshakeAuthority } from './client-auth/client-user-s
 import { PgOffboardAdmissionLedger } from './client-auth/offboard-admission-ledger.js';
 // Block② 数据网关（决定①：api/panel 收口取数）。默认 local ⇒ getter 取到的就是原本地实例、零 HTTP、零行为变更。
 // 组合根（本文件属 composition 层）可合法 import transport 的 http 客户端，仅在 mode='http'（拆进程 2d）时经 remote thunk 构造。
-import { DataGateway, gatewayModeFromEnv } from './gateway/data-gateway.js';
+import { DataGateway, gatewayModeFromEnv, type DataGatewayRemote } from './gateway/data-gateway.js';
 // Block② 2d 第一步：多进程运行模式（一套代码、多入口）。纯选择器，零副作用，main() 据此分支。
 import {
   serviceModeFromEnv,
@@ -469,7 +494,10 @@ import { registerRoleModelSelectionRoutes } from './transport/role-model-selecti
 import { registerProviderSecretRoutes } from './transport/provider-secret-http.js';
 import { registerAccountPlatformRoutes } from './transport/account-platform-http.js';
 import { registerTriggeredPublishRefsRoutes } from './transport/triggered-publish-refs-http.js';
-import type { TriggeredPublishRefsReader } from './kernel/delegated-task-types.js';
+import {
+  DelegatedTaskServiceError,
+  type TriggeredPublishRefsReader,
+} from './kernel/delegated-task-types.js';
 import type { AccountPlatformReader } from './kernel/platform-types.js';
 import type { RoleModelSelectionReader, RoleModelSelectionSource } from './kernel/role-model-selection-port.js';
 import type { ProviderSecretReader } from './kernel/provider-secret-port.js';
@@ -1044,6 +1072,12 @@ interface CompositionContext {
   dashscopeApiKey: string | undefined;
   delegatedTaskService: DelegatedTaskService | undefined;
   delegatedTaskStore: PgDelegatedTaskStore | undefined;
+  /**
+   * 委托任务**指令面**（7 方法 + 自由文本入口）的本地接收方。segA 构造，segD 注入给取数聚合口、
+   * automation 内部 API 挂成路由处理器——**同一个对象两条路径**。
+   * 服务缺席时它仍在（自由文本回 `not_delivered`、7 方法抛具名「未接线」）；只有 segA 连服务都没建起来时才为 undefined。
+   */
+  delegatedTaskCommandPort: DelegatedTaskCommandPort | undefined;
   deploymentTarget: "dev" | "ol" | null;
   draftRefinementStore: DraftRefinementStore | undefined;
   eventBus: EventBus;
@@ -1815,6 +1849,45 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
   } else {
     console.warn('[aidcp-cloud] automation 内部 API：Publish UI update route 未注册（UI snapshot 不可用）');
   }
+  // 委托任务：既有 7 方法窄面 + 自由文本入口，两组都挂**同一个接收方**（1.3 步骤 3）。
+  // 每组独立注册、缺依赖走具名 warn，**不连带关闭其它组**（照本函数既有纪律）。
+  if (ctx.delegatedTaskCommandPort) {
+    registerDelegatedTaskRoutes(
+      httpServer,
+      ctx.delegatedTaskCommandPort,
+      directToken,
+      ctx.deploymentTarget,
+    );
+    registerDelegatedTaskTextCommandRoutes(
+      httpServer,
+      ctx.delegatedTaskCommandPort,
+      directToken,
+      ctx.deploymentTarget,
+    );
+  } else {
+    console.warn('[aidcp-cloud] automation 内部 API：委托任务 7 条 + 自由文本入口未注册（接收方不可用）');
+  }
+  // 调度启停：接收方**刻意没有持久台账**（它改的是进程内布尔，给它跨重启台账会让重启后一次真实启动
+  // 被判 duplicate 并回放陈旧的「是否真翻转」＝编造；理由与判例见 operator-command-receiver.ts）。
+  if (ctx.automationDispatchCommands?.dispatch && ctx.automationDispatchCommands.dispatchActive) {
+    const dispatch = ctx.automationDispatchCommands.dispatch;
+    const dispatchActive = ctx.automationDispatchCommands.dispatchActive;
+    registerAutomationDispatchCommandRoutes(
+      httpServer,
+      new AutomationDispatchCommandReceiver({
+        setDispatch: (accountId, action) => dispatch(accountId, action),
+        isActive: () => dispatchActive(),
+      }),
+      directToken,
+      ctx.deploymentTarget,
+    );
+  } else {
+    console.warn('[aidcp-cloud] automation 内部 API：调度启停 route 未注册（调度引擎句柄不可用）');
+  }
+  // **手动发帖 / 手动评论两组刻意不注册**（1.7b，用户 2026-07-30 裁定）：它们今天没有任何活的 api 侧
+  // 调用方——`/publish`、`/comment` 永远走委托分支，面板动作面里也没有这两个动作。
+  // 接一条今天不执行的通道 = 新增一处「看着接好了、其实永不触发」的假绿。
+  // 要接必须先重新裁定「这两条命令是否该绕开委托路径直发」，那时连同稳定键透传一起做。
   const registry = ctx.riskRegistry;
   if (registry) {
     const local: RiskReadPort = {
@@ -3168,7 +3241,48 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     } catch (err) {
       console.warn('[aidcp-cloud] DelegatedTaskStore 初始化失败，公共写入口 fail-closed:', (err as Error).message);
     }
-  } else if (accountStore) {
+  }
+
+  // 运营指令的幂等台账 + 那个唯一的接收方。
+  //
+  // **台账单独 try，不并进上面那个**：它失败 MUST NOT 把整个委托控制面拖下水。既有 7 方法压根不用台账
+  // （各自有版本号乐观锁），让「台账表还没跑迁移」把面板与客户端的委托任务管理一起掐掉，
+  // 是把一个无关能力的故障放大成一片。失败时换成具名 fail-closed 台账：自由文本那条带原因拒收
+  // （不能保证只发一次就不收），7 方法照常。
+  if (delegatedTaskService && deploymentTarget) {
+    let ledger;
+    try {
+      const pgLedger = new PgOperatorCommandLedger({
+        executionTarget: deploymentTarget,
+        pool: automationPool,
+      });
+      await pgLedger.init();
+      ledger = pgLedger;
+      console.log(`[aidcp-cloud] 运营指令幂等台账已就绪（executionTarget=${deploymentTarget}）`);
+    } catch (err) {
+      const reason = (err as Error).message;
+      ledger = unavailableOperatorCommandLedger(reason);
+      console.warn(
+        '[aidcp-cloud] 运营指令幂等台账不可用 → 自由文本委托带具名原因拒收（既有 7 方法不受影响）：' + reason,
+      );
+    }
+    ctx.delegatedTaskCommandPort = new DelegatedTaskCommandReceiver({
+      service: delegatedTaskService,
+      ledger,
+    });
+  } else if (deploymentTarget) {
+    // 服务本身没建起来（PG / 账号事实不可用）。**仍然给出接收方**：它会把自由文本回成
+    // `not_delivered` + 具名原因、7 方法抛具名「未接线」——比让端口整体 undefined 更能说清是哪一层缺。
+    ctx.delegatedTaskCommandPort = new DelegatedTaskCommandReceiver({
+      service: undefined,
+      ledger: unavailableOperatorCommandLedger('delegated_task_service_unavailable'),
+    });
+  }
+
+  // 这条警告属于**上面那个 store 块**（账号事实在、但没给 dev/ol），与台账无关。
+  // 写成独立 if 而不是挂在台账那条链的 else 上：那样虽然条件推导下来等价，但读的人会以为
+  // 「台账没建成」和「AIDCP_DEPLOY_ENV 不对」是同一件事。
+  if (accountStore && !deploymentTarget) {
     console.warn(
       `[aidcp-cloud] DelegatedTaskStore 未启用：AIDCP_DEPLOY_ENV=${JSON.stringify(readEnvString('AIDCP_DEPLOY_ENV') ?? null)} ` +
       '不是 dev/ol；任务创建与 worker fail-closed，绝不猜测执行环境',
@@ -8128,7 +8242,7 @@ function crossSegment<T>(
 }
 
 async function segDApiServing(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, apiFeishuOwner, approvalPolicyStore, approvePublishForClient, automationPool, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, delegatedTaskService, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookOperationPolicyStore, facebookGroupCommentPolicyStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
+  const { accountDisplayName, accountPersonaService, accountStore, alertStore, apiPool, apiFeishuOwner, approvalPolicyStore, approvePublishForClient, automationPool, buildTodayUsageForAccount, captchaAssist, categoryConfigStore, clientUserStore, commentScheduler, configMirrorRefresher, contentScheduleStore, credentialStore, curatedContentStore, draftRefinementStore, eventBus, facebookCommentConfigStore, facebookOperationPolicyStore, facebookGroupCommentPolicyStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, groupRouteStore, handlePublishDraftImageRemove, hotLeadConfigStore, interactionCustomerApi, interactionInternalApi, interactionOffboarding, interactionPermissionOverview, listAccountAutomationCatalog, llm, modelConfigStore, notificationContactStore, notifyPublishRejected, pacingConfigStore, personaAutoFill, personaPanel, personaStore, port, preflightApprovePublish, publishApprovalStore, publishDispatcher, publishLogStore, publishOrchestrator, quotaConfigStore, readLiveContentVersion, readPublishApproval, refreshPublishPreview, resumeConfigStore, riskRegistry, roleConfigStore, rolePromptProvider, server, sessionConfigStore, tokenUsageStore, writeApprovalDecision } = ctx;
   // ── Block④ 三仓提取 · 批次 0c：面板配置外观从 segC 上提到本段 ────────────────────────
   // 判据＝**构造只依赖 segA**（llm / modelConfigStore / 六个配置 store 全在 segA）。它们只被本段消费，
   // 原先建在 segC 再经 ctx 绕一圈回来 —— 那让 api 模式白白依赖 automation 段。就地建，零跨段依赖。
@@ -8259,6 +8373,35 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           deploymentTarget,
         )
       : undefined;
+  // 委托任务指令面的远端形态：**两个客户端合成一个 7+1 端口**。
+  // 不把它们合进同一个传输文件：一个是端口面（7 方法）、一个是指令面（自由文本入口），
+  // 合并会让路由表失去 `satisfies Record<keyof Port, string>` 那道「端口加方法而路由没跟上就编译红」的保护。
+  // 这里逐方法显式转调、**不用对象展开**：展开拿不到类实例原型上的方法，那种错要真跑起来才现形。
+  const remoteDelegatedTaskPort: DelegatedTaskCommandPort | undefined =
+    mode === 'api' && deploymentTarget && automationDirectToken
+      ? ((): DelegatedTaskCommandPort => {
+          const seven = new DelegatedTaskHttpClient(
+            automationHttp,
+            automationDirectToken,
+            deploymentTarget,
+          );
+          const text = new DelegatedTaskTextCommandHttpClient(
+            automationHttp,
+            automationDirectToken,
+            deploymentTarget,
+          );
+          return {
+            createDraft: (intent) => seven.createDraft(intent),
+            confirm: (taskId, version) => seven.confirm(taskId, version),
+            pause: (taskId, version) => seven.pause(taskId, version),
+            resume: (taskId, version) => seven.resume(taskId, version),
+            cancel: (taskId, version) => seven.cancel(taskId, version),
+            get: (taskId) => seven.get(taskId),
+            list: (filter) => seven.list(filter),
+            createFromText: (input) => text.createFromText(input),
+          };
+        })()
+      : undefined;
   const publishUiUpdateCommand =
     mode === 'api' && deploymentTarget && automationDirectToken
       ? new PublishUiUpdateCommandHttpClient(
@@ -8383,23 +8526,73 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     },
     bindChat: (record) => feishuOwner.botChatStore.setDefault(record),
     delegate: async (text, context) => {
-      if (!delegatedTaskService) {
+      // 改指取数聚合口（此前直接握本地实例）。`dataGateway` 声明在本闭包**之后**，但闭包体在命令到来时
+      // 才执行、那时它早已初始化——TDZ 不成立，TS 也不拦。**不要因此退回本地实例**：那是本轮要消掉的绕过。
+      const port = dataGateway.delegatedTaskService;
+      if (!port) {
         throw new Error('automation_operator_command_unavailable:delegate');
       }
-      const result = await delegatedTaskService.createFromText(text, {
-        sourceRef: context?.messageId ?? context?.chatId,
-        originChatId: context?.chatId,
+      // 幂等键：`requestKey` 取飞书消息 id（跨重投稳定），`scope` 取来源会话。
+      // **拿不到消息 id 就拒发，绝不用随机数或当前时刻兜底**——那样键跨重试就变了，等于宣布这套幂等不存在。
+      // 生产里唯一的调用方恒传 messageId（飞书事件的 message_id），所以这条分支只可能被非生产调用触发。
+      const requestKey = context?.messageId;
+      const commandId = requestKey
+        ? operatorCommandId({
+            kind: 'delegated_task_text',
+            scope: context?.chatId ?? 'feishu',
+            requestKey,
+          })
+        : null;
+      if (!commandId) {
+        throw new DelegatedTaskServiceError(
+          'command_key_unavailable',
+          '这条消息没有可用于判重的稳定标识，未受理（重发同一条消息不会重复执行，但本次没有执行）。',
+          400,
+        );
+      }
+      const receipt = await port.createFromText({
+        commandId,
+        text,
+        ...(context?.messageId ?? context?.chatId
+          ? { sourceRef: (context?.messageId ?? context?.chatId)! }
+          : {}),
+        ...(context?.chatId ? { originChatId: context.chatId } : {}),
       });
+      if (receipt.outcome === 'not_delivered') {
+        // **MUST NOT 表述成已受理 / 已排队。** 「没接线」是对面明确答出来的结论，
+        // 与「结果未知」（对面没答上来，走抛）是两回事。
+        return {
+          command: text,
+          ok: false,
+          level: 'error' as const,
+          title: '委托未送达',
+          message: `这台机器上没有接这条指令的处理器（${receipt.reason}），本次**没有**执行。`,
+        };
+      }
+      if (receipt.outcome === 'collision') {
+        return {
+          command: text,
+          ok: false,
+          level: 'error' as const,
+          title: '委托键冲突',
+          message: '同一把幂等键已被用于另一个作用域，未受理；请重新发起。',
+        };
+      }
+      if (receipt.outcome === 'rejected') {
+        // 还原成本仓既有的业务错误再抛：调用方（CommandRouter）对它的渲染与改动前逐位一致
+        // （黄色「委托任务需要补充信息」）。
+        throw delegatedTaskRejectionToError(receipt.rejection);
+      }
+      const result = receipt.result;
       if (result.kind === 'control') {
-        const request = result.request;
         const task =
-          request.action === 'pause'
-            ? await delegatedTaskService.pause(request.taskId)
-            : request.action === 'resume'
-              ? await delegatedTaskService.resume(request.taskId)
-              : request.action === 'cancel'
-                ? await delegatedTaskService.cancel(request.taskId)
-                : await delegatedTaskService.get(request.taskId);
+          result.action === 'pause'
+            ? await port.pause(result.taskId)
+            : result.action === 'resume'
+              ? await port.resume(result.taskId)
+              : result.action === 'cancel'
+                ? await port.cancel(result.taskId)
+                : await port.get(result.taskId);
         return {
           command: text,
           ok: true,
@@ -8598,6 +8791,53 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
       kind,
     });
   };
+  // ⚠️ **本块位置刻意上提到飞书入站之前**（change split-cloud-automation-production-runtime）：
+  // 飞书入站 deps 里的委托任务端口必须走这个聚合口，而它原来声明在入站之后 ⇒ 直接引用会撞 TDZ。
+  // 上提是安全的、且核过：本块捕获的四个值（curatedContentStore / ctx.delegatedTaskCommandPort /
+  // ctx.interactionStore / publishOrchestrator）在原位置与新位置之间**一次都没有被重新赋值**。
+  // 不上提的话只剩「让飞书直接握本地实例」这条退路——那正是本轮要消掉的两处绕过之一。
+  // ── Block② 数据网关（决定①：api/panel 收口取数）─────────────────────────────
+  // 聚合三个 kernel 读端口（精选库 / 委托任务 / 收件箱），api 消费者从这里取端口注入。
+  // 默认 mode='local'（AIDCP_GATEWAY_MODE!=='http'）⇒ getter 返回的就是上面 ctx 里的本地实例本身、
+  // 零 HTTP、不起任何内部 server（内部 HTTP server 的 listen 属 2d 拆进程，本刀不启动它）、运行时零行为变更。
+  // remote thunk 仅在 http 模式构造 client（拆进程后 2d）；此处 baseUrl 走 env，缺省不提供 ⇒ 保持 local。
+  // api 模式：content 域读端口（精选库 / 发布状态）一律走 HTTP 指向 content 服务；monolith/core 保持 env 决定（默认 local，逐字节等价）。
+  const gatewayMode = mode === 'api' ? 'http' : gatewayModeFromEnv();
+  const gatewayBaseUrl = readEnvString('AIDCP_GATEWAY_BASE_URL');
+  // remote 组装成一个对象再传：`remote` 这个键只能出现一次，而两条来源的**条件不同**——
+  // content 域那两条走 `AIDCP_GATEWAY_BASE_URL`（指向 content 进程），委托这条必须走
+  // **指向 automation 的那个客户端与令牌**。误用 content 那个 base URL 会把委托请求投到只服务
+  // curated 路由的监听上、直接 404（本文件原注释已预告过这一点）。
+  // 委托端口缺席时行为与改动前逐位一致：`remote` 只在非空时才传。
+  const gatewayRemote: DataGatewayRemote = {
+    ...(gatewayMode === 'http' && gatewayBaseUrl
+      ? {
+          curatedContentReader: () => new CuratedContentHttpClient(new InternalHttpClient(gatewayBaseUrl)),
+          publishStatusReader: () => new PublishStatusHttpClient(new InternalHttpClient(gatewayBaseUrl)),
+        }
+      : {}),
+    ...(remoteDelegatedTaskPort ? { delegatedTaskService: () => remoteDelegatedTaskPort } : {}),
+  };
+  const dataGateway = new DataGateway({
+    curatedContentLocal: curatedContentStore,
+    // 本地分支注入的是**接收方**（7+1），不是服务实例：服务的 `createFromText(text, opts)` 与契约的
+    // `createFromText(input)` 签名不同，直接注入编译不过——这条是编译器替我们钉住的，不是约定。
+    delegatedTaskLocal: ctx.delegatedTaskCommandPort,
+    interactionReaderLocal: ctx.interactionStore,
+    // Block② 2e：发布队列状态读端口。默认 local ⇒ 直接把同步 getStatus 适配成异步端口，
+    // 底层仍是同一个 publishOrchestrator.getStatus()，逐字节等价、零 HTTP。
+    // publishOrchestrator 属 segB（content 段）；api 模式本进程无它 ⇒ 本地适配回落诚实报错端口（绝不假成功），
+    // 真正取数经上面的 http remote 指向 content 服务。monolith/core 下 publishOrchestrator 存在 ⇒ 就是原适配、逐字节等价。
+    publishStatusLocal: publishOrchestrator
+      ? { getStatus: () => Promise.resolve(publishOrchestrator.getStatus()) }
+      : { getStatus: () => Promise.reject(new Error('publish_status_unavailable_in_api_mode')) },
+    mode: gatewayMode,
+    // Block② 2d step2 拓扑：content 域读端口（精选库 / 发布状态）remote 到 content 进程；
+    // 委托任务现在**另有一条指向 automation 的 remote**（见上面的 gatewayRemote）；
+    // 收件箱仍属 automation 域、由 core 本地拥有，保持 local。
+    ...(Object.keys(gatewayRemote).length > 0 ? { remote: gatewayRemote } : {}),
+  });
+
   const feishuIngress = await feishuOwner.startIngress({
     commandFace,
     writeApproval: (requestId, approved, payload, context) =>
@@ -8654,7 +8894,11 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             reason: 'publish_target_unavailable',
           };
     },
-    ...(delegatedTaskService ? { delegatedTasks: delegatedTaskService } : {}),
+    // 改指取数聚合口（此前直接握本地实例，是四个接线点里绕开聚合口的两处之一）。
+    // 一处切换即三个消费者同时切换，正是收口到一个注入点的全部意义。
+    ...(dataGateway.delegatedTaskService
+      ? { delegatedTasks: dataGateway.delegatedTaskService }
+      : {}),
   });
   ctx.botChatsProvider = feishuIngress.botChatsProvider;
   if (mode === 'api') {
@@ -8869,39 +9113,6 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     mode === 'api'
       ? new PanelAutomationHttpClient(automationHttp)
       : new PgPanelAutomationRead({ pool: automationPool });
-  // ── Block② 数据网关（决定①：api/panel 收口取数）─────────────────────────────
-  // 聚合三个 kernel 读端口（精选库 / 委托任务 / 收件箱），api 消费者从这里取端口注入。
-  // 默认 mode='local'（AIDCP_GATEWAY_MODE!=='http'）⇒ getter 返回的就是上面 ctx 里的本地实例本身、
-  // 零 HTTP、不起任何内部 server（内部 HTTP server 的 listen 属 2d 拆进程，本刀不启动它）、运行时零行为变更。
-  // remote thunk 仅在 http 模式构造 client（拆进程后 2d）；此处 baseUrl 走 env，缺省不提供 ⇒ 保持 local。
-  // api 模式：content 域读端口（精选库 / 发布状态）一律走 HTTP 指向 content 服务；monolith/core 保持 env 决定（默认 local，逐字节等价）。
-  const gatewayMode = mode === 'api' ? 'http' : gatewayModeFromEnv();
-  const gatewayBaseUrl = readEnvString('AIDCP_GATEWAY_BASE_URL');
-  const dataGateway = new DataGateway({
-    curatedContentLocal: curatedContentStore,
-    delegatedTaskLocal: delegatedTaskService,
-    interactionReaderLocal: ctx.interactionStore,
-    // Block② 2e：发布队列状态读端口。默认 local ⇒ 直接把同步 getStatus 适配成异步端口，
-    // 底层仍是同一个 publishOrchestrator.getStatus()，逐字节等价、零 HTTP。
-    // publishOrchestrator 属 segB（content 段）；api 模式本进程无它 ⇒ 本地适配回落诚实报错端口（绝不假成功），
-    // 真正取数经上面的 http remote 指向 content 服务。monolith/core 下 publishOrchestrator 存在 ⇒ 就是原适配、逐字节等价。
-    publishStatusLocal: publishOrchestrator
-      ? { getStatus: () => Promise.resolve(publishOrchestrator.getStatus()) }
-      : { getStatus: () => Promise.reject(new Error('publish_status_unavailable_in_api_mode')) },
-    mode: gatewayMode,
-    // Block② 2d step2 拓扑：core 的 http 网关只把「content 域」读端口（精选库）remote 到 content 进程；
-    // delegatedTask / interaction 属 automation 域、由 core 本地拥有（segA 已构造），一律保持 local，
-    // 绝不指向 content（content 的内部读 API 只服务 curated 路由，误投 delegated-task 会 404）。
-    // 未来若把委托任务 / 收件箱各自拆成独立服务，再按各自 base URL 追加对应 remote thunk。
-    ...(gatewayMode === 'http' && gatewayBaseUrl
-      ? {
-          remote: {
-            curatedContentReader: () => new CuratedContentHttpClient(new InternalHttpClient(gatewayBaseUrl)),
-            publishStatusReader: () => new PublishStatusHttpClient(new InternalHttpClient(gatewayBaseUrl)),
-          },
-        }
-      : {}),
-  });
 
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
@@ -9546,7 +9757,11 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
           publishQueue: {
             platformForAccount: (accountId) => accountStore?.platformFor?.(accountId),
             viewForAccount: async (accountId) => {
-              if (!delegatedTaskService) return null;
+              // 改指取数聚合口（此前直接握本地实例，与同一个 deps 字面量里上面那行走聚合口不一致）。
+              // **不改的后果是静默假成功**：拆完之后 api 进程里没有本地实例，这里会走 `return null`
+              // ——而 null 在客户端被渲染成「这个账号没有发布队列」，真相是「问不到」。
+              const delegatedTasksPort = dataGateway.delegatedTaskService;
+              if (!delegatedTasksPort) return null;
               try {
                 const queue = await (dataGateway.publishStatusReader
                   ? dataGateway.publishStatusReader.getStatus()
@@ -9557,7 +9772,7 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                 const [pending, recent, tasks] = await Promise.all([
                   clientPublishQueueStore.publishedHistory(50, accountId, 'pending_approval'),
                   clientPublishQueueStore.publishedHistory(10, accountId),
-                  delegatedTaskService.list({
+                  delegatedTasksPort.list({
                     accountId,
                     actionFamily: 'publish',
                     statuses: ['queued', 'planning', 'deferred'],
