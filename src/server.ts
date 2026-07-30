@@ -2078,7 +2078,7 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
     });
     console.log('[aidcp-cloud] automation 内部 API：managed-automation 入口路由已注册（create/cancel/query）');
   } else {
-    console.warn(
+    console.log(
       `[aidcp-cloud] automation 内部 API：managed-automation 入口路由未注册（${MANAGED_AUTOMATION_API_ENV} 未显式开启，默认关闭）`,
     );
   }
