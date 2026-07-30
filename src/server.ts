@@ -225,6 +225,7 @@ import {
   TaskAuthorityStore as ManagedTaskAuthorityStore,
 } from './managed-automation/stores/index.js';
 import { PlanCompiler } from './managed-automation/engine/index.js';
+import { createManagedAutomationRegistry } from './managed-automation/registry/index.js';
 import {
   createApprovalWriteOutlet,
   type ApprovalDecisionContext,
@@ -2047,6 +2048,10 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
       managedLedger.init(),
       managedTraces.init(),
     ]);
+    // 期1-6：注册表接入组合根——生产只发布 persona 只读研究；解析不到的
+    // 定义/能力仍返回 null，服务/编译器以既有原因码如实拒绝（unsupported /
+    // capability_not_available），不猜版本、不近似回退。
+    const managedRegistry = createManagedAutomationRegistry();
     const managedEntryService = new TaskEntryService({
       taskAuthority: managedTaskAuthority,
       runState: managedRunState,
@@ -2055,12 +2060,17 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
       compiler: new PlanCompiler({
         planAuthority: managedTaskAuthority,
         decisionTrace: managedTraces,
-        // 期1 尚无能力/任务定义/账号绑定注册表：解析口返回 null，服务/编译器
-        // 以既有原因码如实拒绝（unsupported / capability_not_available），不猜版本。
-        resolveCapability: () => null,
+        resolveCapability: managedRegistry.resolveCapability,
       }),
-      resolveTaskDefinition: () => null,
-      resolveAccountBinding: () => null,
+      resolveTaskDefinition: managedRegistry.resolveTaskDefinition,
+      // 账号绑定事实源：client_environments 活跃绑定（恰好 1 条才给 envKey，
+      // 0 条或多条歧义都如实 null → 'invalid_task_proposal'）。绑定 revision
+      // 无独立版本事实源，取绑定对身份——换绑即变，不编造时间戳。
+      resolveAccountBinding: async (accountId) => {
+        const envKey = await ctx.clientUserStore.envKeyForAccount(accountId);
+        if (!envKey) return null;
+        return { envKey, accountBindingRevision: `binding:${accountId}->${envKey}` };
+      },
     });
     registerManagedAutomationRoutes(httpServer, managedEntryService, {
       executionTarget: ctx.deploymentTarget,

@@ -58,8 +58,14 @@ export interface AccountBindingResolution {
   accountBindingRevision: string;
 }
 
-/** 账号绑定解析口：解析不到返回 null（提案指向未绑定账号 → 'invalid_task_proposal'）。 */
-export type AccountBindingResolver = (accountId: string, platform: PlatformId) => AccountBindingResolution | null;
+/**
+ * 账号绑定解析口：解析不到返回 null（提案指向未绑定账号 → 'invalid_task_proposal'）。
+ * 允许异步——生产事实源是 ClientUserStore（PG 查询）；同步实现（测试假件）原样兼容。
+ */
+export type AccountBindingResolver = (
+  accountId: string,
+  platform: PlatformId,
+) => AccountBindingResolution | null | Promise<AccountBindingResolution | null>;
 
 export interface TaskEntryServiceDeps {
   taskAuthority: TaskAuthorityEntryPort;
@@ -158,7 +164,7 @@ export class TaskEntryService {
       };
     }
 
-    const binding = this.deps.resolveAccountBinding(proposal.accountId, proposal.platform);
+    const binding = await this.deps.resolveAccountBinding(proposal.accountId, proposal.platform);
     if (!binding) {
       await this.traceDenial(executionTarget, 'admission', proposal.correlationId, 'invalid_task_proposal', [
         `account:${proposal.accountId}`,
