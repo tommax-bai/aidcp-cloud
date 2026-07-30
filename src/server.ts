@@ -475,12 +475,17 @@ import {
   registerStructuredNotificationRoutes,
 } from './transport/api-direct-http.js';
 import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transport/curated-content-http.js';
-// automation → content 的两条属主端口。**单体只挂服务端、不建客户端**：同进程里 automation 段
-// 拿到的仍是属主实例本身，走 HTTP 只会白绕一圈还多一处失败面。客户端类由 automation 独立根建。
+// automation → content 的两条属主端口。**monolith / core / content / api 只挂服务端、不建客户端**：
+// 同进程里 automation 段拿到的仍是属主实例本身，走 HTTP 只会白绕一圈还多一处失败面。
+// 客户端只在 `AIDCP_SERVICE=automation`（本进程没有 content 库）时才建，见 segC 的 `contentReadAuthority`。
 import {
+  ConceptPoolAuthorityHttpClient,
+  CuratedSelectionAuthorityHttpClient,
   registerConceptPoolAuthorityRoutes,
   registerCuratedSelectionAuthorityRoutes,
 } from './transport/content-authority-http.js';
+import type { ConceptPoolPort } from './kernel/concept-pool-port.js';
+import type { CuratedSelectionPort } from './kernel/curated-selection-port.js';
 import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
 import { registerPublishLogRoutes } from './transport/publish-log-http.js';
@@ -4203,6 +4208,43 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     }
     throw new Error(`structured_notification_not_delivered:${result.reason}`);
   };
+  // ── content 属主两条读端口按模式取实现（task 2.4a） ──────────────────────────────────
+  // 概念池（表 `concepts`）与精选召回（表 `curated_content`）的存储都是 content 属主。单体里本段
+  // 直接持着 segA 构造的那两个实例；`AIDCP_SERVICE=automation` 的独立进程里 content 库根本不在本
+  // 进程，segA 那两次 `init()` 必然失败、两个句柄都留 undefined——而那两处 catch 的既有语义是
+  // 「这台机器上没有概念池 / 没有精选素材」：概念抽取角色不注册、精选素材恒空，闭环照跑、只多一行
+  // 降级 warn。**「连不上内容域」就此被读成「内容域是空的」**，正是红线点名的静默假成功。
+  // 故 automation 模式改走 content 的内部 HTTP 客户端，且**缺配置直接抛**（fail-closed）——
+  // 回落本地实例等于对着一个没有这两张表的库空转，比不启动更难查。
+  // 其余模式（monolith / core / content / api）**逐位保持既有行为**：仍是 segA 那两个本地实例，
+  // 连客户端都不构造（同进程走 HTTP 只是白绕一圈还多一处失败面）。
+  const contentReadAuthority = ((): {
+    conceptPool: ConceptPoolPort;
+    curatedSelection: CuratedSelectionPort;
+  } | undefined => {
+    if (seamMode !== 'automation') return undefined;
+    const contentUrl = readEnvString('AIDCP_CONTENT_URL');
+    // 缺任一项都抛，且**点名缺的是哪一项**：这条缝断了就是断了，automation 起不来远好过
+    // 起来之后每次搜索少一半词、每次创作少一份素材，而两者都不报错。
+    if (!contentUrl || !deploymentTarget) {
+      throw new Error(
+        'content_read_authority_unavailable:'
+          + `${contentUrl ? '' : 'AIDCP_CONTENT_URL '}${deploymentTarget ? '' : 'AIDCP_DEPLOY_ENV'}`.trim(),
+      );
+    }
+    const http = new InternalHttpClient(contentUrl);
+    const callerToken = requireDirectInternalToken('AIDCP_CONTENT_INTERNAL_TOKEN');
+    return {
+      conceptPool: new ConceptPoolAuthorityHttpClient(http, callerToken, deploymentTarget),
+      curatedSelection: new CuratedSelectionAuthorityHttpClient(http, callerToken, deploymentTarget),
+    };
+  })();
+  // 三元而非 `??`：`??` 会在客户端字段意外为 undefined 时静默回落到本地实例，
+  // 而那正是本块要消灭的形态（automation 进程绝不能悄悄用上本地 content 存储）。
+  const conceptPoolPort: ConceptPoolPort | undefined =
+    contentReadAuthority ? contentReadAuthority.conceptPool : conceptStore;
+  const curatedSelectionPort: CuratedSelectionPort | undefined =
+    contentReadAuthority ? contentReadAuthority.curatedSelection : curatedContentStore;
   const approvalAuthorityForAutomation: PublishApprovalAuthorityPort | undefined =
     seamMode === 'automation'
       ? new PublishApprovalAuthorityHttpClient(
@@ -7087,7 +7129,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           }
         : {}),
       // 概念池：跨会话搜索记忆 + 从浏览学新关键词（undefined 时退化为仅 seed_keywords）。
-      conceptStore,
+      // task 2.4a：注入的是按模式取好的端口（automation 进程下是 content 的 HTTP 客户端）。
+      conceptStore: conceptPoolPort,
       // 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
       // （正文 curated_note_evaluator + 评论 curated_comment_evaluator）。缺省（PG 不可用）→ 不注册。
       curatedStore: curatedContentStore,
@@ -7355,20 +7398,21 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 单体里两者后果相同（没接线就是真没素材），拆进程后就不同了：连不上 content 域会长成同一个空数组，
     // 搜索词生成拿零样本照跑、零报错——正是红线点名的静默假成功。降级仍由调用方决定（见 comment-scheduler），
     // 但它现在是看着 reason 作的决定。
-    // 注入形态已是 kernel 端口（task 0.6c）：拆进程时这里换成 content 的 HTTP 客户端实例，
-    // comment-scheduler 一行不用改。单体里属主存储只满足端口的另一条（全字段召回），
-    // 三字段投影暂由本适配对象代做——投影**该在属主侧**，拆开时随注册函数一起归位。
+    // 注入形态已是 kernel 端口（task 0.6c），**实现已按模式取好**（task 2.4a）：
+    // monolith / core / content / api 下 `curatedSelectionPort` 就是属主实例本身（逐位等价），
+    // automation 进程下是 content 的 HTTP 客户端。comment-scheduler 一行没改。
+    // 外面这层薄适配只剩一件事：端口整体缺席时抛具名 `not_configured`（见上）。
     curatedSelection: {
       selectSamplesForSearchTerms: (accountId, type, limit) => {
-        if (!curatedContentStore) {
+        if (!curatedSelectionPort) {
           return Promise.reject(
-            new ContentPortError('not_configured', 'curated-selection.selectSamplesForSearchTerms', 'curatedContentStore 未注入'),
+            new ContentPortError('not_configured', 'curated-selection.selectSamplesForSearchTerms', '精选召回端口未注入'),
           );
         }
-        // 窄投影**已归位属主**（task 2.1）：这里只是把端口调用原样转给属主实例，不再就地 map。
+        // 窄投影**已归位属主**（task 2.1）：这里只是把端口调用原样转过去，不再就地 map。
         // 归位之前，「属主结构上满足端口」这句话对本方法是假的——服务端注册那层的在场探针会把它
         // 当成「对面不支持这个方法」，而那条具名原因本来是留给版本落后用的。
-        return curatedContentStore.selectSamplesForSearchTerms(accountId, type, limit);
+        return curatedSelectionPort.selectSamplesForSearchTerms(accountId, type, limit);
       },
     },
     llmFor: (accountId) => ({ complete: (prompt, opts) => llm.complete(prompt, { ...opts, accountId }) }),
@@ -7627,7 +7671,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
 
   // A 阶段4 发帖触发器：复用已持久化的 ConceptStore/LikedNoteStore/PublishLogStore/RiskController 单例。
   // 缺概念池/点赞库（PG 不可用）则不建——manual /publish 回"未就绪"，不静默假发布。
-  if (conceptStore && likedNoteStore) {
+  if (conceptPoolPort && likedNoteStore) {
     // Block② 2e：内容生成触发端口。默认 local ⇒ publishGenerationPort === publishOrchestrator（同一实例，
     // 逐字节等价、零 HTTP）；仅当 AIDCP_GENERATION_TRANSPORT=http 且有 base URL 时才切「同步 kick + 分段 long-poll」HTTP 客户端。
     const generationTransport = readEnvString('AIDCP_GENERATION_TRANSPORT') === 'http' ? 'http' : 'local';
@@ -7650,7 +7694,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
             'content',
           );
     ctx.publishScheduler = new PublishScheduler({
-      conceptStore,
+      conceptStore: conceptPoolPort,
       likedStore: likedNoteStore,
       publishLog: automationPublishLog,
       resolveRisk: resolveController,
@@ -7663,7 +7707,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       // 每个角色的 LLM 调用显式取之记账——无进程级槽、无括起复位，并发生成各轮各归各账。
       orchestrator: publishGenerationPort,
       // 精选灵感语料（change curated-inspiration-corpus）：发帖创作正向素材来源；缺失则回落旧点赞素材路径。
-      curatedStore: curatedContentStore,
+      // task 2.4a：走按模式取好的召回端口（automation 进程下是 content 的 HTTP 客户端）。
+      curatedStore: curatedSelectionPort,
       selectTopK: resolveCuratedGateConfig().selectTopK,
       // 人设取值口（change account-persona-config）：构建发布输入时按当前账号热加载。
       getSoul,

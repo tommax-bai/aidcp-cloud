@@ -478,3 +478,104 @@ test('4a composition: best-effort notification failures warn and config authorit
     /await configCommands\.recordContactCommentAttempt\(accountId\)/,
   );
 });
+
+/**
+ * task 2.4a：概念池与精选召回两条 content 属主读端口，按运行模式取实现。
+ *
+ * **为什么必须有这条用例（§6.4 的实测结论）**：把任一注入点改回本地属主实例，`npm run typecheck`
+ * **全绿**——属主实例结构上就满足那两个窄端口，编译器分不出「本地实例」和「HTTP 客户端」。
+ * 而后果只在 `AIDCP_SERVICE=automation` 真跑起来时才现形，且**不是报错**：本进程没有 `concepts` /
+ * `curated_content` 两张表 ⇒ segA 那两次 `init()` 失败留 undefined ⇒ 概念抽取角色不注册、
+ * 精选素材恒空，闭环照跑、只多一行降级 warn。「连不上内容域」被读成「内容域是空的」。
+ *
+ * **别当冗余删掉**：这条是那个失败态**唯一**的机械守卫。
+ */
+test('4a composition: content read ports are mode-selected and never fall back to the owner stores', async () => {
+  const source = await serverSource();
+  const automation = between(
+    source,
+    'async function segCAutomation(',
+    'async function segDApiServing(',
+  );
+
+  // ① automation 分支建 HTTP 客户端，带 caller token + target，**缺配置响亮抛**。
+  const selection = between(
+    automation,
+    'const contentReadAuthority = ((): {',
+    'const approvalAuthorityForAutomation',
+  );
+  assert.match(selection, /if \(seamMode !== 'automation'\) return undefined;/);
+  assert.match(selection, /new ConceptPoolAuthorityHttpClient\(http, callerToken, deploymentTarget\)/);
+  assert.match(selection, /new CuratedSelectionAuthorityHttpClient\(http, callerToken, deploymentTarget\)/);
+  assert.match(selection, /requireDirectInternalToken\('AIDCP_CONTENT_INTERNAL_TOKEN'\)/);
+  assert.match(
+    selection,
+    /if \(!contentUrl \|\| !deploymentTarget\) \{[\s\S]*throw new Error\([\s\S]*content_read_authority_unavailable/,
+    'missing content config must fail closed, not degrade',
+  );
+  // 变异实测（2026-07-30）：**只断言那句 throw 在文本里是不够的**——在它前面插一句
+  // `return undefined;`，整条 fail-closed 就变成静默回落本地属主实例，而上面那条 match
+  // **照样绿、typecheck 也照样绿**。所以这里改断结构：本 IIFE 里只许有**一处**提前返回，
+  // 且它就是模式守卫那处；缺配置只有 throw 一条出路。**别当冗余删掉。**
+  assert.equal(
+    (selection.match(/return undefined;/g) ?? []).length,
+    1,
+    'the seam-mode guard must be the only early return; another one turns fail-closed into silent fallback',
+  );
+  assert.match(selection, /if \(seamMode !== 'automation'\) return undefined;/);
+
+  // ② 回落只许发生在**非** automation 模式。三元的 automation 侧不得出现属主实例标识符——
+  //    `??` 形态（客户端字段意外 undefined → 静默取本地）正是本块要消灭的形状。
+  const conceptChoice = between(
+    selection,
+    'const conceptPoolPort: ConceptPoolPort | undefined =',
+    'const curatedSelectionPort',
+  );
+  assert.match(conceptChoice, /contentReadAuthority \? contentReadAuthority\.conceptPool : conceptStore/);
+  assert.doesNotMatch(conceptChoice, /\?\?/, 'nullish fallback would silently reach the local content store');
+  const curatedChoice = between(
+    automation,
+    'const curatedSelectionPort: CuratedSelectionPort | undefined =',
+    'const approvalAuthorityForAutomation',
+  );
+  assert.match(
+    curatedChoice,
+    /contentReadAuthority \? contentReadAuthority\.curatedSelection : curatedContentStore/,
+  );
+  assert.doesNotMatch(curatedChoice, /\?\?/, 'nullish fallback would silently reach the local content store');
+
+  // ③ 每一个 `conceptStore:` 注入点都喂端口，一个不留。段落无关的全文断言是有意的：
+  //    将来在别处再 new 一个概念池消费者、顺手喂了属主实例，也会在这里红。
+  //    （segA 的 `ctx` 字段声明是 PropertySignature，不是 PropertyAssignment，不进这张表。）
+  const sourceFile = ts.createSourceFile('server.ts', source, ts.ScriptTarget.ES2022, true);
+  const conceptInjections = namedPropertyTexts(sourceFile, 'conceptStore');
+  assert.deepEqual(
+    conceptInjections.map((text) => text.replace(/\s+/g, ' ')),
+    ['conceptStore: conceptPoolPort', 'conceptStore: conceptPoolPort'],
+    'RoleDispatcher and PublishScheduler must both receive the mode-selected concept port',
+  );
+  // 概念池的在场判定也走端口：判属主实例会让 automation 进程按「本地库里没这张表」跳过发帖调度器。
+  assert.match(automation, /if \(conceptPoolPort && likedNoteStore\) \{/);
+
+  // ④ 精选：**只有发帖创作与评论搜索词两条召回**归本端口。
+  //    RoleDispatcher 的 `curatedStore` 是透传给 content 角色工厂的 opaque Sink（含写），
+  //    `CuratedSelectionPort` 只有两条读方法、覆盖不了它 ⇒ 刻意仍是属主实例，归 task 2.5。
+  //    这条断言会在 2.5 落地时红，那是要的：改它的人必须重读这段而不是顺手改数。
+  const scheduler = between(automation, 'ctx.publishScheduler = new PublishScheduler({', '\n    });');
+  assert.match(scheduler, /curatedStore: curatedSelectionPort,/);
+  const dispatcher = between(automation, 'return new RoleDispatcher({', 'textCardTranscriber,');
+  assert.match(
+    dispatcher,
+    /curatedStore: curatedContentStore,/,
+    'the dispatcher sink handle is still the owner instance on purpose (task 2.5)',
+  );
+
+  // ⑤ 评论搜索词那层薄适配：调用转给端口，端口缺席仍抛具名 not_configured（task 0.6f 的吞点①）。
+  const termSamples = between(automation, 'curatedSelection: {', '\n    },');
+  assert.match(termSamples, /curatedSelectionPort\.selectSamplesForSearchTerms\(accountId, type, limit\)/);
+  assert.match(
+    termSamples,
+    /new ContentPortError\(\s*'not_configured'/,
+    'an absent curated port must reject by name, never resolve to an empty sample set',
+  );
+});
