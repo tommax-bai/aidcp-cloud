@@ -17,11 +17,12 @@
  *     `ApiDirectHttpError`（写路径 code = `api_authority_result_unknown`）。**抛，不是回一个 false**。
  *   - **未送达 ≠ 未知**：`not_delivered` 是接收方**答出来的**带内结论，走回执守卫、不走异常。
  *
- * 已知的一处**刻意不对齐**：既有 `delegated-task-http.ts` 的 7 条委托路由是 4a 信封之前写的，
- * 用无鉴权 `server.register` + 裸 `http.call`，**不带版本、不带 target**。本文件新增的
- * `create-from-text` 按本轮语义要求走信封 + Bearer。接线那一轮 MUST 把那 7 条一并迁到信封形态
- * （见文件末尾 {@link OPERATOR_COMMAND_WIRING_DEBT}），否则同一个委托端口会有两种请求形态、
- * 其中 7 条永远不校验 target —— DEV/OL 共库下那就是「在另一台机器上执行了」而没人拦。
+ * **口径已统一**（此前这里记着一处「刻意不对齐」）：既有 `delegated-task-http.ts` 的 7 条委托路由
+ * 曾是 4a 信封之前写的、用无鉴权 `server.register` + 裸 `http.call`、不带版本也不带 target；
+ * 现已一并迁到信封 + Bearer 形态，两个文件共用同一套信封 helper 与同一份委托任务形状守卫。
+ * **两个文件都留、都不是重复实现**：一个是端口面（7 方法的读写窄面），一个是指令面（四条运营指令，
+ * 含委托的自由文本入口）；合成一个会让路由表失去 `satisfies Record<keyof Port, string>` 那道
+ * 「端口加方法而路由没跟上就编译红」的保护。
  */
 import type { DeploymentTarget } from '../deployment-target.js';
 import {
@@ -54,6 +55,10 @@ import {
   requireRecord,
   requireString,
 } from './api-direct-http-common.js';
+// 委托任务的线上形状守卫**只有一份**，家在它所校验的那个端口面旁边（`delegated-task-http.ts`）。
+// 本文件的自由文本回执里嵌着一个 DelegatedTask，用的就是那一份——复制第二份会各自编译过、
+// 各自测试过，只在两边字段口径真的漂了的那一刻才看得出对不上。
+import { isDelegatedConfirmation, isDelegatedTask } from './delegated-task-http.js';
 
 /** 四条指令共用 4a 的契约版本号（见 kernel 侧说明：分开编号只会各自漂移）。 */
 export const OPERATOR_COMMAND_HTTP_CONTRACT_VERSION = OPERATOR_COMMAND_CONTRACT_VERSION;
@@ -178,112 +183,6 @@ function isCollision(value: Record<string, unknown>, commandId: string): boolean
 
 function isAppliedOrDuplicate(value: Record<string, unknown>): boolean {
   return value.outcome === 'applied' || value.outcome === 'duplicate';
-}
-
-/**
- * 逐字段存在性检查。**缺字段 MUST 判成形状不符**，MUST NOT 放行成一个属性为 `undefined` 的对象——
- * 后者跨进程后会被下游当成「这个事实是空的」（红线：缺席不得压成空值）。
- */
-function hasAllKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  return keys.every((key) => value[key] !== undefined);
-}
-
-const DELEGATED_TASK_REQUIRED_KEYS = [
-  'id',
-  'executionTarget',
-  'accountId',
-  'accountName',
-  'platform',
-  'action',
-  'actionFamily',
-  'targetSuccessCount',
-  'maxAttempts',
-  'deadlineAt',
-  'notBefore',
-  'executionWindow',
-  'sourceConstraints',
-  'targetConstraints',
-  'approvalMode',
-  'priority',
-  'source',
-  'status',
-  'progress',
-  'dedupeKey',
-  'version',
-  'createdAt',
-  'updatedAt',
-] as const;
-
-const DELEGATED_TASK_NULLABLE_KEYS = [
-  'sourceRef',
-  'originChatId',
-  'currentStep',
-  'terminalOutcome',
-  'nextEligibleAt',
-  'claimToken',
-  'claimExpiresAt',
-  'confirmedAt',
-  'completedAt',
-] as const;
-
-const DELEGATED_CONFIRMATION_REQUIRED_KEYS = [
-  'taskId',
-  'version',
-  'title',
-  'accountName',
-  'platformLabel',
-  'actionLabel',
-  'target',
-  'attempts',
-  'schedule',
-  'approval',
-  'priority',
-  'constraints',
-  'capability',
-] as const;
-
-function isDelegatedTaskProgress(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    isNonNegativeInteger(value.successCount) &&
-    isNonNegativeInteger(value.attemptCount) &&
-    isNonNegativeInteger(value.skippedCount) &&
-    isNonNegativeInteger(value.failureCount)
-  );
-}
-
-function isDelegatedTask(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (!hasAllKeys(value, DELEGATED_TASK_REQUIRED_KEYS)) return false;
-  // 可空字段 MUST 显式在场（值可为 null）：漏发与「确实没有」在下游是两码事。
-  if (!DELEGATED_TASK_NULLABLE_KEYS.every((key) => key in value)) return false;
-  return (
-    typeof value.id === 'string' &&
-    typeof value.accountId === 'string' &&
-    typeof value.accountName === 'string' &&
-    typeof value.platform === 'string' &&
-    typeof value.action === 'string' &&
-    typeof value.status === 'string' &&
-    typeof value.dedupeKey === 'string' &&
-    Number.isInteger(value.version) &&
-    isNonNegativeInteger(value.targetSuccessCount) &&
-    isNonNegativeInteger(value.maxAttempts) &&
-    typeof value.pauseRequested === 'boolean' &&
-    typeof value.cancelRequested === 'boolean' &&
-    isDelegatedTaskProgress(value.progress)
-  );
-}
-
-function isDelegatedConfirmation(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (!hasAllKeys(value, DELEGATED_CONFIRMATION_REQUIRED_KEYS)) return false;
-  return (
-    typeof value.taskId === 'string' &&
-    Number.isInteger(value.version) &&
-    Array.isArray(value.constraints) &&
-    value.constraints.every((item) => typeof item === 'string') &&
-    (value.capability === 'supported' || value.capability === 'beta')
-  );
 }
 
 function isDelegatedTextOutcome(value: unknown): value is DelegatedTaskTextOutcome {
@@ -607,8 +506,21 @@ export class AutomationDispatchCommandHttpClient implements AutomationDispatchCo
  * 它们都不是本文件能自己修的（涉及既有文件 / 组合根 / 归属表）。
  */
 export const OPERATOR_COMMAND_WIRING_DEBT = [
-  'delegated-task-http.ts 既有 7 条路由不带信封（无版本 / 无 target 校验、无 Bearer），MUST 与本文件的 create-from-text 统一到信封形态',
-  'feishu/delegated-task-card.ts 与 client-auth/client-auth-server.ts 用 instanceof 认 DelegatedTaskServiceError，跨进程恒 false，MUST 迁到 isDelegatedTaskServiceError',
-  '四条写指令的接收方 MUST 建持久幂等台账（按 commandId 判重并回放首次结果），跨进程重启仍成立',
+  '三条写指令（自由文本委托 / 手动发帖 / 手动评论）的接收方 MUST 建持久幂等台账（按 commandId 判重并回放首次结果），跨进程重启仍成立；调度启停刻意不建——它改的是进程内布尔，给它持久台账会让重启后一次真实启动被判 duplicate 并回放陈旧事实',
+  '四组路由的服务端注册与客户端 MUST 在组装根接上接收方与内部客户端；四个 api 侧接线点（飞书自由文本 / 飞书入站 deps / 客户端 API 发布队列视图 / 面板与客户端 API 主接线）MUST 全部改指同一个取数聚合口',
   'ApiDirectWriteErrorCode 可按 4a 惯例补四个逐命令的 *_result_unknown 码；本轮统一用 api_authority_result_unknown，不改既有 kernel 文件',
+] as const;
+
+/**
+ * 已消的欠账（保留一行说明，免得后来人以为漏了）：
+ *
+ *   - 「既有 7 条路由不带信封」——**已消**，两个文件现在同一套信封 + Bearer + 形状守卫。
+ *   - 「六个调用点用 `instanceof` 认业务错误、跨进程恒 false」——**已消，且是两半一起消的**：
+ *     迁到结构化守卫只治了「原型链没了」，另一半是 `name` / `status` 在线格式那一跳被丢，
+ *     由 `delegated-task-http.ts` 的服务端附加位 + kernel 的补集判据还原关掉。
+ *     **只做前一半是纸面完成**：守卫判的正是那个被丢掉的字段。
+ */
+export const OPERATOR_COMMAND_WIRING_DEBT_CLOSED = [
+  'delegated-task-http.ts 的 7 条路由已迁到信封 + Bearer 形态（含业务拒绝可跨线还原）',
+  '六个 instanceof 调用点已迁结构化守卫，且线格式已把 name / status 带过那一跳',
 ] as const;

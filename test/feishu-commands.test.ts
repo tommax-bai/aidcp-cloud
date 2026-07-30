@@ -3,12 +3,17 @@ import assert from 'node:assert/strict';
 import {
   CommandRouter,
   MAX_COMMANDS_PER_MESSAGE,
+  batchSubCommandMessageId,
   parseCommand,
   splitCommandBatch,
   resolvePublishApprovalRequestId,
   matchAccountByNickname,
   type CommandActions,
 } from '../src/feishu/commands.js';
+import {
+  operatorCommandId,
+  parseOperatorCommandId,
+} from '../src/kernel/operator-command-port.js';
 
 test('splitCommandBatch: 只在已支持 slash 命令边界拆 ASCII/全角分号', () => {
   assert.deepEqual(
@@ -110,8 +115,8 @@ test('CommandRouter.handleBatch: 子命令并发受理，且 messageId+序号形
   );
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(seen, [
-    { text: '/publish Tianxing Bai', messageId: 'om_batch:command:1' },
-    { text: '/comment Tianxing Bai --join --contact --force', messageId: 'om_batch:command:2' },
+    { text: '/publish Tianxing Bai', messageId: 'om_batch-command-1' },
+    { text: '/comment Tianxing Bai --join --contact --force', messageId: 'om_batch-command-2' },
   ], '第二条不应等待第一条完成才开始受理');
   release();
   assert.equal((await pending).length, 2);
@@ -120,7 +125,31 @@ test('CommandRouter.handleBatch: 子命令并发受理，且 messageId+序号形
   const replay = router.handleBatch('/publish Tianxing Bai; /publish Tianxing Bai', { messageId: 'om_batch' });
   await new Promise((resolve) => setImmediate(resolve));
   await replay;
-  assert.deepEqual(seen.map((item) => item.messageId), ['om_batch:command:1', 'om_batch:command:2']);
+  assert.deepEqual(seen.map((item) => item.messageId), ['om_batch-command-1', 'om_batch-command-2']);
+});
+
+test('用例 18｜分号批的子命令 id 必须能算出合法且互异的幂等键（拿真 kernel 函数算，不重述规则）', () => {
+  const first = batchSubCommandMessageId('om_batch', 0);
+  const second = batchSubCommandMessageId('om_batch', 1);
+
+  // 单射：两条子命令不得共用一把键（共用比被拒发更隐蔽——两条命令会互相判成重复）。
+  assert.notEqual(first, second);
+
+  // 合法：拿 kernel 真函数算一遍。此前这里是冒号，而冒号正是幂等键的分段分隔符，
+  // 合法性检查明确拒绝含它的分段 ⇒ 算出 null ⇒ 按契约必须拒发 ⇒ 每条分号批里的
+  // 委托 / 发帖 / 评论都会被拒发。**不要在这里重述 kernel 的规则**——那样 kernel 改了
+  // 这条用例还是绿的；要的就是它跟着 kernel 一起红。
+  for (const requestKey of [first, second]) {
+    const commandId = operatorCommandId({ kind: 'manual_publish', scope: 'acc-1', requestKey });
+    assert.ok(commandId, `子命令 id 不是合法的幂等键分段: ${requestKey}`);
+    const parsed = parseOperatorCommandId(commandId);
+    assert.equal(parsed?.requestKey, requestKey, '幂等键必须能原样反解回子命令 id');
+  }
+
+  assert.notEqual(
+    operatorCommandId({ kind: 'manual_publish', scope: 'acc-1', requestKey: first }),
+    operatorCommandId({ kind: 'manual_publish', scope: 'acc-1', requestKey: second }),
+  );
 });
 
 test('CommandRouter.handleBatch: 一个子命令拒绝不吞掉兄弟，超上限整批不受理', async () => {

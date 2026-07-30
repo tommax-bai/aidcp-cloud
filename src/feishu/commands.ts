@@ -26,6 +26,31 @@ export type CommandAction = 'status' | 'pause' | 'resume' | 'publish-test' | 'pu
 /** 单条飞书消息允许携带的最大原子命令数，防止一次消息无界放大后台工作。 */
 export const MAX_COMMANDS_PER_MESSAGE = 8;
 
+/**
+ * 分号批命令给每条子命令编稳定来源 id 用的分隔符。**MUST NOT 是冒号。**
+ *
+ * 冒号正是运营指令幂等键的分段分隔符（kernel `OPERATOR_COMMAND_ID_SEPARATOR`），而那边的合法性
+ * 检查明确拒绝含分隔符或空白的分段。⇒ 子命令 id 里带冒号，拿它当幂等键会算出 `null`，
+ * 而契约要求「拿到 `null` MUST 当场判成参数错误并拒绝下发」⇒ **每一条分号批里的委托 / 发帖 /
+ * 评论都会被拒发，而且拒得「有道理」，是最难查的那一类**。
+ */
+const BATCH_SUB_COMMAND_SEPARATOR = '-';
+
+/**
+ * 分号批里第 `index`（0 基）条子命令的稳定来源 id。
+ *
+ * **单射**：飞书消息 id 形如 `om_<hex>`、本身不含 `-`，故 `<messageId>-command-<n>` 反解唯一。
+ * 这里**刻意不做** `replace` 归一——顺手 replace 会把两个不同的 messageId 归成同一个，
+ * 那是把「一条命令被拒发」换成「两条命令共用一把幂等键」，后者更隐蔽也更贵。
+ *
+ * 合法性由 `test/feishu/batch-command-idempotency-key.test.ts` 机械钉住（拿真 kernel 函数算一遍，
+ * 而不是在这里重述一遍它的规则）：kernel 哪天把分隔符改成 `-`，那条用例当场红。
+ */
+export function batchSubCommandMessageId(messageId: string, index: number): string {
+  const sep = BATCH_SUB_COMMAND_SEPARATOR;
+  return `${messageId}${sep}command${sep}${index + 1}`;
+}
+
 const COMMAND_AFTER_SEPARATOR =
   /[;；](?=\s*\/(?:aidcp\s+\/?(?:status|pause|resume|publish-test|publish|comment|bind|help)|(?:status|pause|resume|publish-test|publish|comment|bind|task|help))\b)/giu;
 
@@ -363,7 +388,7 @@ export class CommandRouter {
 
     return Promise.all(commands.map(async (command, index) => {
       const childContext = context?.messageId
-        ? { ...context, messageId: `${context.messageId}:command:${index + 1}` }
+        ? { ...context, messageId: batchSubCommandMessageId(context.messageId, index) }
         : context;
       try {
         return await this.handle(command, childContext);

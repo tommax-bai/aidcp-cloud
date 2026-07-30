@@ -67,6 +67,12 @@
  * 需要恢复「失败靠抛」的调用点（今天飞书 delegate handler 就是靠抛）用 {@link delegatedTaskRejectionToError}
  * 在自己那一侧重建同一个 `DelegatedTaskServiceError` 抛出，行为逐位不变。
  *
+ * **既有 7 方法端口不走带内回执**（它的签名是「返回裸值、失败靠抛」，改成回执型会连带毁掉
+ * 「本地实例可原样注入」这条性质）。它那条路上的同一个问题由另一对函数关掉：服务端
+ * {@link delegatedTaskErrorOriginOf} 把 `name` / `status` 放进传输错误的附加位，客户端
+ * {@link restoreDelegatedTaskServiceError} 按补集判据还原。两条路径**共用同一套判据**，
+ * 不是第三套机制。
+ *
  * kernel 准入：零 SQL、零 HTTP、零 LLM、零模块级活状态（无 `let` / `var` / `new Map` / `new Set` /
  * 定时器 / 连接池），只 import 同层 kernel 契约与部署 target 类型。
  */
@@ -315,6 +321,75 @@ export function isOperatorCommandTransportErrorCode(
     typeof code === 'string' &&
     (OPERATOR_COMMAND_TRANSPORT_ERROR_CODES as readonly string[]).includes(code)
   );
+}
+
+/* ───────────────────── 业务拒绝跨那一跳的还原（补上 isDelegatedTaskServiceError 的另一半） */
+
+/**
+ * 业务错误跨内部 HTTP 那一跳时随传输错误一起带过去的**身份附加位**。
+ *
+ * 存在理由（不是防御性设计，是一个已经量化过的活缺口）：内部 HTTP 的线格式对一个
+ * 「带 string `code` 的裸抛出物」**只保 `code` + `message`**，`name` 与 `status` 在那一跳被丢；
+ * 而 {@link isDelegatedTaskServiceError} 判的正是 `name`。⇒ 那六处已经从 `instanceof` 迁到结构化守卫的
+ * 调用点，一旦真的跨进程，**仍然恒 false**——迁移只治了「原型链没了」，没治「识别键没过线」。
+ *
+ * 线格式**对传输层自己的错误类是保附加位的**，所以补法是：服务端主动把业务错误包一层传输层错误、
+ * 把这两个字段放进附加位（见 `src/transport/delegated-task-http.ts`），客户端先用
+ * {@link isOperatorCommandTransportErrorCode} 的**补集**判据认出「这是处理器给的业务原因码」，
+ * 再由 {@link restoreDelegatedTaskServiceError} 从这里还原。
+ *
+ * **`status` MUST 在这里如实带过来。** 客户端补一个默认值就是「缺席压成默认值」，而
+ * {@link DelegatedTaskServiceError} 的 `status` 构造默认值**恰好就是 400**——所以「补默认」看着人畜无害，
+ * 实际会把 409（版本冲突 / 账号已暂停）与 422（平台不支持该委托）一并压平成 400。
+ */
+export interface DelegatedTaskErrorOrigin {
+  name: typeof DELEGATED_TASK_SERVICE_ERROR_NAME;
+  status: number;
+}
+
+export function isDelegatedTaskErrorOrigin(value: unknown): value is DelegatedTaskErrorOrigin {
+  if (typeof value !== 'object' || value === null) return false;
+  const o = value as { name?: unknown; status?: unknown };
+  return o.name === DELEGATED_TASK_SERVICE_ERROR_NAME && Number.isInteger(o.status);
+}
+
+/**
+ * 服务端侧：从一个抛出物析出要随线带过去的身份附加位；**不是业务错误就返回 `null`**。
+ *
+ * 拿不到整数 `status` 时同样返回 `null`（**宁可让对面判成「结果未知」，也不编一个 status**）：
+ * 把一个确定的「不行」降级成「不知道」是安全方向——调用方会如实报未知；
+ * 反过来把「不知道」升格成一个具体的 400 才是编造事实。
+ */
+export function delegatedTaskErrorOriginOf(error: unknown): DelegatedTaskErrorOrigin | null {
+  if (!isDelegatedTaskServiceError(error)) return null;
+  const status = (error as { status?: unknown }).status;
+  if (!Number.isInteger(status)) return null;
+  return { name: DELEGATED_TASK_SERVICE_ERROR_NAME, status: status as number };
+}
+
+/**
+ * 客户端侧：把线上错误还原成 {@link DelegatedTaskServiceError}；**还原不出返回 `null`，绝不套默认**
+ * （形状照既有判例 `content-port-error.ts` 的 `contentPortReasonFromCode`）。
+ *
+ * 三道闸，任一不过即 `null`（调用方据此按传输失败 = 结果未知处置）：
+ *   1. 没有非空 string `code`；
+ *   2. `code` **在**传输层码表内 ⇒ 它是传输失败，MUST NOT 被伪造成某个业务原因；
+ *   3. 附加位里没有合法的身份（`name` 不对，或 `status` 不是整数）。
+ *
+ * `message` 是唯一允许回落的字段（回落到 `code`）：它**MUST NOT 参与任何判定**、只用于展示，
+ * 为一个展示字段缺席就把「账号已暂停」降级成「服务不可用」是把代价花错了地方。
+ * `status` **没有**这个待遇——见 {@link DelegatedTaskErrorOrigin}。
+ */
+export function restoreDelegatedTaskServiceError(
+  wireError: unknown,
+): DelegatedTaskServiceError | null {
+  if (typeof wireError !== 'object' || wireError === null) return null;
+  const o = wireError as { code?: unknown; message?: unknown; details?: unknown };
+  if (typeof o.code !== 'string' || o.code.length === 0) return null;
+  if (isOperatorCommandTransportErrorCode(o.code)) return null;
+  if (!isDelegatedTaskErrorOrigin(o.details)) return null;
+  const message = typeof o.message === 'string' && o.message.length > 0 ? o.message : o.code;
+  return new DelegatedTaskServiceError(o.code, message, o.details.status);
 }
 
 /* ────────────────────────────────────── ① 自由文本委托 */
