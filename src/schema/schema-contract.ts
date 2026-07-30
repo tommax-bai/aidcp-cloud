@@ -143,8 +143,32 @@ export const REQUIRED_SCHEMA_VERSION = '0097_environment_level_rule_mode_and_app
  * 把自动加群日上限的库侧 CHECK 从 0..10 放宽到 0..50。**只抬 KNOWN_MAX、不抬 REQUIRED**：
  * 它是放宽方向的约束替换，缺它时旧库仍能正常跑（只是写不进大于 10 的值、写入被库拒并有明确报错），
  * 不构成「缺列就写不进、链路失败」的硬依赖，故不满足抬 REQUIRED 的门槛。
+ *
+ * 注：`0099_operator_command_receipt`（change split-cloud-automation-production-runtime，1.7③）
+ * 新建运营指令的幂等台账表（属主 automation）。**本轮只抬 KNOWN_MAX、刻意不抬 REQUIRED。**
+ * 判据就是这条常量自己的门槛「缺了这条迁移，链路写不进 / 失败」——今天**不成立**：
+ * 用这张表的接收方是新写的、**还没有接进任何进程**（组装根接线属后续批次），
+ * 所以缺表时现网一行代码都不会碰它。
+ * 现在抬 REQUIRED 的实际后果是**给还没跑过 `npm run migrate up` 的机器装一颗静默地雷**，
+ * 而且比「起不来」更难查（实测这条链路，不是推测）：schema 契约门是 `segAApiFoundation` 的**第一句**、
+ * 裸 `await`、刻意无 try/catch，跑在任何连接池与存储 `init()` 之前；enforce 模式下失败即
+ * `throw` → `main().catch` 置 `exitCode = 1` → 事件循环排空、进程真的退出 →
+ * systemd 只有 `Restart=on-failure` / `RestartSec=5`、**没有 OnFailure、机器上没有探针**
+ * ⇒ 表现是**每 5 秒静默重启一次的崩溃循环，零告警**。
+ * 而且「behind」这一档**没有豁免通道**：`waived`/`pass` 在该分支里是写死的 false，
+ * `AIDCP_ALLOW_SCHEMA_AHEAD` 只作用于「库比代码新」那一档；唯一的杠杆是
+ * `AIDCP_SCHEMA_GATE=warn`，那等于把整台机器的门关掉。
+ *
+ * **接线那一批 MUST 同时做三件事**：抬 REQUIRED 到本版本、部署序列里在**重启之前**
+ * 跑一次 `npm run migrate up`、并对 ol 也补上同一步。漏了第一件，缺表会以运行期 42P01 的形式
+ * 在第一次真写台账时才炸；漏了第二件，就是上面那个崩溃循环。
+ *
+ * **补迁移只能用 `npm run migrate up`（或 `baseline`），MUST NOT 用 `scripts/run-migration.ts`**：
+ * 后者只执行 SQL、**不写 `schema_migrations` 账本**（它自己的文件头明写这条缺口，且用户 2026-07-25
+ * 裁定有意保留它）。用它补完，表在库里、门读的账本却还停在旧版本 ⇒ 照样判 behind，
+ * 而现场看起来「表明明建好了」，是最费时间的一种排查。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0098_facebook_group_join_daily_cap_50';
+export const KNOWN_MAX_SCHEMA_VERSION = '0099_operator_command_receipt';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

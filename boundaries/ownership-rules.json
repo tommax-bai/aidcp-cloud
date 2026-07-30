@@ -26,7 +26,7 @@
     { "dir": "src/comm/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：Edge Gateway、协议、租约、验证码协助（15/15 automation）；protocol.ts 归属见 §10.9" },
     { "dir": "src/comment-agent/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：命令式评论与加群调度（13/13 automation）" },
     { "dir": "src/config/", "layer": "api", "newFile": "adjudicate", "basis": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）" },
-    { "dir": "src/delegated-task/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：认领型 worker 范式（10/10 automation）" },
+    { "dir": "src/delegated-task/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：认领型 worker 范式（整目录 automation，无例外）。**判据是范式，不是当时的文件数**——原文写死「10/10」，目录长到 12 个之后那个数字就只会误导（新增的是 change split-cloud-automation-production-runtime 的运营指令接收方与幂等台账，同属该范式）" },
     { "dir": "src/event-bus/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：进程内总线，不跨服务（2/2 automation）" },
     { "dir": "src/feishu/", "layer": "api", "newFile": "inherit", "basis": "§4.6.2 裁决：src/feishu/ 整体归 aidcp-api（15/15）" },
     { "dir": "src/gateway/", "layer": "api", "newFile": "inherit", "basis": "§4.7 基线 sha 之后由 change block2-data-gateway 新增的目录：api/panel 收口取数的数据网关，只聚合 kernel 读端口、只 import kernel 契约（不连 transport/automation），无 SQL、无进程内活状态。整目录归 api、新文件 inherit。MUST 回写 §4.7" },

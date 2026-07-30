@@ -105,10 +105,15 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   // 加群日上限的 CHECK 放宽只动 api 属主的加群配置表。
   assert.ok(api.includes('0098_facebook_group_join_daily_cap_50'));
   assert.ok(!automation.includes('0098_facebook_group_join_daily_cap_50'));
-  // 每加一条迁移都要在这里同步抬（change raise-facebook-group-join-cap-ceiling → 0098）。
+  // 运营指令幂等台账是 automation 属主的新表，故只能落在 automation 那一侧。
+  assert.ok(automation.includes('0099_operator_command_receipt'));
+  assert.ok(!api.includes('0099_operator_command_receipt'));
+  // 每加一条迁移都要在这里同步抬（→ 0099：change split-cloud-automation-production-runtime）。
+  // **注意这是第二处写死该常量的地方**：test/schema/schema-contract.test.ts 那条是从 migrations/
+  // 目录**算**出最大版本再比，这条是逐字写死。加迁移时两处都会红，别以为改完一处就完了。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0098_facebook_group_join_daily_cap_50',
+    '0099_operator_command_receipt',
   );
 });
 
