@@ -213,6 +213,19 @@ import {
   registerPublishDispatchTriggerRoutes,
 } from './transport/publish-dispatch-trigger-http.js';
 import {
+  MANAGED_AUTOMATION_API_ENV,
+  isManagedAutomationApiEnabled,
+  registerManagedAutomationRoutes,
+} from './transport/managed-automation-http.js';
+import { TaskEntryService } from './managed-automation/service/index.js';
+import {
+  DecisionTraceStore as ManagedDecisionTraceStore,
+  ExecutionLedgerStore as ManagedExecutionLedgerStore,
+  RunStateStore as ManagedRunStateStore,
+  TaskAuthorityStore as ManagedTaskAuthorityStore,
+} from './managed-automation/stores/index.js';
+import { PlanCompiler } from './managed-automation/engine/index.js';
+import {
   createApprovalWriteOutlet,
   type ApprovalDecisionContext,
   type ApprovalWriteOutlet,
@@ -2018,6 +2031,46 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
     );
   } else {
     console.warn('[aidcp-cloud] publish-dispatch trigger 端点未注册：dispatcher 或 approval authority 不可用');
+  }
+  // 期1-4 托管自动化入口操作（Create/Cancel/Query）。总开关默认关闭：关闭时不构造
+  // stores、不探测 schema、不注册路由（未注册路由回 404 route_not_found），行为与主干一致。
+  if (isManagedAutomationApiEnabled()) {
+    const managedStoreOptions = { pool: ctx.automationPool, schemaProber: probeSchemaShape };
+    const managedTaskAuthority = new ManagedTaskAuthorityStore(managedStoreOptions);
+    const managedRunState = new ManagedRunStateStore(managedStoreOptions);
+    const managedLedger = new ManagedExecutionLedgerStore(managedStoreOptions);
+    const managedTraces = new ManagedDecisionTraceStore(managedStoreOptions);
+    // fail-closed：schema 不齐即启动失败，不带病注册。
+    await Promise.all([
+      managedTaskAuthority.init(),
+      managedRunState.init(),
+      managedLedger.init(),
+      managedTraces.init(),
+    ]);
+    const managedEntryService = new TaskEntryService({
+      taskAuthority: managedTaskAuthority,
+      runState: managedRunState,
+      ledger: managedLedger,
+      decisionTrace: managedTraces,
+      compiler: new PlanCompiler({
+        planAuthority: managedTaskAuthority,
+        decisionTrace: managedTraces,
+        // 期1 尚无能力/任务定义/账号绑定注册表：解析口返回 null，服务/编译器
+        // 以既有原因码如实拒绝（unsupported / capability_not_available），不猜版本。
+        resolveCapability: () => null,
+      }),
+      resolveTaskDefinition: () => null,
+      resolveAccountBinding: () => null,
+    });
+    registerManagedAutomationRoutes(httpServer, managedEntryService, {
+      executionTarget: ctx.deploymentTarget,
+      bearerToken: directToken,
+    });
+    console.log('[aidcp-cloud] automation 内部 API：managed-automation 入口路由已注册（create/cancel/query）');
+  } else {
+    console.warn(
+      `[aidcp-cloud] automation 内部 API：managed-automation 入口路由未注册（${MANAGED_AUTOMATION_API_ENV} 未显式开启，默认关闭）`,
+    );
   }
   const actual = await httpServer.listen(port);
   console.log(
