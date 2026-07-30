@@ -33,6 +33,7 @@ import type {
   SetFacebookCommentConfigResult,
 } from '../config/facebook-comment-config-store.js';
 import type {
+  FacebookRuleModeConfig,
   FacebookRuleModeView,
   SetFacebookRuleModeResult,
 } from '../config/facebook-rule-mode-store.js';
@@ -111,9 +112,10 @@ import type { InteractionPermissionOverview } from '../interactions/interaction-
 import type {
   AccountCommentApprovalMode,
   AccountCommentApprovalPolicyRow,
+  EnvironmentCommentApprovalPolicyRow,
   GroupPublishApprovalDelivery,
   GroupPublishApprovalPolicyRow,
-  SetAccountCommentApprovalPolicyResult,
+  SetEnvironmentCommentApprovalPolicyResult,
   SetGroupPublishApprovalPolicyResult,
 } from '../config/approval-policy-store.js';
 
@@ -290,9 +292,12 @@ export interface PanelDeps {
     ): Promise<SetFacebookCommentConfigResult>;
   };
   facebookRuleMode?: {
-    get(accountId: string): Promise<FacebookRuleModeView>;
-    set(
-      accountId: string,
+    /** Account-scoped runtime projection. Kept read-only for the legacy runtime detail route. */
+    get?(accountId: string): Promise<FacebookRuleModeView>;
+    /** Environment-scoped configuration authority. Missing methods are surfaced as unknown/503. */
+    getConfigForEnv?(envKey: string): Promise<FacebookRuleModeConfig>;
+    setEnvironment?(
+      envKey: string,
       patch: { enabled?: boolean },
       updatedBy: string,
     ): Promise<SetFacebookRuleModeResult>;
@@ -450,11 +455,18 @@ export interface PanelDeps {
   /** Account-wide comment authorization and group publish-review delivery policies. */
   approvalPolicies?: {
     list(): Promise<ApprovalPolicyCatalog>;
-    setAccountCommentMode(
-      accountId: string,
+    /** One authority query for the environment catalog; missing/read failure projects unknown. */
+    listEnvironmentCommentPolicies?(
+      envKeys: string[],
+    ): Promise<Map<string, EnvironmentCommentApprovalPolicyRow>>;
+    getEnvironmentCommentPolicy?(
+      envKey: string,
+    ): Promise<EnvironmentCommentApprovalPolicyRow>;
+    setEnvironmentCommentMode?(
+      envKey: string,
       mode: AccountCommentApprovalMode,
       updatedBy: string | null,
-    ): Promise<SetAccountCommentApprovalPolicyResult>;
+    ): Promise<SetEnvironmentCommentApprovalPolicyResult>;
     setGroupPublishDelivery(
       groupLabel: string,
       delivery: GroupPublishApprovalDelivery,

@@ -403,12 +403,75 @@ function createRequestHandler(
   const logger = config.logger ?? console;
   const listPanelEnvironments = async () => {
     const environments = await deps.clientUsers!.listAllEnvironments();
+    const envKeys = environments.map((environment) => environment.envKey);
+    const facebookRuleModeByEnv = new Map<string, Awaited<
+      ReturnType<NonNullable<NonNullable<PanelDeps['facebookRuleMode']>['getConfigForEnv']>>
+    > | null>();
+    await Promise.all(environments.map(async (environment) => {
+      if (!deps.facebookRuleMode?.getConfigForEnv) {
+        facebookRuleModeByEnv.set(environment.envKey, null);
+        return;
+      }
+      try {
+        facebookRuleModeByEnv.set(
+          environment.envKey,
+          await deps.facebookRuleMode.getConfigForEnv(environment.envKey),
+        );
+      } catch (error) {
+        logger.warn(
+          `[panel] environment rule-mode projection unavailable env=${environment.envKey}: ${(error as Error).message}`,
+        );
+        facebookRuleModeByEnv.set(environment.envKey, null);
+      }
+    }));
+    let commentApprovalByEnv: Awaited<
+      ReturnType<NonNullable<NonNullable<PanelDeps['approvalPolicies']>['listEnvironmentCommentPolicies']>>
+    > | null = null;
+    if (deps.approvalPolicies?.listEnvironmentCommentPolicies) {
+      try {
+        commentApprovalByEnv = await deps.approvalPolicies.listEnvironmentCommentPolicies(envKeys);
+      } catch (error) {
+        logger.warn(`[panel] environment comment-approval projection unavailable: ${(error as Error).message}`);
+      }
+    }
     return environments.map((environment) => ({
       ...environment,
+      executionBinding: (() => {
+        if (!environment.account) {
+          return { state: 'unbound' as const, accountId: null };
+        }
+        const resolver = (
+          deps.clientUsers as typeof deps.clientUsers & {
+            resolveEnvironmentKeyForAccount?: (
+              accountId: string,
+            ) => { ok: true; envKey: string } | {
+              ok: false;
+              reason: 'binding_unknown' | 'binding_conflict' | 'binding_unavailable';
+            };
+          }
+        ).resolveEnvironmentKeyForAccount;
+        if (!resolver) {
+          return { state: 'binding_unavailable' as const, accountId: null };
+        }
+        const resolved = resolver.call(deps.clientUsers, environment.account.accountId);
+        if (resolved.ok && resolved.envKey === environment.envKey) {
+          return { state: 'bound' as const, accountId: environment.account.accountId };
+        }
+        if (!resolved.ok && resolved.reason === 'binding_unknown') {
+          return { state: 'unbound' as const, accountId: null };
+        }
+        return {
+          state: resolved.ok ? 'binding_conflict' as const : resolved.reason,
+          accountId: null,
+        };
+      })(),
       slowStart: {
         ...environment.slowStart,
         globallyDisabled: deps.slowStartDisabled ?? false,
       },
+      // null 是 authority 未接入或本次读取失败；MUST NOT 伪装成 disabled/source_rules。
+      facebookRuleMode: facebookRuleModeByEnv.get(environment.envKey) ?? null,
+      commentApproval: commentApprovalByEnv?.get(environment.envKey) ?? null,
     }));
   };
 
@@ -837,6 +900,100 @@ function createRequestHandler(
           globallyDisabled: deps.slowStartDisabled ?? false,
         },
       });
+      return;
+    }
+    const environmentRuleModeMatch = url.match(/^\/api\/environments\/([^/]+)\/facebook-rule-mode$/);
+    if (method === 'PUT' && environmentRuleModeMatch) {
+      if (!deps.facebookRuleMode?.setEnvironment) {
+        sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
+        return;
+      }
+      let envKey: string;
+      let body: unknown;
+      try {
+        envKey = decodeURIComponent(environmentRuleModeMatch[1]);
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (!isRecord(body) || !hasExactlyKeys(body, ['enabled']) || typeof body.enabled !== 'boolean') {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      try {
+        const result = await deps.facebookRuleMode.setEnvironment(
+          envKey,
+          { enabled: body.enabled },
+          `panel:${verified.payload.sub}`,
+        );
+        if (!result.ok) {
+          const status = result.reason === 'environment_not_found'
+            ? 404
+            : result.reason === 'environment_unavailable'
+              ? 503
+              : result.reason === 'unsupported_platform'
+                ? 409
+                : 400;
+          sendJson(res, status, { error: result.reason });
+          return;
+        }
+        sendJson(res, 200, { envKey, facebookRuleMode: result.row });
+      } catch (error) {
+        logger.warn(`[panel] environment rule-mode write unavailable env=${envKey}: ${(error as Error).message}`);
+        sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
+      }
+      return;
+    }
+    const environmentCommentApprovalMatch = url.match(/^\/api\/environments\/([^/]+)\/comment-approval$/);
+    if (method === 'PUT' && environmentCommentApprovalMatch) {
+      if (!deps.approvalPolicies?.setEnvironmentCommentMode) {
+        sendJson(res, 503, { error: 'comment_approval_unavailable' });
+        return;
+      }
+      let envKey: string;
+      let body: unknown;
+      try {
+        envKey = decodeURIComponent(environmentCommentApprovalMatch[1]);
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (
+        !isRecord(body)
+        || !hasExactlyKeys(body, ['mode'])
+        || (body.mode !== 'source_rules' && body.mode !== 'auto_approve_all')
+      ) {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      try {
+        const result = await deps.approvalPolicies.setEnvironmentCommentMode(
+          envKey,
+          body.mode,
+          `panel:${verified.payload.sub}`,
+        );
+        if (!result.ok) {
+          const status = result.reason === 'environment_not_owned'
+            ? 404
+            : result.reason === 'policy_unavailable'
+              ? 503
+              : 400;
+          sendJson(res, status, {
+            error: result.reason === 'environment_not_owned'
+              ? 'environment_not_found'
+              : result.reason,
+          });
+          return;
+        }
+        sendJson(res, 200, { envKey, commentApproval: result.row });
+      } catch (error) {
+        logger.warn(
+          `[panel] environment comment-approval write unavailable env=${envKey}: ${(error as Error).message}`,
+        );
+        sendJson(res, 503, { error: 'comment_approval_unavailable' });
+      }
       return;
     }
 
@@ -1338,7 +1495,7 @@ function createRequestHandler(
       const accountId = decodeURIComponent(
         url.slice('/api/accounts/'.length, -'/facebook-rule-mode'.length),
       );
-      if (!deps.facebookRuleMode) {
+      if (!deps.facebookRuleMode?.get) {
         sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
         return;
       }
@@ -1875,31 +2032,6 @@ function createRequestHandler(
       sendJson(res, 200, { route: result.route }); // 写后回读真态（route=null 表已清除）
       return;
     }
-    if (method === 'PUT' && url === '/api/approval-policies/account-comment') {
-      if (!deps.approvalPolicies) {
-        sendJson(res, 503, { error: 'approval_policies_unavailable' });
-        return;
-      }
-      let body: unknown;
-      try {
-        body = await readJsonBody(req);
-      } catch {
-        sendJson(res, 400, { error: 'bad_request' });
-        return;
-      }
-      const { accountId, mode } = (body ?? {}) as { accountId?: unknown; mode?: unknown };
-      if (typeof accountId !== 'string' || !accountId.trim() || (mode !== 'source_rules' && mode !== 'auto_approve_all')) {
-        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_account_comment_policy' });
-        return;
-      }
-      const result = await deps.approvalPolicies.setAccountCommentMode(accountId, mode, verified.payload.sub);
-      if (!result.ok) {
-        sendJson(res, result.reason === 'account_not_found' ? 404 : 400, { error: result.reason });
-        return;
-      }
-      sendJson(res, 200, { policy: result.row });
-      return;
-    }
     if (method === 'PUT' && url === '/api/approval-policies/group-publish') {
       if (!deps.approvalPolicies) {
         sendJson(res, 503, { error: 'approval_policies_unavailable' });
@@ -2007,48 +2139,6 @@ function createRequestHandler(
         return;
       }
       sendJson(res, 200, result.row);
-      return;
-    }
-    if (method === 'PUT' && url.startsWith('/api/accounts/') && url.endsWith('/facebook-rule-mode')) {
-      const accountId = decodeURIComponent(
-        url.slice('/api/accounts/'.length, -'/facebook-rule-mode'.length),
-      );
-      if (!deps.facebookRuleMode) {
-        sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
-        return;
-      }
-      let body: unknown;
-      try {
-        body = await readJsonBody(req);
-      } catch {
-        sendJson(res, 400, { error: 'bad_request' });
-        return;
-      }
-      const raw = (body ?? {}) as Record<string, unknown>;
-      if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') {
-        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_value' });
-        return;
-      }
-      const result = await deps.facebookRuleMode.set(
-        accountId,
-        { ...(raw.enabled === undefined ? {} : { enabled: raw.enabled }) },
-        `panel:${verified.payload.sub}`,
-      );
-      // change environment-level-rule-mode-and-approval：写入口按**环境**定位（store 内先把账号
-      // 解析成它唯一绑定的环境），解析不出唯一环境即具名拒绝，MUST NOT 退回写账号键旧行。
-      if (!result.ok) {
-        if (result.reason === 'environment_not_found') {
-          sendJson(res, 404, { error: 'environment_not_found' });
-        } else if (result.reason === 'environment_conflict') {
-          sendJson(res, 409, { error: 'environment_conflict' });
-        } else if (result.reason === 'environment_unavailable') {
-          sendJson(res, 503, { error: 'facebook_rule_mode_unavailable' });
-        } else {
-          sendJson(res, 400, { error: 'bad_request', reason: result.reason });
-        }
-        return;
-      }
-      sendJson(res, 200, await deps.facebookRuleMode.get(accountId));
       return;
     }
     // 风控写（V1 task 8.4）：经 registry 取账号 controller 单写；status 经枚举信号种类、quota 经 setQuotaLevel

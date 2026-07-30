@@ -72,12 +72,14 @@ test('环境 auto_approve_all 写校验环境存在并返回数据库真态', as
     if (sql.includes('INSERT INTO environment_comment_approval_policy')) {
       return { rows: [{ env_key: 'env-1' }], rowCount: 1 };
     }
-    if (sql.includes('SELECT p.mode, p.updated_by, p.updated_at')) {
+    if (sql.includes('WITH requested AS')) {
       return { rows: [{
+        env_key: 'env-1',
         mode: 'auto_approve_all',
         updated_by: 'panel:alice',
         updated_at: new Date(0),
         bound_account: 'acc-1',
+        account_exists: true,
         duplicate_count: 1,
         owner_count: 1,
       }] };
@@ -105,12 +107,14 @@ test('未绑定账号的环境可保存可读取，并如实标注当前没有�
     if (sql.includes('INSERT INTO environment_comment_approval_policy')) {
       return { rows: [{ env_key: 'env-unbound' }], rowCount: 1 };
     }
-    if (sql.includes('SELECT p.mode, p.updated_by, p.updated_at')) {
+    if (sql.includes('WITH requested AS')) {
       return { rows: [{
+        env_key: 'env-unbound',
         mode: 'auto_approve_all',
         updated_by: 'client:u1',
         updated_at: new Date(5),
         bound_account: null,
+        account_exists: false,
         duplicate_count: 0,
         owner_count: 1,
       }] };
@@ -127,6 +131,41 @@ test('未绑定账号的环境可保存可读取，并如实标注当前没有�
   assert.equal(result.row.updatedBy, 'client:u1', '客户来源署名 MUST 与管理员可区分');
 });
 
+test('环境策略目录按 envKey 批量单查，悬空 account_id 不冒充执行对象', async () => {
+  const { pool, calls } = fakePool((sql, params) => {
+    if (!sql.includes('WITH requested AS')) return { rows: [] };
+    assert.deepEqual(params, [['env-bound', 'env-dangling']]);
+    return { rows: [
+      {
+        env_key: 'env-bound',
+        mode: 'source_rules',
+        updated_by: null,
+        updated_at: null,
+        bound_account: 'acc-live',
+        account_exists: true,
+        duplicate_count: 1,
+        owner_count: 1,
+      },
+      {
+        env_key: 'env-dangling',
+        mode: 'auto_approve_all',
+        updated_by: 'panel:alice',
+        updated_at: new Date(9),
+        bound_account: 'acc-deleted',
+        account_exists: false,
+        duplicate_count: 1,
+        owner_count: 1,
+      },
+    ] };
+  });
+  const policies = await new ApprovalPolicyStore({ schemaEnsurer: ensureCapabilitySchema, pool })
+    .listEnvironmentCommentPolicies(['env-bound', 'env-dangling', 'env-bound']);
+  assert.equal(calls.length, 1, '目录投影 MUST 单查询，不按环境 N+1');
+  assert.equal(policies.get('env-bound')?.boundAccountId, 'acc-live');
+  assert.equal(policies.get('env-dangling')?.boundAccountId, null);
+  assert.equal(policies.get('env-dangling')?.mode, 'auto_approve_all');
+});
+
 test('非所有者写 fail-closed：ownership 与 UPSERT 同一条语句，零行即拒绝', async () => {
   const { pool, calls } = fakePool((sql) => {
     if (sql.includes('INSERT INTO environment_comment_approval_policy')) {
@@ -140,7 +179,7 @@ test('非所有者写 fail-closed：ownership 与 UPSERT 同一条语句，零�
   const insert = calls.find((call) => call.sql.includes('INSERT INTO environment_comment_approval_policy'))!;
   assert.match(insert.sql, /EXISTS\(SELECT 1 FROM client_env_scope s/);
   assert.equal(
-    calls.some((call) => call.sql.includes('SELECT p.mode, p.updated_by, p.updated_at')),
+    calls.some((call) => call.sql.includes('WITH requested AS')),
     false,
     '非所有者 MUST NOT 读回该环境现有策略（否则通过响应泄露）',
   );

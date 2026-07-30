@@ -128,9 +128,18 @@ test('notification/routes 读写闭环 + bot-chats 列表（绑定目标 opaque 
   }
 });
 
-test('approval policies API returns catalog and persists account/group truth', async () => {
+test('approval policies keep catalog/group writes and move comment writes to envKey', async () => {
   let accountMode = 'source_rules' as 'source_rules' | 'auto_approve_all';
   let groupDelivery = 'client_and_feishu' as 'client_and_feishu' | 'client_only';
+  const environmentWrites: Array<{ envKey: string; mode: typeof accountMode; updatedBy: string | null }> = [];
+  const environmentPolicy = (envKey: string) => ({
+    envKey,
+    mode: accountMode,
+    configured: true,
+    updatedBy: 'panel:alice',
+    updatedAt: 1,
+    boundAccountId: null,
+  });
   const approvalPolicies = {
     list: async () => ({
       accounts: [{ accountId: 'acc-1', mode: accountMode, configured: true, updatedBy: 'alice', updatedAt: 0 }],
@@ -139,9 +148,16 @@ test('approval policies API returns catalog and persists account/group truth', a
         activeAccountCount: 2, reachableAccountCount: 1,
       }],
     }),
-    setAccountCommentMode: async (accountId: string, mode: typeof accountMode, updatedBy: string | null) => {
+    getEnvironmentCommentPolicy: async () => {
+      throw new Error('mutation must return the setter readback without a second read');
+    },
+    setEnvironmentCommentMode: async (envKey: string, mode: typeof accountMode, updatedBy: string | null) => {
+      if (envKey === 'policy-down') {
+        return { ok: false as const, reason: 'policy_unavailable' as const };
+      }
+      environmentWrites.push({ envKey, mode, updatedBy });
       accountMode = mode;
-      return { ok: true as const, row: { accountId, mode, configured: true, updatedBy, updatedAt: 1 } };
+      return { ok: true as const, row: environmentPolicy(envKey) };
     },
     setGroupPublishDelivery: async (groupLabel: string, delivery: typeof groupDelivery, updatedBy: string | null) => {
       groupDelivery = delivery;
@@ -159,11 +175,25 @@ test('approval policies API returns catalog and persists account/group truth', a
     const initialBody = await initial.json() as any;
     assert.equal(initialBody.groups[0].reachableAccountCount, 1);
 
-    const accountWrite = await fetch(`${base}/api/approval-policies/account-comment`, {
+    const removedAccountWrite = await fetch(`${base}/api/approval-policies/account-comment`, {
       method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ accountId: 'acc-1', mode: 'auto_approve_all' }),
     });
-    assert.equal(accountWrite.status, 200);
-    assert.equal((await accountWrite.json() as any).policy.mode, 'auto_approve_all');
+    assert.equal(removedAccountWrite.status, 404);
+    assert.equal(environmentWrites.length, 0);
+
+    const environmentWrite = await fetch(`${base}/api/environments/env-unbound/comment-approval`, {
+      method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ mode: 'auto_approve_all' }),
+    });
+    assert.equal(environmentWrite.status, 200);
+    assert.deepEqual(await environmentWrite.json(), {
+      envKey: 'env-unbound',
+      commentApproval: environmentPolicy('env-unbound'),
+    });
+    assert.deepEqual(environmentWrites, [{
+      envKey: 'env-unbound',
+      mode: 'auto_approve_all',
+      updatedBy: 'panel:alice',
+    }]);
 
     const groupWrite = await fetch(`${base}/api/approval-policies/group-publish`, {
       method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ groupLabel: 'teamA', delivery: 'client_only' }),
@@ -171,10 +201,44 @@ test('approval policies API returns catalog and persists account/group truth', a
     assert.equal(groupWrite.status, 200);
     assert.equal((await groupWrite.json() as any).policy.delivery, 'client_only');
 
-    const invalid = await fetch(`${base}/api/approval-policies/account-comment`, {
-      method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ accountId: 'acc-1', mode: 'trust_client_body' }),
+    const invalid = await fetch(`${base}/api/environments/env-unbound/comment-approval`, {
+      method: 'PUT', headers: jsonHeaders, body: JSON.stringify({ mode: 'trust_client_body' }),
     });
     assert.equal(invalid.status, 400);
+    const extraSelector = await fetch(`${base}/api/environments/env-unbound/comment-approval`, {
+      method: 'PUT',
+      headers: jsonHeaders,
+      body: JSON.stringify({ mode: 'source_rules', accountId: 'acc-1' }),
+    });
+    assert.equal(extraSelector.status, 400);
+    assert.equal(environmentWrites.length, 1, '额外选择器 MUST 在触达 authority 前拒绝');
+
+    const policyUnavailable = await fetch(`${base}/api/environments/policy-down/comment-approval`, {
+      method: 'PUT',
+      headers: jsonHeaders,
+      body: JSON.stringify({ mode: 'source_rules' }),
+    });
+    assert.equal(policyUnavailable.status, 503);
+    assert.deepEqual(await policyUnavailable.json(), { error: 'policy_unavailable' });
+    assert.equal(environmentWrites.length, 1, 'authority 不可用 MUST NOT 假装写入成功');
+  } finally {
+    await h.close();
+  }
+});
+
+test('environment comment approval missing authority returns 503', async () => {
+  const h = await startPanelApi({ ...baseDeps } as unknown as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const auth = await login(base);
+    const response = await fetch(`${base}/api/environments/env-1/comment-approval`, {
+      method: 'PUT',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'auto_approve_all' }),
+    });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: 'comment_approval_unavailable' });
   } finally {
     await h.close();
   }

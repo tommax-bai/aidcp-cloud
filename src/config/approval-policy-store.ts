@@ -60,6 +60,17 @@ export interface EnvironmentCommentApprovalPolicyRow {
   boundAccountId: string | null;
 }
 
+interface EnvironmentCommentApprovalPolicyDbRow {
+  env_key: string;
+  mode: string | null;
+  updated_by: string | null;
+  updated_at: Date | null;
+  bound_account: string | null;
+  account_exists: boolean;
+  duplicate_count: number | string;
+  owner_count: number | string;
+}
+
 export interface GroupPublishApprovalPolicyRow {
   groupLabel: string;
   delivery: GroupPublishApprovalDelivery;
@@ -185,38 +196,43 @@ export class ApprovalPolicyStore {
   /** 环境维度直读真态。表缺失时抛给调用方，MUST NOT 在读路由上把「读不到」表述成「按来源规则」。 */
   async getEnvironmentCommentPolicy(envKey: string): Promise<EnvironmentCommentApprovalPolicyRow> {
     const key = (envKey ?? '').trim();
-    const { rows } = await this.pool.query<{
-      mode: string | null;
-      updated_by: string | null;
-      updated_at: Date | null;
-      bound_account: string | null;
-      duplicate_count: number | string;
-      owner_count: number | string;
-    }>(
-      `SELECT p.mode, p.updated_by, p.updated_at,
+    if (!key) return this.environmentCommentPolicyFromDb(key);
+    const policies = await this.listEnvironmentCommentPolicies([key]);
+    return policies.get(key) ?? this.environmentCommentPolicyFromDb(key);
+  }
+
+  /**
+   * 后台环境目录的批量投影。单次 authority 查询覆盖整页环境，避免 Console 轮询把环境数放大成
+   * N 条策略查询。`accounts` 的存在性必须参与执行对象判据：悬空 `client_environments.account_id`
+   * 不是当前执行对象，MUST NOT 仅凭非空字符串回显为 boundAccountId。
+   */
+  async listEnvironmentCommentPolicies(
+    envKeys: string[],
+  ): Promise<Map<string, EnvironmentCommentApprovalPolicyRow>> {
+    const keys = [...new Set(envKeys.map((envKey) => (envKey ?? '').trim()).filter(Boolean))];
+    if (keys.length === 0) return new Map();
+    const { rows } = await this.pool.query<EnvironmentCommentApprovalPolicyDbRow>(
+      `WITH requested AS (
+         SELECT DISTINCT unnest($1::text[]) AS env_key
+       )
+       SELECT k.env_key,p.mode,p.updated_by,p.updated_at,
               e.account_id AS bound_account,
+              (a.account_id IS NOT NULL) AS account_exists,
               CASE WHEN e.account_id IS NOT NULL
                    THEN (SELECT count(*) FROM client_environments e3 WHERE e3.account_id=e.account_id)
                    ELSE 0 END AS duplicate_count,
               (SELECT count(DISTINCT s.user_id) FROM client_env_scope s
                 WHERE s.env_key=k.env_key AND s.source='admin') AS owner_count
-         FROM (SELECT $1::text AS env_key) k
+         FROM requested k
          LEFT JOIN client_environments e ON e.env_key=k.env_key
+         LEFT JOIN accounts a ON a.account_id=e.account_id
          LEFT JOIN environment_comment_approval_policy p ON p.env_key=k.env_key`,
-      [key],
+      [keys],
     );
-    const row = rows[0];
-    const unique = row?.bound_account != null
-      && Number(row.duplicate_count) <= 1
-      && Number(row.owner_count) <= 1;
-    return {
-      envKey: key,
-      mode: accountMode(row?.mode),
-      configured: row?.mode != null,
-      updatedBy: row?.updated_by ?? null,
-      updatedAt: row?.updated_at?.getTime() ?? null,
-      boundAccountId: unique ? row!.bound_account : null,
-    };
+    return new Map(rows.map((row) => [
+      row.env_key,
+      this.environmentCommentPolicyFromDb(row.env_key, row),
+    ]));
   }
 
   async getGroupPublishPolicyForAccount(accountId: string): Promise<AccountGroupPublishApprovalPolicy> {
@@ -478,5 +494,23 @@ export class ApprovalPolicyStore {
 
   async close(): Promise<void> {
     await this.pool.end();
+  }
+
+  private environmentCommentPolicyFromDb(
+    envKey: string,
+    row?: EnvironmentCommentApprovalPolicyDbRow,
+  ): EnvironmentCommentApprovalPolicyRow {
+    const unique = row?.bound_account != null
+      && row.account_exists === true
+      && Number(row.duplicate_count) <= 1
+      && Number(row.owner_count) <= 1;
+    return {
+      envKey,
+      mode: accountMode(row?.mode),
+      configured: row?.mode != null,
+      updatedBy: row?.updated_by ?? null,
+      updatedAt: row?.updated_at?.getTime() ?? null,
+      boundAccountId: unique ? row.bound_account : null,
+    };
   }
 }

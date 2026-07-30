@@ -8877,20 +8877,25 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             set: (accountId, patch, updatedBy) =>
               facebookCommentConfigStore.setAccount(accountId, patch, updatedBy),
           },
-          facebookRuleMode: facebookRuleModeStore && facebookRuleModeRuntimeStore
+          facebookRuleMode: facebookRuleModeStore
             ? {
-                get: async (accountId) => ({
-                  config: facebookRuleModeStore.getConfig(accountId),
-                  runtime: await facebookRuleModeRuntimeStore.getRuntimeView(accountId),
-                  contactFallback: accountStore?.getContactInfo
-                    ? await accountStore.getContactInfo(accountId).then(
-                      (contact) => (contact ? 'not_pending' as const : 'pending' as const),
-                      () => 'unknown' as const,
-                    )
-                    : 'unknown' as const,
-                }),
-                set: (accountId, patch, updatedBy) =>
-                  facebookRuleModeStore.setAccount(accountId, patch, updatedBy),
+                ...(facebookRuleModeRuntimeStore
+                  ? {
+                      get: async (accountId: string) => ({
+                        config: facebookRuleModeStore.getConfig(accountId),
+                        runtime: await facebookRuleModeRuntimeStore.getRuntimeView(accountId),
+                        contactFallback: accountStore?.getContactInfo
+                          ? await accountStore.getContactInfo(accountId).then(
+                            (contact) => (contact ? 'not_pending' as const : 'pending' as const),
+                            () => 'unknown' as const,
+                          )
+                          : 'unknown' as const,
+                      }),
+                    }
+                  : {}),
+                getConfigForEnv: async (envKey) => facebookRuleModeStore.getConfigForEnv(envKey),
+                setEnvironment: (envKey, patch, updatedBy) =>
+                  facebookRuleModeStore.setEnvironment(envKey, patch, updatedBy),
               }
             : undefined,
           facebookGroupTargets: {
@@ -9084,8 +9089,12 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
                     })),
                   };
                 },
-                setAccountCommentMode: (accountId, mode, updatedBy) =>
-                  approvalPolicyStore!.setAccountCommentMode(accountId, mode, updatedBy),
+                listEnvironmentCommentPolicies: (envKeys) =>
+                  approvalPolicyStore!.listEnvironmentCommentPolicies(envKeys),
+                getEnvironmentCommentPolicy: (envKey) =>
+                  approvalPolicyStore!.getEnvironmentCommentPolicy(envKey),
+                setEnvironmentCommentMode: (envKey, mode, updatedBy) =>
+                  approvalPolicyStore!.setEnvironmentCommentMode(envKey, mode, updatedBy),
                 setGroupPublishDelivery: (groupLabel, delivery, updatedBy) =>
                   approvalPolicyStore!.setGroupPublishDelivery(groupLabel, delivery, updatedBy),
               }

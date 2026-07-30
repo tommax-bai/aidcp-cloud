@@ -149,19 +149,20 @@ test('自检拒绝保留端口（forbidden_port）', async () => {
   await h.close();
 });
 
-test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非法/非 FB/缺账号', async () => {
+test('Facebook 规则模式保留账号 runtime GET，配置 PUT 只按环境写后回读', async () => {
   let enabled = false;
-  const writes: Array<{ accountId: string; patch: { enabled?: boolean }; updatedBy: string }> = [];
+  const writes: Array<{ envKey: string; patch: { enabled?: boolean }; updatedBy: string }> = [];
+  const configForEnv = (envKey: string) => ({
+    envKey,
+    enabled,
+    definitionId: FACEBOOK_RULE_DEFINITION_ID,
+    definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
+    definitionMismatch: false,
+    updatedAt: enabled ? '2026-07-27T00:00:00.000Z' : null,
+    updatedBy: enabled ? 'panel:alice' : null,
+  });
   const view = (accountId: string) => ({
-    config: {
-      envKey: accountId === 'missing' ? null : `env-of-${accountId}`,
-      enabled,
-      definitionId: FACEBOOK_RULE_DEFINITION_ID,
-      definitionVersion: FACEBOOK_RULE_DEFINITION_VERSION,
-      definitionMismatch: false,
-      updatedAt: enabled ? '2026-07-27T00:00:00.000Z' : null,
-      updatedBy: enabled ? 'panel:alice' : null,
-    },
+    config: configForEnv(`env-of-${accountId}`),
     runtime: {
       viewCount: 0,
       threshold: FACEBOOK_RULE_VIEW_THRESHOLD,
@@ -175,16 +176,16 @@ test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非
   });
   const facebookRuleMode: NonNullable<PanelDeps['facebookRuleMode']> = {
     get: async (accountId) => view(accountId),
-    set: async (accountId, patch, updatedBy) => {
-      writes.push({ accountId, patch, updatedBy });
-      // change environment-level-rule-mode-and-approval：写入口按环境定位，
-      // 账号反查不出唯一环境时是 environment_not_found / environment_conflict，不再是 account_not_found。
-      if (accountId === 'missing') return { ok: false, reason: 'environment_not_found' };
-      if (accountId === 'ambiguous') return { ok: false, reason: 'environment_conflict' };
-      if (accountId === 'xhs-1') return { ok: false, reason: 'unsupported_platform' };
+    getConfigForEnv: async () => {
+      throw new Error('mutation must return the setter readback without a second read');
+    },
+    setEnvironment: async (envKey, patch, updatedBy) => {
+      writes.push({ envKey, patch, updatedBy });
+      if (envKey === 'missing') return { ok: false, reason: 'environment_not_found' };
+      if (envKey === 'xhs-1') return { ok: false, reason: 'unsupported_platform' };
       if (patch.enabled === undefined) return { ok: false, reason: 'no_valid_fields' };
       enabled = patch.enabled;
-      return { ok: true, row: view(accountId).config };
+      return { ok: true, row: configForEnv(envKey) };
     },
   };
   const h = await startPanelApi({ ...deps, facebookRuleMode } as PanelDeps, makeConfig());
@@ -205,7 +206,15 @@ test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非
     assert.equal(initial.status, 200);
     assert.equal(((await initial.json()) as { config: { enabled: boolean } }).config.enabled, false);
 
-    const invalid = await fetch(`${base}/api/accounts/fb-1/facebook-rule-mode`, {
+    const removedAccountWrite = await fetch(`${base}/api/accounts/fb-1/facebook-rule-mode`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(removedAccountWrite.status, 404);
+    assert.equal(writes.length, 0, '账号键 MUST NOT 再作为配置写选择器');
+
+    const invalid = await fetch(`${base}/api/environments/env-unbound/facebook-rule-mode`, {
       method: 'PUT',
       headers: auth,
       body: JSON.stringify({ enabled: 'yes' }),
@@ -213,43 +222,45 @@ test('Facebook 规则模式 API 鉴权写入、回读真态，并诚实拒绝非
     assert.equal(invalid.status, 400);
     assert.equal(writes.length, 0);
 
-    const saved = await fetch(`${base}/api/accounts/fb-1/facebook-rule-mode`, {
+    const extraSelector = await fetch(`${base}/api/environments/env-unbound/facebook-rule-mode`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({ enabled: true, accountId: 'fb-1' }),
+    });
+    assert.equal(extraSelector.status, 400);
+    assert.equal(writes.length, 0);
+
+    const saved = await fetch(`${base}/api/environments/env-unbound/facebook-rule-mode`, {
       method: 'PUT',
       headers: auth,
       body: JSON.stringify({ enabled: true }),
     });
     assert.equal(saved.status, 200);
-    assert.equal(((await saved.json()) as { config: { enabled: boolean; updatedBy: string } }).config.enabled, true);
+    assert.deepEqual(await saved.json(), {
+      envKey: 'env-unbound',
+      facebookRuleMode: configForEnv('env-unbound'),
+    });
     assert.deepEqual(writes[0], {
-      accountId: 'fb-1',
+      envKey: 'env-unbound',
       patch: { enabled: true },
       updatedBy: 'panel:alice',
     });
 
-    const unsupported = await fetch(`${base}/api/accounts/xhs-1/facebook-rule-mode`, {
+    const unsupported = await fetch(`${base}/api/environments/xhs-1/facebook-rule-mode`, {
       method: 'PUT',
       headers: auth,
       body: JSON.stringify({ enabled: true }),
     });
-    assert.equal(unsupported.status, 400);
-    assert.equal(((await unsupported.json()) as { reason: string }).reason, 'unsupported_platform');
+    assert.equal(unsupported.status, 409);
+    assert.equal(((await unsupported.json()) as { error: string }).error, 'unsupported_platform');
 
-    const missing = await fetch(`${base}/api/accounts/missing/facebook-rule-mode`, {
+    const missing = await fetch(`${base}/api/environments/missing/facebook-rule-mode`, {
       method: 'PUT',
       headers: auth,
       body: JSON.stringify({ enabled: true }),
     });
     assert.equal(missing.status, 404);
     assert.equal(((await missing.json()) as { error: string }).error, 'environment_not_found');
-
-    // 反查歧义（多环境 / 跨客户争用）MUST 具名拒绝：既不写、也不假装成功。
-    const ambiguous = await fetch(`${base}/api/accounts/ambiguous/facebook-rule-mode`, {
-      method: 'PUT',
-      headers: auth,
-      body: JSON.stringify({ enabled: true }),
-    });
-    assert.equal(ambiguous.status, 409);
-    assert.equal(((await ambiguous.json()) as { error: string }).error, 'environment_conflict');
   } finally {
     await h.close();
   }
@@ -271,6 +282,13 @@ test('Facebook 规则模式 API 未接 authority 时返回 unavailable，不伪�
     });
     assert.equal(response.status, 503);
     assert.equal(((await response.json()) as { error: string }).error, 'facebook_rule_mode_unavailable');
+    const write = await fetch(`${base}/api/environments/env-1/facebook-rule-mode`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(write.status, 503);
+    assert.equal(((await write.json()) as { error: string }).error, 'facebook_rule_mode_unavailable');
   } finally {
     await h.close();
   }
@@ -322,12 +340,16 @@ test('环境管理 API 展示资产/账号摘要并按环境写慢启动，旧�
       environments: Array<{
         environmentName: string;
         slowStart: { enabled: boolean; since: number | null; globallyDisabled: boolean };
+        facebookRuleMode: unknown;
+        commentApproval: unknown;
       }>;
     };
     assert.equal(environmentBody.environments[0]?.environmentName, '环境一');
     assert.deepEqual(environmentBody.environments[0]?.slowStart, {
       enabled: true, since: 123, globallyDisabled: true,
     });
+    assert.equal(environmentBody.environments[0]?.facebookRuleMode, null);
+    assert.equal(environmentBody.environments[0]?.commentApproval, null);
     const accounts = await fetch(`${base}/api/accounts`, { headers: auth });
     assert.deepEqual(((await accounts.json()) as { accounts: Array<{ environmentSummary: unknown }> })
       .accounts[0]?.environmentSummary, { activeCount: 1, deletingCount: 0, onlineCount: 0 });
@@ -361,6 +383,110 @@ test('环境管理 API 展示资产/账号摘要并按环境写慢启动，旧�
       body: JSON.stringify({ confirmEnvKey: 'profile-1', idempotencyKey: 'idem-1' }),
     });
     assert.equal(removed.status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test('环境列表批量投影规则模式与评论审批真态，不按环境 N+1 读取审批 authority', async () => {
+  let approvalBatchReads = 0;
+  const requestedBatches: string[][] = [];
+  const clientUsers = {
+    async listAllEnvironments() {
+      return [
+        {
+          envKey: 'env-a',
+          slowStart: { enabled: false, since: null },
+          account: { accountId: 'acc-a' },
+        },
+        {
+          envKey: 'env-b',
+          slowStart: { enabled: false, since: null },
+          account: { accountId: 'acc-conflict' },
+        },
+      ];
+    },
+    resolveEnvironmentKeyForAccount(accountId: string) {
+      return accountId === 'acc-a'
+        ? { ok: true as const, envKey: 'env-a' }
+        : { ok: false as const, reason: 'binding_conflict' as const };
+    },
+  };
+  const facebookRuleMode = {
+    async getConfigForEnv(envKey: string) {
+      return {
+        envKey,
+        enabled: envKey === 'env-a',
+        definitionId: envKey === 'env-b' ? 'stored_definition' : FACEBOOK_RULE_DEFINITION_ID,
+        definitionVersion: envKey === 'env-b' ? 99 : FACEBOOK_RULE_DEFINITION_VERSION,
+        definitionMismatch: envKey === 'env-b',
+        updatedAt: null,
+        updatedBy: null,
+      };
+    },
+  };
+  const approvalPolicies = {
+    async listEnvironmentCommentPolicies(envKeys: string[]) {
+      approvalBatchReads += 1;
+      requestedBatches.push(envKeys);
+      return new Map(envKeys.map((envKey) => [envKey, {
+        envKey,
+        mode: envKey === 'env-b' ? 'auto_approve_all' as const : 'source_rules' as const,
+        configured: envKey === 'env-b',
+        updatedBy: null,
+        updatedAt: null,
+        boundAccountId: null,
+      }]));
+    },
+  };
+  const h = await startPanelApi({
+    ...deps,
+    clientUsers,
+    facebookRuleMode,
+    approvalPolicies,
+  } as unknown as PanelDeps, makeConfig());
+  assert.equal(h.started, true);
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'alice', password: 'pw1' }),
+    });
+    const { token } = await login.json() as { token: string };
+    const response = await fetch(`${base}/api/environments`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      environments: Array<{
+        envKey: string;
+        facebookRuleMode: { enabled: boolean } | null;
+        commentApproval: { mode: string } | null;
+        executionBinding: { state: string; accountId: string | null };
+      }>;
+    };
+    assert.equal(body.environments[0]?.facebookRuleMode?.enabled, true);
+    assert.deepEqual(body.environments[0]?.executionBinding, {
+      state: 'bound',
+      accountId: 'acc-a',
+    });
+    assert.deepEqual(body.environments[1]?.executionBinding, {
+      state: 'binding_conflict',
+      accountId: null,
+    });
+    assert.deepEqual(body.environments[1]?.facebookRuleMode, {
+      envKey: 'env-b',
+      enabled: false,
+      definitionId: 'stored_definition',
+      definitionVersion: 99,
+      definitionMismatch: true,
+      updatedAt: null,
+      updatedBy: null,
+    }, '存储定义漂移 MUST 原样投影，不能用当前编译常量覆盖');
+    assert.equal(body.environments[1]?.commentApproval?.mode, 'auto_approve_all');
+    assert.equal(approvalBatchReads, 1);
+    assert.deepEqual(requestedBatches, [['env-a', 'env-b']]);
   } finally {
     await h.close();
   }
