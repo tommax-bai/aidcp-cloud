@@ -245,10 +245,13 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
   );
   assert.equal(
     actual.filter((blocker) => blocker.category === 'content-owner').length,
-    10,
+    9,
     'content-owner blockers: draft refinement, facebook publish media, concept, curated,'
-    + ' role factories, generic llm, token usage, text-card transcription, reply generation,'
-    + ' publish rejection evidence',
+    + ' role factories, generic llm, token usage, text-card transcription, reply generation.'
+    + ' It was 10: publish rejection evidence was retired as mis-attributed (task 2.9, see the'
+    + ' retirement note in composition-root-4a-census.ts and the dedicated assertion above).'
+    + ' This count only ever goes DOWN by adjudication — a drop with no matching retirement note'
+    + ' means a probe stopped matching, which is a regression, not progress.',
   );
   for (const blocker of actual) {
     assert.ok(blocker.owner.length > 0, `${blocker.id} owner`);
@@ -269,8 +272,22 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
   assert.ok(actual.some((blocker) => blocker.id === 'content-token-usage-authority'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-textcard-transcription-authority'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-reply-generation-authority'));
-  assert.ok(
-    actual.some((blocker) => blocker.id === 'content-publish-rejection-evidence-authority'),
+  assert.equal(
+    actual.some((blocker) =>
+      blocker.id === 'content-publish-rejection-evidence-authority'
+      || blocker.evidence.some((item) => item.includes('hasUserRejectionEvidence'))),
+    false,
+    'content-publish-rejection-evidence-authority was retired as MIS-ATTRIBUTED (task 2.9) and must not'
+    + ' come back: hasUserRejectionEvidence is defined in src/kernel/publish-pipeline-types.ts (kernel,'
+    + ' and on the kernel roster) — a two-line pure field read; the six-line src/publish-agent/types.ts'
+    + ' is only an `export * from` left over from the git mv that moved the type closure into kernel,'
+    + ' and that move predates the binding. The data comes from the api-owned publishLog 4a port whose'
+    + ' client the automation root already constructs, and the field\'s only writer is api-owned.'
+    + ' A kernel pure predicate cannot be a content authority. Refreshing could never fix this: `owner`'
+    + ' is a hardcoded binding field that sweepReviewedProbes copies through without consulting'
+    + ' module-ownership.json. If you are re-adding this because the predicate got STUBBED somewhere'
+    + ' rather than imported from kernel, that is a DIFFERENT failure (a rejected draft would read as'
+    + ' "not rejected") — file it as its own entry, do not resurrect this one.',
   );
   assert.ok(actual.some((blocker) => blocker.id.startsWith('seg-a-foreign-pool-')));
   assert.ok(actual.some((blocker) => blocker.id.startsWith('seg-a-api-owner-')));

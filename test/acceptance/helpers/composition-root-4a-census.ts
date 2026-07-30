@@ -1198,28 +1198,41 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       },
     ],
   },
-  /**
-   * 0.3d: the delegated-executor candidate loader reads rejection evidence out
-   * of draft metadata through a content-owned predicate
-   * (`src/publish-agent/types.ts`). Absent from the automation package, and it
-   * is exactly the kind of dependency that would silently degrade to `false`
-   * if it were stubbed — a rejected draft would read as "not rejected".
-   */
-  {
-    id: 'content-publish-rejection-evidence-authority',
-    category: 'content-owner',
-    owner: 'content',
-    consumer: 'automation',
-    closingChange: 'future',
-    probes: [
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segCAutomation',
-        kind: 'call',
-        symbol: 'hasUserRejectionEvidence',
-      },
-    ],
-  },
+  // `content-publish-rejection-evidence-authority` was retired here (change
+  // split-cloud-automation-production-runtime, task 2.9). It was MIS-ATTRIBUTED, not resolved.
+  //
+  // The binding this replaces was added by 0.3d with the note «the candidate loader reads rejection
+  // evidence out of draft metadata through a content-owned predicate (`src/publish-agent/types.ts`)».
+  // That premise is wrong on every link, and each correction was checked mechanically:
+  //
+  //   1. The predicate is `hasUserRejectionEvidence` in `src/kernel/publish-pipeline-types.ts` —
+  //      module-ownership says `kernel`, and it is on the kernel roster in kernel-non-members.json.
+  //      It is a two-line pure field read, imports only kernel types, constructs nothing.
+  //      `src/publish-agent/types.ts` is a six-line `export * from '../kernel/...'` left over from
+  //      the `git mv` that moved the type closure into kernel — and that move (2026-07-24) PREDATES
+  //      this binding (2026-07-29). The `content` label came from the import specifier the author
+  //      happened to read, not from where the code lives.
+  //   2. The data (`draft.metadata`) comes from `apiDirectPorts.publishLog.loadForDispatch()` — an
+  //      **api**-owned 4a port (table `publish_log` owner=api), already cross-process, and the
+  //      automation composition root ALREADY constructs its client
+  //      (`new AutomationPublishLogHttpClient(...)`).
+  //   3. The field's only writer is `src/publish-agent/publish-log-store.ts`, owner **api**.
+  //   4. The predicate is already IN the automation package via the pinned kernel dependency
+  //      (present in the installed `.d.ts`; seven automation files already import from that module).
+  //
+  // ⇒ Nothing in this chain touches content. A kernel pure predicate cannot be a content authority.
+  //
+  // **Why refreshing the ledger could never have corrected this**: only evidence PRESENCE is
+  // AST-derived. `owner` is a hardcoded field on the binding that `sweepReviewedProbes` copies
+  // straight through — it never consults module-ownership.json. So a wrong owner label survives
+  // every `--refresh-ledger` unchanged. Do not read this ledger's owner column as derived.
+  //
+  // **What was NOT retired** — 0.3d's underlying worry is real and stays real: if anyone ever STUBS
+  // this predicate instead of importing it from kernel, a rejected draft reads as "not rejected" and
+  // the delegated executor turns it into `failed` instead of `cancelled`. That is a different failure
+  // with a different fix (don't stub a kernel import), and it needs its own entry if it ever happens.
+  //
+  // Reappearance is asserted against in test/acceptance/composition-root-4a-inventory.test.ts.
 ] as const;
 
 async function sourceFile(relative: string): Promise<ts.SourceFile> {
