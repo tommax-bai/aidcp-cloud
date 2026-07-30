@@ -150,10 +150,10 @@ export const REQUIRED_SCHEMA_VERSION = '0105_facebook_primary_browse_surface';
  * 用这张表的接收方是新写的、**还没有接进任何进程**（组装根接线属后续批次），
  * 所以缺表时现网一行代码都不会碰它。
  * ⚠️ **这段判断已被另一路 change 的改动盖过（2026-07-30 集成时发现，如实记下）**：
- * `REQUIRED_SCHEMA_VERSION` 现在是 `0102_facebook_consumption_runtime`，高于 0099。
+ * `REQUIRED_SCHEMA_VERSION` 现在是 `0105_facebook_primary_browse_surface`，高于 0099。
  * 于是 0099 **按复合序被顺带纳入**「缺了就算 behind」——与上面 0075/0076 那条「副作用（有意，登记于此）」
  * 是同一种情形：**它仍然不是任何存储的硬依赖**，只是序的结果。
- * 实际影响是**接线那一批少一件事**：不必再为 0099 抬 REQUIRED（已被 0102 覆盖），
+ * 实际影响是**接线那一批少一件事**：不必再为 0099 抬 REQUIRED（已被 0105 覆盖），
  * 但**部署序列里那一步照旧不能省**——重启前必须 `npm run migrate up`，且 ol 同理。
  *
  * 下面这段是当时（REQUIRED 还是 0097）的原始论证，保留是因为判据本身没变：
@@ -182,8 +182,16 @@ export const REQUIRED_SCHEMA_VERSION = '0105_facebook_primary_browse_surface';
  *
  * 注：`0105_facebook_primary_browse_surface` 增加环境级 Feed/Reels 主入口权威及审计。
  * Facebook 浏览会话启动必须读到该权威，故 REQUIRED 与 KNOWN_MAX 抬到 0105。
+ *
+ * 注：`0106_managed_automation_task_authority` / `0107_managed_automation_run_state` /
+ * `0108_managed_automation_execution_ledger` / `0109_managed_automation_decision_traces`
+ * （change add-managed-automation-runtime，automation）新建托管自动化运行时 8 张核心表
+ * （tasks / task_revisions / execution_plans / task_runs / step_runs / execution_intents /
+ * execution_attempts / decision_traces），纯新增、不触碰任何既有表。**只抬 KNOWN_MAX、
+ * 不抬 REQUIRED**：新 store 尚未接入任何运行链路，且沿用 0077 先例——store 自带精确
+ * schema probe，缺表时在 init 处 fail-closed（能力不可用），不构成既有链路的硬依赖。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0105_facebook_primary_browse_surface';
+export const KNOWN_MAX_SCHEMA_VERSION = '0109_managed_automation_decision_traces';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

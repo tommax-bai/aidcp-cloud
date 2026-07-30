@@ -35,6 +35,7 @@
     { "table": "content_schedule_global", "owner": "api", "basis": "§5.1「排期（content_schedule_*）」→ aidcp-api" },
     { "table": "content_schedule_hour_claims", "owner": "api", "basis": "§5.1「排期（content_schedule_*）」→ aidcp-api" },
     { "table": "curated_content", "owner": "content", "basis": "§5.1「内容事实与评估」→ aidcp-content" },
+    { "table": "decision_traces", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增（migrations/0109）。§5.1 未具名；托管自动化运行时的决策留痕账本（仅 append），随「自动化任务、尝试和租约」域走，唯一 SQL 写入方 src/managed-automation/stores/ 属 automation。MUST 回写 §5.1" },
     { "table": "delegated_task_attempts", "owner": "automation", "basis": "§5.1「自动化任务、尝试和租约（delegated_tasks 等）」→ aidcp-automation" },
     { "table": "delegated_task_events", "owner": "automation", "basis": "§5.1「自动化任务、尝试和租约」→ aidcp-automation" },
     { "table": "delegated_tasks", "owner": "automation", "basis": "§5.1 具名 delegated_tasks → aidcp-automation" },
@@ -47,6 +48,9 @@
     { "table": "automation_sync_read_owner_generation", "owner": "automation", "basis": "change split-cloud-api-composition-root-4b 新增（migrations/0085）。automation owner 的 A3-A6 target-scoped digest/generation/same-generation emit dedup 元数据；不保存 runtime business payload，防进程重启后 cursor 回退，写入方 src/transport/automation-sync-read-generation-store.ts 与 sync-read-changed-outbox.ts 均属 automation。" },
     { "table": "risk_command_outcome", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change cloud-coupling-phase5（P5-1，用户 2026-07-25 拍板面板写风控走异步）新增（migrations/0079）。§5.1 未具名；风控写命令的结果账本，唯一 SQL 写入方 src/risk/risk-command-service.ts 属 automation，与 event_outbox 及风控单写者同域。**归 automation 而非 api 是硬判据**：写这张表的是单写者应用完之后回读的真态，api 侧只经内部 API 回读、绝不直连（§8.5「一个域绝不直连另一个域的数据库」）。MUST 回写 §5.1" },
     { "table": "operator_command_receipt", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change split-cloud-automation-production-runtime（1.7③）新增（migrations/0099）。§5.1 未具名；运营指令的幂等台账，唯一 SQL 写入方 src/delegated-task/operator-command-ledger.ts 属 automation（src/delegated-task/ 整目录归 automation，§4.7）。**归 automation 而非 api 是硬判据，与 risk_command_outcome 同形**：判重必须发生在产生副作用的那一侧、且与副作用同库才谈得上同事务；api 侧记账只能记「我发出去了」，那不是幂等。api 侧回读一律经内部 API、绝不直连（§8.5；跨属主读无豁免通道，见 AC-OWN-06）。MUST 回写 §5.1" },
+    { "table": "execution_attempts", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增（migrations/0108）。§5.1 未具名；托管自动化运行时的平台动作尝试台账，随「自动化任务、尝试和租约」域走，唯一 SQL 写入方 src/managed-automation/stores/ 属 automation。MUST 回写 §5.1" },
+    { "table": "execution_intents", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增（migrations/0108）。§5.1 未具名；托管自动化运行时的不可变执行意图（业务幂等键唯一），随「自动化任务、尝试和租约」域走，唯一 SQL 写入方 src/managed-automation/stores/ 属 automation。MUST 回写 §5.1" },
+    { "table": "execution_plans", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增（migrations/0106）。§5.1 未具名；托管自动化运行时的编译产物快照（行不可变，修订=新行），随「自动化任务、尝试和租约」域走，唯一 SQL 写入方 src/managed-automation/stores/ 属 automation。MUST 回写 §5.1" },
     { "table": "facebook_comment_audit", "owner": "automation", "basis": "§5.1 未具名；评论执行台账，写入方 src/comment-agent/ 属 automation（§4.7）" },
     { "table": "facebook_consumption_action", "owner": "automation", "basis": "change add-configurable-facebook-consumption-mode；消费动作义务与终态是 target-scoped 自动化运行事实" },
     { "table": "facebook_consumption_action_result_fact", "owner": "automation", "basis": "change add-configurable-facebook-consumption-mode；消费动作回执去重事实由 automation 单写" },
@@ -127,6 +131,10 @@
     { "table": "schema_migrations", "owner": "automation", "basis": "【待定稿裁决】§4.7 基线 sha 之后由 change cloud-schema-migration-executor 新增（migrations/0064_schema_migrations_ledger.sql）。§5.1 未具名。它不是业务事实源而是**迁移账本**：唯一写入方是部署期执行器 scripts/migrate.ts（INSERT，migrate.ts:185 / :252），三服务运行时只读（src/schema/schema-gate.ts:73 的 SELECT version）。暂判 automation，与本轮 src/schema/ 整目录归 automation 一致。拆库后账本的最终归属随 §5.4.7 子目标 B 的数据库角色划分定——账本回答的是「谁有权改 schema」而非「谁拥有哪块业务数据」，该问题在角色划分定稿前无解，故此处只作最小失真登记。MUST 回写 §5.1，见 docpatch R5。MUST NOT 写进 boundaries/exception-tables.json：那份清单明写「条目数只减不增，新增 MUST 由控制仓 change 批准」，且其两条现有条目的例外理由（多写者是设计前提 / owner 是三服务之外的外部探针）本表都不符合" },
     { "table": "session_config", "owner": "automation", "basis": "历史表名，已被 session_config_global 取代（migrations/0015）；随 §5.1 四类限频配置 → aidcp-automation。保留登记以覆盖 migrations 的 CREATE TABLE 全集" },
     { "table": "session_config_global", "owner": "automation", "basis": "§5.1 具名四类限频配置之一 → aidcp-automation" },
+    { "table": "step_runs", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增（migrations/0107）。§5.1 未具名；托管自动化运行时 ExecutionPlan 节点的可恢复运行实例，随「自动化任务、尝试和租约」域走，唯一 SQL 写入方 src/managed-automation/stores/ 属 automation。MUST 回写 §5.1" },
+    { "table": "task_revisions", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增（migrations/0106）。§5.1 未具名；托管自动化任务权威的修订链（append-only），随「自动化任务、尝试和租约」域走，唯一 SQL 写入方 src/managed-automation/stores/ 属 automation。MUST 回写 §5.1" },
+    { "table": "task_runs", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增（migrations/0107）。§5.1 未具名；托管自动化运行时的正交状态运行实例（含单写者认领租约），随「自动化任务、尝试和租约」域走，唯一 SQL 写入方 src/managed-automation/stores/ 属 automation。MUST 回写 §5.1" },
+    { "table": "tasks", "owner": "automation", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增（migrations/0106）。§5.1 未具名；托管自动化任务权威主表（CreateTask/ReviseTask/CancelTask 的落点），随「自动化任务、尝试和租约」域走，唯一 SQL 写入方 src/managed-automation/stores/ 属 automation。MUST 回写 §5.1" },
     { "table": "valuable_comments", "owner": "automation", "basis": "§5.1 未具名；语料归档，写入方 src/cache/valuable-comment-store.ts 属 automation（§4.7 cache 逐文件表）" }
   ]
 }

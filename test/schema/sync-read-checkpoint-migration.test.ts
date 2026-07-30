@@ -123,10 +123,20 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!automation.includes('0104_facebook_reel_mode_cadence'));
   assert.ok(api.includes('0105_facebook_primary_browse_surface'));
   assert.ok(!automation.includes('0105_facebook_primary_browse_surface'));
-  // 每加一条迁移都要在这里同步抬。
+  // 托管自动化运行时的 8 张核心表全归 automation 属主（0106–0109）。
+  for (const version of [
+    '0106_managed_automation_task_authority',
+    '0107_managed_automation_run_state',
+    '0108_managed_automation_execution_ledger',
+    '0109_managed_automation_decision_traces',
+  ]) {
+    assert.ok(automation.includes(version));
+    assert.ok(!api.includes(version));
+  }
+  // 每加一条迁移都要在这里同步抬（change add-managed-automation-runtime → 0109）。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0105_facebook_primary_browse_surface',
+    '0109_managed_automation_decision_traces',
   );
 });
 
