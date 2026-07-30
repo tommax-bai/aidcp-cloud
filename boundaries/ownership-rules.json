@@ -33,6 +33,7 @@
     { "dir": "src/hot-lead/", "layer": "automation", "newFile": "inherit", "basis": "§4.7：浏览闭环内触发（2/2 automation）" },
     { "dir": "src/interactions/", "layer": "automation", "newFile": "adjudicate", "basis": "§4.6.1：收件箱 / 回复工作流 / 发送与回执 / 离场 saga 段" },
     { "dir": "src/llm/", "layer": "content", "newFile": "inherit", "basis": "§4.7：模型客户端（4/4 content）" },
+    { "dir": "src/managed-automation/", "layer": "automation", "newFile": "inherit", "basis": "§4.7 基线 sha 之后由 change add-managed-automation-runtime 新增的目录：托管自动化运行时（六层运行对象模型），期1-1 先落契约层 contracts/（纯类型 + 冻结字面数组 + 纯归一函数，零运行时副作用，只 type-only 引 kernel 契约），后续期次在同目录扩展 typed store / 入口操作 / 执行引擎，全部属自动化执行域。整目录归 automation、新文件 inherit。MUST 回写 §4.7" },
     { "dir": "src/metrics/", "layer": "content", "newFile": "inherit", "basis": "§4.6.6：用量与成本两张表归 aidcp-content（2/2）" },
     { "dir": "src/onboarding/", "layer": "api", "newFile": "adjudicate", "basis": "§4.7：状态表归 api、创作桥接归 content" },
     { "dir": "src/orchestrator/", "layer": "automation", "newFile": "adjudicate", "basis": "§4.7：content-scheduler.ts 归 api，其余归 automation" },
