@@ -22,9 +22,13 @@ import {
   CURATED_SELECTION_AUTHORITY_ROUTES,
   ConceptPoolAuthorityHttpClient,
   CuratedSelectionAuthorityHttpClient,
+  CURATED_WRITE_AUTHORITY_ROUTES,
+  CuratedWriteAuthorityHttpClient,
   registerConceptPoolAuthorityRoutes,
   registerCuratedSelectionAuthorityRoutes,
+  registerCuratedWriteAuthorityRoutes,
 } from '../../src/transport/content-authority-http.js';
+import type { CuratedWritePort } from '../../src/kernel/curated-write-port.js';
 
 const TOKEN = 'content-internal-token';
 
@@ -360,4 +364,207 @@ test('content 属主端口的失败映射层只有一份，取用方一律 impor
       );
     }
   }
+});
+
+/* ══════════════════════════ 精选库写侧（task 2.4b） ══════════════════════════ */
+
+/**
+ * 写侧独立的小夹具：**刻意不去改上面那个读侧夹具**，改它会连带碰到五条既有用例。
+ * `local` 只给要断言的方法，其余用一个当场失败的桩兜底——「路由把调用送到了另一个方法」
+ * 这种错必须当场炸，不能悄悄落进一个空实现里。
+ */
+async function withWriteChannel(
+  local: Partial<CuratedWritePort>,
+  run: (client: CuratedWritePort, server: InternalHttpServer) => Promise<void>,
+  opts: { serverTarget?: DeploymentTarget; clientTarget?: DeploymentTarget } = {},
+): Promise<void> {
+  const server = new InternalHttpServer();
+  const notWired = (method: string) => () => {
+    throw new Error(`unexpected call to ${method}`);
+  };
+  const port: CuratedWritePort = {
+    upsertObservation: local.upsertObservation ?? notWired('upsertObservation'),
+    refreshReferenceImages: local.refreshReferenceImages ?? notWired('refreshReferenceImages'),
+    getTextCardContext: local.getTextCardContext ?? notWired('getTextCardContext'),
+    archiveComment: local.archiveComment ?? notWired('archiveComment'),
+    markBotAction: local.markBotAction ?? notWired('markBotAction'),
+  };
+  registerCuratedWriteAuthorityRoutes(server, port, TOKEN, opts.serverTarget ?? 'dev');
+  const listening = await server.listen(0);
+  const http = new InternalHttpClient(`http://127.0.0.1:${listening}`);
+  try {
+    await run(new CuratedWriteAuthorityHttpClient(http, TOKEN, opts.clientTarget ?? 'dev'), server);
+  } finally {
+    await server.close();
+  }
+}
+
+test('五条写路由：注册的路径就是请求的路径，入参原样送达属主', async () => {
+  const seen: unknown[] = [];
+  await withWriteChannel(
+    {
+      upsertObservation: async (obs) => {
+        seen.push({ m: 'upsertObservation', obs });
+      },
+      refreshReferenceImages: async (accountId, sourceId, contentType, input) => {
+        seen.push({ m: 'refreshReferenceImages', accountId, sourceId, contentType, input });
+        return 1;
+      },
+      getTextCardContext: async (accountId, sourceId, contentType) => {
+        seen.push({ m: 'getTextCardContext', accountId, sourceId, contentType });
+        return { referenceImages: [] };
+      },
+      archiveComment: async (accountId, input) => {
+        seen.push({ m: 'archiveComment', accountId, input });
+      },
+      markBotAction: async (accountId, sourceId, action, content) => {
+        seen.push({ m: 'markBotAction', accountId, sourceId, action, content });
+      },
+    },
+    async (client) => {
+      await client.upsertObservation({
+        accountId: 'a1',
+        contentType: 'image_text',
+        sourceId: 's1',
+        body: 'body',
+        topics: ['t1'],
+        admitReason: 'llm_eval',
+        // 平台原文与换算锚点成对过来（少了锚点属主会按读到它的时刻换算，越晚读误差越大）。
+        publishedAtText: '3 天前',
+        publishedObservedAt: 1_700_000_000_000,
+      });
+      assert.equal(await client.refreshReferenceImages('a1', 's1', 'video', undefined), 1);
+      assert.deepEqual(await client.getTextCardContext('a1', 's1', 'image_text'), {
+        referenceImages: [],
+      });
+      await client.archiveComment('a1', { sourceId: 'c1', text: 'nice', topics: [] });
+      await client.markBotAction('a1', 's1', 'collect', { body: 'b' });
+    },
+  );
+
+  assert.deepEqual(seen, [
+    {
+      m: 'upsertObservation',
+      obs: {
+        accountId: 'a1',
+        contentType: 'image_text',
+        sourceId: 's1',
+        body: 'body',
+        topics: ['t1'],
+        admitReason: 'llm_eval',
+        publishedAtText: '3 天前',
+        publishedObservedAt: 1_700_000_000_000,
+      },
+    },
+    { m: 'refreshReferenceImages', accountId: 'a1', sourceId: 's1', contentType: 'video', input: undefined },
+    { m: 'getTextCardContext', accountId: 'a1', sourceId: 's1', contentType: 'image_text' },
+    { m: 'archiveComment', accountId: 'a1', input: { sourceId: 'c1', text: 'nice', topics: [] } },
+    { m: 'markBotAction', accountId: 'a1', sourceId: 's1', action: 'collect', content: { body: 'b' } },
+  ]);
+  assert.deepEqual(
+    Object.keys(CURATED_WRITE_AUTHORITY_ROUTES).sort(),
+    ['archiveComment', 'getTextCardContext', 'markBotAction', 'refreshReferenceImages', 'upsertObservation'],
+  );
+});
+
+/**
+ * 返回 `void` 的三个方法：**空响应体 MUST 抛，MUST NOT 被读成写成功了**。
+ *
+ * 这条守的是写侧独有的那个失败态：`undefined` 编码后就是个空响应体，与「这条路由压根没跑」
+ * 逐字节一样。少了显式回执，一次没落库的写会安安静静地返回，而精选语料只会少不会多——
+ * **少一条谁都不会发现**。
+ */
+test('写侧 void 方法：路由回空响应体时 MUST 抛，MUST NOT 静默当成写成功', async () => {
+  const server = new InternalHttpServer();
+  // 用一个"忘了回执"的路由顶掉真注册（同路径、回 undefined）——正是漏写回执时的真实形态。
+  server.registerBearer(CURATED_WRITE_AUTHORITY_ROUTES.upsertObservation, TOKEN, async () => undefined);
+  const listening = await server.listen(0);
+  const http = new InternalHttpClient(`http://127.0.0.1:${listening}`);
+  const client = new CuratedWriteAuthorityHttpClient(http, TOKEN, 'dev');
+  try {
+    await assert.rejects(
+      () =>
+        client.upsertObservation({
+          accountId: 'a1',
+          contentType: 'image_text',
+          sourceId: 's1',
+          body: 'b',
+          topics: [],
+          admitReason: 'llm_eval',
+        }),
+      (err: unknown) =>
+        isContentPortError(err) && err.reason === 'malformed_response',
+      '空响应体 MUST 判形状不符；静默 resolve 等于把没落库的写报成成功',
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+/**
+ * 两个「0 / null 是领域答案」的回执：0 行受影响与「库里没有这条」MUST 原样过来，
+ * 而属主真失败 MUST 是具名抛出、**MUST NOT 被译成那两个答案**。
+ *
+ * 这两者混起来的后果具体且不响：`refreshReferenceImages` 回 0 的意思是「库里没有这条源帖」，
+ * 调用方据此分支；把一次读不到的失败译成 0，后续转写就会往一条不存在的行上写。
+ */
+test('写侧回执：0 与 null 是领域答案，属主失败仍是具名抛出', async () => {
+  await withWriteChannel(
+    {
+      refreshReferenceImages: async () => 0,
+      getTextCardContext: async () => null,
+    },
+    async (client) => {
+      assert.equal(
+        await client.refreshReferenceImages('a1', 'missing', 'image_text', []),
+        0,
+        '0 行受影响是「库里没有这条源帖」，MUST 原样过来',
+      );
+      assert.equal(
+        await client.getTextCardContext('a1', 'missing', 'image_text'),
+        null,
+        'null 是「库里没有这条」，与读失败是两回事',
+      );
+    },
+  );
+
+  await withWriteChannel(
+    {
+      refreshReferenceImages: async () => {
+        throw new CuratedContentUnavailableError('curated_content table missing');
+      },
+      getTextCardContext: async () => {
+        throw new CuratedContentUnavailableError('curated_content table missing');
+      },
+    },
+    async (client) => {
+      await assert.rejects(
+        () => client.refreshReferenceImages('a1', 's1', 'image_text', []),
+        (err: unknown) => isContentPortError(err) && err.reason !== 'unsupported_method',
+        '属主失败 MUST 是具名 ContentPortError，MUST NOT 落成 0',
+      );
+      await assert.rejects(
+        () => client.getTextCardContext('a1', 's1', 'image_text'),
+        (err: unknown) => isContentPortError(err),
+        '读失败 MUST 抛，MUST NOT 落成 null（那会被读成「库里没有这条」）',
+      );
+    },
+  );
+
+  // 坏回执同样 MUST 抛。**这与上一段不是一回事**：上面是属主报了错，这里是属主答了、
+  // 但答的不是一个行数（契约漂移 / 对面版本不符）。兜底成 0 会把它读成一句确定的
+  // 「库里没有这条源帖」，后续转写就往一条不存在的行上写。
+  await withWriteChannel(
+    {
+      refreshReferenceImages: (async () =>
+        '1') as unknown as CuratedWritePort['refreshReferenceImages'],
+    },
+    async (client) => {
+      await assert.rejects(
+        () => client.refreshReferenceImages('a1', 's1', 'image_text', []),
+        (err: unknown) => isContentPortError(err) && err.reason === 'malformed_response',
+        '非整数回执 MUST 判形状不符，MUST NOT 取 0',
+      );
+    },
+  );
 });

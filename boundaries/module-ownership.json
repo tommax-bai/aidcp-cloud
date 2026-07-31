@@ -1215,6 +1215,11 @@
     "note": "change split-cloud-automation-production-runtime 新写：精选库召回的跨属主端口面（表 curated_content 属 content，两个消费方是 automation 的发帖与评论调度器）。刻意是两个方法而非一个：发帖侧要全字段，评论侧只要三字段窄投影——全字段视图挂着参照图集/视觉分析/文字卡转写等大块 JSON，搬过进程边界只为留三个字段，投影本就该在属主侧做。缺失计数用 null 而非 0，区别『不知道』与『真是 0』。失败抛 ContentPortError、**绝不回空数组**——回空数组正是今天五处降级形状把『连不上对面』吃成『没有精选素材』的那个形态。仅 import kernel；零 SQL/HTTP/LLM/模块级活状态"
   },
   {
+    "path": "src/kernel/curated-write-port.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 新写：精选库写侧的跨属主端口面（表 curated_content 属 content；台账条目 content-curated-write-authority）。与 curated-selection-port 是同一张表的两张脸、刻意分文件：召回那张的消费方是发帖与评论调度器，本张是两个精选准入评估角色 + 组装根，失败后果也不同（召回失败＝没素材可用，写失败＝这一条观测永久丢了）；合成一个端口会让只需要读的调用方结构上也拿到写能力。只开 5 个方法，逐条对得上真实调用点：upsertObservation（curated-note-evaluator.ts:362）、refreshReferenceImages（同文件:253）、getTextCardContext（同文件:293）、archiveComment（curated-comment-evaluator.ts:159）、markBotAction（组装根 segC 的自有点赞/收藏并入语料）。那两个角色类已随 task 0.7 改判 automation 属主，所以这是货真价实的跨属主写。getTextCardContext 是本张脸上唯一的读，放这里而非召回那张：它只被准入评估在写之前当读穿缓存用，与按账号挑素材、带排序与时间窗的召回既不同调用方也不同语义。签名照抄属主真实签名，属主实例结构上即满足。三条只对写侧成立的 MUST：返回 void 的三个方法跨线时由传输层回显式回执（undefined 编码后是空响应体，与『路由压根没跑』逐字节一样，写没做成会读起来像做成了）；写失败 MUST NOT 被译成『这条本来就不该写』（属主侧几处真实 no-op 与写失败在单体里靠抛不抛区分得开，跨进程后一旦有哪层把抛出吃成静默返回，两件事永久混成一件，而精选语料只会少不会多、少一条谁都不会发现）；refreshReferenceImages 回真实受影响行数、MUST NOT 编造（0 意味着库里没有这条源帖，回乐观的 1 会让后续转写往一条不存在的行上写）。仅 import kernel 类型；零 SQL/HTTP/LLM/模块级活状态"
+  },
+  {
     "path": "src/kernel/default-chat-provider.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P4-1 新写：默认群目标的单方法只读端口（DefaultChatProvider.getDefaultChat）+ DefaultChatTarget。chatName 保留是因为调用点把它打进「默认群查询完成」日志，砍掉即静默抹掉一条可观测性。零 import，四条准入正则实跑零命中。消除 import 豁免 1 条（src/comm/handler.ts -> src/cache/bot-chat-store.ts，automation -> api），并顺带取代 publish-executor 里那份 3 行手抄同名接口。请求回写 §4.7 见 docpatch RK-P4-1"

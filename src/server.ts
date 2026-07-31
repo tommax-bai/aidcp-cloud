@@ -119,11 +119,18 @@ const CONTENT_ROLE_FACTORIES: RoleFactoryRegistry = {
   valuable_comment_archivist: (o: ValuableCommentArchivistFactoryOptions) => new ValuableCommentArchivist(o),
   curated_note_evaluator: (o: CuratedNoteEvaluatorFactoryOptions) => {
     const { curatedStore, textCardTranscriber, ...rest } = o;
-    // 两跳而不是一跳（task 0.6d）：先把 opaque 句柄断言成**本进程真正注入的那个 content 类型**，
-    // 再靠赋值给 `curatedStore: CuratedNoteSink` 做结构核对。直接 `as CuratedNoteSink` 是一次
-    // 无检查的转换，Sink 上任何方法缺失都过得去——而 Sink 的三个方法今天已全部必选，
+    // 两跳而不是一跳（task 0.6d）：先把 opaque 句柄断言成**跨属主写口**，再靠赋值给
+    // `curatedStore: CuratedNoteSink` 做结构核对。直接 `as CuratedNoteSink` 是一次无检查的转换，
+    // Sink 上任何方法缺失都过得去——而 Sink 的三个方法今天已全部必选，
     // 正是要靠这一步把「换成 HTTP 客户端后少实现一个方法」变成此处的编译红。
-    const noteSink: CuratedNoteSink = curatedStore as CuratedContentStore;
+    //
+    // **task 2.4b：第一跳的目标类型从 content 属主的存储类换成了 kernel 的写口。**
+    // 这不是换个写法：那个 content 类型是 `CONTENT_ROLE_FACTORIES` 身上**最后一个** content 符号，
+    // 而这张工厂表正是台账条目 `content-role-factories` 的证据。四个角色类已随 task 0.7 归 automation，
+    // 两个 Sink 类型也定义在那些文件里，`TextCardTranscriber` 早已取自 kernel。
+    // 更要紧的是这一跳的检查力**变强了**：写口是两种实现（本地属主 / HTTP 客户端）**共同**的契约，
+    // 而原先那个类型只是其中一种实现，拿它当锚等于用本地实现给跨进程实现打分。
+    const noteSink: CuratedNoteSink = curatedStore as CuratedWritePort;
     return new CuratedNoteEvaluator({
       ...rest,
       curatedStore: noteSink,
@@ -138,7 +145,9 @@ const CONTENT_ROLE_FACTORIES: RoleFactoryRegistry = {
   },
   curated_comment_evaluator: (o: CuratedCommentEvaluatorFactoryOptions) => {
     const { curatedStore, ...rest } = o;
-    return new CuratedCommentEvaluator({ ...rest, curatedStore: curatedStore as CuratedCommentSink });
+    // 同上两跳（task 2.4b）：先断言成写口，再靠赋值做结构核对，不直接 `as CuratedCommentSink`。
+    const commentSink: CuratedCommentSink = curatedStore as CuratedWritePort;
+    return new CuratedCommentEvaluator({ ...rest, curatedStore: commentSink });
   },
 };
 import { ConnectionRuntimeRegistry, type DispatcherBuildContext } from './orchestrator/connection-runtime.js';
@@ -481,11 +490,14 @@ import { CuratedContentHttpClient, registerCuratedContentRoutes } from './transp
 import {
   ConceptPoolAuthorityHttpClient,
   CuratedSelectionAuthorityHttpClient,
+  CuratedWriteAuthorityHttpClient,
   registerConceptPoolAuthorityRoutes,
   registerCuratedSelectionAuthorityRoutes,
+  registerCuratedWriteAuthorityRoutes,
 } from './transport/content-authority-http.js';
 import type { ConceptPoolPort } from './kernel/concept-pool-port.js';
 import type { CuratedSelectionPort } from './kernel/curated-selection-port.js';
+import type { CuratedWritePort } from './kernel/curated-write-port.js';
 import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
 import { registerPublishLogRoutes } from './transport/publish-log-http.js';
@@ -2037,10 +2049,26 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
         '[aidcp-cloud] content 内部 API：curated-selection-authority 路由未注册（CuratedContentStore 不可用）',
       );
     }
+    // 精选库写侧（task 2.4b）：与上面召回那组**各注册各的**——写口起不来不该连带关掉召回，
+    // 反之亦然。同一个属主实例同时满足两张脸，但两张脸的失败后果不同
+    // （召回失败＝这一轮没素材可用，写失败＝这一条观测永久丢了）。
+    if (store) {
+      registerCuratedWriteAuthorityRoutes(
+        httpServer,
+        store,
+        contentAuthorityToken,
+        ctx.deploymentTarget,
+      );
+      capabilities.push('curated-write-authority');
+    } else {
+      console.warn(
+        '[aidcp-cloud] content 内部 API：curated-write-authority 路由未注册（CuratedContentStore 不可用）',
+      );
+    }
   } else {
     console.warn(
-      '[aidcp-cloud] content 内部 API：concept-pool-authority / curated-selection-authority 均未注册' +
-        '（AIDCP_DEPLOY_ENV 缺失/非法，无法校验调用方 target）',
+      '[aidcp-cloud] content 内部 API：concept-pool-authority / curated-selection-authority /' +
+        ' curated-write-authority 均未注册（AIDCP_DEPLOY_ENV 缺失/非法，无法校验调用方 target）',
     );
   }
   // Block② 2e：把发布队列状态读 + 发布生成触发 additive 暴露到 content 侧内部读 API。
@@ -4175,6 +4203,51 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       ),
     };
   }
+  // ── content 属主端口按模式取实现（读侧 task 2.4a / 写侧 task 2.4b） ────────────────────
+  // 概念池（表 `concepts`）与精选库（表 `curated_content`）的存储都是 content 属主。单体里本段
+  // 直接持着 segA 构造的那两个实例；`AIDCP_SERVICE=automation` 的独立进程里 content 库根本不在本
+  // 进程，segA 那两次 `init()` 必然失败、两个句柄都留 undefined——而那两处 catch 的既有语义是
+  // 「这台机器上没有概念池 / 没有精选素材」：概念抽取角色不注册、精选素材恒空、自有点赞收藏不入语料、
+  // 两个精选准入评估角色不注册，闭环照跑、只多一行降级 warn。
+  // **「连不上内容域」就此被读成「内容域是空的」**，正是红线点名的静默假成功。
+  // 故 automation 模式改走 content 的内部 HTTP 客户端，且**缺配置直接抛**（fail-closed）——
+  // 回落本地实例等于对着一个没有这两张表的库空转，比不启动更难查。
+  // 其余模式（monolith / core / content / api）**逐位保持既有行为**：仍是 segA 那两个本地实例，
+  // 连客户端都不构造（同进程走 HTTP 只是白绕一圈还多一处失败面）。
+  //
+  // 三条脸分开建、共用一条连接与一个令牌：召回（读）、写、概念池。**分开不是洁癖**——
+  // 召回失败＝这一轮没素材可用，写失败＝这一条观测永久丢了，两者的降级判断不是同一个。
+  const contentAuthorityClients = ((): {
+    conceptPool: ConceptPoolPort;
+    curatedSelection: CuratedSelectionPort;
+    curatedWrite: CuratedWritePort;
+  } | undefined => {
+    if (seamMode !== 'automation') return undefined;
+    const contentUrl = readEnvString('AIDCP_CONTENT_URL');
+    // 缺任一项都抛，且**点名缺的是哪一项**：这条缝断了就是断了，automation 起不来远好过
+    // 起来之后每次搜索少一半词、每次创作少一份素材、每条观测悄悄写不进去，而三者都不报错。
+    if (!contentUrl || !deploymentTarget) {
+      throw new Error(
+        'content_authority_unavailable:'
+          + `${contentUrl ? '' : 'AIDCP_CONTENT_URL '}${deploymentTarget ? '' : 'AIDCP_DEPLOY_ENV'}`.trim(),
+      );
+    }
+    const http = new InternalHttpClient(contentUrl);
+    const callerToken = requireDirectInternalToken('AIDCP_CONTENT_INTERNAL_TOKEN');
+    return {
+      conceptPool: new ConceptPoolAuthorityHttpClient(http, callerToken, deploymentTarget),
+      curatedSelection: new CuratedSelectionAuthorityHttpClient(http, callerToken, deploymentTarget),
+      curatedWrite: new CuratedWriteAuthorityHttpClient(http, callerToken, deploymentTarget),
+    };
+  })();
+  // 三元而非 `??`：`??` 会在客户端字段意外为 undefined 时静默回落到本地实例，
+  // 而那正是本块要消灭的形态（automation 进程绝不能悄悄用上本地 content 存储）。
+  const conceptPoolPort: ConceptPoolPort | undefined =
+    contentAuthorityClients ? contentAuthorityClients.conceptPool : conceptStore;
+  const curatedSelectionPort: CuratedSelectionPort | undefined =
+    contentAuthorityClients ? contentAuthorityClients.curatedSelection : curatedContentStore;
+  const curatedWritePort: CuratedWritePort | undefined =
+    contentAuthorityClients ? contentAuthorityClients.curatedWrite : curatedContentStore;
   const automationPublishLog = apiDirectPorts.publishLog;
   if (!automationPublishLog) {
     throw new Error('automation_publish_log_authority_unavailable');
@@ -4186,7 +4259,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
    * 「没接上」这个状态会连落脚点都没有、直接消失成「一切正常」。
    * 结算一次、两处共用；`unavailable` 带着可读 reason，在下面的启动日志里说出来。
    */
-  const curatedContentCapability: CuratedContentCapability = curatedContentStore
+  // task 2.4b：判的是**写口在不在**，不再是本地属主实例在不在。两者在单体里等价
+  // （端口就是那个实例本身），在 automation 进程里不等价——那里本地实例必然缺席，
+  // 判本地实例会把一条接得好好的跨进程写口读成「精选库没接上」，
+  // 然后关掉自有收藏并入语料、并对客户端收回自动首作链的承诺。
+  const curatedContentCapability: CuratedContentCapability = curatedWritePort
     ? { state: 'wired' }
     : { state: 'unavailable', reason: 'not_wired_by_composition_root' };
   if (curatedContentCapability.state === 'unavailable') {
@@ -4208,43 +4285,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     }
     throw new Error(`structured_notification_not_delivered:${result.reason}`);
   };
-  // ── content 属主两条读端口按模式取实现（task 2.4a） ──────────────────────────────────
-  // 概念池（表 `concepts`）与精选召回（表 `curated_content`）的存储都是 content 属主。单体里本段
-  // 直接持着 segA 构造的那两个实例；`AIDCP_SERVICE=automation` 的独立进程里 content 库根本不在本
-  // 进程，segA 那两次 `init()` 必然失败、两个句柄都留 undefined——而那两处 catch 的既有语义是
-  // 「这台机器上没有概念池 / 没有精选素材」：概念抽取角色不注册、精选素材恒空，闭环照跑、只多一行
-  // 降级 warn。**「连不上内容域」就此被读成「内容域是空的」**，正是红线点名的静默假成功。
-  // 故 automation 模式改走 content 的内部 HTTP 客户端，且**缺配置直接抛**（fail-closed）——
-  // 回落本地实例等于对着一个没有这两张表的库空转，比不启动更难查。
-  // 其余模式（monolith / core / content / api）**逐位保持既有行为**：仍是 segA 那两个本地实例，
-  // 连客户端都不构造（同进程走 HTTP 只是白绕一圈还多一处失败面）。
-  const contentReadAuthority = ((): {
-    conceptPool: ConceptPoolPort;
-    curatedSelection: CuratedSelectionPort;
-  } | undefined => {
-    if (seamMode !== 'automation') return undefined;
-    const contentUrl = readEnvString('AIDCP_CONTENT_URL');
-    // 缺任一项都抛，且**点名缺的是哪一项**：这条缝断了就是断了，automation 起不来远好过
-    // 起来之后每次搜索少一半词、每次创作少一份素材，而两者都不报错。
-    if (!contentUrl || !deploymentTarget) {
-      throw new Error(
-        'content_read_authority_unavailable:'
-          + `${contentUrl ? '' : 'AIDCP_CONTENT_URL '}${deploymentTarget ? '' : 'AIDCP_DEPLOY_ENV'}`.trim(),
-      );
-    }
-    const http = new InternalHttpClient(contentUrl);
-    const callerToken = requireDirectInternalToken('AIDCP_CONTENT_INTERNAL_TOKEN');
-    return {
-      conceptPool: new ConceptPoolAuthorityHttpClient(http, callerToken, deploymentTarget),
-      curatedSelection: new CuratedSelectionAuthorityHttpClient(http, callerToken, deploymentTarget),
-    };
-  })();
-  // 三元而非 `??`：`??` 会在客户端字段意外为 undefined 时静默回落到本地实例，
-  // 而那正是本块要消灭的形态（automation 进程绝不能悄悄用上本地 content 存储）。
-  const conceptPoolPort: ConceptPoolPort | undefined =
-    contentReadAuthority ? contentReadAuthority.conceptPool : conceptStore;
-  const curatedSelectionPort: CuratedSelectionPort | undefined =
-    contentReadAuthority ? contentReadAuthority.curatedSelection : curatedContentStore;
   const approvalAuthorityForAutomation: PublishApprovalAuthorityPort | undefined =
     seamMode === 'automation'
       ? new PublishApprovalAuthorityHttpClient(
@@ -5236,7 +5276,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     }
     // 精选灵感：把自有动作并入精选语料（change curated-inspiration-corpus）。
     // like = 弱信号（只标既有行、不自动建）；collect = 强信号（有同访问非空正文才补建精选，取不到则只补标记既有行）。
-    if (noteKeyPersistable && curatedContentStore && evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
+    // task 2.4b：走按模式取好的写口（automation 进程下是 content 的 HTTP 客户端）。
+    if (noteKeyPersistable && curatedWritePort && evt.noteId && (evt.action === 'like' || evt.action === 'collect')) {
       const observed = lastObservedNoteByAccount.get(accountId);
       const content =
         evt.action === 'collect' && observed && observed.noteId === evt.noteId
@@ -5256,7 +5297,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
                 : {}),
             }
           : undefined;
-      curatedContentStore.markBotAction(accountId, evt.noteId, evt.action, content).catch((err) => {
+      // 失败仍是 best-effort + 具名 warn（既有行为），但**跨进程后失败率会高得多**：
+      // 这是一条真写，丢了就是这条自有动作永久没进语料，而语料只会少不会多、少一条没人会发现。
+      // 登记在 tasks 2.4b：这条要么补可计数信号，要么明写接受丢失。**绝不能改成静默吞掉。**
+      curatedWritePort.markBotAction(accountId, evt.noteId, evt.action, content).catch((err) => {
         console.warn('[aidcp-cloud] curated markBotAction error:', err);
       });
     }
@@ -7133,7 +7177,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       conceptStore: conceptPoolPort,
       // 精选语料库（change curated-admission-eval-roles，Phase 3）：注入则注册两段式准入的模型评估角色
       // （正文 curated_note_evaluator + 评论 curated_comment_evaluator）。缺省（PG 不可用）→ 不注册。
-      curatedStore: curatedContentStore,
+      // task 2.4b：注入的是按模式取好的**写口**（automation 进程下是 content 的 HTTP 客户端）。
+      // 两个角色对它的取用面就是写口的四个方法，见 CONTENT_ROLE_FACTORIES 的窄化。
+      curatedStore: curatedWritePort,
       textCardTranscriber,
       // content 层角色工厂（组合根注入）：dispatcher 据此构造 4 个 content 角色而不静态 import 它们。
       roleFactories: CONTENT_ROLE_FACTORIES,

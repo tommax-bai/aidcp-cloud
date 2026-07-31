@@ -46,9 +46,18 @@ import type {
   CuratedTermSample,
 } from '../kernel/curated-selection-port.js';
 import type {
+  CuratedActionContent,
   CuratedContentTypeFilter,
+  CuratedObservation,
+  CuratedReferenceImageInput,
   CuratedSelectItem,
+  CuratedSourceContentType,
+  CuratedTextCardContext,
 } from '../kernel/curated-content-types.js';
+import type {
+  CuratedCommentArchiveInput,
+  CuratedWritePort,
+} from '../kernel/curated-write-port.js';
 import type { InternalHttpClient, InternalHttpServer } from './internal-http.js';
 import {
   ApiDirectHttpError,
@@ -519,6 +528,373 @@ export class CuratedSelectionAuthorityHttpClient implements CuratedSelectionPort
       'curated-selection.selectSamplesForSearchTerms',
       { accountId, contentType, limit },
       isCuratedTermSampleList,
+    );
+  }
+}
+
+/* ══════════════════════════════ 精选库写侧（task 2.4b） ══════════════════════════════ */
+
+/*
+ * 与上面召回那组**同文件**（三件套同文件是硬要求），且刻意共用这里已有的入参解析与失败译码：
+ * 同一个域的两张脸各写一套解析，第二套会在某次字段调整后悄悄与第一套不一致，
+ * 而两边都编译得过、都测得过——那正是本文件刚删掉一份重复译码表的同一个理由。
+ */
+
+/* ─────────────────────────── 入参解析（服务端侧） */
+
+function optionalStringArray(value: unknown, label: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isStringArray(value)) {
+    throw new ApiDirectHttpError('api_direct_invalid_request', `${label} must be a string array`);
+  }
+  return value;
+}
+
+function optionalNullableCount(value: unknown, label: string): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!isNonNegativeInteger(value)) {
+    throw new ApiDirectHttpError('api_direct_invalid_request', `${label} must be a count or null`);
+  }
+  return value;
+}
+
+function optionalTimestamp(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  return requireInteger(value, label, 1);
+}
+
+/** 源帖内容类型（写侧只认这两个；`comment` 走 archiveComment，`note` / `source_post` 是召回侧的过滤别名）。 */
+function curatedSourceContentType(value: unknown): CuratedSourceContentType {
+  if (value === 'image_text' || value === 'video') return value;
+  throw new ApiDirectHttpError(
+    'api_direct_invalid_request',
+    'contentType must be image_text or video',
+  );
+}
+
+/** 观测 / 收藏共用的行定位三元组。 */
+interface CuratedRowKeyInput {
+  accountId: string;
+  sourceId: string;
+  contentType: CuratedSourceContentType;
+}
+
+function curatedRowKey(record: Record<string, unknown>): CuratedRowKeyInput {
+  return {
+    accountId: requireString(record.accountId, 'accountId'),
+    sourceId: requireString(record.sourceId, 'sourceId'),
+    contentType: curatedSourceContentType(record.contentType),
+  };
+}
+
+/**
+ * 观测入参。
+ *
+ * **身份与必填字段逐条校验，两块增强负载原样透传**（`referenceImages` / `textCardTranscription`）。
+ * 那两块的规范化规则住在属主里（非法项丢弃、保住本体），**在这里再写一份校验就是第二份规则**：
+ * 两份在写下来那天一致，此后任何一次单边调整都不会报错，只会让某些今天写得进去的观测
+ * 明天开始被这一层默默拒掉——而拒掉一条观测没有任何人会发现（精选语料只会少不会多）。
+ */
+function upsertObservationInput(value: unknown): CuratedObservation {
+  const record = requireRecord(value, 'curated observation');
+  const contentType = record.contentType;
+  if (contentType !== 'image_text' && contentType !== 'video' && contentType !== 'comment') {
+    throw new ApiDirectHttpError(
+      'api_direct_invalid_request',
+      'contentType must be image_text, video or comment',
+    );
+  }
+  const topics = optionalStringArray(record.topics, 'topics') ?? [];
+  const publishedObservedAt = optionalTimestamp(record.publishedObservedAt, 'publishedObservedAt');
+  const publishedAtText = optionalString(record.publishedAtText, 'publishedAtText');
+  if (publishedAtText !== undefined && publishedObservedAt === undefined) {
+    // 属主契约：平台原文在场时，换算锚点必须一起在场。少了锚点那句「3 天前」
+    // 会被后来的读者按**读到它的时刻**换算，越晚读误差越大，且看不出是错的。
+    throw new ApiDirectHttpError(
+      'api_direct_invalid_request',
+      'publishedObservedAt is required when publishedAtText is present',
+    );
+  }
+  return {
+    accountId: requireString(record.accountId, 'accountId'),
+    contentType,
+    sourceId: requireString(record.sourceId, 'sourceId'),
+    body: requireString(record.body, 'body'),
+    topics,
+    admitReason: requireString(record.admitReason, 'admitReason'),
+    ...(optionalString(record.title, 'title') !== undefined
+      ? { title: optionalString(record.title, 'title')! }
+      : {}),
+    ...(optionalString(record.author, 'author') !== undefined
+      ? { author: optionalString(record.author, 'author')! }
+      : {}),
+    ...(optionalString(record.sourceUrl, 'sourceUrl') !== undefined
+      ? { sourceUrl: optionalString(record.sourceUrl, 'sourceUrl')! }
+      : {}),
+    ...(optionalNullableCount(record.likeCount, 'likeCount') !== undefined
+      ? { likeCount: optionalNullableCount(record.likeCount, 'likeCount')! }
+      : {}),
+    ...(optionalNullableCount(record.collectCount, 'collectCount') !== undefined
+      ? { collectCount: optionalNullableCount(record.collectCount, 'collectCount')! }
+      : {}),
+    ...(optionalNullableCount(record.commentCount, 'commentCount') !== undefined
+      ? { commentCount: optionalNullableCount(record.commentCount, 'commentCount')! }
+      : {}),
+    ...(publishedAtText !== undefined ? { publishedAtText } : {}),
+    ...(publishedObservedAt !== undefined ? { publishedObservedAt } : {}),
+    // 两块增强负载：属主是它们唯一的规范化处，这里不复制第二份规则。
+    ...(Array.isArray(record.referenceImages)
+      ? { referenceImages: record.referenceImages as CuratedObservation['referenceImages'] }
+      : {}),
+    ...(record.textCardTranscription !== undefined && record.textCardTranscription !== null
+      ? {
+          textCardTranscription:
+            record.textCardTranscription as CuratedObservation['textCardTranscription'],
+        }
+      : {}),
+  };
+}
+
+interface RefreshReferenceImagesInput extends CuratedRowKeyInput {
+  input: CuratedReferenceImageInput[] | undefined;
+}
+
+function refreshReferenceImagesInput(value: unknown): RefreshReferenceImagesInput {
+  const record = requireRecord(value, 'refresh reference images');
+  return {
+    ...curatedRowKey(record),
+    // 属主对 `undefined` 与空数组的处置相同（都不写），照原样透传即可；
+    // 图集本身仍由属主规范化，理由同 upsertObservation。
+    input: Array.isArray(record.input)
+      ? (record.input as CuratedReferenceImageInput[])
+      : undefined,
+  };
+}
+
+function textCardContextInput(value: unknown): CuratedRowKeyInput {
+  return curatedRowKey(requireRecord(value, 'text card context'));
+}
+
+interface ArchiveCommentInput {
+  accountId: string;
+  input: CuratedCommentArchiveInput;
+}
+
+function archiveCommentInput(value: unknown): ArchiveCommentInput {
+  const record = requireRecord(value, 'archive comment');
+  const input = requireRecord(record.input, 'input');
+  const likeCount = optionalNullableCount(input.likeCount, 'input.likeCount');
+  return {
+    accountId: requireString(record.accountId, 'accountId'),
+    input: {
+      sourceId: requireString(input.sourceId, 'input.sourceId'),
+      text: requireString(input.text, 'input.text'),
+      topics: optionalStringArray(input.topics, 'input.topics') ?? [],
+      ...(optionalString(input.author, 'input.author') !== undefined
+        ? { author: optionalString(input.author, 'input.author')! }
+        : {}),
+      ...(optionalString(input.sourceNoteTitle, 'input.sourceNoteTitle') !== undefined
+        ? { sourceNoteTitle: optionalString(input.sourceNoteTitle, 'input.sourceNoteTitle')! }
+        : {}),
+      ...(optionalString(input.reason, 'input.reason') !== undefined
+        ? { reason: optionalString(input.reason, 'input.reason')! }
+        : {}),
+      // `null` 与「字段缺席」在属主侧同样落 null，但两者 MUST 都能过来：
+      // 把 `null` 挡成非法会让「读不到点赞数」这条完全正常的观测整条写不进去。
+      ...(likeCount !== undefined ? { likeCount } : {}),
+    },
+  };
+}
+
+interface MarkBotActionInput {
+  accountId: string;
+  sourceId: string;
+  action: 'like' | 'collect';
+  content?: CuratedActionContent;
+}
+
+function markBotActionInput(value: unknown): MarkBotActionInput {
+  const record = requireRecord(value, 'mark bot action');
+  const action = record.action;
+  if (action !== 'like' && action !== 'collect') {
+    throw new ApiDirectHttpError('api_direct_invalid_request', 'action must be like or collect');
+  }
+  return {
+    accountId: requireString(record.accountId, 'accountId'),
+    sourceId: requireString(record.sourceId, 'sourceId'),
+    action,
+    // 强弱信号的差别是属主的领域规则（点赞只标既有行、收藏可自动建行），
+    // 这一层不复制它，也不因为 `content` 缺席就改判动作类型。
+    ...(record.content !== undefined && record.content !== null
+      ? { content: record.content as CuratedActionContent }
+      : {}),
+  };
+}
+
+/* ─────────────────────────── 回执守卫（客户端侧） */
+
+/**
+ * 读穿缓存的回执形状。**照本文件既有口径**：只校验行身份必需的那一项（图集是数组），
+ * 转写块作可选增强透传——它缺失不会被误读成「这条源帖不存在」，而后者由 `null` 表达。
+ */
+function isCuratedTextCardContextOrNull(value: unknown): value is CuratedTextCardContext | null {
+  if (value === null) return true;
+  return isRecord(value) && Array.isArray(value.referenceImages);
+}
+
+export const CURATED_WRITE_AUTHORITY_ROUTES = {
+  upsertObservation: 'content-authority/curated-write/v1/upsert-observation',
+  refreshReferenceImages: 'content-authority/curated-write/v1/refresh-reference-images',
+  getTextCardContext: 'content-authority/curated-write/v1/text-card-context',
+  archiveComment: 'content-authority/curated-write/v1/archive-comment',
+  markBotAction: 'content-authority/curated-write/v1/mark-bot-action',
+} as const satisfies Record<keyof CuratedWritePort, string>;
+
+/* ─────────────────────────── 服务端注册（content 侧） */
+
+/**
+ * 精选库五条写口。与召回那组**各注册各的**：写口起不来不该连带关掉召回，反之亦然。
+ */
+export function registerCuratedWriteAuthorityRoutes(
+  server: InternalHttpServer,
+  local: CuratedWritePort,
+  callerToken: string,
+  executionTarget: DeploymentTarget,
+): void {
+  const route = <TIn, TOut>(
+    method: keyof CuratedWritePort & string,
+    parseInput: (value: unknown) => TIn,
+    invoke: (input: TIn) => Promise<TOut>,
+  ) => async (args: unknown): Promise<TOut> => {
+    // 信封先解、且在 try 之外：版本 / target 不符是传输契约问题，MUST 保住原码，
+    // 别被属主译码那层染成泛化的 remote_error。
+    const input = parseApiDirectEnvelope(args, executionTarget, parseInput);
+    return runOwnerCall(`curated-write.${method}`, ownerHasMethod(local, method), () =>
+      invoke(input));
+  };
+
+  server.registerBearer(
+    CURATED_WRITE_AUTHORITY_ROUTES.upsertObservation,
+    callerToken,
+    // 返回 void 的三个方法**必须回一个显式回执**：`undefined` 编码后是空响应体，
+    // 与「这条路由压根没跑」逐字节一样——写没做成会读起来像做成了。
+    route('upsertObservation', upsertObservationInput, async (obs) => {
+      await local.upsertObservation(obs);
+      return { accepted: true } as const;
+    }),
+  );
+  server.registerBearer(
+    CURATED_WRITE_AUTHORITY_ROUTES.refreshReferenceImages,
+    callerToken,
+    route('refreshReferenceImages', refreshReferenceImagesInput, (input) =>
+      local.refreshReferenceImages(
+        input.accountId,
+        input.sourceId,
+        input.contentType,
+        input.input,
+      )),
+  );
+  server.registerBearer(
+    CURATED_WRITE_AUTHORITY_ROUTES.getTextCardContext,
+    callerToken,
+    route('getTextCardContext', textCardContextInput, (input) =>
+      local.getTextCardContext(input.accountId, input.sourceId, input.contentType)),
+  );
+  server.registerBearer(
+    CURATED_WRITE_AUTHORITY_ROUTES.archiveComment,
+    callerToken,
+    route('archiveComment', archiveCommentInput, async (input) => {
+      await local.archiveComment(input.accountId, input.input);
+      return { accepted: true } as const;
+    }),
+  );
+  server.registerBearer(
+    CURATED_WRITE_AUTHORITY_ROUTES.markBotAction,
+    callerToken,
+    route('markBotAction', markBotActionInput, async (input) => {
+      await local.markBotAction(input.accountId, input.sourceId, input.action, input.content);
+      return { accepted: true } as const;
+    }),
+  );
+}
+
+/* ─────────────────────────── 客户端（automation 侧） */
+
+export class CuratedWriteAuthorityHttpClient implements CuratedWritePort {
+  private readonly channel: ContentAuthorityChannel;
+
+  constructor(
+    http: InternalHttpClient,
+    callerToken: string,
+    executionTarget: DeploymentTarget,
+  ) {
+    this.channel = { http, callerToken, executionTarget };
+  }
+
+  async upsertObservation(obs: CuratedObservation): Promise<void> {
+    await callContentAuthority(
+      this.channel,
+      CURATED_WRITE_AUTHORITY_ROUTES.upsertObservation,
+      'curated-write.upsertObservation',
+      obs,
+      isVoidAck,
+    );
+  }
+
+  refreshReferenceImages(
+    accountId: string,
+    sourceId: string,
+    contentType: CuratedSourceContentType,
+    input: CuratedReferenceImageInput[] | undefined,
+  ): Promise<number> {
+    return callContentAuthority(
+      this.channel,
+      CURATED_WRITE_AUTHORITY_ROUTES.refreshReferenceImages,
+      'curated-write.refreshReferenceImages',
+      { accountId, sourceId, contentType, input },
+      // 受影响行数是调用方的领域答案（0 ＝ 库里没有这条源帖），非整数 MUST 判形状不符，
+      // MUST NOT 取 0——那会把一次坏回执读成一句确定的「这条不存在」。
+      isNonNegativeInteger,
+    );
+  }
+
+  getTextCardContext(
+    accountId: string,
+    sourceId: string,
+    contentType: CuratedSourceContentType,
+  ): Promise<CuratedTextCardContext | null> {
+    return callContentAuthority(
+      this.channel,
+      CURATED_WRITE_AUTHORITY_ROUTES.getTextCardContext,
+      'curated-write.getTextCardContext',
+      { accountId, sourceId, contentType },
+      isCuratedTextCardContextOrNull,
+    );
+  }
+
+  async archiveComment(accountId: string, input: CuratedCommentArchiveInput): Promise<void> {
+    await callContentAuthority(
+      this.channel,
+      CURATED_WRITE_AUTHORITY_ROUTES.archiveComment,
+      'curated-write.archiveComment',
+      { accountId, input },
+      isVoidAck,
+    );
+  }
+
+  async markBotAction(
+    accountId: string,
+    sourceId: string,
+    action: 'like' | 'collect',
+    content?: CuratedActionContent,
+  ): Promise<void> {
+    await callContentAuthority(
+      this.channel,
+      CURATED_WRITE_AUTHORITY_ROUTES.markBotAction,
+      'curated-write.markBotAction',
+      { accountId, sourceId, action, content },
+      isVoidAck,
     );
   }
 }
