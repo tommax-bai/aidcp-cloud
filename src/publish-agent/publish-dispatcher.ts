@@ -182,6 +182,9 @@ export class PublishDispatcher {
   private readonly notifyUiPublishState?: (accountId: string, recordId: number, state: 'approved' | 'submitted' | 'failed', title?: string | null) => void;
   private readonly notifyDispatchEvent?: (notice: DispatchNotice) => void;
   private readonly facebookPublishMedia?: NonNullable<PublishDispatcherDeps['facebookPublishMedia']>;
+  /** 见 {@link PublishDispatcher.getFacebookMediaSettleMisses}。 */
+  private facebookMediaSettleDrops = 0;
+  private facebookMediaSettleFailures = 0;
   private readonly recordPublish?: (accountId: string) => Promise<void>;
   private readonly breakerThreshold: number;
   private readonly preemptRedispatchMax: number;
@@ -539,7 +542,21 @@ export class PublishDispatcher {
   ): Promise<void> {
     if (draft.platform !== 'facebook') return;
     const reservation = draft.metadata?.facebookMedia;
-    if (!reservation || !this.facebookPublishMedia) return;
+    // **这条稿本来就没有素材保留**——不是缺依赖，正常返回。
+    if (!reservation) return;
+    // 而这一条是**缺依赖**（task 2.4d）。原先它与上一条挤在同一个 `return` 里：
+    // 「这条稿没有素材保留」与「本进程压根没配这条端口」被同一个静默 return 一起吃掉，
+    // 三个写全部消失、一个字都不留。单体里第二种几乎不发生（属主实例恒在），
+    // 拆进程后它就是一次真实的配置缺口——后果是那组素材**永久停在 reserved 上没人回收**。
+    if (!this.facebookPublishMedia) {
+      this.facebookMediaSettleDrops += 1;
+      this.logger.error(
+        `[PublishDispatcher] facebook_media_settle_dropped: ${outcome} 未回写`
+          + ` recordId=${recordId} set=${reservation.setId}`
+          + '（本进程未注入 Facebook 素材端口）—— 这组素材会一直停在 reserved，无人回收',
+      );
+      return;
+    }
     try {
       if (outcome === 'published_confirmed') {
         await this.facebookPublishMedia.markUsed(reservation.setId, recordId);
@@ -549,12 +566,30 @@ export class PublishDispatcher {
         await this.facebookPublishMedia.releaseReservation(reservation.setId, reservation.reservationId);
       }
     } catch (err) {
+      // task 2.4d：**这一支以前只有一句 warn，没有任何东西数着它。** 后果与上面那支相同——
+      // 素材永久停在 reserved——而跨进程后失败率只会更高（多一跳网络、多一个进程要活着）。
+      // 这里补的是「可计数信号」那一半；**兜底回收扫描仍未做**，见 tasks 2.4d 的登记。
+      // 刻意仍不向上抛：下发主链路不该被素材记账拖垮。但「漏了多少次」从此问得出来。
+      this.facebookMediaSettleFailures += 1;
       this.logger.warn(
         `[PublishDispatcher] Facebook 素材状态回写失败 recordId=${recordId} set=${reservation.setId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
     }
+  }
+
+  /**
+   * Facebook 素材记账**没做成**的次数，两类分开数：
+   * `dropped` = 本进程没有那条端口，压根没试；`failed` = 试了但写失败。
+   *
+   * 存在的理由很具体：这两支都**有意**不影响下发主链路，所以它们发生时**没有任何调用方会知道**，
+   * 而每一次都对应一组永久停在 `reserved`、无人回收的素材。
+   * 在兜底回收扫描落地之前，这两个数字是「到底漏了多少」的唯一出处。
+   * 两类分开数也是有意的：一个要改配置，一个要查对面为什么写不进去，处置完全不同。
+   */
+  getFacebookMediaSettleMisses(): { dropped: number; failed: number } {
+    return { dropped: this.facebookMediaSettleDrops, failed: this.facebookMediaSettleFailures };
   }
 
   /** 临界区：单条草稿的实际下发（已按账号串行进入）。 */

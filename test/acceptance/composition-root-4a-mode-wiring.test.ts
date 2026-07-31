@@ -512,6 +512,10 @@ test('4a composition: content ports are mode-selected and never fall back to the
   assert.match(selection, /new ConceptPoolAuthorityHttpClient\(http, callerToken, deploymentTarget\)/);
   assert.match(selection, /new CuratedSelectionAuthorityHttpClient\(http, callerToken, deploymentTarget\)/);
   assert.match(selection, /new CuratedWriteAuthorityHttpClient\(http, callerToken, deploymentTarget\)/);
+  assert.match(
+    selection,
+    /new FacebookPublishMediaAuthorityHttpClient\(\s*http,\s*callerToken,\s*deploymentTarget,\s*\)/,
+  );
   assert.match(selection, /requireDirectInternalToken\('AIDCP_CONTENT_INTERNAL_TOKEN'\)/);
   assert.match(
     selection,
@@ -535,6 +539,7 @@ test('4a composition: content ports are mode-selected and never fall back to the
     ['conceptPoolPort', 'conceptPool', 'conceptStore'],
     ['curatedSelectionPort', 'curatedSelection', 'curatedContentStore'],
     ['curatedWritePort', 'curatedWrite', 'curatedContentStore'],
+    ['facebookPublishMediaPort', 'facebookPublishMedia', 'facebookPublishMediaStore'],
   ]) {
     const choice = between(selection, `const ${port}`, ';\n');
     assert.match(
@@ -590,7 +595,20 @@ test('4a composition: content ports are mode-selected and never fall back to the
     'the curated capability must be derived from the port, not from the local owner instance',
   );
 
-  // ⑦ 角色工厂那两跳窄化的锚点 MUST 是 kernel 写口，MUST NOT 是 content 属主的存储类。
+  // ⑦ FB 素材两处消费点都走端口。**第二处最容易漏**：它不走下发器那个三方法窄口，
+  //    是组装根在审批驳回时的直调；只改窄口的话，驳回时那组素材永久停在 reserved 上没人回收。
+  assert.match(
+    automation,
+    /facebookPublishMedia: facebookPublishMediaPort,/,
+    'the dispatcher must receive the mode-selected media port',
+  );
+  assert.match(
+    automation,
+    /facebookPublishMediaPort\s*\)\s*\{\s*\n\s*await facebookPublishMediaPort\s*\n\s*\.releaseReservation\(/,
+    'the approval-rejection release does not go through the dispatcher port — it must be repointed too',
+  );
+
+  // ⑧ 角色工厂那两跳窄化的锚点 MUST 是 kernel 写口，MUST NOT 是 content 属主的存储类。
   //    这不是风格问题：那个 content 类型曾是这张工厂表身上最后一个 content 符号
   //    （台账条目 content-role-factories 的证据），且拿单一实现当锚等于用本地实现给跨进程实现打分。
   const factories = between(source, 'const CONTENT_ROLE_FACTORIES', '\n};');

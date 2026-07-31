@@ -497,6 +497,11 @@ import {
 import type { ConceptPoolPort } from './kernel/concept-pool-port.js';
 import type { CuratedSelectionPort } from './kernel/curated-selection-port.js';
 import type { CuratedWritePort } from './kernel/curated-write-port.js';
+import type { FacebookPublishMediaPort } from './kernel/facebook-publish-media-port.js';
+import {
+  FacebookPublishMediaAuthorityHttpClient,
+  registerFacebookPublishMediaAuthorityRoutes,
+} from './transport/content-media-usage-http.js';
 import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
 import { registerPublishLogRoutes } from './transport/publish-log-http.js';
@@ -2064,10 +2069,26 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
         '[aidcp-cloud] content 内部 API：curated-write-authority 路由未注册（CuratedContentStore 不可用）',
       );
     }
+    // FB 发帖素材状态流转（task 2.4d）：同样各注册各的。属主是另一个存储，它起不来与精选库无关。
+    if (ctx.facebookPublishMediaStore) {
+      registerFacebookPublishMediaAuthorityRoutes(
+        httpServer,
+        ctx.facebookPublishMediaStore,
+        contentAuthorityToken,
+        ctx.deploymentTarget,
+      );
+      capabilities.push('facebook-publish-media-authority');
+    } else {
+      console.warn(
+        '[aidcp-cloud] content 内部 API：facebook-publish-media-authority 路由未注册'
+          + '（FacebookPublishMediaStore 不可用）',
+      );
+    }
   } else {
     console.warn(
       '[aidcp-cloud] content 内部 API：concept-pool-authority / curated-selection-authority /' +
-        ' curated-write-authority 均未注册（AIDCP_DEPLOY_ENV 缺失/非法，无法校验调用方 target）',
+        ' curated-write-authority / facebook-publish-media-authority'
+        + ' 均未注册（AIDCP_DEPLOY_ENV 缺失/非法，无法校验调用方 target）',
     );
   }
   // Block② 2e：把发布队列状态读 + 发布生成触发 additive 暴露到 content 侧内部读 API。
@@ -4222,6 +4243,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     conceptPool: ConceptPoolPort;
     curatedSelection: CuratedSelectionPort;
     curatedWrite: CuratedWritePort;
+    facebookPublishMedia: FacebookPublishMediaPort;
   } | undefined => {
     if (seamMode !== 'automation') return undefined;
     const contentUrl = readEnvString('AIDCP_CONTENT_URL');
@@ -4239,6 +4261,11 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       conceptPool: new ConceptPoolAuthorityHttpClient(http, callerToken, deploymentTarget),
       curatedSelection: new CuratedSelectionAuthorityHttpClient(http, callerToken, deploymentTarget),
       curatedWrite: new CuratedWriteAuthorityHttpClient(http, callerToken, deploymentTarget),
+      facebookPublishMedia: new FacebookPublishMediaAuthorityHttpClient(
+        http,
+        callerToken,
+        deploymentTarget,
+      ),
     };
   })();
   // 三元而非 `??`：`??` 会在客户端字段意外为 undefined 时静默回落到本地实例，
@@ -4249,6 +4276,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     contentAuthorityClients ? contentAuthorityClients.curatedSelection : curatedContentStore;
   const curatedWritePort: CuratedWritePort | undefined =
     contentAuthorityClients ? contentAuthorityClients.curatedWrite : curatedContentStore;
+  // FB 发帖素材状态流转（task 2.4d）。**只开属主九个方法里的三个**——那是 automation 的全部消费面；
+  // 其余六个的消费方文件归 api（面板增删改查与 `availableCount`）或 content 自己，见 kernel 端口注释。
+  const facebookPublishMediaPort: FacebookPublishMediaPort | undefined =
+    contentAuthorityClients ? contentAuthorityClients.facebookPublishMedia : facebookPublishMediaStore;
   const automationPublishLog = apiDirectPorts.publishLog;
   if (!automationPublishLog) {
     throw new Error('automation_publish_log_authority_unavailable');
@@ -6464,13 +6495,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         );
       });
     },
-    facebookPublishMedia: facebookPublishMediaStore
-      ? {
-          releaseReservation: (setId, reservationId) => facebookPublishMediaStore!.releaseReservation(setId, reservationId),
-          markUsed: (setId, publishLogId) => facebookPublishMediaStore!.markUsed(setId, publishLogId),
-          quarantine: (setId, reason) => facebookPublishMediaStore!.quarantine(setId, reason),
-        }
-      : undefined,
+    // task 2.4d：直接喂按模式取好的端口。下发器那个三方法窄口与 kernel 端口**签名逐字相同**，
+    // 原先那层逐方法转发的箭头函数只是把同一组方法抄了一遍，没有任何窄化作用——
+    // 抄一遍反而多一处会漂的地方（属主换实现时这三行要跟着改，漏改不报错）。
+    facebookPublishMedia: facebookPublishMediaPort,
     breakerThreshold: Number(process.env.AIDCP_PUBLISH_BREAKER_THRESHOLD ?? 2),
     logger: console,
   });
@@ -6521,8 +6549,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       .then(async (draft) => {
         if (!draft || draft.status !== 'pending_approval') return;
         await automationPublishLog.rejectPendingApproval(recordId);
-        if (draft.platform === 'facebook' && draft.metadata?.facebookMedia && facebookPublishMediaStore) {
-          await facebookPublishMediaStore
+        // task 2.4d：这条路径**不走下发器那个窄口**，是组装根直调——只改窄口会把它漏掉，
+        // 于是审批驳回时那组素材永久卡在 reserved 上没人回收（kernel 端口注释点名了这一处）。
+        if (draft.platform === 'facebook' && draft.metadata?.facebookMedia && facebookPublishMediaPort) {
+          await facebookPublishMediaPort
             .releaseReservation(draft.metadata.facebookMedia.setId, draft.metadata.facebookMedia.reservationId)
             .catch((err) =>
               console.warn(

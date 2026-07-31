@@ -1,10 +1,12 @@
 /**
- * automation → content 另外两条属主端口的传输三件套（路由常量 + 服务端注册 + 类型化客户端），
- * **本轮只定义、不接线**（不改组装根、不改默认注入、不改 `src/server.ts`）。
+ * automation → content 另外两条属主端口的传输三件套（路由常量 + 服务端注册 + 类型化客户端）。
  *
  * 覆盖的两个端口（都在 kernel 定义，本文件一个字都不改它们）：
- *   - {@link file://../kernel/facebook-publish-media-port.ts} FB 发帖素材状态流转 3 个写；
- *   - {@link file://../kernel/llm-usage-recording-port.ts} 模型 token 用量记账 1 个批量写。
+ *   - {@link file://../kernel/facebook-publish-media-port.ts} FB 发帖素材状态流转 3 个写
+ *     —— **已接线**（task 2.4d）：content 监听独立注册、automation 侧客户端按模式取、两个消费点已改指；
+ *   - {@link file://../kernel/llm-usage-recording-port.ts} 模型 token 用量记账 1 个批量写
+ *     —— **仍未接线**，且它不是纯接线：属主今天没有 `recordUsage`，automation 侧还需要一个合并缓冲，
+ *     两者的落点都要先裁定，见文件末尾 {@link CONTENT_MEDIA_USAGE_WIRING_DEBT}。
  * 失败信号统一走 {@link file://../kernel/content-port-error.ts}，线上译码复用
  * {@link file://./content-authority-wire.ts}（**不复制第二份失败映射表**，理由见那份文件的文件头）。
  *
@@ -359,9 +361,6 @@ export class LlmUsageRecordingAuthorityHttpClient implements LlmUsageRecordingPo
  * 它们都不是本文件能自己修的（涉及组装根、调用侧既有代码、属主实现、跨仓同步名单、归属表）。
  */
 export const CONTENT_MEDIA_USAGE_WIRING_DEBT = [
-  'publish-dispatcher.ts:542 的 `if (!reservation || !this.facebookPublishMedia) return;` MUST 换成响亮取用闸：拆进程后「这条稿没有素材保留」与「本进程压根没配这条端口」被同一个 return 吃掉，三个写全静默消失（tasks 2.7 点名的可选实参四层同形之一）',
-  'publish-dispatcher.ts:553-559 的 catch 今天只 logger.warn：写失败之后那组素材永久卡在保留态、无人回收。跨进程后失败率只会更高，MUST 补可计数信号或兜底回收扫描',
-  'src/server.ts:6146 那处组装根直调 releaseReservation（审批驳回释放保留）MUST 一并改指端口客户端——它不走下发器那个窄口，只改窄口会漏掉这条路径',
   'content 属主 MUST 补 recordUsage（把批量落库那段从私有定时器里提出来）或交适配对象，否则服务端在场探针会一直答 unsupported_method；同形先例是精选库的 selectSamplesForSearchTerms',
   'automation 侧需要一个本进程的用量合并缓冲（打桶 + 按主键合并 + 定时批量提交）。落点由接线方裁定，但无论落在哪，recordUsage 的抛出 MUST 有人接住并计数，MUST NOT 被 fire-and-forget 吞掉；且传输失败 MUST NOT 重投（可交换累加计数器，重投即翻倍）',
   '成本红线：接线时 MUST NOT 在传输层或 automation 侧折算成本、MUST NOT 引入任何硬编码价目表。成本由属主侧读时 JOIN 账单反算出的单价快照算出（已上线规格 llm-token-usage-stats 的 Token Usage Cost Estimates）',
@@ -375,6 +374,9 @@ export const CONTENT_MEDIA_USAGE_WIRING_DEBT = [
  * 而这三条里有两条是**别处的文件**（归属表、控制仓同步名单），下一个人无从判断该不该再做一遍。
  */
 export const CONTENT_MEDIA_USAGE_WIRING_DEBT_CLOSED = [
+  'FB 素材三条路由已在 content 监听上独立注册，automation 侧客户端已按模式取好，两个消费点（下发器窄口 + 组装根审批驳回直调）都已改指端口',
+  'publish-dispatcher 的静默 return 已拆成两支：「这条稿没有素材保留」仍是正常返回，「本进程没有这条端口」计入 dropped 并具名报错、说出后果（素材会停在 reserved 无人回收）',
+  'publish-dispatcher 写失败那支已补可计数信号（与 dropped 分开数，两者处置不同）。⚠️ **兜底回收扫描仍未做**——欠账原文是「补可计数信号 or 兜底回收扫描」，这里只取了前一半：计数让「漏了多少」问得出来，但漏掉的那些素材今天仍然没有任何东西会把它们放回可用池",
   'content-authority-http.ts 的私有译码副本已删，改指 content-authority-wire.ts 公共那一份（结清前逐条比过两份实现，语义一致、尚未漂移 ⇒ 这次是防患不是修 bug）',
   '两个 kernel 端口文件已同时进 ownership-rules.json 的 fileOverrides 与 kernel-non-members.json 的 kernelRoster.members',
   '本文件与 content-authority-wire.ts 已进控制仓 scripts/sync-split-repos 的 TRANSPORT_MEMBERS',

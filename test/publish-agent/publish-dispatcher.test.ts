@@ -52,6 +52,14 @@ function harness(opts: {
   pendingDispatchRecordIds?: () => Promise<number[]>;
   /** authority CAS/transport 未确认时，dispatching gate 必须阻断不可逆平台动作。 */
   dispatchProgressFails?: boolean;
+  /** task 2.4d：Facebook 素材端口。**不传 = 本进程没有这条端口**，正是要断言的那一支。 */
+  facebookPublishMedia?: {
+    releaseReservation(setId: number, reservationId?: string): Promise<boolean>;
+    markUsed(setId: number, publishLogId: number): Promise<boolean>;
+    quarantine(setId: number, reason: string): Promise<boolean>;
+  };
+  /** 捕获日志（默认静默）：用于断言那条具名 error 真的说出来了。 */
+  captureLogs?: string[];
 }) {
   const events: string[] = [];
   /** 7.1：被抢占事件驱动重投的调度器捕获（不自动跑，测试手动泵/断言次数）。 */
@@ -156,7 +164,14 @@ function harness(opts: {
     notifyUiPublishState: (accountId, recordId, state, title) => uiStates.push({ accountId, recordId, state, title }),
     notifyDispatchEvent: (n) => notices.push(n),
     recordPublish: async (accountId) => { recordedPublishes.push(accountId); },
-    logger: silentLogger,
+    ...(opts.facebookPublishMedia ? { facebookPublishMedia: opts.facebookPublishMedia } : {}),
+    logger: opts.captureLogs
+      ? {
+          log() {},
+          warn: (m: unknown) => opts.captureLogs!.push(String(m)),
+          error: (m: unknown) => opts.captureLogs!.push(String(m)),
+        }
+      : silentLogger,
   });
   return {
     dispatcher,
@@ -700,5 +715,81 @@ describe('PublishDispatcher · 持久授权与待下发态', () => {
     });
     await h.dispatcher.scanAndDispatchApproved();
     assert.equal(h.events.includes('seq'), false);
+  });
+});
+
+/**
+ * Facebook 素材记账的两条「没做成」（task 2.4d）。
+ *
+ * 这两支**有意**不影响下发主链路，所以它们发生时没有任何调用方会知道；而每一次都对应一组
+ * 永久停在 `reserved`、无人回收的素材。原先它们一个是与「这条稿本来就没有素材保留」挤在同一个
+ * 静默 `return` 里，一个只有一句谁都不数的 warn。
+ *
+ * **三条一起才说明问题**：只断言「缺端口会响」不够——那样把「本来就没保留」也一并弄响就算过了，
+ * 而那是一次正常返回，弄响等于制造噪声。所以第三条钉的是**不该响的那次真的没响**。
+ */
+describe('Facebook 素材记账没做成时必须留下可数的痕迹', () => {
+  const facebookDraft = (over: Record<string, unknown> = {}) =>
+    makeDraft({
+      platform: 'facebook',
+      metadata: { facebookMedia: { setId: 42, reservationId: 'rsv-1' }, ...over } as any,
+    } as Partial<DispatchDraft>);
+
+  test('本进程没有素材端口 → 计入 dropped 并具名说出来，MUST NOT 静默 return', async () => {
+    const logs: string[] = [];
+    const h = harness({ approved: true, edgeId: 'edge-A', draft: facebookDraft(), captureLogs: logs });
+    await h.dispatcher.dispatch(7);
+
+    assert.deepEqual(
+      h.dispatcher.getFacebookMediaSettleMisses(),
+      { dropped: 1, failed: 0 },
+      '缺端口 MUST 计入 dropped —— 它是配置缺口，不是「这条稿没有素材」',
+    );
+    const named = logs.filter((line) => line.includes('facebook_media_settle_dropped'));
+    assert.equal(named.length, 1, '缺端口 MUST 留一条具名日志');
+    assert.match(named[0]!, /set=42/);
+    assert.match(named[0]!, /reserved/, '日志 MUST 说出后果：这组素材会一直停在 reserved');
+  });
+
+  test('端口在但写失败 → 计入 failed，且仍不打断下发主链路', async () => {
+    const logs: string[] = [];
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      draft: facebookDraft(),
+      captureLogs: logs,
+      facebookPublishMedia: {
+        releaseReservation: async () => { throw new Error('content unreachable'); },
+        markUsed: async () => { throw new Error('content unreachable'); },
+        quarantine: async () => { throw new Error('content unreachable'); },
+      },
+    });
+    await h.dispatcher.dispatch(7);
+
+    assert.deepEqual(
+      h.dispatcher.getFacebookMediaSettleMisses(),
+      { dropped: 0, failed: 1 },
+      '写失败 MUST 计入 failed —— 与「没这条端口」处置完全不同，所以分开数',
+    );
+    // 主链路照常走完：素材记账拖垮下发才是更坏的失败。
+    assert.ok(h.events.includes('seq'), '素材记账失败 MUST NOT 打断下发');
+  });
+
+  test('这条稿本来就没有素材保留 → 两个计数都不动（这一支不该响）', async () => {
+    const logs: string[] = [];
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      draft: makeDraft({ platform: 'facebook', metadata: {} as any } as Partial<DispatchDraft>),
+      captureLogs: logs,
+    });
+    await h.dispatcher.dispatch(7);
+
+    assert.deepEqual(
+      h.dispatcher.getFacebookMediaSettleMisses(),
+      { dropped: 0, failed: 0 },
+      '「没有素材保留」是一次正常返回，把它也弄响只会制造噪声',
+    );
+    assert.equal(logs.filter((line) => line.includes('facebook_media_settle_dropped')).length, 0);
   });
 });
