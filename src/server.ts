@@ -2293,9 +2293,9 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     // owns customer policy writes. Resolve the locked environment anchor here
     // instead of relying on segC's account projection.
     environmentSlowStartResolver: async ({ since }) => {
-      if (process.env.AIDCP_SLOW_START_DISABLED === 'true') return 'inactive';
+      if (process.env.AIDCP_SLOW_START_DISABLED === 'true') return 'off';
       return Date.now() - since >= SLOW_START_TOTAL_DAYS * 86_400_000
-        ? 'inactive'
+        ? 'graduated'
         : 'active';
     },
   });

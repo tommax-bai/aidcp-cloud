@@ -122,7 +122,7 @@ function database() {
         rowCount: owned ? 1 : 0,
       };
     }
-    if (sql.startsWith('SELECT e.platform,') && !sql.includes('e.slow_start_since')) {
+    if (sql.startsWith('SELECT e.platform,') && sql.includes('AS account_display_name')) {
       const env = environments.get(String(params[0]));
       if (!env) return { rows: [], rowCount: 0 };
       const duplicateCount = env.accountId === null
@@ -134,6 +134,7 @@ function database() {
           account_id: env.accountId,
           account_display_name: env.accountId ? `Display ${env.accountId}` : null,
           account_exists: env.accountId !== null,
+          slow_start_since: env.slowStartSince,
           duplicate_count: duplicateCount,
           owner_count: ownerCounts.get(String(params[0])) ?? 1,
         }],
@@ -350,6 +351,33 @@ describe('FacebookOperationPolicyStore', () => {
       assert.equal(saved.view.consumption.viewsPerLike, 7);
     }
     assert.equal(db.audits.length, 1);
+  });
+
+  it('reads an unbound slow-start selection from the environment anchor', async () => {
+    const db = database();
+    await db.store.init();
+
+    const saved = await db.store.writeEnvironment(
+      'env-unbound',
+      {
+        expectedRevision: 0,
+        mode: 'slow_start',
+        requestId: 'request-unbound-slow-start',
+      },
+      'client:customer-a',
+    );
+
+    assert.equal(saved.ok, true);
+    if (saved.ok) {
+      assert.equal(saved.view.baseMode, 'persona');
+      assert.equal(saved.view.effectiveMode, null, 'unbound config has no execution object');
+      assert.equal(saved.view.binding.state, 'unbound');
+      assert.equal(saved.view.slowStart.state, 'active');
+      assert.equal(
+        saved.view.slowStart.since,
+        db.environments.get('env-unbound')!.slowStartSince?.getTime(),
+      );
+    }
   });
 
   it('allocates policy revisions globally across environments', async () => {
@@ -792,7 +820,7 @@ describe('FacebookOperationPolicyStore', () => {
       assert.equal(slow.ok, true);
       assert.ok(db.environments.get('env-fb')?.slowStartSince);
       db.store.bindSlowStartResolver(async () => inactiveSlowStart);
-      db.store.bindEnvironmentSlowStartResolver(async () => 'inactive');
+      db.store.bindEnvironmentSlowStartResolver(async () => inactiveSlowStart.state);
 
       const enabled = await db.store.writeLegacyRuleMode(
         'env-fb',
@@ -868,10 +896,10 @@ describe('FacebookOperationPolicyStore', () => {
     );
     assert.equal(unbound.ok, true);
     if (unbound.ok) {
-      assert.equal(unbound.view.slowStart.state, 'unknown');
+      assert.equal(unbound.view.slowStart.state, 'active');
       assert.ok(
         unbound.slowStartSince,
-        'legacy callers must receive the committed anchor even when the unified view is unbound',
+        'unbound callers must receive the committed anchor and matching configured state',
       );
     }
   });

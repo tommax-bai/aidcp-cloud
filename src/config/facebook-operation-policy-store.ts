@@ -129,7 +129,7 @@ export type FacebookOperationPolicyEnvironmentSlowStartResolver = (input: {
   envKey: string;
   accountId: string | null;
   since: number;
-}) => Promise<'active' | 'inactive' | 'unknown'>;
+}) => Promise<'active' | 'off' | 'graduated' | 'unknown'>;
 
 export interface FacebookOperationPolicyAccountDecision {
   mode: FacebookEffectiveOperationMode;
@@ -174,6 +174,7 @@ interface EnvironmentDbRow {
   account_id: string | null;
   account_display_name: string | null;
   account_exists: boolean;
+  slow_start_since: Date | string | null;
   duplicate_count: number | string;
   owner_count: number | string;
 }
@@ -550,15 +551,16 @@ export class FacebookOperationPolicyStore {
       });
     }
     if (!environment.account_id || !environment.account_exists) {
+      const slowStart = await this.resolveEnvironmentSlowStart(
+        key,
+        null,
+        environment.slow_start_since,
+      );
       return this.project(policy, {
         bindingState: 'unbound',
         accountId: null,
         accountDisplayName: null,
-        slowStart: {
-          state: 'unknown',
-          since: null,
-          globallyDisabled: false,
-        },
+        slowStart,
         effectiveMode: null,
         blocker: null,
       });
@@ -1338,6 +1340,7 @@ export class FacebookOperationPolicyStore {
     const { rows } = await this.pool.query<EnvironmentDbRow>(
       `SELECT e.platform,
               e.account_id,
+              e.slow_start_since,
               (SELECT COALESCE(
                         NULLIF(btrim(a.operator_alias), ''),
                         NULLIF(btrim(a.nickname), ''),
@@ -1388,32 +1391,57 @@ export class FacebookOperationPolicyStore {
     }
   }
 
+  private async resolveEnvironmentSlowStart(
+    envKey: string,
+    accountId: string | null,
+    rawSince: Date | string | null,
+  ): Promise<FacebookOperationPolicyView['slowStart']> {
+    const since = asEpochMillis(rawSince);
+    if (since === null) {
+      return { state: 'off', since: null, globallyDisabled: false };
+    }
+    if (this.environmentSlowStartResolver) {
+      try {
+        const state = await this.environmentSlowStartResolver({ envKey, accountId, since });
+        if (state === 'unknown') {
+          return { state, since: null, globallyDisabled: false };
+        }
+        return {
+          state,
+          since: state === 'off' ? null : since,
+          globallyDisabled: state === 'off',
+        };
+      } catch {
+        return { state: 'unknown', since: null, globallyDisabled: false };
+      }
+    }
+    // Narrow embedders without the exact-environment resolver retain the
+    // historical unbound behavior: a persisted anchor means active slow start.
+    if (!accountId) {
+      return { state: 'active', since, globallyDisabled: false };
+    }
+    const slowStart = await this.resolveSlowStart(accountId);
+    if (slowStart.state === 'unknown') return slowStart;
+    if (slowStart.globallyDisabled) {
+      return { state: 'off', since: null, globallyDisabled: true };
+    }
+    if (slowStart.since !== since) {
+      return { state: 'unknown', since: null, globallyDisabled: false };
+    }
+    return slowStart;
+  }
+
   private async legacyRuleSlowStartConflict(
     envKey: string,
     environment: LockedEnvironmentDbRow,
   ): Promise<'active' | 'inactive' | 'unknown'> {
-    const since = asEpochMillis(environment.slow_start_since);
-    if (since === null) return 'inactive';
     const accountId = environment.account_id?.trim();
-    if (this.environmentSlowStartResolver) {
-      try {
-        return await this.environmentSlowStartResolver({
-          envKey,
-          accountId: accountId || null,
-          since,
-        });
-      } catch {
-        return 'unknown';
-      }
-    }
-    // Fallback retained for narrow tests/embedders. The account projection is
-    // accepted only when it proves it describes this exact locked anchor;
-    // duplicate bindings otherwise collapse the account anchor to null.
-    if (!accountId) return 'active';
-    const slowStart = await this.resolveSlowStart(accountId);
+    const slowStart = await this.resolveEnvironmentSlowStart(
+      envKey,
+      accountId || null,
+      environment.slow_start_since,
+    );
     if (slowStart.state === 'unknown') return 'unknown';
-    if (slowStart.globallyDisabled) return 'inactive';
-    if (slowStart.since !== since) return 'unknown';
     return slowStart.state === 'active' ? 'active' : 'inactive';
   }
 
