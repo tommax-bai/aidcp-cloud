@@ -359,14 +359,23 @@ export class LlmUsageRecordingAuthorityHttpClient implements LlmUsageRecordingPo
  * 它们都不是本文件能自己修的（涉及组装根、调用侧既有代码、属主实现、跨仓同步名单、归属表）。
  */
 export const CONTENT_MEDIA_USAGE_WIRING_DEBT = [
-  'content-authority-http.ts 里还留着一份与 content-authority-wire.ts 逐字相同的私有译码副本（本轮它是并行热点、只读）。MUST 在接线轮改指公共那份并删掉副本：两份失败映射表各自编译通过、各自测试通过，只有失败真发生的那一刻才看得出对不上',
   'publish-dispatcher.ts:542 的 `if (!reservation || !this.facebookPublishMedia) return;` MUST 换成响亮取用闸：拆进程后「这条稿没有素材保留」与「本进程压根没配这条端口」被同一个 return 吃掉，三个写全静默消失（tasks 2.7 点名的可选实参四层同形之一）',
   'publish-dispatcher.ts:553-559 的 catch 今天只 logger.warn：写失败之后那组素材永久卡在保留态、无人回收。跨进程后失败率只会更高，MUST 补可计数信号或兜底回收扫描',
   'src/server.ts:6146 那处组装根直调 releaseReservation（审批驳回释放保留）MUST 一并改指端口客户端——它不走下发器那个窄口，只改窄口会漏掉这条路径',
   'content 属主 MUST 补 recordUsage（把批量落库那段从私有定时器里提出来）或交适配对象，否则服务端在场探针会一直答 unsupported_method；同形先例是精选库的 selectSamplesForSearchTerms',
   'automation 侧需要一个本进程的用量合并缓冲（打桶 + 按主键合并 + 定时批量提交）。落点由接线方裁定，但无论落在哪，recordUsage 的抛出 MUST 有人接住并计数，MUST NOT 被 fire-and-forget 吞掉；且传输失败 MUST NOT 重投（可交换累加计数器，重投即翻倍）',
   '成本红线：接线时 MUST NOT 在传输层或 automation 侧折算成本、MUST NOT 引入任何硬编码价目表。成本由属主侧读时 JOIN 账单反算出的单价快照算出（已上线规格 llm-token-usage-stats 的 Token Usage Cost Estimates）',
-  '两个新 kernel 文件（facebook-publish-media-port.ts / llm-usage-recording-port.ts）MUST 同时进 boundaries/ownership-rules.json 的 fileOverrides 与 kernel-non-members.json 的 kernelRoster.members：src/kernel/ 没有目录规则，漏加 fileOverride 会让 boundaries:refresh 直接抛错，两处不一致会被 AC-BOUND-03 的 deepEqual 抓到',
-  '本文件与 content-authority-wire.ts MUST 进控制仓 scripts/sync-split-repos 的 TRANSPORT_MEMBERS：服务端在 content、客户端在 automation，不进名单则 content 仓拿不到注册函数',
   'automation 侧的 AIDCP_CONTENT_URL / AIDCP_CONTENT_INTERNAL_TOKEN 与 content 侧「每组独立注册、一组失败不连带关闭其它组、注册成功的组名进启动日志」已由 CONTENT_AUTHORITY_WIRING_DEBT 登记，本文件这两组照同一份处置，不重复登记',
+] as const;
+
+/**
+ * 已结清的欠账（形态照 `operator-command-http.ts` 的同名清单）。
+ *
+ * **留着条目而不是删掉**，理由与那份一致：删掉之后「做过了」与「从来没记过」长得一模一样，
+ * 而这三条里有两条是**别处的文件**（归属表、控制仓同步名单），下一个人无从判断该不该再做一遍。
+ */
+export const CONTENT_MEDIA_USAGE_WIRING_DEBT_CLOSED = [
+  'content-authority-http.ts 的私有译码副本已删，改指 content-authority-wire.ts 公共那一份（结清前逐条比过两份实现，语义一致、尚未漂移 ⇒ 这次是防患不是修 bug）',
+  '两个 kernel 端口文件已同时进 ownership-rules.json 的 fileOverrides 与 kernel-non-members.json 的 kernelRoster.members',
+  '本文件与 content-authority-wire.ts 已进控制仓 scripts/sync-split-repos 的 TRANSPORT_MEMBERS',
 ] as const;

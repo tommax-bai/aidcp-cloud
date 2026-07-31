@@ -37,13 +37,6 @@
  * 零属主表 SQL、零业务判定，满足 `aidcp-transport` 准入（三家都可能调用 + 不含任何属主表 SQL）。
  */
 import type { DeploymentTarget } from '../deployment-target.js';
-import {
-  CONTENT_PORT_ERROR_CODE_PREFIX,
-  ContentPortError,
-  contentPortReasonFromCode,
-  isContentPortError,
-  isContentPortFailureReason,
-} from '../kernel/content-port-error.js';
 import { API_DIRECT_CONTRACT_VERSION } from '../kernel/api-direct-port.js';
 import type { ConceptPool } from '../kernel/concept-pool.js';
 import type { ConceptPoolPort, ConceptWithSource } from '../kernel/concept-pool-port.js';
@@ -56,14 +49,9 @@ import type {
   CuratedContentTypeFilter,
   CuratedSelectItem,
 } from '../kernel/curated-content-types.js';
-import {
-  InternalHttpError,
-  type InternalHttpClient,
-  type InternalHttpServer,
-} from './internal-http.js';
+import type { InternalHttpClient, InternalHttpServer } from './internal-http.js';
 import {
   ApiDirectHttpError,
-  apiDirectEnvelope,
   isNonNegativeInteger,
   isRecord,
   isVoidAck,
@@ -73,6 +61,16 @@ import {
   requireRecord,
   requireString,
 } from './api-direct-http-common.js';
+// 失败映射层取公共那一份（`content-media-usage-http.ts` 的欠账登记第 1 条，本轮结清）。
+// 这里原先有一份逐字相同的私有副本：**两份失败映射表各自编译通过、各自测试通过，
+// 只有失败真发生的那一刻才看得出对不上**——而失败路径恰恰是最少被真跑到的那条。
+// 结清时逐条比过两份实现，语义完全一致、尚未漂移（所以这次是防患，不是修 bug）。
+import {
+  callContentAuthority,
+  ownerHasMethod,
+  runOwnerCall,
+  type ContentAuthorityChannel,
+} from './content-authority-wire.js';
 
 /**
  * 共用 4a 的契约版本号。**刻意不另起一个编号**：两套版本号只会各自漂移，
@@ -218,79 +216,6 @@ function curatedSelectionInput(value: unknown): CuratedSelectionInput {
 }
 
 /* ─────────────────────────── 属主侧失败译码（服务端注册用） */
-
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (isRecord(error) && typeof error.message === 'string') return error.message;
-  return String(error);
-}
-
-function errorCode(error: unknown): string | null {
-  return isRecord(error) && typeof error.code === 'string' ? error.code : null;
-}
-
-/**
- * 把属主抛出的任何东西译成**线上还认得出来**的失败。
- *
- * 三条分支各有各的必要性：
- *   ① 已是具名 content 端口错误 → **重建**而不是原样抛。`ContentPortErrorShape` 的 `code` 是可选的，
- *      而线格式只透传带 string `code` 的抛出物；原样抛一个没有 `code` 的实现方错误，
- *      reason 会在这一跳被压成 `handler_error`，回落分支再次死掉。
- *   ② reason 超出本进程枚举（对面版本更新）→ 原样带过去，**不收窄成兜底原因**
- *      （kernel 明写：未知取值由调用方原样记录并按不可用处置）。
- *   ③ 其它任何抛出物 → 具名 `remote_error`，原始 code 与消息进 `detail`。属主侧既有哨兵错误
- *      （精选库缺表那个）没有 `code`，正是靠这一条才没在跨进程后退化成一句 `handler_error`。
- */
-function ownerFailureAsWireError(error: unknown, operation: string): unknown {
-  if (isContentPortError(error)) {
-    if (isContentPortFailureReason(error.reason)) {
-      return new ContentPortError(error.reason, error.operation ?? operation, error.detail);
-    }
-    return new InternalHttpError(
-      `${CONTENT_PORT_ERROR_CODE_PREFIX}${error.reason}`,
-      errorMessage(error),
-    );
-  }
-  const code = errorCode(error);
-  const message = errorMessage(error);
-  return new ContentPortError(
-    'remote_error',
-    operation,
-    code === null ? message : `${code}: ${message}`,
-  );
-}
-
-/**
- * 属主侧的方法在场探针。**这个 `typeof` 探针只有放在这一侧才有意义**：它问的是本进程里那个
- * 真实存储对象有没有这个方法。同一个探针写在 automation 侧就恒为真（客户端类总是定义着方法），
- * 那正是本 change 要消掉的死代码。属主缺方法时答具名 `unsupported_method`，
- * 让概念池的回落分支有一个真会发生的触发条件。
- *
- * 另一条更常见的触发路径不经过这里：对面跑的是旧版本、根本没注册这条路由 → 404
- * `route_not_found` → 客户端译成 `unsupported_method`（见 {@link clientFailureAsContentPortError}）。
- */
-function ownerHasMethod(port: object, method: string): boolean {
-  return typeof (port as Record<string, unknown>)[method] === 'function';
-}
-
-async function runOwnerCall<T>(
-  operation: string,
-  present: boolean,
-  invoke: () => Promise<T>,
-): Promise<T> {
-  if (!present) {
-    throw new ContentPortError(
-      'unsupported_method',
-      operation,
-      'owner implementation does not provide this method',
-    );
-  }
-  try {
-    return await invoke();
-  } catch (error) {
-    throw ownerFailureAsWireError(error, operation);
-  }
-}
 
 /* ─────────────────────────────────────────── 服务端注册（content 侧） */
 
@@ -474,86 +399,6 @@ function isCuratedTermSampleList(value: unknown): value is CuratedTermSample[] {
 }
 
 /* ─────────────────────────── 客户端侧失败译码（automation 侧） */
-
-/**
- * 把这一跳上的任何失败译回具名 {@link ContentPortError}。
- *
- * 顺序有讲究：先用 `contentPortReasonFromCode` 还原属主给的具名原因（`unsupported_method`
- * 唯一能活着过来的路径），还原不出来的再逐条显式判定。**认不出的一律 `remote_error` +
- * 原始 code 进 `detail`，MUST NOT 套一个默认 reason。**
- */
-function clientFailureAsContentPortError(error: unknown, operation: string): ContentPortError {
-  const code = errorCode(error);
-  const message = errorMessage(error);
-  const recovered = contentPortReasonFromCode(code);
-  if (recovered !== null) return new ContentPortError(recovered, operation, message);
-
-  switch (code) {
-    case 'timeout':
-      // 连上了但没在预算内答完。**与「对面回答了空」是两回事**，这正是本端口存在的理由之一。
-      return new ContentPortError('timeout', operation, message);
-    case 'transport_error':
-      return new ContentPortError('unreachable', operation, message);
-    case 'bad_response':
-      return new ContentPortError('malformed_response', operation, message);
-    case 'route_not_found':
-      // 对面在、令牌也对，就是没有这条路由：版本落后 / 路由没注册。**这是回落分支最现实的触发点。**
-      return new ContentPortError('unsupported_method', operation, message);
-    case 'internal_http_auth_config_invalid':
-      // 本进程的令牌根本没配好，**一个字节都没发出去**——这是「这条端口没配置」的字面情形。
-      return new ContentPortError('not_configured', operation, `${code}: ${message}`);
-    case 'internal_http_unauthorized':
-      // 401 是对面明确拒绝，不是没配。混进 `not_configured` 会让「令牌轮换没同步」
-      // 读起来像「这条端口本来就没开」，运维会去查错的地方。
-      return new ContentPortError('remote_error', operation, `${code}: ${message}`);
-    case 'api_direct_version_unsupported':
-      // **刻意不判 `unsupported_method`**：版本不符是整条通道对不上，回落方法与首选方法同属一个
-      // 契约版本、照样会失败。判成回落只会让调用方多打一次注定失败的请求，
-      // 并把一次通道级配置错误伪装成一次能力缺口。
-      return new ContentPortError('remote_error', operation, `${code}: ${message}`);
-    default:
-      return new ContentPortError(
-        'remote_error',
-        operation,
-        code === null ? message : `${code}: ${message}`,
-      );
-  }
-}
-
-interface ContentAuthorityChannel {
-  readonly http: InternalHttpClient;
-  readonly callerToken: string;
-  readonly executionTarget: DeploymentTarget;
-}
-
-async function callContentAuthority<T>(
-  channel: ContentAuthorityChannel,
-  route: string,
-  operation: string,
-  input: unknown,
-  validate: (value: unknown) => value is T,
-): Promise<T> {
-  let raw: unknown;
-  try {
-    raw = await channel.http.callBearer<unknown>(
-      route,
-      apiDirectEnvelope(channel.executionTarget, input),
-      channel.callerToken,
-    );
-  } catch (error) {
-    throw clientFailureAsContentPortError(error, operation);
-  }
-  // 形状不符 MUST 抛。**MUST NOT 兜底成空数组 / false / 0**——那就是把一次契约漂移
-  // （kernel pin 没跟上：编译过、跑起来才错）伪装成一个真实答案。
-  if (!validate(raw)) {
-    throw new ContentPortError(
-      'malformed_response',
-      operation,
-      `unexpected response shape from ${route}`,
-    );
-  }
-  return raw;
-}
 
 /* ─────────────────────────────────────────── 客户端（automation 侧） */
 

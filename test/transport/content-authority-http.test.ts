@@ -304,3 +304,60 @@ test('形状不符 MUST 抛，MUST NOT 兜底成空值', async () => {
     },
   );
 });
+
+/**
+ * 失败映射表只许有一份。
+ *
+ * **这条用例守的东西，上面五条往返用例一条都守不住**——复制出来的第二份副本在复制那一刻
+ * 行为完全一致，往返测试照样全绿；它要等到某天有人只改了其中一份、且**恰好在失败真发生的那一刻**
+ * 才现形，而失败路径正是最少被真跑到的那条。2026-07-31 结清这条欠账时，两份实现比下来
+ * 语义确实还一致，等于说：**如果只靠行为测试，这个问题永远不会被发现。**
+ *
+ * 判据写成「取用方 MUST import 公共那份 + MUST NOT 自己定义同名函数」，
+ * 而不是「文件里不许出现某段文本」——后者会被换个函数名轻易绕过。**别当冗余删掉。**
+ */
+test('content 属主端口的失败映射层只有一份，取用方一律 import 公共译码模块', async () => {
+  const { readFile } = await import('node:fs/promises');
+  // 取用方＝所有走 content 属主端口三件套的传输模块。新增一个就往这里加一条。
+  const consumers = ['content-authority-http.ts', 'content-media-usage-http.ts'];
+  // 只在公共模块里定义、别处一律 import 的符号。
+  const shared = [
+    'ownerFailureAsWireError',
+    'clientFailureAsContentPortError',
+    'ownerHasMethod',
+    'runOwnerCall',
+    'callContentAuthority',
+  ];
+
+  const wire = await readFile(
+    new URL('../../src/transport/content-authority-wire.ts', import.meta.url),
+    'utf8',
+  );
+  for (const symbol of shared) {
+    assert.match(
+      wire,
+      new RegExp(`function ${symbol}\\b`),
+      `公共译码模块 MUST 是 ${symbol} 的唯一定义处`,
+    );
+  }
+
+  for (const file of consumers) {
+    const source = await readFile(
+      new URL(`../../src/transport/${file}`, import.meta.url),
+      'utf8',
+    );
+    assert.match(
+      source,
+      /from '\.\/content-authority-wire\.js'/,
+      `${file} MUST 从公共译码模块取用，不得自带一份`,
+    );
+    for (const symbol of shared) {
+      assert.doesNotMatch(
+        source,
+        new RegExp(`function ${symbol}\\b`),
+        `${file} 里出现了 ${symbol} 的本地定义 —— 那是第二份失败映射表，`
+          + '它与公共那份在复制当天完全等价，只有某一份被改过、且恰好在失败发生时才看得出对不上',
+      );
+    }
+  }
+});
