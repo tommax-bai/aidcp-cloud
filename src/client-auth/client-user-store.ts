@@ -839,6 +839,7 @@ export class ClientUserStore {
   private blockedAutomationEnvKeys = new Set<string>();
   /** RiskController 同步热路径镜像：只收录当前恰好绑定一个环境的账号。 */
   private environmentSlowStartByAccount = new Map<string, number | null>();
+  private environmentSlowStartCompletedByAccount = new Map<string, number | null>();
   private ambiguousEnvironmentAccounts = new Set<string>();
   /**
    * 账号 → 唯一绑定环境的同步反查镜像（change environment-level-rule-mode-and-approval）。
@@ -1228,10 +1229,15 @@ export class ClientUserStore {
       env_key: string;
       account_id: string;
       slow_start_since: Date | null;
+      slow_start_completed_at: Date | null;
       owner_count: number | string;
     }>(`SELECT e.env_key,
                e.account_id,
                e.slow_start_since,
+               (SELECT c.completed_at
+                  FROM facebook_environment_slow_start_completion c
+                 WHERE c.env_key=e.env_key AND c.execution_target=$1)
+                 AS slow_start_completed_at,
                (SELECT count(DISTINCT s.user_id)
                   FROM client_env_scope s
                  WHERE s.env_key = e.env_key AND s.source = 'admin') AS owner_count
@@ -1239,8 +1245,15 @@ export class ClientUserStore {
          WHERE e.account_id IS NOT NULL
            AND COALESCE(e.lifecycle_state, 'active') = 'active'
            AND lower(btrim(COALESCE(e.platform, ''))) IN ('facebook', 'fb')
-         ORDER BY e.account_id, e.env_key`);
-    const grouped = new Map<string, { envKey: string; since: number | null; ownerCount: number }[]>();
+         ORDER BY e.account_id, e.env_key`,
+      [this.executionTarget ?? 'dev'],
+    );
+    const grouped = new Map<string, {
+      envKey: string;
+      since: number | null;
+      completedAt: number | null;
+      ownerCount: number;
+    }[]>();
     for (const row of rows) {
       const accountId = String(row.account_id ?? '').trim();
       if (!accountId || accountId === RETIRED_ACCOUNT_ID) continue;
@@ -1248,17 +1261,22 @@ export class ClientUserStore {
       entries.push({
         envKey: row.env_key,
         since: row.slow_start_since ? row.slow_start_since.getTime() : null,
+        completedAt: row.slow_start_completed_at
+          ? row.slow_start_completed_at.getTime()
+          : null,
         ownerCount: Number(row.owner_count ?? 0),
       });
       grouped.set(accountId, entries);
     }
     const next = new Map<string, number | null>();
+    const completed = new Map<string, number | null>();
     const ambiguous = new Set<string>();
     const envKeys = new Map<string, string>();
     const ambiguousEnvKeys = new Set<string>();
     for (const [accountId, entries] of grouped) {
       if (entries.length === 1) {
         next.set(accountId, entries[0].since);
+        completed.set(accountId, entries[0].completedAt);
         // 唯一环境仍可能被多个客户同时归属 —— 那是跨客户争用，配置反查 MUST NOT 认它。
         if (entries[0].ownerCount > 1) {
           ambiguousEnvKeys.add(accountId);
@@ -1278,6 +1296,7 @@ export class ClientUserStore {
       );
     }
     this.environmentSlowStartByAccount = next;
+    this.environmentSlowStartCompletedByAccount = completed;
     this.ambiguousEnvironmentAccounts = ambiguous;
     this.environmentKeyByAccount = envKeys;
     this.ambiguousEnvironmentKeyAccounts = ambiguousEnvKeys;
@@ -1294,6 +1313,11 @@ export class ClientUserStore {
   slowStartSinceFor(accountId: string): number | null {
     if (this.ambiguousEnvironmentAccounts.has(accountId)) return null;
     return this.environmentSlowStartByAccount.get(accountId) ?? null;
+  }
+
+  slowStartCompletedAtFor(accountId: string): number | null {
+    if (this.ambiguousEnvironmentAccounts.has(accountId)) return null;
+    return this.environmentSlowStartCompletedByAccount.get(accountId) ?? null;
   }
 
   hasAmbiguousEnvironmentBinding(accountId: string): boolean {
@@ -1442,16 +1466,38 @@ export class ClientUserStore {
         this.pool,
         this.mirrorVersionBumper,
         'client_environment_slow_start',
-        (q) =>
-          q.query(
+        async (q) => {
+          const written = await q.query(
             `UPDATE client_environments e
-            SET slow_start_since=$3, slow_start_initialized=true, updated_at=now()
+            SET slow_start_since=CASE
+                  WHEN $3::timestamptz IS NULL THEN NULL
+                  WHEN EXISTS(
+                    SELECT 1 FROM facebook_environment_slow_start_completion c
+                     WHERE c.env_key=e.env_key AND c.execution_target=$4
+                  ) THEN $3
+                  ELSE COALESCE(e.slow_start_since,$3)
+                END,
+                slow_start_initialized=true,
+                updated_at=now()
           WHERE e.env_key=$2
             AND EXISTS(SELECT 1 FROM client_env_scope s
                         WHERE s.user_id=$1 AND s.env_key=e.env_key AND s.source='admin')
         RETURNING e.env_key`,
-            [userId, key, value],
-          ),
+            [userId, key, value, this.executionTarget ?? 'dev'],
+          );
+          if (enabled && (written.rowCount ?? written.rows.length) > 0) {
+            await q.query(
+              `DELETE FROM facebook_environment_slow_start_completion c
+                WHERE c.env_key=$1
+                  AND EXISTS(
+                    SELECT 1 FROM facebook_environment_slow_start_completion current
+                     WHERE current.env_key=$1 AND current.execution_target=$2
+                  )`,
+              [key, this.executionTarget ?? 'dev'],
+            );
+          }
+          return written;
+        },
       );
       if ((result.rowCount ?? result.rows.length) === 0) {
         return { ok: false, reason: 'environment_not_owned' };
@@ -1477,10 +1523,15 @@ export class ClientUserStore {
         this.pool,
         this.mirrorVersionBumper,
         'client_environment_slow_start',
-        (q) =>
-          q.query<{ slow_start_since: Date | null }>(
+        async (q) => {
+          const written = await q.query<{ slow_start_since: Date | null }>(
             `UPDATE client_environments
                 SET slow_start_since=CASE
+                      WHEN $2 AND EXISTS(
+                        SELECT 1 FROM facebook_environment_slow_start_completion c
+                         WHERE c.env_key=client_environments.env_key
+                           AND c.execution_target=$4
+                      ) THEN $3
                       WHEN $2 THEN COALESCE(slow_start_since, $3)
                       ELSE NULL
                     END,
@@ -1490,8 +1541,21 @@ export class ClientUserStore {
                 AND lifecycle_state='active'
                 AND platform='facebook'
           RETURNING slow_start_since`,
-            [key, enabled, value],
-          ),
+            [key, enabled, value, this.executionTarget ?? 'dev'],
+          );
+          if (enabled && written.rows[0]) {
+            await q.query(
+              `DELETE FROM facebook_environment_slow_start_completion c
+                WHERE c.env_key=$1
+                  AND EXISTS(
+                    SELECT 1 FROM facebook_environment_slow_start_completion current
+                     WHERE current.env_key=$1 AND current.execution_target=$2
+                  )`,
+              [key, this.executionTarget ?? 'dev'],
+            );
+          }
+          return written;
+        },
       );
       const written = result.rows[0];
       if (!written) {
@@ -1984,24 +2048,63 @@ export class ClientUserStore {
         if (!Number.isSafeInteger(policyRevision) || policyRevision < 1) {
           throw new Error('facebook_operation_policy_revision_unavailable');
         }
-        const rule = {
+        let rule: {
+          viewsPerLike: number;
+          joinEveryNRounds: number;
+        } = {
           viewsPerLike: FACEBOOK_OPERATION_POLICY_BOUNDS.rule.viewsPerLike.default,
           joinEveryNRounds: FACEBOOK_OPERATION_POLICY_BOUNDS.rule.joinEveryNRounds.default,
         };
-        const consumption = {
+        let consumption: {
+          viewsPerLike: number;
+          confirmedLikesPerJoin: number;
+          confirmedJoinsPerComment: number;
+        } = {
           viewsPerLike: FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.viewsPerLike.default,
           confirmedLikesPerJoin:
             FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedLikesPerJoin.default,
           confirmedJoinsPerComment:
             FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedJoinsPerComment.default,
         };
+        if (this.executionTarget) {
+          const globalResult = await client.query<{
+            rule_views_per_like: number | string;
+            rule_join_every_n_rounds: number | string;
+            consumption_views_per_like: number | string;
+            consumption_confirmed_likes_per_join: number | string;
+            consumption_confirmed_joins_per_comment: number | string;
+          }>(
+            `SELECT rule_views_per_like,rule_join_every_n_rounds,
+                    consumption_views_per_like,consumption_confirmed_likes_per_join,
+                    consumption_confirmed_joins_per_comment
+               FROM facebook_operation_global_policy
+              WHERE execution_target=$1`,
+            [this.executionTarget],
+          );
+          const global = globalResult.rows[0];
+          if (!global) {
+            await client.query('ROLLBACK');
+            return { ok: false, reason: 'schema_unavailable' };
+          }
+          rule = {
+            viewsPerLike: Number(global.rule_views_per_like),
+            joinEveryNRounds: Number(global.rule_join_every_n_rounds),
+          };
+          consumption = {
+            viewsPerLike: Number(global.consumption_views_per_like),
+            confirmedLikesPerJoin: Number(global.consumption_confirmed_likes_per_join),
+            confirmedJoinsPerComment: Number(
+              global.consumption_confirmed_joins_per_comment,
+            ),
+          };
+        }
         await client.query(
           `INSERT INTO facebook_operation_policy
              (env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
               consumption_views_per_like,consumption_confirmed_likes_per_join,
               consumption_confirmed_joins_per_comment,policy_schema_version,
-              policy_revision,updated_at,updated_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,now(),$9)`,
+              policy_revision,cadence_source,updated_at,updated_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,'global',now(),$9)`,
           [
             envKey,
             baseMode,
@@ -2016,6 +2119,7 @@ export class ClientUserStore {
         );
         const afterPolicy = {
           baseMode,
+          cadenceSource: 'global',
           rule,
           consumption,
           policySchemaVersion: 1,

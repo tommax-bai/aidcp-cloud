@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0102_facebook_consumption_runtime';
+export const REQUIRED_SCHEMA_VERSION = '0103_facebook_operation_global_policy';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -175,8 +175,12 @@ export const REQUIRED_SCHEMA_VERSION = '0102_facebook_consumption_runtime';
  * 后者只执行 SQL、**不写 `schema_migrations` 账本**（它自己的文件头明写这条缺口，且用户 2026-07-25
  * 裁定有意保留它）。用它补完，表在库里、门读的账本却还停在旧版本 ⇒ 照样判 behind，
  * 而现场看起来「表明明建好了」，是最费时间的一种排查。
+ *
+ * 注：`0103_facebook_operation_global_policy` 是 Facebook 规则/消费节奏、慢启动天数与逐日上限的
+ * 目标全局权威，同时增加环境继承来源和 DEV/OL 隔离的粘滞毕业事实。运行时 schema probe 明确要求
+ * 这些表/列；缺失时全局配置与冷启动真态不可安全回落，故 REQUIRED 与 KNOWN_MAX 一并抬到 0103。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0102_facebook_consumption_runtime';
+export const KNOWN_MAX_SCHEMA_VERSION = '0103_facebook_operation_global_policy';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

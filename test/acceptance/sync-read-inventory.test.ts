@@ -95,6 +95,7 @@ test('post-4a B1/B2/B4 owner snapshots expose only the surviving split-service f
     'blockedEnvironmentKeys',
     'slowStartAnchors.accountId',
     'slowStartAnchors.slowStartSince',
+    'slowStartAnchors.slowStartCompletedAt',
     'slowStartAnchors.ambiguous',
   ]);
   assert.deepEqual(byId.get('B4')?.survivingFields, [

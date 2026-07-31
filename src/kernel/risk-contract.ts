@@ -52,6 +52,19 @@ export interface AccountNurtureProvider {
    */
   slowStartSinceFor(accountId: string): number | null;
   /**
+   * 当前执行目标下的环境慢启动毕业时刻。null = 尚未毕业或无唯一环境。
+   * 毕业事实是粘滞的；只有显式重新开启慢启动才会清除。
+   */
+  slowStartCompletedAtFor?(accountId: string): number | null;
+  /**
+   * Facebook 当前执行目标的慢启动总天数与逐日上限。缺省保留编译默认。
+   * 返回值必须是同步内存快照；调用方不得在风控热路径做 IO。
+   */
+  facebookSlowStartPolicy?(): {
+    totalDays: number;
+    dailyCaps: ActionQuota[];
+  };
+  /**
    * 账号入库时刻（epoch ms）。**仅供 env 全局旁路 `AIDCP_COLDSTART_RAMP=true` 这条历史路径**，
    * 且仅在账号级未开启时才被查询（见 RiskController 的 anchor 解析优先级）。
    * MUST NOT 用作慢启动起点——它记的是「第一次连上本云端库」，不是平台注册时间。

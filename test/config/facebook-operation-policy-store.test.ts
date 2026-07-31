@@ -15,11 +15,26 @@ interface PolicyRow {
   consumption_confirmed_joins_per_comment: number;
   policy_schema_version: number;
   policy_revision: number;
+  cadence_source: 'global' | 'environment';
   updated_at: Date;
   updated_by: string;
 }
 
-function readySchema(): SchemaProber {
+interface GlobalPolicyRow {
+  execution_target: 'dev' | 'ol';
+  rule_views_per_like: number;
+  rule_join_every_n_rounds: number;
+  consumption_views_per_like: number;
+  consumption_confirmed_likes_per_join: number;
+  consumption_confirmed_joins_per_comment: number;
+  slow_start_total_days: number;
+  slow_start_daily_caps: unknown[];
+  revision: number;
+  updated_at: Date;
+  updated_by: string;
+}
+
+function readySchema(withGlobal = false): SchemaProber {
   return async (_pool, tables) => ({
     tables: new Set(tables),
     columns: new Set([
@@ -32,6 +47,7 @@ function readySchema(): SchemaProber {
       'facebook_operation_policy.consumption_confirmed_joins_per_comment',
       'facebook_operation_policy.policy_schema_version',
       'facebook_operation_policy.policy_revision',
+      'facebook_operation_policy.cadence_source',
       'facebook_operation_policy.updated_at',
       'facebook_operation_policy.updated_by',
       'facebook_operation_policy_audit.audit_id',
@@ -45,15 +61,46 @@ function readySchema(): SchemaProber {
       'facebook_operation_policy_audit.request_id',
       'facebook_operation_policy_audit.reason',
       'facebook_operation_policy_audit.created_at',
+      ...(withGlobal ? [
+        'facebook_operation_global_policy.execution_target',
+        'facebook_operation_global_policy.rule_views_per_like',
+        'facebook_operation_global_policy.rule_join_every_n_rounds',
+        'facebook_operation_global_policy.consumption_views_per_like',
+        'facebook_operation_global_policy.consumption_confirmed_likes_per_join',
+        'facebook_operation_global_policy.consumption_confirmed_joins_per_comment',
+        'facebook_operation_global_policy.slow_start_total_days',
+        'facebook_operation_global_policy.slow_start_daily_caps',
+        'facebook_operation_global_policy.revision',
+        'facebook_operation_global_policy.updated_at',
+        'facebook_operation_global_policy.updated_by',
+        'facebook_operation_global_policy_audit.audit_id',
+        'facebook_operation_global_policy_audit.execution_target',
+        'facebook_operation_global_policy_audit.prior_revision',
+        'facebook_operation_global_policy_audit.new_revision',
+        'facebook_operation_global_policy_audit.before_policy',
+        'facebook_operation_global_policy_audit.after_policy',
+        'facebook_operation_global_policy_audit.actor_class',
+        'facebook_operation_global_policy_audit.actor_id',
+        'facebook_operation_global_policy_audit.request_id',
+        'facebook_operation_global_policy_audit.reason',
+        'facebook_operation_global_policy_audit.created_at',
+        'facebook_environment_slow_start_completion.env_key',
+        'facebook_environment_slow_start_completion.execution_target',
+        'facebook_environment_slow_start_completion.completed_at',
+      ] : []),
     ]),
     indexes: new Set([
       'idx_facebook_operation_policy_audit_env_revision',
       'uq_facebook_operation_policy_audit_revision',
+      ...(withGlobal ? [
+        'idx_facebook_operation_global_policy_audit_target_revision',
+        'idx_facebook_environment_slow_start_completion_target',
+      ] : []),
     ]),
   });
 }
 
-function database() {
+function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
   const environments = new Map<string, {
     platform: string;
     accountId: string | null;
@@ -85,6 +132,30 @@ function database() {
   ]);
   let policies = new Map<string, PolicyRow>();
   let audits: unknown[][] = [];
+  let globalRow: GlobalPolicyRow = {
+    execution_target: options.executionTarget ?? 'dev',
+    rule_views_per_like: 5,
+    rule_join_every_n_rounds: 2,
+    consumption_views_per_like: 5,
+    consumption_confirmed_likes_per_join: 2,
+    consumption_confirmed_joins_per_comment: 2,
+    slow_start_total_days: 7,
+    slow_start_daily_caps: Array.from({ length: 7 }, (_, index) => ({
+      day: index + 1,
+      view: 20 + index * 5,
+      like: 2 + index,
+      comment: index,
+      follow: 1 + index,
+      publish: 0,
+      search: 1 + index,
+      joinGroup: index > 1 ? 1 : 0,
+    })),
+    revision: 1,
+    updated_at: new Date('2026-07-30T00:00:00.000Z'),
+    updated_by: 'migration:0103',
+  };
+  let globalAudits: unknown[][] = [];
+  let graduationMarks: unknown[][] = [];
   let auditFailure = false;
   let lockTail = Promise.resolve();
   let slowStartRefreshes = 0;
@@ -95,8 +166,44 @@ function database() {
 
   const query = async (text: string, params: unknown[] = []) => {
     const sql = text.replace(/\s+/g, ' ').trim();
+    if (sql.startsWith('SELECT execution_target,rule_views_per_like')) {
+      const matchesTarget = params.length === 0
+        || String(params[0]) === globalRow.execution_target;
+      return {
+        rows: matchesTarget ? [{ ...globalRow }] : [],
+        rowCount: matchesTarget ? 1 : 0,
+      };
+    }
+    if (sql.startsWith('UPDATE facebook_operation_global_policy')) {
+      globalRow = {
+        ...globalRow,
+        execution_target: String(params[0]) as GlobalPolicyRow['execution_target'],
+        rule_views_per_like: Number(params[1]),
+        rule_join_every_n_rounds: Number(params[2]),
+        consumption_views_per_like: Number(params[3]),
+        consumption_confirmed_likes_per_join: Number(params[4]),
+        consumption_confirmed_joins_per_comment: Number(params[5]),
+        slow_start_total_days: Number(params[6]),
+        slow_start_daily_caps: JSON.parse(String(params[7])),
+        revision: Number(params[8]),
+        updated_at: new Date(),
+        updated_by: String(params[9]),
+      };
+      return { rows: [{ ...globalRow }], rowCount: 1 };
+    }
+    if (sql.startsWith('INSERT INTO facebook_operation_global_policy_audit')) {
+      globalAudits.push(params);
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.startsWith('INSERT INTO facebook_environment_slow_start_completion')) {
+      graduationMarks.push(params);
+      return { rows: [], rowCount: 0 };
+    }
     if (sql.startsWith('SELECT env_key,base_mode') && !sql.includes('WHERE env_key=')) {
-      return { rows: [...policies.values()], rowCount: policies.size };
+      const rows = sql.includes("WHERE cadence_source='global'")
+        ? [...policies.values()].filter((row) => row.cadence_source === 'global')
+        : [...policies.values()];
+      return { rows, rowCount: rows.length };
     }
     if (sql.startsWith('SELECT env_key,enabled,updated_at,updated_by')) {
       if (sql.includes('WHERE env_key=')) {
@@ -177,6 +284,28 @@ function database() {
       audits.push(params);
       return { rows: [], rowCount: 1 };
     }
+    if (sql.startsWith('DELETE FROM facebook_environment_slow_start_completion')) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (
+      sql.startsWith('UPDATE facebook_operation_policy')
+      && !sql.includes('base_mode=')
+    ) {
+      const prior = policies.get(String(params[0]))!;
+      const row: PolicyRow = {
+        ...prior,
+        rule_views_per_like: Number(params[1]),
+        rule_join_every_n_rounds: Number(params[2]),
+        consumption_views_per_like: Number(params[3]),
+        consumption_confirmed_likes_per_join: Number(params[4]),
+        consumption_confirmed_joins_per_comment: Number(params[5]),
+        policy_revision: Number(params[6]),
+        updated_at: new Date(),
+        updated_by: String(params[7]),
+      };
+      policies.set(row.env_key, row);
+      return { rows: [row], rowCount: 1 };
+    }
     if (
       sql.startsWith('INSERT INTO facebook_operation_policy')
       || sql.startsWith('UPDATE facebook_operation_policy')
@@ -191,8 +320,9 @@ function database() {
         consumption_confirmed_joins_per_comment: Number(params[6]),
         policy_schema_version: 1,
         policy_revision: Number(params[7]),
+        cadence_source: (params[8] ?? 'environment') as PolicyRow['cadence_source'],
         updated_at: new Date(),
-        updated_by: String(params[8]),
+        updated_by: String(params[9] ?? params[8]),
       };
       policies.set(row.env_key, row);
       return { rows: [row], rowCount: 1 };
@@ -209,6 +339,9 @@ function database() {
             policies: Map<string, PolicyRow>;
             audits: unknown[][];
             slow: Map<string, Date | null>;
+            globalRow: GlobalPolicyRow;
+            globalAudits: unknown[][];
+            graduationMarks: unknown[][];
           }
         | null = null;
       return {
@@ -224,6 +357,9 @@ function database() {
               policies: new Map([...policies].map(([key, row]) => [key, { ...row }])),
               audits: audits.map((row) => [...row]),
               slow: new Map([...environments].map(([key, env]) => [key, env.slowStartSince])),
+              globalRow: { ...globalRow },
+              globalAudits: globalAudits.map((row) => [...row]),
+              graduationMarks: graduationMarks.map((row) => [...row]),
             };
             return { rows: [], rowCount: 0 };
           }
@@ -237,6 +373,9 @@ function database() {
             if (snapshot) {
               policies = snapshot.policies;
               audits = snapshot.audits;
+              globalRow = snapshot.globalRow;
+              globalAudits = snapshot.globalAudits;
+              graduationMarks = snapshot.graduationMarks;
               for (const [key, since] of snapshot.slow) {
                 environments.get(key)!.slowStartSince = since;
               }
@@ -265,7 +404,8 @@ function database() {
 
   const store = new FacebookOperationPolicyStore({
     pool,
-    schemaProber: readySchema(),
+    schemaProber: readySchema(options.executionTarget !== undefined),
+    executionTarget: options.executionTarget,
     mirrorVersionBumper,
     environmentResolver: (accountId) => ({
       ok: true,
@@ -295,6 +435,9 @@ function database() {
     environments,
     get policies() { return policies; },
     get audits() { return audits; },
+    get globalRow() { return globalRow; },
+    get globalAudits() { return globalAudits; },
+    get graduationMarks() { return graduationMarks; },
     get slowStartRefreshes() { return slowStartRefreshes; },
     get revisionAllocations() { return revisionAllocations; },
     get bumps() { return bumps; },
@@ -320,6 +463,143 @@ describe('FacebookOperationPolicyStore', () => {
       assert.equal(resolved.baseMode, 'rule');
       assert.equal(resolved.policyRevision, 0);
     }
+  });
+
+  it('propagates target-global cadence only to inheriting environments with CAS and audit', async () => {
+    const db = database({ executionTarget: 'dev' });
+    await db.store.init();
+    assert.equal(db.store.getGlobal()?.executionTarget, 'dev');
+    assert.equal(db.store.getGlobal()?.revision, 1);
+
+    const inherited = await db.store.writeEnvironment(
+      'env-fb',
+      {
+        expectedRevision: 0,
+        mode: 'rule',
+        cadenceSource: 'global',
+        requestId: 'seed-inherited',
+      },
+      'panel:alice',
+    );
+    assert.equal(inherited.ok, true);
+    const independent = await db.store.writeEnvironment(
+      'env-fb-alias',
+      {
+        expectedRevision: 0,
+        mode: 'consumption',
+        cadenceSource: 'environment',
+        rule: { viewsPerLike: 9, joinEveryNRounds: 4 },
+        consumption: {
+          viewsPerLike: 8,
+          confirmedLikesPerJoin: 3,
+          confirmedJoinsPerComment: 5,
+        },
+        requestId: 'seed-independent',
+      },
+      'panel:alice',
+    );
+    assert.equal(independent.ok, true);
+    const independentRevision = db.policies.get('env-fb-alias')?.policy_revision;
+
+    const currentGlobal = db.store.getGlobal()!;
+    const last = currentGlobal.slowStart.dailyCaps.at(-1)!;
+    const dailyCaps = [
+      ...currentGlobal.slowStart.dailyCaps,
+      ...Array.from({ length: 7 }, (_, index) => ({
+        ...last,
+        day: 8 + index,
+      })),
+    ];
+    const updated = await db.store.writeGlobal(
+      {
+        expectedRevision: 1,
+        rule: { viewsPerLike: 6, joinEveryNRounds: 3 },
+        consumption: {
+          viewsPerLike: 7,
+          confirmedLikesPerJoin: 4,
+          confirmedJoinsPerComment: 5,
+        },
+        slowStart: { totalDays: 14, dailyCaps },
+        requestId: 'global-update',
+        reason: 'operator tuning',
+      },
+      'panel:alice',
+    );
+    assert.equal(updated.ok, true);
+    if (updated.ok) {
+      assert.equal(updated.view.revision, 2);
+      assert.equal(updated.view.slowStart.totalDays, 14);
+    }
+    assert.deepEqual(
+      {
+        source: db.policies.get('env-fb')?.cadence_source,
+        ruleViews: db.policies.get('env-fb')?.rule_views_per_like,
+        consumptionViews: db.policies.get('env-fb')?.consumption_views_per_like,
+      },
+      { source: 'global', ruleViews: 6, consumptionViews: 7 },
+    );
+    assert.deepEqual(
+      {
+        source: db.policies.get('env-fb-alias')?.cadence_source,
+        revision: db.policies.get('env-fb-alias')?.policy_revision,
+        ruleViews: db.policies.get('env-fb-alias')?.rule_views_per_like,
+        consumptionViews: db.policies.get('env-fb-alias')?.consumption_views_per_like,
+      },
+      {
+        source: 'environment',
+        revision: independentRevision,
+        ruleViews: 9,
+        consumptionViews: 8,
+      },
+      'independent environment must not be mutated or revision-bumped',
+    );
+    assert.equal(db.globalAudits.length, 1);
+    assert.equal(db.audits.length, 3, 'two direct writes plus one propagated audit');
+    assert.deepEqual(db.graduationMarks, [['dev', 7], ['dev', 14]]);
+    assert.deepEqual(db.bumps.slice(-2), [
+      'content_schedule',
+      'client_environment_slow_start',
+    ]);
+
+    const stale = await db.store.writeGlobal(
+      {
+        expectedRevision: 1,
+        rule: currentGlobal.rule,
+        consumption: currentGlobal.consumption,
+        slowStart: currentGlobal.slowStart,
+        requestId: 'stale-global-update',
+      },
+      'panel:bob',
+    );
+    assert.equal(stale.ok, false);
+    if (!stale.ok) {
+      assert.equal(stale.reason, 'revision_conflict');
+      assert.equal(stale.current?.revision, 2);
+    }
+    assert.equal(db.globalAudits.length, 1, 'stale CAS must not create an audit row');
+  });
+
+  it('rejects malformed target-global daily caps before opening a transaction', async () => {
+    const db = database({ executionTarget: 'dev' });
+    await db.store.init();
+    const current = db.store.getGlobal()!;
+    const result = await db.store.writeGlobal(
+      {
+        expectedRevision: current.revision,
+        rule: current.rule,
+        consumption: current.consumption,
+        slowStart: {
+          totalDays: 8,
+          dailyCaps: current.slowStart.dailyCaps,
+        },
+        requestId: 'bad-global-caps',
+      },
+      'panel:alice',
+    );
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, 'invalid_value');
+    assert.equal(db.globalAudits.length, 0);
+    assert.equal(db.graduationMarks.length, 0);
   });
 
   it('allows unbound Facebook configuration and returns server defaults', async () => {

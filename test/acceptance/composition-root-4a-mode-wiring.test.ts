@@ -160,9 +160,12 @@ test('4a composition: exact-environment slow-start arbitration is wired in segA 
     'const facebookOperationPolicyStore = new FacebookOperationPolicyStore({',
     '\n  const facebookGroupCommentPolicyStore =',
   );
-  assert.match(operationPolicy, /environmentSlowStartResolver:\s*async \(\{ since \}\)/);
+  assert.match(
+    operationPolicy,
+    /environmentSlowStartResolver:\s*async \(\{ since, completedAt, totalDays \}\)/,
+  );
   assert.match(operationPolicy, /AIDCP_SLOW_START_DISABLED/);
-  assert.match(operationPolicy, /SLOW_START_TOTAL_DAYS \* 86_400_000/);
+  assert.match(operationPolicy, /totalDays \* 86_400_000/);
 
   const automation = between(
     source,

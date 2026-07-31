@@ -37,18 +37,21 @@ export type AutomationSlowStartLookup =
       state: 'fresh';
       resolution: 'known';
       slowStartSince: number | null;
+      slowStartCompletedAt: number | null;
       asOf: number;
     }
   | {
       state: 'fresh';
       resolution: 'missing' | 'ambiguous';
       slowStartSince: null;
+      slowStartCompletedAt: null;
       asOf: number;
     }
   | {
       state: Exclude<SyncReadDeliveryState, 'fresh'>;
       resolution: 'unknown';
       slowStartSince: null;
+      slowStartCompletedAt: null;
       asOf: number | null;
     };
 
@@ -177,6 +180,7 @@ export class AutomationSyncReadMirrors {
         state: state as Exclude<SyncReadDeliveryState, 'fresh'>,
         resolution: 'unknown',
         slowStartSince: null,
+        slowStartCompletedAt: null,
         asOf: view.metadata?.sourceAsOf ?? null,
       };
     }
@@ -188,6 +192,7 @@ export class AutomationSyncReadMirrors {
         state: 'fresh',
         resolution: 'missing',
         slowStartSince: null,
+        slowStartCompletedAt: null,
         asOf: view.metadata!.sourceAsOf,
       };
     }
@@ -196,6 +201,7 @@ export class AutomationSyncReadMirrors {
         state: 'fresh',
         resolution: 'ambiguous',
         slowStartSince: null,
+        slowStartCompletedAt: null,
         asOf: view.metadata!.sourceAsOf,
       };
     }
@@ -203,6 +209,7 @@ export class AutomationSyncReadMirrors {
       state: 'fresh',
       resolution: 'known',
       slowStartSince: row.slowStartSince,
+      slowStartCompletedAt: row.slowStartCompletedAt,
       asOf: view.metadata!.sourceAsOf,
     };
   }

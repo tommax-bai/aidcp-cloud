@@ -312,7 +312,10 @@ export interface PanelDeps {
   facebookOperationPolicy?: Pick<
     FacebookOperationPolicyStore,
     'isReady' | 'getForEnv' | 'writeEnvironment' | 'writeLegacySlowStart'
-  >;
+  > & Partial<Pick<
+    FacebookOperationPolicyStore,
+    'getGlobal' | 'writeGlobal'
+  >>;
   /** Deployment-target-scoped join-to-first-comment wait authority. */
   facebookGroupCommentPolicy?: Pick<
     FacebookGroupCommentPolicyStore,

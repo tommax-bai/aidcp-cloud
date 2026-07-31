@@ -6,12 +6,16 @@ import {
   type SchemaProber,
 } from '../kernel/schema-capability-contract.js';
 import { normalizePlatformId } from '../kernel/platform-types.js';
+import type { ActionQuota } from '../kernel/risk-contract.js';
+import type { DeploymentTarget } from '../deployment-target.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 import type { MirrorVersionBumper } from './mirror-version-store.js';
 
 const { Pool } = pg;
 
 export const FACEBOOK_OPERATION_POLICY_SCHEMA_VERSION = 'facebook_operation_policy@1';
+export const FACEBOOK_OPERATION_GLOBAL_POLICY_SCHEMA_VERSION =
+  'facebook_operation_global_policy@1';
 
 export const FACEBOOK_OPERATION_POLICY_BOUNDS = {
   rule: {
@@ -25,8 +29,46 @@ export const FACEBOOK_OPERATION_POLICY_BOUNDS = {
   },
 } as const;
 
+export const FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS = {
+  ...FACEBOOK_OPERATION_POLICY_BOUNDS,
+  slowStart: {
+    totalDays: { min: 1, max: 30, default: 7 },
+    dailyCaps: {
+      view: { min: 0, max: 300 },
+      like: { min: 0, max: 100 },
+      comment: { min: 0, max: 15 },
+      follow: { min: 0, max: 30 },
+      publish: { min: 0, max: 2 },
+      search: { min: 0, max: 20 },
+      joinGroup: { min: 0, max: 5 },
+    },
+  },
+} as const;
+
+export interface FacebookSlowStartDailyCaps {
+  day: number;
+  view: number;
+  like: number;
+  comment: number;
+  follow: number;
+  publish: number;
+  search: number;
+  joinGroup: number;
+}
+
+export const DEFAULT_FACEBOOK_SLOW_START_DAILY_CAPS: FacebookSlowStartDailyCaps[] = [
+  { day: 1, view: 20, like: 2, comment: 0, follow: 1, publish: 0, search: 1, joinGroup: 0 },
+  { day: 2, view: 25, like: 3, comment: 0, follow: 1, publish: 0, search: 1, joinGroup: 0 },
+  { day: 3, view: 35, like: 6, comment: 1, follow: 2, publish: 0, search: 2, joinGroup: 1 },
+  { day: 4, view: 40, like: 8, comment: 2, follow: 2, publish: 0, search: 2, joinGroup: 1 },
+  { day: 5, view: 50, like: 12, comment: 3, follow: 3, publish: 1, search: 3, joinGroup: 2 },
+  { day: 6, view: 60, like: 15, comment: 4, follow: 4, publish: 1, search: 4, joinGroup: 2 },
+  { day: 7, view: 70, like: 18, comment: 5, follow: 5, publish: 1, search: 5, joinGroup: 3 },
+];
+
 export type FacebookBaseOperationMode = 'persona' | 'rule' | 'consumption';
 export type FacebookRequestedOperationMode = FacebookBaseOperationMode | 'slow_start';
+export type FacebookCadenceSource = 'global' | 'environment';
 export type FacebookEffectiveOperationMode =
   | FacebookBaseOperationMode
   | 'slow_start'
@@ -49,6 +91,7 @@ export interface FacebookOperationPolicyView {
   effectiveMode: FacebookEffectiveOperationMode | null;
   policyRevision: number;
   schemaVersion: string;
+  cadenceSource: FacebookCadenceSource;
   rule: FacebookRuleOperationParameters;
   consumption: FacebookConsumptionOperationParameters;
   bounds: typeof FACEBOOK_OPERATION_POLICY_BOUNDS;
@@ -66,6 +109,34 @@ export interface FacebookOperationPolicyView {
   updatedAt: string | null;
   updatedBy: string | null;
 }
+
+export interface FacebookOperationGlobalPolicyView {
+  executionTarget: DeploymentTarget;
+  revision: number;
+  schemaVersion: string;
+  rule: FacebookRuleOperationParameters;
+  consumption: FacebookConsumptionOperationParameters;
+  slowStart: {
+    totalDays: number;
+    dailyCaps: FacebookSlowStartDailyCaps[];
+  };
+  bounds: typeof FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface FacebookSlowStartRuntimePolicy {
+  totalDays: number;
+  dailyCaps: ActionQuota[];
+}
+
+export type FacebookOperationGlobalPolicyWriteResult =
+  | { ok: true; view: FacebookOperationGlobalPolicyView }
+  | {
+      ok: false;
+      reason: 'invalid_value' | 'revision_conflict' | 'policy_unavailable';
+      current?: FacebookOperationGlobalPolicyView;
+    };
 
 export type FacebookOperationPolicyWriteResult =
   | { ok: true; view: FacebookOperationPolicyView }
@@ -129,6 +200,8 @@ export type FacebookOperationPolicyEnvironmentSlowStartResolver = (input: {
   envKey: string;
   accountId: string | null;
   since: number;
+  completedAt: number | null;
+  totalDays: number;
 }) => Promise<'active' | 'off' | 'graduated' | 'unknown'>;
 
 export interface FacebookOperationPolicyAccountDecision {
@@ -145,6 +218,7 @@ export interface FacebookOperationPolicyBaseProjection {
   envKey: string;
   baseMode: FacebookBaseOperationMode;
   policyRevision: number;
+  cadenceSource: FacebookCadenceSource;
   rule: FacebookRuleOperationParameters;
   consumption: FacebookConsumptionOperationParameters;
   updatedAt: string | null;
@@ -165,6 +239,7 @@ interface OperationPolicyDbRow {
   consumption_confirmed_joins_per_comment: number | string;
   policy_schema_version: number | string;
   policy_revision: number | string;
+  cadence_source: FacebookCadenceSource;
   updated_at: Date | string;
   updated_by: string;
 }
@@ -175,6 +250,7 @@ interface EnvironmentDbRow {
   account_display_name: string | null;
   account_exists: boolean;
   slow_start_since: Date | string | null;
+  slow_start_completed_at: Date | string | null;
   duplicate_count: number | string;
   owner_count: number | string;
 }
@@ -183,8 +259,23 @@ interface LockedEnvironmentDbRow {
   platform: string | null;
   account_id: string | null;
   slow_start_since: Date | string | null;
+  slow_start_completed_at: Date | string | null;
   duplicate_count: number | string;
   owner_count: number | string;
+}
+
+interface GlobalOperationPolicyDbRow {
+  execution_target: DeploymentTarget;
+  rule_views_per_like: number | string;
+  rule_join_every_n_rounds: number | string;
+  consumption_views_per_like: number | string;
+  consumption_confirmed_likes_per_join: number | string;
+  consumption_confirmed_joins_per_comment: number | string;
+  slow_start_total_days: number | string;
+  slow_start_daily_caps: unknown;
+  revision: number | string;
+  updated_at: Date | string;
+  updated_by: string;
 }
 
 interface LegacyRuleModeDbRow {
@@ -208,6 +299,7 @@ const OPERATION_POLICY_REQUIREMENT = {
       'consumption_confirmed_joins_per_comment',
       'policy_schema_version',
       'policy_revision',
+      'cadence_source',
       'updated_at',
       'updated_by',
     ])],
@@ -224,6 +316,37 @@ const OPERATION_POLICY_REQUIREMENT = {
       'reason',
       'created_at',
     ])],
+    ['facebook_operation_global_policy', new Set([
+      'execution_target',
+      'rule_views_per_like',
+      'rule_join_every_n_rounds',
+      'consumption_views_per_like',
+      'consumption_confirmed_likes_per_join',
+      'consumption_confirmed_joins_per_comment',
+      'slow_start_total_days',
+      'slow_start_daily_caps',
+      'revision',
+      'updated_at',
+      'updated_by',
+    ])],
+    ['facebook_operation_global_policy_audit', new Set([
+      'audit_id',
+      'execution_target',
+      'prior_revision',
+      'new_revision',
+      'before_policy',
+      'after_policy',
+      'actor_class',
+      'actor_id',
+      'request_id',
+      'reason',
+      'created_at',
+    ])],
+    ['facebook_environment_slow_start_completion', new Set([
+      'env_key',
+      'execution_target',
+      'completed_at',
+    ])],
   ]),
   indexes: new Map([
     [
@@ -233,6 +356,14 @@ const OPERATION_POLICY_REQUIREMENT = {
     [
       'uq_facebook_operation_policy_audit_revision',
       'facebook_operation_policy_audit',
+    ],
+    [
+      'idx_facebook_operation_global_policy_audit_target_revision',
+      'facebook_operation_global_policy_audit',
+    ],
+    [
+      'idx_facebook_environment_slow_start_completion_target',
+      'facebook_environment_slow_start_completion',
     ],
   ]),
 };
@@ -245,6 +376,7 @@ export interface FacebookOperationPolicyStoreOptions {
   user?: string;
   password?: string;
   schemaProber: SchemaProber;
+  executionTarget?: DeploymentTarget;
   mirrorVersionBumper?: MirrorVersionBumper;
   environmentResolver?: FacebookOperationPolicyEnvironmentResolver;
   slowStartResolver?: FacebookOperationPolicySlowStartResolver;
@@ -274,11 +406,11 @@ function actorParts(actor: string): { actorClass: string; actorId: string } {
   };
 }
 
-function defaultCachedPolicy(envKey: string): CachedPolicy {
+function defaultGlobalPolicy(executionTarget: DeploymentTarget): FacebookOperationGlobalPolicyView {
   return {
-    envKey,
-    baseMode: 'persona',
-    policyRevision: 0,
+    executionTarget,
+    revision: 1,
+    schemaVersion: FACEBOOK_OPERATION_GLOBAL_POLICY_SCHEMA_VERSION,
     rule: {
       viewsPerLike: FACEBOOK_OPERATION_POLICY_BOUNDS.rule.viewsPerLike.default,
       joinEveryNRounds: FACEBOOK_OPERATION_POLICY_BOUNDS.rule.joinEveryNRounds.default,
@@ -289,6 +421,33 @@ function defaultCachedPolicy(envKey: string): CachedPolicy {
         FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedLikesPerJoin.default,
       confirmedJoinsPerComment:
         FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedJoinsPerComment.default,
+    },
+    slowStart: {
+      totalDays: FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.slowStart.totalDays.default,
+      dailyCaps: DEFAULT_FACEBOOK_SLOW_START_DAILY_CAPS.map((row) => ({ ...row })),
+    },
+    bounds: FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS,
+    updatedAt: null,
+    updatedBy: null,
+  };
+}
+
+function defaultCachedPolicy(
+  envKey: string,
+  globalPolicy?: FacebookOperationGlobalPolicyView,
+  cadenceSource: FacebookCadenceSource = 'global',
+): CachedPolicy {
+  const defaults = globalPolicy ?? defaultGlobalPolicy('dev');
+  return {
+    envKey,
+    baseMode: 'persona',
+    policyRevision: 0,
+    cadenceSource,
+    rule: {
+      ...defaults.rule,
+    },
+    consumption: {
+      ...defaults.consumption,
     },
     updatedAt: null,
     updatedBy: null,
@@ -302,10 +461,92 @@ function inIntegerBound(
   return Number.isInteger(value) && Number(value) >= bound.min && Number(value) <= bound.max;
 }
 
+function normalizedDailyCaps(
+  value: unknown,
+  totalDays: number,
+): FacebookSlowStartDailyCaps[] | null {
+  if (!Array.isArray(value) || value.length !== totalDays) return null;
+  const keys = ['day', 'view', 'like', 'comment', 'follow', 'publish', 'search', 'joinGroup'];
+  const result: FacebookSlowStartDailyCaps[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const row = value[index];
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+    if (Object.keys(row).sort().join(',') !== [...keys].sort().join(',')) return null;
+    const candidate = row as unknown as FacebookSlowStartDailyCaps;
+    if (candidate.day !== index + 1) return null;
+    const bounds = FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.slowStart.dailyCaps;
+    if (
+      !inIntegerBound(candidate.view, bounds.view)
+      || !inIntegerBound(candidate.like, bounds.like)
+      || !inIntegerBound(candidate.comment, bounds.comment)
+      || !inIntegerBound(candidate.follow, bounds.follow)
+      || !inIntegerBound(candidate.publish, bounds.publish)
+      || !inIntegerBound(candidate.search, bounds.search)
+      || !inIntegerBound(candidate.joinGroup, bounds.joinGroup)
+    ) return null;
+    result.push({ ...candidate });
+  }
+  return result;
+}
+
+function normalizedGlobalWrite(input: {
+  expectedRevision: number;
+  rule: FacebookRuleOperationParameters;
+  consumption: FacebookConsumptionOperationParameters;
+  slowStart: {
+    totalDays: number;
+    dailyCaps: FacebookSlowStartDailyCaps[];
+  };
+  requestId: string;
+  reason?: string | null;
+}): { ok: true; dailyCaps: FacebookSlowStartDailyCaps[] }
+  | { ok: false; reason: 'invalid_value' } {
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  if (
+    !inIntegerBound(input.rule?.viewsPerLike, FACEBOOK_OPERATION_POLICY_BOUNDS.rule.viewsPerLike)
+    || !inIntegerBound(
+      input.rule?.joinEveryNRounds,
+      FACEBOOK_OPERATION_POLICY_BOUNDS.rule.joinEveryNRounds,
+    )
+    || !inIntegerBound(
+      input.consumption?.viewsPerLike,
+      FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.viewsPerLike,
+    )
+    || !inIntegerBound(
+      input.consumption?.confirmedLikesPerJoin,
+      FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedLikesPerJoin,
+    )
+    || !inIntegerBound(
+      input.consumption?.confirmedJoinsPerComment,
+      FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedJoinsPerComment,
+    )
+    || !inIntegerBound(
+      input.slowStart?.totalDays,
+      FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.slowStart.totalDays,
+    )
+    || !String(input.requestId || '').trim()
+    || (
+      input.reason !== undefined
+      && input.reason !== null
+      && typeof input.reason !== 'string'
+    )
+  ) return { ok: false, reason: 'invalid_value' };
+  const dailyCaps = normalizedDailyCaps(
+    input.slowStart?.dailyCaps,
+    input.slowStart.totalDays,
+  );
+  return dailyCaps
+    ? { ok: true, dailyCaps }
+    : { ok: false, reason: 'invalid_value' };
+}
+
 function normalizedWrite(
   input: {
     expectedRevision: number;
     mode: FacebookRequestedOperationMode;
+    cadenceSource?: FacebookCadenceSource;
     rule?: FacebookRuleOperationParameters;
     consumption?: FacebookConsumptionOperationParameters;
     requestId: string;
@@ -322,6 +563,37 @@ function normalizedWrite(
   if (!String(input.requestId || '').trim()) return { ok: false, reason: 'invalid_value' };
   if (input.reason !== undefined && input.reason !== null && typeof input.reason !== 'string') {
     return { ok: false, reason: 'invalid_value' };
+  }
+  if (input.cadenceSource !== undefined && !['global', 'environment'].includes(input.cadenceSource)) {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  if (input.cadenceSource === 'global' && (
+    input.rule !== undefined || input.consumption !== undefined
+  )) {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  if (input.cadenceSource === 'environment') {
+    if (!input.rule || !input.consumption) return { ok: false, reason: 'invalid_value' };
+    if (
+      !inIntegerBound(input.rule.viewsPerLike, FACEBOOK_OPERATION_POLICY_BOUNDS.rule.viewsPerLike)
+      || !inIntegerBound(
+        input.rule.joinEveryNRounds,
+        FACEBOOK_OPERATION_POLICY_BOUNDS.rule.joinEveryNRounds,
+      )
+      || !inIntegerBound(
+        input.consumption.viewsPerLike,
+        FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.viewsPerLike,
+      )
+      || !inIntegerBound(
+        input.consumption.confirmedLikesPerJoin,
+        FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedLikesPerJoin,
+      )
+      || !inIntegerBound(
+        input.consumption.confirmedJoinsPerComment,
+        FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedJoinsPerComment,
+      )
+    ) return { ok: false, reason: 'invalid_value' };
+    return { ok: true };
   }
   if (
     (input.mode === 'persona' || input.mode === 'slow_start')
@@ -397,6 +669,7 @@ export class FacebookOperationPolicyStore {
   private readonly pool: pg.Pool;
   private readonly ownedPool?: pg.Pool;
   private readonly schemaProber: SchemaProber;
+  private readonly executionTarget?: DeploymentTarget;
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private environmentResolver?: FacebookOperationPolicyEnvironmentResolver;
   private slowStartResolver?: FacebookOperationPolicySlowStartResolver;
@@ -404,10 +677,12 @@ export class FacebookOperationPolicyStore {
   private slowStartRefresh?: () => Promise<void>;
   private cache = new Map<string, CachedPolicy>();
   private legacyFallbackCache = new Map<string, CachedPolicy>();
+  private globalPolicy?: FacebookOperationGlobalPolicyView;
   private ready = false;
 
   constructor(options: FacebookOperationPolicyStoreOptions) {
     this.schemaProber = options.schemaProber;
+    this.executionTarget = options.executionTarget;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.environmentResolver = options.environmentResolver;
     this.slowStartResolver = options.slowStartResolver;
@@ -446,45 +721,78 @@ export class FacebookOperationPolicyStore {
   }
 
   async init(): Promise<void> {
+    const requirement = this.executionTarget
+      ? OPERATION_POLICY_REQUIREMENT
+      : {
+          tables: new Map(
+            [...OPERATION_POLICY_REQUIREMENT.tables].filter(([table]) =>
+              table === 'facebook_operation_policy'
+              || table === 'facebook_operation_policy_audit'),
+          ),
+          indexes: new Map(
+            [...OPERATION_POLICY_REQUIREMENT.indexes].filter(([, table]) =>
+              table === 'facebook_operation_policy_audit'),
+          ),
+        };
     const shape = await this.schemaProber(
       this.pool,
-      [...OPERATION_POLICY_REQUIREMENT.tables.keys()],
+      [...requirement.tables.keys()],
     );
-    const verdict = classifySchemaCapability(OPERATION_POLICY_REQUIREMENT, shape);
+    const verdict = classifySchemaCapability(requirement, shape);
     if (verdict.status !== 'ready') {
       throw new SchemaCapabilityError(
         {
           capability: 'facebook_operation_policy',
-          sinceVersion: '0100_facebook_operation_and_group_comment_policy',
+          sinceVersion: '0103_facebook_operation_global_policy',
           ddl: [],
         },
         verdict,
       );
     }
     await this.refreshFromAuthority();
+    if (this.executionTarget && !this.globalPolicy) {
+      throw new Error(`facebook_operation_global_policy_missing:${this.executionTarget}`);
+    }
     this.ready = true;
   }
 
   async refreshFromAuthority(): Promise<void> {
-    const [policyResult, legacyResult] = await Promise.all([
+    const [policyResult, legacyResult, globalResult] = await Promise.all([
       this.pool.query<OperationPolicyDbRow>(
         `SELECT env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,policy_schema_version,
-                policy_revision,updated_at,updated_by
+                policy_revision,cadence_source,updated_at,updated_by
            FROM facebook_operation_policy`,
       ),
       this.pool.query<LegacyRuleModeDbRow>(
         `SELECT env_key,enabled,updated_at,updated_by
            FROM facebook_rule_mode_environment_config`,
       ),
+      this.executionTarget
+        ? this.pool.query<GlobalOperationPolicyDbRow>(
+            `SELECT execution_target,rule_views_per_like,rule_join_every_n_rounds,
+                    consumption_views_per_like,consumption_confirmed_likes_per_join,
+                    consumption_confirmed_joins_per_comment,slow_start_total_days,
+                    slow_start_daily_caps,revision,updated_at,updated_by
+               FROM facebook_operation_global_policy
+              WHERE execution_target=$1`,
+            [this.executionTarget],
+          )
+        : Promise.resolve({ rows: [] as GlobalOperationPolicyDbRow[] }),
     ]);
+    const globalRow = globalResult.rows[0];
+    this.globalPolicy = globalRow ? this.globalFromRow(globalRow) : undefined;
     this.cache = new Map(
       policyResult.rows.map((row) => [row.env_key, this.cachedFromRow(row)]),
     );
     this.legacyFallbackCache = new Map(
       legacyResult.rows.map((row) => {
-        const policy = defaultCachedPolicy(row.env_key);
+        const policy = defaultCachedPolicy(
+          row.env_key,
+          this.globalPolicy,
+          'environment',
+        );
         policy.baseMode = row.enabled === true ? 'rule' : 'persona';
         policy.updatedAt = asIso(row.updated_at);
         policy.updatedBy = row.updated_by ?? null;
@@ -495,6 +803,32 @@ export class FacebookOperationPolicyStore {
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  getGlobal(): FacebookOperationGlobalPolicyView | null {
+    return this.ready && this.globalPolicy
+      ? this.cloneGlobal(this.globalPolicy)
+      : null;
+  }
+
+  slowStartRuntimePolicy(): FacebookSlowStartRuntimePolicy {
+    const policy = this.globalPolicy
+      ?? defaultGlobalPolicy(this.executionTarget ?? 'dev');
+    return {
+      totalDays: policy.slowStart.totalDays,
+      dailyCaps: policy.slowStart.dailyCaps.map((row) => ({
+        view: row.view,
+        like: row.like,
+        collect: 0,
+        comment: row.comment,
+        follow: row.follow,
+        publish: row.publish,
+        search: row.search,
+        comment_like: 0,
+        join_group: row.joinGroup,
+        dm_reply: 0,
+      })),
+    };
   }
 
   getBaseForEnv(envKey: string): FacebookOperationPolicyBaseProjection | null {
@@ -555,6 +889,7 @@ export class FacebookOperationPolicyStore {
         key,
         null,
         environment.slow_start_since,
+        environment.slow_start_completed_at,
       );
       return this.project(policy, {
         bindingState: 'unbound',
@@ -621,11 +956,208 @@ export class FacebookOperationPolicyStore {
     };
   }
 
+  async writeGlobal(
+    input: {
+      expectedRevision: number;
+      rule: FacebookRuleOperationParameters;
+      consumption: FacebookConsumptionOperationParameters;
+      slowStart: {
+        totalDays: number;
+        dailyCaps: FacebookSlowStartDailyCaps[];
+      };
+      requestId: string;
+      reason?: string | null;
+    },
+    actor: string,
+  ): Promise<FacebookOperationGlobalPolicyWriteResult> {
+    if (!this.ready || !this.executionTarget || !this.globalPolicy) {
+      return { ok: false, reason: 'policy_unavailable' };
+    }
+    const validation = normalizedGlobalWrite(input);
+    if (!validation.ok) return validation;
+
+    const client = await this.pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
+      const currentResult = await client.query<GlobalOperationPolicyDbRow>(
+        `SELECT execution_target,rule_views_per_like,rule_join_every_n_rounds,
+                consumption_views_per_like,consumption_confirmed_likes_per_join,
+                consumption_confirmed_joins_per_comment,slow_start_total_days,
+                slow_start_daily_caps,revision,updated_at,updated_by
+           FROM facebook_operation_global_policy
+          WHERE execution_target=$1
+          FOR UPDATE`,
+        [this.executionTarget],
+      );
+      const currentRow = currentResult.rows[0];
+      if (!currentRow) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'policy_unavailable' };
+      }
+      const current = this.globalFromRow(currentRow);
+      if (current.revision !== input.expectedRevision) {
+        await client.query('ROLLBACK');
+        await this.refreshFromAuthority();
+        return {
+          ok: false,
+          reason: 'revision_conflict',
+          ...(this.globalPolicy ? { current: this.cloneGlobal(this.globalPolicy) } : {}),
+        };
+      }
+
+      // Materialize graduation under the old duration before replacing it, so
+      // a later increase cannot revive an environment that already graduated.
+      await this.markGraduatedInTx(client, current.slowStart.totalDays);
+
+      const nextRevision = current.revision + 1;
+      const writtenResult = await client.query<GlobalOperationPolicyDbRow>(
+        `UPDATE facebook_operation_global_policy
+            SET rule_views_per_like=$2,
+                rule_join_every_n_rounds=$3,
+                consumption_views_per_like=$4,
+                consumption_confirmed_likes_per_join=$5,
+                consumption_confirmed_joins_per_comment=$6,
+                slow_start_total_days=$7,
+                slow_start_daily_caps=$8::jsonb,
+                revision=$9,
+                updated_at=now(),
+                updated_by=$10
+          WHERE execution_target=$1
+          RETURNING execution_target,rule_views_per_like,rule_join_every_n_rounds,
+                    consumption_views_per_like,consumption_confirmed_likes_per_join,
+                    consumption_confirmed_joins_per_comment,slow_start_total_days,
+                    slow_start_daily_caps,revision,updated_at,updated_by`,
+        [
+          this.executionTarget,
+          input.rule.viewsPerLike,
+          input.rule.joinEveryNRounds,
+          input.consumption.viewsPerLike,
+          input.consumption.confirmedLikesPerJoin,
+          input.consumption.confirmedJoinsPerComment,
+          input.slowStart.totalDays,
+          JSON.stringify(validation.dailyCaps),
+          nextRevision,
+          actor,
+        ],
+      );
+      const next = this.globalFromRow(writtenResult.rows[0]);
+      const actorInfo = actorParts(actor);
+      await client.query(
+        `INSERT INTO facebook_operation_global_policy_audit
+           (execution_target,prior_revision,new_revision,before_policy,after_policy,
+            actor_class,actor_id,request_id,reason,created_at)
+         VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,now())`,
+        [
+          this.executionTarget,
+          current.revision,
+          next.revision,
+          JSON.stringify(this.globalAuditSnapshot(current)),
+          JSON.stringify(this.globalAuditSnapshot(next)),
+          actorInfo.actorClass,
+          actorInfo.actorId,
+          input.requestId,
+          input.reason ?? null,
+        ],
+      );
+
+      const cadenceChanged =
+        JSON.stringify(current.rule) !== JSON.stringify(next.rule)
+        || JSON.stringify(current.consumption) !== JSON.stringify(next.consumption);
+      if (cadenceChanged) {
+        const inherited = await client.query<OperationPolicyDbRow>(
+          `SELECT env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
+                  consumption_views_per_like,consumption_confirmed_likes_per_join,
+                  consumption_confirmed_joins_per_comment,policy_schema_version,
+                  policy_revision,cadence_source,updated_at,updated_by
+             FROM facebook_operation_policy
+            WHERE cadence_source='global'
+            ORDER BY env_key
+            FOR UPDATE`,
+        );
+        for (const row of inherited.rows) {
+          const prior = this.cachedFromRow(row);
+          const revisionResult = await client.query<{ revision: number | string }>(
+            `SELECT nextval('facebook_operation_policy_revision_seq') AS revision`,
+          );
+          const environmentRevision = Number(revisionResult.rows[0]?.revision);
+          if (!Number.isSafeInteger(environmentRevision) || environmentRevision < 1) {
+            throw new Error('facebook_operation_policy_revision_unavailable');
+          }
+          const propagatedResult = await client.query<OperationPolicyDbRow>(
+            `UPDATE facebook_operation_policy
+                SET rule_views_per_like=$2,
+                    rule_join_every_n_rounds=$3,
+                    consumption_views_per_like=$4,
+                    consumption_confirmed_likes_per_join=$5,
+                    consumption_confirmed_joins_per_comment=$6,
+                    policy_revision=$7,
+                    updated_at=now(),
+                    updated_by=$8
+              WHERE env_key=$1
+              RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
+                        consumption_views_per_like,consumption_confirmed_likes_per_join,
+                        consumption_confirmed_joins_per_comment,policy_schema_version,
+                        policy_revision,cadence_source,updated_at,updated_by`,
+            [
+              row.env_key,
+              next.rule.viewsPerLike,
+              next.rule.joinEveryNRounds,
+              next.consumption.viewsPerLike,
+              next.consumption.confirmedLikesPerJoin,
+              next.consumption.confirmedJoinsPerComment,
+              environmentRevision,
+              actor,
+            ],
+          );
+          const propagated = this.cachedFromRow(propagatedResult.rows[0]);
+          await client.query(
+            `INSERT INTO facebook_operation_policy_audit
+               (env_key,prior_revision,new_revision,before_policy,after_policy,
+                actor_class,actor_id,request_id,reason,created_at)
+             VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,now())`,
+            [
+              row.env_key,
+              prior.policyRevision,
+              propagated.policyRevision,
+              JSON.stringify(this.auditSnapshot(prior)),
+              JSON.stringify(this.auditSnapshot(propagated)),
+              actorInfo.actorClass,
+              actorInfo.actorId,
+              input.requestId,
+              input.reason ?? 'global_cadence_propagated',
+            ],
+          );
+        }
+      }
+
+      // A shorter duration takes effect in the same transaction.
+      await this.markGraduatedInTx(client, next.slowStart.totalDays);
+      await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+      await this.mirrorVersionBumper?.bumpInTx(client, 'client_environment_slow_start');
+      await client.query('COMMIT');
+      committed = true;
+      await this.refreshFromAuthority();
+      this.mirrorVersionBumper?.notifyAfterCommit?.('content_schedule');
+      this.mirrorVersionBumper?.notifyAfterCommit?.('client_environment_slow_start');
+      await this.slowStartRefresh?.();
+      return this.globalPolicy
+        ? { ok: true, view: this.cloneGlobal(this.globalPolicy) }
+        : { ok: false, reason: 'policy_unavailable' };
+    } catch (error) {
+      if (!committed) await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async writeEnvironment(
     envKey: string,
     input: {
       expectedRevision: number;
       mode: FacebookRequestedOperationMode;
+      cadenceSource?: FacebookCadenceSource;
       rule?: FacebookRuleOperationParameters;
       consumption?: FacebookConsumptionOperationParameters;
       requestId: string;
@@ -678,7 +1210,7 @@ export class FacebookOperationPolicyStore {
         `SELECT env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,policy_schema_version,
-                policy_revision,updated_at,updated_by
+                policy_revision,cadence_source,updated_at,updated_by
            FROM facebook_operation_policy
           WHERE env_key=$1
           FOR UPDATE`,
@@ -699,13 +1231,32 @@ export class FacebookOperationPolicyStore {
         };
       }
 
-      const nextRule = input.mode === 'rule' && input.rule ? input.rule : current.rule;
-      const nextConsumption =
-        input.mode === 'consumption' && input.consumption
-          ? input.consumption
-          : current.consumption;
+      const nextCadenceSource = input.cadenceSource ?? current.cadenceSource;
+      if (nextCadenceSource === 'global' && !this.globalPolicy) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'policy_unavailable' };
+      }
+      const nextRule = nextCadenceSource === 'global'
+        ? this.globalPolicy!.rule
+        : input.cadenceSource === 'environment'
+          ? input.rule!
+          : input.mode === 'rule' && input.rule
+            ? input.rule
+            : current.rule;
+      const nextConsumption = nextCadenceSource === 'global'
+        ? this.globalPolicy!.consumption
+        : input.cadenceSource === 'environment'
+          ? input.consumption!
+          : input.mode === 'consumption' && input.consumption
+            ? input.consumption
+            : current.consumption;
       const nextBaseMode: FacebookBaseOperationMode =
         input.mode === 'slow_start' ? 'persona' : input.mode;
+      const shouldResetSlowStart = input.mode === 'slow_start'
+        && (
+          environment.slow_start_since == null
+          || environment.slow_start_completed_at != null
+        );
       const revisionResult = await client.query<{ revision: number | string }>(
         `SELECT nextval('facebook_operation_policy_revision_seq') AS revision`,
       );
@@ -716,7 +1267,8 @@ export class FacebookOperationPolicyStore {
       await client.query(
         `UPDATE client_environments
             SET slow_start_since=CASE
-                  WHEN $2 THEN COALESCE(slow_start_since,$3)
+                  WHEN $2 AND $4 THEN $3
+                  WHEN $2 THEN slow_start_since
                   ELSE NULL
                 END,
                 slow_start_initialized=true,
@@ -726,8 +1278,15 @@ export class FacebookOperationPolicyStore {
           key,
           input.mode === 'slow_start',
           new Date(shanghaiDayStartMs(Date.now())),
+          shouldResetSlowStart,
         ],
       );
+      if (shouldResetSlowStart) {
+        await client.query(
+          `DELETE FROM facebook_environment_slow_start_completion WHERE env_key=$1`,
+          [key],
+        );
+      }
       const written = currentRow
         ? await client.query<OperationPolicyDbRow>(
             `UPDATE facebook_operation_policy
@@ -739,13 +1298,14 @@ export class FacebookOperationPolicyStore {
                     consumption_confirmed_joins_per_comment=$7,
                     policy_schema_version=1,
                     policy_revision=$8,
+                    cadence_source=$9,
                     updated_at=now(),
-                    updated_by=$9
+                    updated_by=$10
               WHERE env_key=$1
               RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                         consumption_views_per_like,consumption_confirmed_likes_per_join,
                         consumption_confirmed_joins_per_comment,policy_schema_version,
-                        policy_revision,updated_at,updated_by`,
+                        policy_revision,cadence_source,updated_at,updated_by`,
             [
               key,
               nextBaseMode,
@@ -755,6 +1315,7 @@ export class FacebookOperationPolicyStore {
               nextConsumption.confirmedLikesPerJoin,
               nextConsumption.confirmedJoinsPerComment,
               nextRevision,
+              nextCadenceSource,
               actor,
             ],
           )
@@ -763,12 +1324,12 @@ export class FacebookOperationPolicyStore {
                (env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,policy_schema_version,
-                policy_revision,updated_at,updated_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,now(),$9)
+                policy_revision,cadence_source,updated_at,updated_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,now(),$10)
              RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                        consumption_views_per_like,consumption_confirmed_likes_per_join,
                        consumption_confirmed_joins_per_comment,policy_schema_version,
-                       policy_revision,updated_at,updated_by`,
+                       policy_revision,cadence_source,updated_at,updated_by`,
             [
               key,
               nextBaseMode,
@@ -778,6 +1339,7 @@ export class FacebookOperationPolicyStore {
               nextConsumption.confirmedLikesPerJoin,
               nextConsumption.confirmedJoinsPerComment,
               nextRevision,
+              nextCadenceSource,
               actor,
             ],
           );
@@ -878,7 +1440,7 @@ export class FacebookOperationPolicyStore {
         `SELECT env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,policy_schema_version,
-                policy_revision,updated_at,updated_by
+                policy_revision,cadence_source,updated_at,updated_by
            FROM facebook_operation_policy
           WHERE env_key=$1
           FOR UPDATE`,
@@ -921,12 +1483,7 @@ export class FacebookOperationPolicyStore {
       }
 
       const nextBaseMode: FacebookBaseOperationMode = input.enabled ? 'rule' : 'persona';
-      const nextRule = input.enabled && current.baseMode === 'persona'
-        ? {
-            viewsPerLike: FACEBOOK_OPERATION_POLICY_BOUNDS.rule.viewsPerLike.default,
-            joinEveryNRounds: FACEBOOK_OPERATION_POLICY_BOUNDS.rule.joinEveryNRounds.default,
-          }
-        : current.rule;
+      const nextRule = current.rule;
       if (currentRow && current.baseMode === nextBaseMode) {
         await client.query('COMMIT');
         committed = true;
@@ -954,13 +1511,14 @@ export class FacebookOperationPolicyStore {
                     consumption_confirmed_joins_per_comment=$7,
                     policy_schema_version=1,
                     policy_revision=$8,
+                    cadence_source=$9,
                     updated_at=now(),
-                    updated_by=$9
+                    updated_by=$10
               WHERE env_key=$1
               RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                         consumption_views_per_like,consumption_confirmed_likes_per_join,
                         consumption_confirmed_joins_per_comment,policy_schema_version,
-                        policy_revision,updated_at,updated_by`,
+                        policy_revision,cadence_source,updated_at,updated_by`,
             [
               key,
               nextBaseMode,
@@ -970,6 +1528,7 @@ export class FacebookOperationPolicyStore {
               current.consumption.confirmedLikesPerJoin,
               current.consumption.confirmedJoinsPerComment,
               nextRevision,
+              current.cadenceSource,
               actor,
             ],
           )
@@ -978,12 +1537,12 @@ export class FacebookOperationPolicyStore {
                (env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,policy_schema_version,
-                policy_revision,updated_at,updated_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,now(),$9)
+                policy_revision,cadence_source,updated_at,updated_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,now(),$10)
              RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                        consumption_views_per_like,consumption_confirmed_likes_per_join,
                        consumption_confirmed_joins_per_comment,policy_schema_version,
-                       policy_revision,updated_at,updated_by`,
+                       policy_revision,cadence_source,updated_at,updated_by`,
             [
               key,
               nextBaseMode,
@@ -993,6 +1552,7 @@ export class FacebookOperationPolicyStore {
               current.consumption.confirmedLikesPerJoin,
               current.consumption.confirmedJoinsPerComment,
               nextRevision,
+              current.cadenceSource,
               actor,
             ],
           );
@@ -1088,7 +1648,7 @@ export class FacebookOperationPolicyStore {
         `SELECT env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,policy_schema_version,
-                policy_revision,updated_at,updated_by
+                policy_revision,cadence_source,updated_at,updated_by
            FROM facebook_operation_policy
           WHERE env_key=$1
           FOR UPDATE`,
@@ -1100,7 +1660,12 @@ export class FacebookOperationPolicyStore {
         : await this.readLegacyFallback(client, key);
       const currentSlowStartSince = asEpochMillis(environment.slow_start_since);
       const currentlyEnabled = currentSlowStartSince !== null;
-      if (currentRow && currentlyEnabled === input.enabled) {
+      const alreadyFreshlyActive = currentlyEnabled
+        && environment.slow_start_completed_at == null;
+      if (currentRow && (
+        (!input.enabled && !currentlyEnabled)
+        || (input.enabled && alreadyFreshlyActive)
+      )) {
         await client.query('COMMIT');
         committed = true;
         this.cache.set(key, current);
@@ -1120,7 +1685,7 @@ export class FacebookOperationPolicyStore {
       await client.query(
         `UPDATE client_environments
             SET slow_start_since=CASE
-                  WHEN $2 THEN COALESCE(slow_start_since,$3)
+                  WHEN $2 THEN $3
                   ELSE NULL
                 END,
                 slow_start_initialized=true,
@@ -1128,6 +1693,12 @@ export class FacebookOperationPolicyStore {
           WHERE env_key=$1`,
         [key, input.enabled, slowStartAnchor],
       );
+      if (input.enabled) {
+        await client.query(
+          `DELETE FROM facebook_environment_slow_start_completion WHERE env_key=$1`,
+          [key],
+        );
+      }
       const written = currentRow
         ? await client.query<OperationPolicyDbRow>(
             `UPDATE facebook_operation_policy
@@ -1139,13 +1710,14 @@ export class FacebookOperationPolicyStore {
                     consumption_confirmed_joins_per_comment=$7,
                     policy_schema_version=1,
                     policy_revision=$8,
+                    cadence_source=$9,
                     updated_at=now(),
-                    updated_by=$9
+                    updated_by=$10
               WHERE env_key=$1
               RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                         consumption_views_per_like,consumption_confirmed_likes_per_join,
                         consumption_confirmed_joins_per_comment,policy_schema_version,
-                        policy_revision,updated_at,updated_by`,
+                        policy_revision,cadence_source,updated_at,updated_by`,
             [
               key,
               current.baseMode,
@@ -1155,6 +1727,7 @@ export class FacebookOperationPolicyStore {
               current.consumption.confirmedLikesPerJoin,
               current.consumption.confirmedJoinsPerComment,
               nextRevision,
+              current.cadenceSource,
               actor,
             ],
           )
@@ -1163,12 +1736,12 @@ export class FacebookOperationPolicyStore {
                (env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,policy_schema_version,
-                policy_revision,updated_at,updated_by)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,now(),$9)
+                policy_revision,cadence_source,updated_at,updated_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,now(),$10)
              RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                        consumption_views_per_like,consumption_confirmed_likes_per_join,
                        consumption_confirmed_joins_per_comment,policy_schema_version,
-                       policy_revision,updated_at,updated_by`,
+                       policy_revision,cadence_source,updated_at,updated_by`,
             [
               key,
               current.baseMode,
@@ -1178,6 +1751,7 @@ export class FacebookOperationPolicyStore {
               current.consumption.confirmedLikesPerJoin,
               current.consumption.confirmedJoinsPerComment,
               nextRevision,
+              current.cadenceSource,
               actor,
             ],
           );
@@ -1220,7 +1794,9 @@ export class FacebookOperationPolicyStore {
         ok: true,
         view,
         slowStartSince: input.enabled
-          ? currentSlowStartSince ?? slowStartAnchor.getTime()
+          ? alreadyFreshlyActive
+            ? currentSlowStartSince
+            : slowStartAnchor.getTime()
           : null,
       };
     } catch (error) {
@@ -1238,7 +1814,11 @@ export class FacebookOperationPolicyStore {
   private policyForEnv(envKey: string): CachedPolicy {
     return this.cache.get(envKey)
       ?? this.legacyFallbackCache.get(envKey)
-      ?? defaultCachedPolicy(envKey);
+      ?? defaultCachedPolicy(
+        envKey,
+        this.globalPolicy,
+        this.executionTarget ? 'global' : 'environment',
+      );
   }
 
   private async readLegacyFallback(
@@ -1252,8 +1832,14 @@ export class FacebookOperationPolicyStore {
       [envKey],
     );
     const row = rows[0];
-    if (!row) return defaultCachedPolicy(envKey);
-    const policy = defaultCachedPolicy(envKey);
+    if (!row) {
+      return defaultCachedPolicy(
+        envKey,
+        this.globalPolicy,
+        this.executionTarget ? 'global' : 'environment',
+      );
+    }
+    const policy = defaultCachedPolicy(envKey, this.globalPolicy, 'environment');
     policy.baseMode = row.enabled === true ? 'rule' : 'persona';
     policy.updatedAt = asIso(row.updated_at);
     policy.updatedBy = row.updated_by ?? null;
@@ -1268,6 +1854,10 @@ export class FacebookOperationPolicyStore {
       `SELECT e.platform,
               e.account_id,
               e.slow_start_since,
+              (SELECT c.completed_at
+                 FROM facebook_environment_slow_start_completion c
+                WHERE c.env_key=e.env_key AND c.execution_target=$2)
+                AS slow_start_completed_at,
               CASE WHEN e.account_id IS NULL THEN 0
                    ELSE (SELECT count(*) FROM client_environments e2
                           WHERE e2.account_id=e.account_id
@@ -1280,7 +1870,7 @@ export class FacebookOperationPolicyStore {
         WHERE e.env_key=$1
           AND COALESCE(e.lifecycle_state,'active')='active'
         FOR UPDATE OF e`,
-      [envKey],
+      [envKey, this.executionTarget ?? 'dev'],
     );
     return rows[0] ?? null;
   }
@@ -1312,6 +1902,7 @@ export class FacebookOperationPolicyStore {
       envKey: row.env_key,
       baseMode: row.base_mode,
       policyRevision: Number(row.policy_revision),
+      cadenceSource: row.cadence_source ?? 'environment',
       rule: {
         viewsPerLike: Number(row.rule_views_per_like),
         joinEveryNRounds: Number(row.rule_join_every_n_rounds),
@@ -1329,6 +1920,7 @@ export class FacebookOperationPolicyStore {
   private auditSnapshot(policy: CachedPolicy): Record<string, unknown> {
     return {
       baseMode: policy.baseMode,
+      cadenceSource: policy.cadenceSource,
       rule: policy.rule,
       consumption: policy.consumption,
       policySchemaVersion: 1,
@@ -1336,11 +1928,84 @@ export class FacebookOperationPolicyStore {
     };
   }
 
+  private globalFromRow(row: GlobalOperationPolicyDbRow): FacebookOperationGlobalPolicyView {
+    const totalDays = Number(row.slow_start_total_days);
+    const dailyCaps = normalizedDailyCaps(row.slow_start_daily_caps, totalDays);
+    if (!dailyCaps) throw new Error('facebook_operation_global_policy_invalid_daily_caps');
+    return {
+      executionTarget: row.execution_target,
+      revision: Number(row.revision),
+      schemaVersion: FACEBOOK_OPERATION_GLOBAL_POLICY_SCHEMA_VERSION,
+      rule: {
+        viewsPerLike: Number(row.rule_views_per_like),
+        joinEveryNRounds: Number(row.rule_join_every_n_rounds),
+      },
+      consumption: {
+        viewsPerLike: Number(row.consumption_views_per_like),
+        confirmedLikesPerJoin: Number(row.consumption_confirmed_likes_per_join),
+        confirmedJoinsPerComment: Number(row.consumption_confirmed_joins_per_comment),
+      },
+      slowStart: { totalDays, dailyCaps },
+      bounds: FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS,
+      updatedAt: asIso(row.updated_at),
+      updatedBy: row.updated_by ?? null,
+    };
+  }
+
+  private cloneGlobal(
+    policy: FacebookOperationGlobalPolicyView,
+  ): FacebookOperationGlobalPolicyView {
+    return {
+      ...policy,
+      rule: { ...policy.rule },
+      consumption: { ...policy.consumption },
+      slowStart: {
+        totalDays: policy.slowStart.totalDays,
+        dailyCaps: policy.slowStart.dailyCaps.map((row) => ({ ...row })),
+      },
+    };
+  }
+
+  private globalAuditSnapshot(
+    policy: FacebookOperationGlobalPolicyView,
+  ): Record<string, unknown> {
+    return {
+      executionTarget: policy.executionTarget,
+      rule: policy.rule,
+      consumption: policy.consumption,
+      slowStart: policy.slowStart,
+      schemaVersion: policy.schemaVersion,
+      revision: policy.revision,
+    };
+  }
+
+  private async markGraduatedInTx(
+    client: pg.PoolClient,
+    totalDays: number,
+  ): Promise<void> {
+    if (!this.executionTarget) return;
+    await client.query(
+      `INSERT INTO facebook_environment_slow_start_completion
+         (env_key,execution_target,completed_at)
+       SELECT e.env_key,$1,now()
+         FROM client_environments e
+        WHERE e.slow_start_since IS NOT NULL
+          AND lower(btrim(COALESCE(e.platform,''))) IN ('facebook','fb')
+          AND now() >= e.slow_start_since + ($2 * interval '1 day')
+       ON CONFLICT (env_key,execution_target) DO NOTHING`,
+      [this.executionTarget, totalDays],
+    );
+  }
+
   private async readEnvironment(envKey: string): Promise<EnvironmentDbRow | null> {
     const { rows } = await this.pool.query<EnvironmentDbRow>(
       `SELECT e.platform,
               e.account_id,
               e.slow_start_since,
+              (SELECT c.completed_at
+                 FROM facebook_environment_slow_start_completion c
+                WHERE c.env_key=e.env_key AND c.execution_target=$2)
+                AS slow_start_completed_at,
               (SELECT COALESCE(
                         NULLIF(btrim(a.operator_alias), ''),
                         NULLIF(btrim(a.nickname), ''),
@@ -1363,7 +2028,7 @@ export class FacebookOperationPolicyStore {
          FROM client_environments e
         WHERE e.env_key=$1
           AND COALESCE(e.lifecycle_state,'active')='active'`,
-      [envKey],
+      [envKey, this.executionTarget ?? 'dev'],
     );
     return rows[0] ?? null;
   }
@@ -1395,6 +2060,7 @@ export class FacebookOperationPolicyStore {
     envKey: string,
     accountId: string | null,
     rawSince: Date | string | null,
+    rawCompletedAt: Date | string | null = null,
   ): Promise<FacebookOperationPolicyView['slowStart']> {
     const since = asEpochMillis(rawSince);
     if (since === null) {
@@ -1402,7 +2068,13 @@ export class FacebookOperationPolicyStore {
     }
     if (this.environmentSlowStartResolver) {
       try {
-        const state = await this.environmentSlowStartResolver({ envKey, accountId, since });
+        const state = await this.environmentSlowStartResolver({
+          envKey,
+          accountId,
+          since,
+          completedAt: asEpochMillis(rawCompletedAt),
+          totalDays: this.slowStartRuntimePolicy().totalDays,
+        });
         if (state === 'unknown') {
           return { state, since: null, globallyDisabled: false };
         }
@@ -1440,6 +2112,7 @@ export class FacebookOperationPolicyStore {
       envKey,
       accountId || null,
       environment.slow_start_since,
+      environment.slow_start_completed_at,
     );
     if (slowStart.state === 'unknown') return 'unknown';
     return slowStart.state === 'active' ? 'active' : 'inactive';
@@ -1489,6 +2162,7 @@ export class FacebookOperationPolicyStore {
       effectiveMode: input.effectiveMode,
       policyRevision: policy.policyRevision,
       schemaVersion: FACEBOOK_OPERATION_POLICY_SCHEMA_VERSION,
+      cadenceSource: policy.cadenceSource,
       rule: { ...policy.rule },
       consumption: { ...policy.consumption },
       bounds: FACEBOOK_OPERATION_POLICY_BOUNDS,

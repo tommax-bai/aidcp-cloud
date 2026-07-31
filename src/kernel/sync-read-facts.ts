@@ -80,6 +80,7 @@ export type ClientEnvironmentAutomationSnapshot = {
   readonly slowStartAnchors: readonly {
     readonly accountId: string;
     readonly slowStartSince: number | null;
+    readonly slowStartCompletedAt: number | null;
     readonly ambiguous: boolean;
   }[];
 };
@@ -289,11 +290,14 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
             hasExactKeys(row, [
               'accountId',
               'slowStartSince',
+              'slowStartCompletedAt',
               'ambiguous',
             ]) &&
             isNonEmptyString(row.accountId) &&
             (row.slowStartSince === null ||
               isNonNegativeInteger(row.slowStartSince)) &&
+            (row.slowStartCompletedAt === null ||
+              isNonNegativeInteger(row.slowStartCompletedAt)) &&
             typeof row.ambiguous === 'boolean',
         )
       );

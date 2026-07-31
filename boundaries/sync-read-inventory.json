@@ -385,6 +385,7 @@
         "blockedEnvironmentKeys",
         "slowStartAnchors.accountId",
         "slowStartAnchors.slowStartSince",
+        "slowStartAnchors.slowStartCompletedAt",
         "slowStartAnchors.ambiguous"
       ],
       "excludedFields": ["label", "platform", "displayName", "accountCard"],
@@ -400,6 +401,13 @@
         {
           "symbol": "ClientUserStore.slowStartSinceFor",
           "method": "slowStartSinceFor",
+          "sourceFile": "src/client-auth/client-user-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "ClientUserStore.slowStartCompletedAtFor",
+          "method": "slowStartCompletedAtFor",
           "sourceFile": "src/client-auth/client-user-store.ts",
           "callSiteFiles": ["src/server.ts"],
           "kind": "sync_read"

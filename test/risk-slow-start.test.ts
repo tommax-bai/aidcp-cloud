@@ -1,7 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RiskController, coldStartDailyCap, deriveWindowQuotas } from '../src/risk/index.js';
-import type { AccountNurtureProvider, RiskQuotaLevel, RiskState, RiskStatus, WindowQuotas } from '../src/risk/index.js';
+import type {
+  AccountNurtureProvider,
+  ActionQuota,
+  RiskQuotaLevel,
+  RiskState,
+  RiskStatus,
+  WindowQuotas,
+} from '../src/risk/index.js';
 import { shanghaiDayStartMs } from '../src/time/shanghai-day.js';
 
 // change account-level-slow-start：账号级慢启动（accounts.slow_start_since 非 NULL = 开且为起点）。
@@ -26,6 +33,15 @@ const state = (status: RiskStatus, quotaLevel: RiskQuotaLevel): RiskState => ({
  * 而「平台未知」正是本文件要测的一条闸——桩自己回落一次，那条测试就永远测不到东西。
  */
 class NurtureStub implements AccountNurtureProvider {
+  public completedAt: number | null = null;
+  public facebookPolicy: { totalDays: number; dailyCaps: ActionQuota[] } = {
+    totalDays: 7,
+    dailyCaps: Array.from(
+      { length: 7 },
+      (_, index) => coldStartDailyCap(index, 'facebook')!,
+    ),
+  };
+
   constructor(
     public platform: string | undefined,
     public slowStartSince: number | null,
@@ -36,6 +52,12 @@ class NurtureStub implements AccountNurtureProvider {
   }
   slowStartSinceFor(): number | null {
     return this.slowStartSince;
+  }
+  slowStartCompletedAtFor(): number | null {
+    return this.completedAt;
+  }
+  facebookSlowStartPolicy(): { totalDays: number; dailyCaps: ActionQuota[] } {
+    return this.facebookPolicy;
   }
   createdAtFor(): number | undefined {
     return this.createdAt;
@@ -165,6 +187,70 @@ test('热加载：改 provider 值后，**同一个 controller 实例** 的 effe
 
   assert.deepEqual(c.effectiveQuotas(), deriveWindowQuotas('aggressive'), '关闭后立刻逐位回落');
   assert.equal(c.slowStartView().state, 'off');
+});
+
+test('Facebook 全局冷启动配置热加载：保留当前天数，立即采用新上限，缩短后当场毕业', () => {
+  const nurture = new NurtureStub('facebook', NOW - 4 * DAY - 1000);
+  const configuredCap = (view: number): ActionQuota => ({
+    view,
+    like: 1,
+    collect: 0,
+    comment: 0,
+    follow: 0,
+    publish: 0,
+    search: 0,
+    comment_like: 0,
+    join_group: 0,
+    dm_reply: 0,
+  });
+  nurture.facebookPolicy = {
+    totalDays: 14,
+    dailyCaps: Array.from({ length: 14 }, () => configuredCap(11)),
+  };
+  const controller = controllerAt(nurture, NOW, { level: 'aggressive' });
+
+  assert.equal(controller.slowStartView().day, 5, '配置更新不重置锚点，仍是第 5 天');
+  assert.equal(controller.effectiveQuotas().day.view, 11);
+
+  nurture.facebookPolicy.dailyCaps[4] = configuredCap(13);
+  assert.equal(controller.slowStartView().day, 5, '同一 controller 仍保留第 5 天');
+  assert.equal(controller.effectiveQuotas().day.view, 13, '当前天新上限立即生效');
+
+  nurture.facebookPolicy = {
+    totalDays: 4,
+    dailyCaps: nurture.facebookPolicy.dailyCaps.slice(0, 4),
+  };
+  assert.equal(controller.slowStartView().state, 'graduated', '总天数缩短到当前天之前应立即毕业');
+  assert.deepEqual(
+    controller.effectiveQuotas(),
+    deriveWindowQuotas('aggressive'),
+    '毕业后不应回落到编译期第 5 天上限',
+  );
+});
+
+test('Facebook 粘滞毕业：延长总天数不会让已毕业环境重新进入冷启动', () => {
+  const nurture = new NurtureStub('facebook', NOW - 9 * DAY - 1000);
+  nurture.completedAt = NOW - 2 * DAY;
+  nurture.facebookPolicy = {
+    totalDays: 14,
+    dailyCaps: Array.from({ length: 14 }, () => ({
+      view: 1,
+      like: 0,
+      collect: 0,
+      comment: 0,
+      follow: 0,
+      publish: 0,
+      search: 0,
+      comment_like: 0,
+      join_group: 0,
+      dm_reply: 0,
+    })),
+  };
+  const controller = controllerAt(nurture, NOW, { level: 'aggressive' });
+
+  assert.equal(controller.slowStartView().state, 'graduated');
+  assert.equal(controller.slowStartView().totalDays, 14);
+  assert.deepEqual(controller.effectiveQuotas(), deriveWindowQuotas('aggressive'));
 });
 
 // ── 3.5 platform 诚实闸（design D5）──

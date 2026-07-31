@@ -15,6 +15,9 @@ import {
   FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
   FACEBOOK_RULE_VIEW_THRESHOLD,
 } from '../src/kernel/facebook-rule-mode-types.js';
+import type {
+  FacebookOperationGlobalPolicyView,
+} from '../src/config/facebook-operation-policy-store.js';
 import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
 
 /**
@@ -299,6 +302,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
   let operationRevision = 0;
   let baseMode: 'persona' | 'rule' | 'consumption' = 'persona';
   let effectiveMode: 'persona' | 'slow_start' | 'rule' | 'consumption' = 'persona';
+  let globalRevision = 2;
   let groupRevision: number | null = null;
   let joinToFirstCommentHours = 24;
   const operationWrites: Array<{
@@ -310,12 +314,21 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
     input: { requestId: string; joinToFirstCommentHours: number };
     actor: string;
   }> = [];
+  const globalWrites: Array<{
+    input: {
+      requestId: string;
+      expectedRevision: number;
+      slowStart: { totalDays: number };
+    };
+    actor: string;
+  }> = [];
   const operationView = () => ({
     envKey: 'env-fb',
     baseMode,
     effectiveMode,
     policyRevision: operationRevision,
     schemaVersion: 'facebook_operation_policy@1',
+    cadenceSource: 'environment' as const,
     rule: { viewsPerLike: 5, joinEveryNRounds: 2 },
     consumption: {
       viewsPerLike: 5,
@@ -359,8 +372,66 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
     updatedAt: groupRevision === null ? null : '2026-07-30T00:00:00.000Z',
     updatedBy: groupRevision === null ? null : 'panel:alice',
   });
+  const globalView = (): FacebookOperationGlobalPolicyView => ({
+    executionTarget: 'dev' as const,
+    revision: globalRevision,
+    schemaVersion: 'facebook-operation-global-policy/v1',
+    rule: { viewsPerLike: 5, joinEveryNRounds: 2 },
+    consumption: {
+      viewsPerLike: 5,
+      confirmedLikesPerJoin: 2,
+      confirmedJoinsPerComment: 2,
+    },
+    slowStart: {
+      totalDays: 7,
+      dailyCaps: Array.from({ length: 7 }, (_, index) => ({
+        day: index + 1,
+        view: 20 + index * 5,
+        like: 2 + index,
+        comment: index,
+        follow: 1 + index,
+        publish: 0,
+        search: 1 + index,
+        joinGroup: index > 1 ? 1 : 0,
+      })),
+    },
+    bounds: {
+      rule: {
+        viewsPerLike: { min: 1, max: 100, default: 5 },
+        joinEveryNRounds: { min: 1, max: 20, default: 2 },
+      },
+      consumption: {
+        viewsPerLike: { min: 1, max: 100, default: 5 },
+        confirmedLikesPerJoin: { min: 1, max: 20, default: 2 },
+        confirmedJoinsPerComment: { min: 1, max: 20, default: 2 },
+      },
+      slowStart: {
+        totalDays: { min: 1, max: 30, default: 7 },
+        dailyCaps: {
+          view: { min: 0, max: 300 },
+          like: { min: 0, max: 100 },
+          comment: { min: 0, max: 15 },
+          follow: { min: 0, max: 30 },
+          publish: { min: 0, max: 2 },
+          search: { min: 0, max: 20 },
+          joinGroup: { min: 0, max: 5 },
+        },
+      },
+    },
+    updatedAt: '2026-07-30T00:00:00.000Z',
+    updatedBy: 'panel:alice',
+  });
   const facebookOperationPolicy: NonNullable<PanelDeps['facebookOperationPolicy']> = {
     isReady: () => true,
+    getGlobal: () => globalView(),
+    writeGlobal: async (input, actor) => {
+      globalWrites.push({ input, actor });
+      if (input.expectedRevision !== globalRevision) {
+        return { ok: false, reason: 'revision_conflict', current: globalView() };
+      }
+      globalRevision += 1;
+      return { ok: true, view: globalView() };
+    },
     getForEnv: async (envKey) => envKey === 'env-fb' ? operationView() : null,
     writeEnvironment: async (envKey, input, actor) => {
       operationWrites.push({ envKey, input, actor });
@@ -491,6 +562,65 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
       1,
     );
 
+    const initialGlobal = await fetch(
+      `${base}/api/facebook/operation-global-policy`,
+      { headers: auth },
+    );
+    assert.equal(initialGlobal.status, 200);
+    const globalPayload = await initialGlobal.json() as ReturnType<typeof globalView>;
+    assert.equal(globalPayload.executionTarget, 'dev');
+    assert.equal(globalPayload.revision, 2);
+    assert.equal(globalPayload.slowStart.totalDays, 7);
+
+    const invalidGlobal = await fetch(`${base}/api/facebook/operation-global-policy`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        expectedRevision: 2,
+        rule: globalPayload.rule,
+        consumption: globalPayload.consumption,
+      }),
+    });
+    assert.equal(invalidGlobal.status, 422);
+    assert.equal(globalWrites.length, 0);
+
+    const savedGlobal = await fetch(`${base}/api/facebook/operation-global-policy`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        expectedRevision: 2,
+        rule: globalPayload.rule,
+        consumption: globalPayload.consumption,
+        slowStart: globalPayload.slowStart,
+        reason: 'update target defaults',
+      }),
+    });
+    assert.equal(savedGlobal.status, 200);
+    assert.equal(
+      ((await savedGlobal.json()) as { revision: number }).revision,
+      3,
+    );
+    assert.equal(globalWrites[0]?.actor, 'panel:alice');
+    assert.equal(globalWrites[0]?.input.slowStart.totalDays, 7);
+    assert.match(globalWrites[0]?.input.requestId ?? '', /^[0-9a-f-]{36}$/);
+
+    const staleGlobal = await fetch(`${base}/api/facebook/operation-global-policy`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        expectedRevision: 2,
+        rule: globalPayload.rule,
+        consumption: globalPayload.consumption,
+        slowStart: globalPayload.slowStart,
+      }),
+    });
+    assert.equal(staleGlobal.status, 409);
+    assert.equal(
+      ((await staleGlobal.json()) as { current: { revision: number } })
+        .current.revision,
+      3,
+    );
+
     const initialGroup = await fetch(
       `${base}/api/facebook/groups/comment-policy`,
       { headers: auth },
@@ -567,6 +697,10 @@ test('Facebook operation/group policy APIs report unavailable authorities as 503
     );
     assert.equal(
       (await fetch(`${base}/api/facebook/groups/comment-policy`, { headers })).status,
+      503,
+    );
+    assert.equal(
+      (await fetch(`${base}/api/facebook/operation-global-policy`, { headers })).status,
       503,
     );
   } finally {

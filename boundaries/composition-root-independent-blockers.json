@@ -94,7 +94,8 @@
       "closingChange": "split-cloud-api-composition-root-4b",
       "evidence": [
         "src/server.ts#segCAutomation:call:clientUserStore.automationGateForEdgeId",
-        "src/server.ts#segCAutomation:call:clientUserStore.slowStartSinceFor"
+        "src/server.ts#segCAutomation:call:clientUserStore.slowStartSinceFor",
+        "src/server.ts#segCAutomation:call:clientUserStore.slowStartCompletedAtFor"
       ]
     },
     {

@@ -437,6 +437,7 @@ export class RiskController {
    */
   private nurtureAnchorState():
     | { kind: 'anchor'; anchor: NurtureAnchor }
+    | { kind: 'graduated'; anchor: NurtureAnchor }
     | { kind: 'none' }
     | { kind: 'unknown' } {
     // 全局停用闸：无视所有账号级开关与 env 旁路（raw SQL 改库不刷镜像时的秒级止血手段）。
@@ -453,13 +454,19 @@ export class RiskController {
     // 每次都走到），也被什么都没拒绝的徽章投影调用。记账收口在真正的拒绝点（统一停手闸）。
     if (this.mirrorStale?.('client_environment_slow_start') ?? false) return { kind: 'unknown' };
     const environmentSince = this.nurtureProvider?.slowStartSinceFor(this.accountId) ?? null;
-    if (environmentSince != null) return { kind: 'anchor', anchor: { since: environmentSince, source: 'environment' } };
+    if (environmentSince != null) {
+      const anchor: NurtureAnchor = { since: environmentSince, source: 'environment' };
+      if (this.nurtureProvider?.slowStartCompletedAtFor?.(this.accountId) != null) {
+        return { kind: 'graduated', anchor };
+      }
+      return { kind: 'anchor', anchor };
+    }
     const createdAt = this.coldStartRampEnabled ? this.nurtureProvider?.createdAtFor(this.accountId) : undefined;
     if (createdAt != null) return { kind: 'anchor', anchor: { since: createdAt, source: 'legacy_env' } };
     return { kind: 'none' };
   }
 
-  /** 按锚点与 now 现算天数（1-based）。day > 7 即毕业（coldStartDailyCap 返回 null）。 */
+  /** 按锚点与 now 现算天数（1-based）；是否毕业由当前平台策略的 totalDays 决定。 */
   private dayIndexFor(anchor: NurtureAnchor, now: number): number {
     return Math.max(0, Math.floor((now - anchor.since) / 86_400_000)) + 1;
   }
@@ -469,8 +476,8 @@ export class RiskController {
    * effectiveQuotas = min(当日天花板, 风控缩放配额)。取 min 保证「逐日爬坡」与
    * 「风控降速(warned/restricted/frozen)」两条闸同时生效、谁更紧谁生效、互不架空。
    *
-   * 无锚点 / 平台未知 / 账号已毕业（超 7 天窗口）→ 原样返回风控缩放（逐位零回归）。
-   * 天花板走确定性 coldStartDailyCap（区间上界），绝不随机采样、逐调用稳定。
+   * 无锚点 / 平台未知 / 账号已毕业（超过当前窗口）→ 原样返回风控缩放（逐位零回归）。
+   * Facebook 天花板走目标全局配置；其他支持平台继续走确定性 coldStartDailyCap。
    *
    * **平台未知 MUST NOT 回落小红书曲线**（design D5）：回落一次就是 FB 号按 XHS 曲线跑
    * （D1 view=50 而非 20，差 2.5 倍），且无日志无告警。FB 那条更保守的曲线正是本功能唯一的存在理由。
@@ -480,7 +487,16 @@ export class RiskController {
     if (!anchor) return riskScaled;
     const platform = this.nurtureProvider?.platformFor(this.accountId);
     if (!supportsSlowStart(platform)) return riskScaled;
-    const cap = coldStartDailyCap(this.dayIndexFor(anchor, this.clock()) - 1, platform);
+    const dayIndex = this.dayIndexFor(anchor, this.clock()) - 1;
+    const configuredFacebookPolicy = platform === 'facebook'
+      ? this.nurtureProvider?.facebookSlowStartPolicy?.()
+      : undefined;
+    if (configuredFacebookPolicy && dayIndex >= configuredFacebookPolicy.totalDays) {
+      return riskScaled;
+    }
+    const cap = configuredFacebookPolicy
+      ? configuredFacebookPolicy.dailyCaps[dayIndex] ?? null
+      : coldStartDailyCap(dayIndex, platform);
     if (!cap) return riskScaled;
     const windowCap = deriveWindowQuotasFromDaily(cap);
     return minWindowQuotas(riskScaled, windowCap);
@@ -496,7 +512,11 @@ export class RiskController {
    * 而不是一个看起来像 bug 的沉默（design D6）。
    */
   slowStartView(): SlowStartView {
-    const totalDays = SLOW_START_TOTAL_DAYS;
+    const platform = this.nurtureProvider?.platformFor(this.accountId);
+    const totalDays = platform === 'facebook'
+      ? this.nurtureProvider?.facebookSlowStartPolicy?.().totalDays
+        ?? SLOW_START_TOTAL_DAYS
+      : SLOW_START_TOTAL_DAYS;
     if (this.slowStartDisabled) {
       return { state: 'off', totalDays, eligible: false, ineligibleReason: 'globally_disabled' };
     }
@@ -508,10 +528,17 @@ export class RiskController {
     if (anchorState.kind === 'unknown') {
       return { state: 'off', totalDays, eligible: false, ineligibleReason: 'binding_unknown' };
     }
+    if (anchorState.kind === 'graduated') {
+      return {
+        state: 'graduated',
+        totalDays,
+        since: anchorState.anchor.since,
+        eligible: true,
+      };
+    }
     const anchor = anchorState.kind === 'anchor' ? anchorState.anchor : null;
     if (!anchor) return { state: 'off', totalDays, eligible: true };
 
-    const platform = this.nurtureProvider?.platformFor(this.accountId);
     if (platform == null) {
       return { state: 'off', totalDays, since: anchor.since, eligible: false, ineligibleReason: 'platform_unknown' };
     }

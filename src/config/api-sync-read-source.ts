@@ -129,21 +129,33 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
           lifecycle_state: string;
           account_id: string | null;
           slow_start_since: Date | string | null;
+          slow_start_completed_at: Date | string | null;
         }>(
-          `SELECT env_key, lifecycle_state, account_id, slow_start_since
-             FROM client_environments
+          `SELECT e.env_key,e.lifecycle_state,e.account_id,e.slow_start_since,
+                  (SELECT c.completed_at
+                     FROM facebook_environment_slow_start_completion c
+                    WHERE c.env_key=e.env_key AND c.execution_target=$1)
+                    AS slow_start_completed_at
+             FROM client_environments e
             ORDER BY env_key`,
+          [this.executionTarget],
         );
-        const grouped = new Map<string, Array<number | null>>();
+        const grouped = new Map<string, Array<{
+          since: number | null;
+          completedAt: number | null;
+        }>>();
         for (const row of rows) {
           const accountId = row.account_id?.trim();
           if (!accountId || accountId === 'default') continue;
           const values = grouped.get(accountId) ?? [];
-          values.push(
-            row.slow_start_since === null
+          values.push({
+            since: row.slow_start_since === null
               ? null
               : new Date(row.slow_start_since).getTime(),
-          );
+            completedAt: row.slow_start_completed_at === null
+              ? null
+              : new Date(row.slow_start_completed_at).getTime(),
+          });
           grouped.set(accountId, values);
         }
         const value: ClientEnvironmentAutomationSnapshot = {
@@ -153,7 +165,10 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
           slowStartAnchors: [...grouped]
             .map(([accountId, values]) => ({
               accountId,
-              slowStartSince: values.length === 1 ? values[0]! : null,
+              slowStartSince: values.length === 1 ? values[0]!.since : null,
+              slowStartCompletedAt: values.length === 1
+                ? values[0]!.completedAt
+                : null,
               ambiguous: values.length !== 1,
             }))
             .sort((a, b) => a.accountId.localeCompare(b.accountId)),

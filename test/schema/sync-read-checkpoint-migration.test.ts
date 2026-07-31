@@ -115,10 +115,13 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!api.includes('0101_facebook_rule_policy_revision_runtime'));
   assert.ok(automation.includes('0102_facebook_consumption_runtime'));
   assert.ok(!api.includes('0102_facebook_consumption_runtime'));
+  // 目标全局运行数值、环境继承来源和目标隔离的慢启动毕业事实均由 API 配置权威持有。
+  assert.ok(api.includes('0103_facebook_operation_global_policy'));
+  assert.ok(!automation.includes('0103_facebook_operation_global_policy'));
   // 每加一条迁移都要在这里同步抬。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0102_facebook_consumption_runtime',
+    '0103_facebook_operation_global_policy',
   );
 });
 

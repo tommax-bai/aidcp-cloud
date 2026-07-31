@@ -70,7 +70,6 @@ import {
   InteractionGuardRegistry,
   ActionCooldownGate,
   PacingSaturationAlerter,
-  SLOW_START_TOTAL_DAYS,
   // change risk-state-cross-process-integrity：跨进程单写四件套
   AutomationWriterLock,
   resolveWriterLockConnection,
@@ -2317,12 +2316,14 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     pool: configMirrorPool,
     schemaProber: probeSchemaShape,
     mirrorVersionBumper: mirrorVersionStore,
+    ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
     // segA runs in every service mode, including the split API process that
     // owns customer policy writes. Resolve the locked environment anchor here
     // instead of relying on segC's account projection.
-    environmentSlowStartResolver: async ({ since }) => {
+    environmentSlowStartResolver: async ({ since, completedAt, totalDays }) => {
       if (process.env.AIDCP_SLOW_START_DISABLED === 'true') return 'off';
-      return Date.now() - since >= SLOW_START_TOTAL_DAYS * 86_400_000
+      if (completedAt != null) return 'graduated';
+      return Date.now() - since >= totalDays * 86_400_000
         ? 'graduated'
         : 'active';
     },
@@ -4610,6 +4611,10 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       ? {
           platformFor: (accountId: string) => accountStore.platformFor!(accountId),
           slowStartSinceFor: (accountId: string) => clientUserStore.slowStartSinceFor(accountId),
+          slowStartCompletedAtFor: (accountId: string) =>
+            clientUserStore.slowStartCompletedAtFor(accountId),
+          facebookSlowStartPolicy: () =>
+            facebookOperationPolicyStore!.slowStartRuntimePolicy(),
           createdAtFor: (accountId: string) => accountStore.createdAtFor!(accountId),
         }
       : undefined;

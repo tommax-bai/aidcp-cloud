@@ -1009,6 +1009,112 @@ function createRequestHandler(
       return;
     }
 
+    if (
+      (method === 'GET' || method === 'PUT')
+      && url === '/api/facebook/operation-global-policy'
+    ) {
+      if (
+        !deps.facebookOperationPolicy?.isReady()
+        || !deps.facebookOperationPolicy.getGlobal
+        || !deps.facebookOperationPolicy.writeGlobal
+      ) {
+        sendJson(res, 503, { error: 'facebook_operation_global_policy_unavailable' });
+        return;
+      }
+      if (method === 'GET') {
+        const view = deps.facebookOperationPolicy.getGlobal();
+        sendJson(
+          res,
+          view ? 200 : 503,
+          view ?? { error: 'facebook_operation_global_policy_unavailable' },
+        );
+        return;
+      }
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'bad_request' });
+        return;
+      }
+      if (
+        !isRecord(body)
+        || !hasExactlyKeys(body, [
+          'expectedRevision',
+          'rule',
+          'consumption',
+          'slowStart',
+          ...('reason' in body ? ['reason'] : []),
+        ])
+        || !Number.isInteger(body.expectedRevision)
+        || !isRecord(body.rule)
+        || !hasExactlyKeys(body.rule, ['viewsPerLike', 'joinEveryNRounds'])
+        || !isRecord(body.consumption)
+        || !hasExactlyKeys(body.consumption, [
+          'viewsPerLike',
+          'confirmedLikesPerJoin',
+          'confirmedJoinsPerComment',
+        ])
+        || !isRecord(body.slowStart)
+        || !hasExactlyKeys(body.slowStart, ['totalDays', 'dailyCaps'])
+        || !Array.isArray(body.slowStart.dailyCaps)
+        || (
+          body.reason !== undefined
+          && (typeof body.reason !== 'string' || body.reason.length > 500)
+        )
+      ) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_payload' });
+        return;
+      }
+      const result = await deps.facebookOperationPolicy.writeGlobal(
+        {
+          expectedRevision: Number(body.expectedRevision),
+          rule: body.rule as {
+            viewsPerLike: number;
+            joinEveryNRounds: number;
+          },
+          consumption: body.consumption as {
+            viewsPerLike: number;
+            confirmedLikesPerJoin: number;
+            confirmedJoinsPerComment: number;
+          },
+          slowStart: body.slowStart as {
+            totalDays: number;
+            dailyCaps: Array<{
+              day: number;
+              view: number;
+              like: number;
+              comment: number;
+              follow: number;
+              publish: number;
+              search: number;
+              joinGroup: number;
+            }>;
+          },
+          requestId: randomUUID(),
+          ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+        },
+        `panel:${verified.payload.sub}`,
+      );
+      if (!result.ok) {
+        sendJson(
+          res,
+          result.reason === 'revision_conflict'
+            ? 409
+            : result.reason === 'policy_unavailable'
+              ? 503
+              : 422,
+          {
+            error: result.reason,
+            ...(result.current ? { current: result.current } : {}),
+          },
+        );
+        return;
+      }
+      sendJson(res, 200, result.view);
+      return;
+    }
+
     const facebookOperationPolicyMatch =
       url.match(/^\/api\/environments\/([^/]+)\/facebook-operation-policy$/);
     if ((method === 'GET' || method === 'PUT') && facebookOperationPolicyMatch) {
@@ -1052,11 +1158,22 @@ function createRequestHandler(
         sendJson(res, 422, { error: 'validation_failed', reason: 'invalid_payload' });
         return;
       }
-      const allowed = new Set(['expectedRevision', 'mode', 'rule', 'consumption', 'reason']);
+      const allowed = new Set([
+        'expectedRevision',
+        'mode',
+        'cadenceSource',
+        'rule',
+        'consumption',
+        'reason',
+      ]);
       if (
         Object.keys(body).some((key) => !allowed.has(key))
         || !Number.isInteger(body.expectedRevision)
         || !['persona', 'slow_start', 'rule', 'consumption'].includes(String(body.mode))
+        || (
+          body.cadenceSource !== undefined
+          && !['global', 'environment'].includes(String(body.cadenceSource))
+        )
         || (
           body.reason !== undefined
           && (typeof body.reason !== 'string' || body.reason.length > 500)
@@ -1066,7 +1183,30 @@ function createRequestHandler(
         return;
       }
       const mode = body.mode as 'persona' | 'slow_start' | 'rule' | 'consumption';
-      if (
+      const cadenceSource = body.cadenceSource as
+        | 'global'
+        | 'environment'
+        | undefined;
+      if (cadenceSource === 'global' && (
+        body.rule !== undefined || body.consumption !== undefined
+      )) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'cadence_source_mismatch' });
+        return;
+      }
+      if (cadenceSource === 'environment' && (
+        !isRecord(body.rule)
+        || !hasExactlyKeys(body.rule, ['viewsPerLike', 'joinEveryNRounds'])
+        || !isRecord(body.consumption)
+        || !hasExactlyKeys(body.consumption, [
+          'viewsPerLike',
+          'confirmedLikesPerJoin',
+          'confirmedJoinsPerComment',
+        ])
+      )) {
+        sendJson(res, 422, { error: 'validation_failed', reason: 'cadence_source_mismatch' });
+        return;
+      }
+      if (cadenceSource === undefined && (
         (mode === 'persona' || mode === 'slow_start')
           ? body.rule !== undefined || body.consumption !== undefined
           : mode === 'rule'
@@ -1094,7 +1234,7 @@ function createRequestHandler(
                   )
                 )
               )
-      ) {
+      )) {
         sendJson(res, 422, { error: 'validation_failed', reason: 'mode_parameter_mismatch' });
         return;
       }
@@ -1103,6 +1243,7 @@ function createRequestHandler(
         {
           expectedRevision: Number(body.expectedRevision),
           mode,
+          ...(cadenceSource ? { cadenceSource } : {}),
           ...(body.rule ? {
             rule: body.rule as {
               viewsPerLike: number;

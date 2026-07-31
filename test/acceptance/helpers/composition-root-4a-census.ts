@@ -774,6 +774,12 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
         kind: 'call',
         symbol: 'clientUserStore.slowStartSinceFor',
       },
+      {
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: 'call',
+        symbol: 'clientUserStore.slowStartCompletedAtFor',
+      },
     ],
   },
   {

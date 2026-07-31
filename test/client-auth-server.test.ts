@@ -2074,6 +2074,7 @@ function makeFacebookOperationPolicyDep(options: {
     effectiveMode: slowStartState === 'active' ? 'slow_start' : null,
     policyRevision: currentRevision,
     schemaVersion: 'facebook_operation_policy@1',
+    cadenceSource: 'environment',
     rule: { viewsPerLike: 17, joinEveryNRounds: 4 },
     consumption: {
       viewsPerLike: 19,

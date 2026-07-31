@@ -174,8 +174,18 @@ test('B2 missing, ambiguous and stale slow-start evidence never collapse into kn
       value: {
         blockedEnvironmentKeys: ['blocked'],
         slowStartAnchors: [
-          { accountId: 'known', slowStartSince: null, ambiguous: false },
-          { accountId: 'ambiguous', slowStartSince: null, ambiguous: true },
+          {
+            accountId: 'known',
+            slowStartSince: null,
+            slowStartCompletedAt: null,
+            ambiguous: false,
+          },
+          {
+            accountId: 'ambiguous',
+            slowStartSince: null,
+            slowStartCompletedAt: null,
+            ambiguous: true,
+          },
         ],
       },
     }),
@@ -184,6 +194,10 @@ test('B2 missing, ambiguous and stale slow-start evidence never collapse into kn
   assert.equal(mirrors.automationGateForEdgeId('ads-blocked'), 'blocked');
   assert.equal(mirrors.automationGateForEdgeId('ads-open'), 'allowed');
   assert.equal(mirrors.slowStartForAccount('known').resolution, 'known');
+  assert.equal(
+    mirrors.slowStartForAccount('known').slowStartCompletedAt,
+    null,
+  );
   assert.equal(mirrors.slowStartForAccount('missing').resolution, 'missing');
   assert.equal(
     mirrors.slowStartForAccount('ambiguous').resolution,

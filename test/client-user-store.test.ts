@@ -999,12 +999,14 @@ test('创建意图：consumption 使用一次全局 revision 写 policy + audit 
   assert.equal(auditInsert.params?.[4], intentId);
   const after = JSON.parse(String(auditInsert.params?.[2])) as {
     baseMode: string;
+    cadenceSource: string;
     policyRevision: number;
     rule: Record<string, number>;
     consumption: Record<string, number>;
   };
   assert.deepEqual(after, {
     baseMode: 'consumption',
+    cadenceSource: 'global',
     rule: { viewsPerLike: 5, joinEveryNRounds: 2 },
     consumption: {
       viewsPerLike: 5,
