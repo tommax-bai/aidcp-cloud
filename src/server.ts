@@ -730,8 +730,22 @@ import { buildInteractionPermissionOverview } from './interactions/interaction-p
 // 互动域环境授权闸的 api 属主实现（Block③ L3 反方向收口）：持 api 池、自开事务，经 kernel 端口注入 automation。
 import { PgInteractionAuthGate } from './interactions/interaction-auth-gate.js';
 import type { InteractionAuthGate } from './kernel/interaction-auth-gate-types.js';
-// 组合根直接构造 content 的回复生成实现，并作为 ReplyAiPort 注入 ReplyWorkflow（automation 编排层只持接口）。
+// content 的回复生成实现。**task 2.6 起它建在内容段**（`ctx.replyAi`），自动化段只按模式取用：
+// automation 取 content 的 HTTP 客户端，跑过内容段的取那个实例。编排层一直只持 kernel 的 ReplyAiPort。
 import { ReplyAiService } from './interactions/reply-ai.js';
+import {
+  ReplyAiAuthorityHttpClient,
+  registerReplyAiAuthorityRoutes,
+} from './transport/content-authority-http.js';
+import type { ReplyAiPort } from './kernel/interaction-types.js';
+
+/**
+ * 互动 AI 单步超时的**单一来源**。内容段拿它建服务实例，自动化段还拿它算僵尸任务的回收窗口——
+ * 两段各读一次 env 就是两个会各自漂的默认值，而漂了不报错、只是两边对「多久算超时」看法不同。
+ */
+function resolveInteractionAiTimeoutMs(): number {
+  return Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
+}
 import { projectRuntimeControls } from './interactions/runtime-controls-provider.js';
 // change offboard-saga → Block③ L3：离场**执行台账**的属主侧操作，由组合根注入（拆进程时换成内部 HTTP）。
 import { PgOffboardMaterializationOps } from './interactions/offboard-write-adapter.js';
@@ -1142,6 +1156,12 @@ interface CompositionContext {
    * 自动化模式改取 content 的 HTTP 客户端。
    */
   textCardTranscriber?: TextCardTranscriber;
+  /**
+   * 互动回复生成实现（**content 段构造**，task 2.6）。与转写器同因同治：
+   * 它此前建在自动化段，于是内容进程拿不到它、那条路由注册不上。编排层本来就只持 kernel 接口，
+   * 唯一的跨属主边就在组装根这个 `new` 上。
+   */
+  replyAi?: ReplyAiPort;
   interactionCustomerApi?: InteractionCustomerApi | undefined;
   // Block② 数据网关：收件箱读侧窄面本地实例（segC 构造），additive 挂 ctx 供 segD 组建 DataGateway 聚合；不改其构造/时机。
   interactionStore?: InteractionStore | undefined;
@@ -2089,6 +2109,21 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
     } else {
       console.warn(
         '[aidcp-cloud] content 内部 API：curated-write-authority 路由未注册（CuratedContentStore 不可用）',
+      );
+    }
+    // 互动回复生成（task 2.6）：同样各注册各的。属主是内容段构造的那个实例，
+    // 与转写器一样，**只在跑过内容段的进程里才有**；没有就具名 warn，绝不注册一条空路由。
+    if (ctx.replyAi) {
+      registerReplyAiAuthorityRoutes(
+        httpServer,
+        ctx.replyAi,
+        contentAuthorityToken,
+        ctx.deploymentTarget,
+      );
+      capabilities.push('reply-ai-authority');
+    } else {
+      console.warn(
+        '[aidcp-cloud] content 内部 API：reply-ai-authority 路由未注册（本进程未运行内容段，无回复生成实例）',
       );
     }
     // 模型用量记账（task 2.4d-用量）：同样各注册各的。
@@ -4082,6 +4117,10 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     getProvider: textCardOcrProvider,
     logger: console,
   });
+
+  // 互动回复生成（task 2.6）：与转写器同因同治——原先建在自动化段，内容进程因此拿不到它、
+  // 那条路由永远注册不上。它只要两样东西（模型客户端 + 单步超时），两样在这里都有。
+  ctx.replyAi = new ReplyAiService(llm, resolveInteractionAiTimeoutMs());
   // 帖级形态档服务（change textcard-carousel-form-parity，阶段0 影子）：AIDCP_POST_FORM_PROFILE 默认关。
   // 开=CoverCardWriter 复用封面感知结果 + 对内页 senseAt 有界并发判形、只把形态档写审计（不改渲染）；关=不计算、byte-identical。
   // 依赖感知旗标 AIDCP_COVER_FORM_SENSING（senseAt 受同一 enabled 门控；感知关时形态档恒 generative）。
@@ -4344,6 +4383,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     curatedWrite: CuratedWritePort;
     facebookPublishMedia: FacebookPublishMediaPort;
     textCardTranscription: TextCardTranscriber;
+    replyAi: ReplyAiPort;
   } | undefined => {
     if (seamMode !== 'automation') return undefined;
     const contentUrl = readEnvString('AIDCP_CONTENT_URL');
@@ -4375,6 +4415,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         deploymentTarget,
         () => process.env.AIDCP_TEXTCARD_OCR === 'true',
       ),
+      // 回复生成（task 2.6）：三个方法都带着 `fallback`（这一步为什么没得到正常答案），
+      // 客户端逐字校验它落在联合里——丢了它，一次超时会读成一次正常回答。
+      replyAi: new ReplyAiAuthorityHttpClient(http, callerToken, deploymentTarget),
     };
   })();
   // 三元而非 `??`：`??` 会在客户端字段意外为 undefined 时静默回落到本地实例，
@@ -5173,7 +5216,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   let interactionInbox: InteractionInboxService | undefined;
 
   let interactionOffboarding: InteractionOffboardingService | undefined;
-  const interactionAiTimeoutMs = Math.max(1_000, readEnvNumber('AIDCP_INTERACTION_AI_TIMEOUT_MS', 20_000));
+  const interactionAiTimeoutMs = resolveInteractionAiTimeoutMs();
   try {
     // Block③ L3 翻转前置：这三个 store 此前构造时都不传 pool ⇒ 各自 `new Pool(resolveEnvPgConfig())`
     // 回落**共享库**配置，而不是自己表的属主池。**属主各不相同**：InteractionStore 写的是 interaction_*
@@ -5236,35 +5279,55 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     }
     const resetClassifying = await interactionStore.recoverStalledClassifyingJobs(Date.now() - interactionAiTimeoutMs * 2);
     interactionMetrics.gauge('interaction_recovered_classifying_jobs', resetClassifying);
-    const replyAi = new ReplyAiService(
-      llm,
-      interactionAiTimeoutMs,
-    );
-    replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigResolver, replyAi, {
-      accountNameFor: accountDisplayName,
-      ...(apiDirectPorts.accountRuntime ? {
-        contactInfoFor: (accountId: string) =>
-          apiDirectPorts.accountRuntime!.getContactInfo(accountId),
-      } : {}),
-      canAutoQueue: async (context, snapshot, preview) =>
-        ctx.interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
-    });
-    interactionInbox = new InteractionInboxService({
-      store: interactionStore,
-      configs: replyConfigResolver,
-      workflow: replyWorkflow,
-      controllerFor: interactionRiskControllerFor,
-      metrics: interactionMetrics,
-      ...(apiDirectPorts.accountRuntime ? {
-        recordNickname: (accountId: string, nickname: string) =>
-          apiDirectPorts.accountRuntime!.recordNickname(accountId, nickname),
-      } : {}),
-      logger: console,
-      dispatchAuto: (input) => {
-        if (!ctx.interactionSender) throw new Error('interaction_sender_unavailable');
-        return ctx.interactionSender.dispatchQueued(input);
-      },
-    });
+    // task 2.6：不再在本段 `new` content 的实现，改按模式取用。三条路径与转写器那条逐字同形：
+    //   automation ⇒ content 的 HTTP 客户端；跑过内容段 ⇒ 内容段建的那个实例；
+    //   两者皆非（今天只有 core）⇒ 响亮 `cross_segment_drop` 并留空。
+    // 留空时**不构造 `replyWorkflow`**（它本来就是可选的），而不是塞一个空壳进去：
+    // 塞空壳意味着每一次分类 / 润色 / 风险复核都会静静地回一个看起来合法的结果。
+    const replyAi: ReplyAiPort | undefined = contentAuthorityClients
+      ? contentAuthorityClients.replyAi
+      : crossSegment(
+          ctx.replyAi,
+          '互动回复生成',
+          '内容段',
+          '本进程不组装回复工作流，收件箱的自动回复链整条不启用（绝不半截可用）',
+        );
+    if (!replyAi) {
+      console.warn(
+        '[aidcp-cloud] 回复生成能力缺席 ⇒ 跳过 ReplyWorkflow 组装（收件箱只读，不生成草稿）',
+      );
+    }
+    // **这个 `if` 是编译器逼出来的，别改成非空断言绕过去。** 工作流的第三个实参是必填的，
+    // 而缺席时唯一诚实的处置就是不组装它——`replyWorkflow` 本来就是可选的，
+    // 下游那两处内部 API 也早有「没有工作流就不挂」的分支。塞一个空壳进去才是灾难：
+    // 每一次分类 / 润色 / 风险复核都会静静回一个看起来合法的结果。
+    if (replyAi) {
+      replyWorkflow = new ReplyWorkflow(interactionStore, replyConfigResolver, replyAi, {
+        accountNameFor: accountDisplayName,
+        ...(apiDirectPorts.accountRuntime ? {
+          contactInfoFor: (accountId: string) =>
+            apiDirectPorts.accountRuntime!.getContactInfo(accountId),
+        } : {}),
+        canAutoQueue: async (context, snapshot, preview) =>
+          ctx.interactionSender?.canAutoQueueDraft(context, snapshot, preview) ?? false,
+      });
+      interactionInbox = new InteractionInboxService({
+        store: interactionStore,
+        configs: replyConfigResolver,
+        workflow: replyWorkflow,
+        controllerFor: interactionRiskControllerFor,
+        metrics: interactionMetrics,
+        ...(apiDirectPorts.accountRuntime ? {
+          recordNickname: (accountId: string, nickname: string) =>
+            apiDirectPorts.accountRuntime!.recordNickname(accountId, nickname),
+        } : {}),
+        logger: console,
+        dispatchAuto: (input) => {
+          if (!ctx.interactionSender) throw new Error('interaction_sender_unavailable');
+          return ctx.interactionSender.dispatchQueued(input);
+        },
+      });
+    }
     const recovery = await interactionStore.recoverableAttemptIds();
     interactionMetrics.gauge('interaction_recoverable_attempts', recovery.length);
     if (recovery.length) {

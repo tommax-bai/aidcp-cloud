@@ -1168,26 +1168,29 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
   // Not retired with it, and deliberately: the note evaluator still takes a transcriber handle, but
   // that handle is typed as the kernel port, so it is no longer a content dependency of the
   // automation root. The curated store write those roles do is a separate, live entry.
-  /**
-   * 0.3d: segC constructs the interaction reply generator in-process.
-   * `src/interactions/reply-ai.ts` is content-owned and absent from the
-   * automation package, so the reply workflow cannot be assembled there.
-   */
-  {
-    id: 'content-reply-generation-authority',
-    category: 'content-owner',
-    owner: 'content',
-    consumer: 'automation',
-    closingChange: 'future',
-    probes: [
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segCAutomation',
-        kind: 'new',
-        symbol: 'ReplyAiService',
-      },
-    ],
-  },
+  // `content-reply-generation-authority` retired 2026-07-31 (change
+  // split-cloud-automation-production-runtime, task 2.6). **Resolved by wiring** — third of that
+  // kind, and the same treatment as the text-card transcriber earlier the same day.
+  //
+  // The entry (0.3d) was accurate: segC constructed the interaction reply generator in-process, and
+  // `src/interactions/reply-ai.ts` is content-owned and absent from the automation package. Worth
+  // noting what was already right and stayed right: the orchestration layer only ever held the
+  // kernel `ReplyAiPort`, so this was never a coupling of the workflow — it was one `new` in the
+  // composition root, sitting in the wrong segment.
+  //
+  // The construction moves to segB (content), which is also what lets the content process serve the
+  // three routes at all; segC picks the content HTTP client under `automation`, the segB instance
+  // through `crossSegment` when content did run, and otherwise nothing.
+  //
+  // **"Otherwise nothing" is load-bearing, and the compiler is what enforced it**: the workflow's
+  // third constructor argument is required, so the absent case cannot be papered over with a stub.
+  // It skips assembling the workflow instead — which the two downstream internal APIs already had a
+  // branch for. A stub would have been the worst outcome on the menu: every classify / polish /
+  // review would quietly return something structurally valid.
+  //
+  // As with the transcriber, the probe stopped matching on its own, so the guard is not the probe.
+  // The reappearance assertion in composition-root-4a-inventory.test.ts has the same two halves:
+  // segC MUST NOT construct the generator, **and** the automation branch MUST still exist.
   // `content-publish-rejection-evidence-authority` was retired here (change
   // split-cloud-automation-production-runtime, task 2.9). It was MIS-ATTRIBUTED, not resolved.
   //

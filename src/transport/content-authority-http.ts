@@ -62,6 +62,17 @@ import type {
   CuratedWritePort,
 } from '../kernel/curated-write-port.js';
 import type {
+  AiFallback,
+  AiStepResult,
+  IntentClassifierInput,
+  IntentClassifierOutput,
+  PolisherInput,
+  PolisherOutput,
+  ReplyAiPort,
+  RiskReviewerInput,
+  RiskReviewerOutput,
+} from '../kernel/interaction-types.js';
+import type {
   TextCardTranscriber,
   TextCardTranscriberInput,
   TextCardTranscriberOutcome,
@@ -1054,6 +1065,139 @@ export class TextCardTranscriptionAuthorityHttpClient implements TextCardTranscr
         + '本进程会照常发起转写调用，但属主那侧按自己的旗标原样退回——'
         + '结果是角色报「正在转写」而实际一个字也没转。请让两侧配置一致。',
     );
+  }
+}
+
+/* ═══════════════════════════════════ 互动回复生成（automation → content） */
+
+/**
+ * 回复生成三条方法的传输三件套（task 2.6）。
+ *
+ * 编排层（automation 的 `ReplyWorkflow`）本来就只持 kernel 的接口，**唯一的跨属主边在组装根**：
+ * 它在自动化段里 `new` 了 content 的具体实现。所以这一组不用改编排层一个字。
+ *
+ * **这条链上最容易在传输层丢掉的东西是 `fallback`**：它带的是「这一步为什么没得到正常答案」
+ * （超时 / 上游报错 / JSON 不合法 / 不过 schema / 太长 / 候选被否…）。
+ * 丢了它，一次超时的分类会读成一次正常的分类，而 `value` 那半仍然是个合法取值——
+ * **失败因此长得和成功一模一样**。所以回执守卫**逐字校验 `fallback` 落在联合类型里**，
+ * MUST NOT 只判 `typeof === 'string'`：那样一个乱码回执会被当成一个未知但合法的原因，
+ * 更糟的是任何默认值都会把它压成 `'none'`。
+ */
+const AI_FALLBACK_VALUES: ReadonlySet<string> = new Set<AiFallback>([
+  'none',
+  'timeout',
+  'upstream_error',
+  'invalid_json',
+  'invalid_schema',
+  'too_long',
+  'knowledge_answer_missing',
+  'candidate_rejected',
+]);
+
+export const REPLY_AI_AUTHORITY_ROUTES = {
+  classify: 'content-authority/reply-ai/v1/classify',
+  polish: 'content-authority/reply-ai/v1/polish',
+  review: 'content-authority/reply-ai/v1/review',
+} as const satisfies Record<keyof ReplyAiPort, string>;
+
+/**
+ * 入参照本文件既有口径**原样透传**：这三个入参是属主自己的提示词装配面，
+ * 传输层重做一遍校验就会出现两份口径，而属主那份才是真的（同 `refreshReferenceImages` 的处置）。
+ * 这一跳只保证它是个对象——不是对象的话属主会拿到 `undefined` 然后走一条谁也没想过的路。
+ */
+function replyAiInput<T>(label: string): (value: unknown) => T {
+  return (value: unknown): T => requireRecord(value, label) as T;
+}
+
+/** `AiStepResult<T>` 的回执守卫。`value` 只判在场（形状归属主），`fallback` **必须**是联合里的一员。 */
+function isAiStepResult(value: unknown): value is AiStepResult<unknown> {
+  return isRecord(value)
+    && 'value' in value
+    && typeof value.fallback === 'string'
+    && AI_FALLBACK_VALUES.has(value.fallback);
+}
+
+/* ─────────────────────────── 服务端注册（content 侧） */
+
+export function registerReplyAiAuthorityRoutes(
+  server: InternalHttpServer,
+  local: ReplyAiPort,
+  callerToken: string,
+  executionTarget: DeploymentTarget,
+): void {
+  const route = <TIn, TOut>(
+    method: keyof ReplyAiPort & string,
+    invoke: (input: TIn) => Promise<TOut>,
+  ) => async (args: unknown): Promise<TOut> => {
+    // 信封先解、且在 try 之外：口径同本文件其余各组。
+    const input = parseApiDirectEnvelope(args, executionTarget, replyAiInput<TIn>(`reply-ai.${method}`));
+    return runOwnerCall(`reply-ai.${method}`, ownerHasMethod(local, method), () => invoke(input));
+  };
+
+  server.registerBearer(
+    REPLY_AI_AUTHORITY_ROUTES.classify,
+    callerToken,
+    route<IntentClassifierInput, AiStepResult<IntentClassifierOutput>>(
+      'classify',
+      (input) => local.classify(input),
+    ),
+  );
+  server.registerBearer(
+    REPLY_AI_AUTHORITY_ROUTES.polish,
+    callerToken,
+    route<PolisherInput, AiStepResult<PolisherOutput>>('polish', (input) => local.polish(input)),
+  );
+  server.registerBearer(
+    REPLY_AI_AUTHORITY_ROUTES.review,
+    callerToken,
+    route<RiskReviewerInput, AiStepResult<RiskReviewerOutput>>(
+      'review',
+      (input) => local.review(input),
+    ),
+  );
+}
+
+/* ─────────────────────────── 客户端（automation 侧） */
+
+export class ReplyAiAuthorityHttpClient implements ReplyAiPort {
+  private readonly channel: ContentAuthorityChannel;
+
+  constructor(
+    http: InternalHttpClient,
+    callerToken: string,
+    executionTarget: DeploymentTarget,
+  ) {
+    this.channel = { http, callerToken, executionTarget };
+  }
+
+  classify(input: IntentClassifierInput): Promise<AiStepResult<IntentClassifierOutput>> {
+    return callContentAuthority(
+      this.channel,
+      REPLY_AI_AUTHORITY_ROUTES.classify,
+      'reply-ai.classify',
+      input,
+      isAiStepResult,
+    ) as Promise<AiStepResult<IntentClassifierOutput>>;
+  }
+
+  polish(input: PolisherInput): Promise<AiStepResult<PolisherOutput>> {
+    return callContentAuthority(
+      this.channel,
+      REPLY_AI_AUTHORITY_ROUTES.polish,
+      'reply-ai.polish',
+      input,
+      isAiStepResult,
+    ) as Promise<AiStepResult<PolisherOutput>>;
+  }
+
+  review(input: RiskReviewerInput): Promise<AiStepResult<RiskReviewerOutput>> {
+    return callContentAuthority(
+      this.channel,
+      REPLY_AI_AUTHORITY_ROUTES.review,
+      'reply-ai.review',
+      input,
+      isAiStepResult,
+    ) as Promise<AiStepResult<RiskReviewerOutput>>;
   }
 }
 

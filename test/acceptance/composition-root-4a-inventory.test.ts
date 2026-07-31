@@ -268,6 +268,30 @@ test('content-textcard-transcription-authority 已撤：自动化段不再造转
   );
 });
 
+/**
+ * `content-reply-generation-authority` 撤条的**复活断言**（2026-07-31，task 2.6）。
+ * 判据与转写器那条同形、同理由：探针是自己停止匹配的，而「探针不再匹配」分不出
+ * 「耦合没了」与「接线被删了」。两半缺一不可。
+ */
+test('content-reply-generation-authority 已撤：自动化段不再造回复生成器，且远端取用分支仍在', async () => {
+  assert.equal(
+    await evidenceForProbe({
+      sourceFile: 'src/server.ts',
+      scope: 'segCAutomation',
+      kind: 'new',
+      symbol: 'ReplyAiService',
+    }),
+    null,
+    '自动化段又就地造回复生成器 ⇒ 撤条前提失效，MUST 复活 content-reply-generation-authority',
+  );
+  const source = await readFile(new URL('../../src/server.ts', import.meta.url), 'utf8');
+  assert.ok(
+    source.includes('contentAuthorityClients.replyAi'),
+    'automation 模式下取 content 回复生成客户端的那条分支不见了 ⇒ 自动化进程拿不到这条能力，'
+    + 'MUST 复活 content-reply-generation-authority',
+  );
+});
+
 test('full-root blocker ledger exactly matches source-derived composition blockers', async () => {
   const [ledger, actual] = await Promise.all([
     loadJson<BlockerLedger>(
@@ -303,13 +327,13 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
   );
   assert.equal(
     actual.filter((blocker) => blocker.category === 'content-owner').length,
-    7,
+    6,
     'content-owner blockers: draft refinement, facebook publish media, concept, curated,'
-    + ' generic llm, token usage, reply generation.'
+    + ' generic llm, token usage.'
     + ' It was 10. Publish rejection evidence was retired as mis-attributed (task 2.9); role'
-    + ' factories (tasks 0.7 + 2.4b) and text-card transcription (task 2.4e) were retired as'
-    + ' RESOLVED on 2026-07-31 — a different kind of retirement, earned by wiring rather than by'
-    + ' bookkeeping. All three have'
+    + ' factories (tasks 0.7 + 2.4b), text-card transcription (task 2.4e) and reply generation'
+    + ' (task 2.6) were retired as RESOLVED on 2026-07-31 — a different kind of retirement, earned'
+    + ' by wiring rather than by bookkeeping. All four have'
     + ' retirement notes in composition-root-4a-census.ts and a dedicated reappearance assertion.'
     + ' This count only ever goes DOWN by adjudication — a drop with no matching retirement note'
     + ' means a probe stopped matching, which is a regression, not progress.',
@@ -341,7 +365,16 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
     + ' the guard that matters — all five probes stopped matching on their own, and silence cannot'
     + ' distinguish "coupling gone" from "wiring deleted".',
   );
-  assert.ok(actual.some((blocker) => blocker.id === 'content-reply-generation-authority'));
+  assert.equal(
+    actual.some((blocker) => blocker.id === 'content-reply-generation-authority'),
+    false,
+    'content-reply-generation-authority was retired as RESOLVED (task 2.6): the generator moved to'
+    + ' segB (content) — which is what lets the content process serve the three routes — and segC'
+    + ' picks the content HTTP client, the segB instance through crossSegment, or nothing. The'
+    + ' orchestration layer always held only the kernel port; the coupling was one `new` in the'
+    + ' wrong segment. If it is back, segC is constructing the generator again. The two-half'
+    + ' reappearance assertion above is the guard that matters.',
+  );
   assert.equal(
     actual.some((blocker) =>
       blocker.id === 'content-publish-rejection-evidence-authority'

@@ -4,11 +4,11 @@
   "claimBlocked": true,
   "claim": "api, automation, and content are independently bootable without foreign owner pools, stores, or synchronous in-process dependencies",
   "summary": {
-    "total": 53,
+    "total": 52,
     "byCategory": {
       "4b-mirror": 14,
       "operator-command": 3,
-      "content-owner": 7,
+      "content-owner": 6,
       "composition-root": 29
     }
   },
@@ -258,16 +258,6 @@
       "evidence": [
         "src/server.ts#segAApiFoundation:new:TokenUsageStore",
         "src/server.ts#segDApiServing:identifier-use:tokenUsageStore"
-      ]
-    },
-    {
-      "id": "content-reply-generation-authority",
-      "category": "content-owner",
-      "owner": "content",
-      "consumer": "automation",
-      "closingChange": "future",
-      "evidence": [
-        "src/server.ts#segCAutomation:new:ReplyAiService"
       ]
     },
     {
