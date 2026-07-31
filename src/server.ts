@@ -364,6 +364,7 @@ import {
 } from './transport/delegated-task-http.js';
 import {
   DelegatedTaskTextCommandHttpClient,
+  AutomationDispatchCommandHttpClient,
   registerAutomationDispatchCommandRoutes,
   registerDelegatedTaskTextCommandRoutes,
 } from './transport/operator-command-http.js';
@@ -497,6 +498,7 @@ import {
 import type { ConceptPoolPort } from './kernel/concept-pool-port.js';
 import type { CuratedSelectionPort } from './kernel/curated-selection-port.js';
 import type { CuratedWritePort } from './kernel/curated-write-port.js';
+import type { AutomationDispatchActivity } from './kernel/operator-command-port.js';
 import type { FacebookPublishMediaPort } from './kernel/facebook-publish-media-port.js';
 import {
   FacebookPublishMediaAuthorityHttpClient,
@@ -1034,10 +1036,17 @@ interface CompositionContext {
   // single-assignment cross-segment handles
   apiDirectAuthorities?: ApiDirectAuthorities;
   apiFeishuOwner?: ApiFeishuOwner;
-  automationDispatchCommands?: Pick<
-    CommandFaceDeps,
-    'dispatch' | 'dispatchActive'
-  >;
+  automationDispatchCommands?: {
+    dispatch: NonNullable<CommandFaceDeps['dispatch']>;
+    /**
+     * **本进程内的同步布尔**，只给 automation 侧那个接收方读（它就在本进程里，三态对它没有意义）。
+     * 面板方向请用 {@link CompositionContext.dispatchActivityForPanel}——那条可能跨进程，
+     * 「读不到」是一个必须表达得出来的真实答案（task 1.3a）。
+     */
+    isActive: () => boolean;
+  };
+  /** 面板方向的调度活跃三态读（task 1.3a）。 */
+  dispatchActivityForPanel?: () => Promise<AutomationDispatchActivity>;
   automationEdgeResumeAuthority?: EdgeResumeCommandPort;
   automationFacebookScopeAuthority?: FacebookScopeCommandPort;
   automationPublishUiUpdateAuthority?: PublishUiUpdateCommandPort;
@@ -1890,9 +1899,9 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
   }
   // 调度启停：接收方**刻意没有持久台账**（它改的是进程内布尔，给它跨重启台账会让重启后一次真实启动
   // 被判 duplicate 并回放陈旧的「是否真翻转」＝编造；理由与判例见 operator-command-receiver.ts）。
-  if (ctx.automationDispatchCommands?.dispatch && ctx.automationDispatchCommands.dispatchActive) {
+  if (ctx.automationDispatchCommands?.dispatch && ctx.automationDispatchCommands.isActive) {
     const dispatch = ctx.automationDispatchCommands.dispatch;
-    const dispatchActive = ctx.automationDispatchCommands.dispatchActive;
+    const dispatchActive = ctx.automationDispatchCommands.isActive;
     registerAutomationDispatchCommandRoutes(
       httpServer,
       new AutomationDispatchCommandReceiver({
@@ -8265,8 +8274,12 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         edgesOnline: server.onlineEdgeCount(),
       };
     },
-    dispatchActive: () => dispatchActive,
+    isActive: () => dispatchActive,
   };
+  // 面板方向的三态读（task 1.3a）。**与上面那个同步布尔刻意分开**：
+  // 上面那个给 automation 侧的接收方用——它就在本进程里、读的就是这个布尔，三态对它没有意义；
+  // 面板方向则可能跨进程，`unavailable` 是一个真实且必须表达得出来的答案。
+  ctx.dispatchActivityForPanel = async () => ({ state: 'known', active: dispatchActive });
   // risk.command backlog 只能在真实 Edge resume 依赖就绪后开始消费；此前 LISTEN wake 会被未启动 consumer 忽略，
   // start() 立即跑首轮并承接全部 backlog，不丢通知。
   riskCommandConsumer?.start();
@@ -8494,6 +8507,16 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
   const facebookScopeCommand =
     mode === 'api' && deploymentTarget && automationDirectToken
       ? new FacebookScopeCommandHttpClient(
+          automationHttp,
+          automationDirectToken,
+          deploymentTarget,
+        )
+      : undefined;
+  // 调度启停（task 1.3a）：api 独立进程里调度引擎在 automation 那边，读与写都得跨进程。
+  // 形态与上面两个客户端逐字一致；不建的那些模式（monolith / core）下走进程内闭包。
+  const automationDispatchCommand =
+    mode === 'api' && deploymentTarget && automationDirectToken
+      ? new AutomationDispatchCommandHttpClient(
           automationHttp,
           automationDirectToken,
           deploymentTarget,
@@ -8861,8 +8884,31 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     // 后果不是新增分支，而是让**已经写好但到不了**的两条诚实分支真的可达：
     // 面板 `/dispatch` 回 503 `dispatch_unavailable`，状态灯回 `null`（区别于 true/false）。
     // 单体形态下这里恒有值（segC 无条件挂上它），所以现网行为逐位不变。
-    dispatch: ctx.automationDispatchCommands?.dispatch,
-    dispatchActive: ctx.automationDispatchCommands?.dispatchActive,
+    // task 1.3a：api 独立进程里调度引擎在 automation 那边，读与写**两条一起接**——
+    // 只接读的话，状态灯亮着、按钮按下去却没人接，比两个都读不到更糟。
+    dispatch: automationDispatchCommand
+      ? async (accountId, action) => {
+          const receipt = await automationDispatchCommand.setDispatch({
+            commandId: randomUUID(),
+            accountId,
+            action,
+          });
+          // 三种非成功回执各有各的真相，MUST NOT 压成一句「失败」——
+          // 用户拍板的这一版要求「点了失败给明确提示」，提示的内容就从这里来。
+          if (receipt.outcome === 'not_delivered') {
+            throw new Error(`调度指令没有送达处理器（${receipt.reason}），本次启停未生效`);
+          }
+          if (receipt.outcome === 'collision') {
+            throw new Error('同一条指令 id 被用在了另一个账号上，本次未执行');
+          }
+          // 回执里的 state 与面板要的形状**逐字相同**，原样回传即可。
+          // 别在这里重组一个新对象：多写一遍就多一处会漂的地方，而且漂了不报错。
+          return receipt.state;
+        }
+      : ctx.automationDispatchCommands?.dispatch,
+    dispatchActive: automationDispatchCommand
+      ? () => automationDispatchCommand.readDispatchActivity()
+      : ctx.dispatchActivityForPanel,
     managementChatIds,
   });
   ctx.commandFace = commandFace;

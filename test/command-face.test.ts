@@ -50,7 +50,8 @@ function commandFace(options: {
       changed: true,
       edgesOnline: 1,
     }),
-    dispatchActive: () => true,
+    // task 1.3a：状态灯读改成异步三态（`unavailable` ≠ `active:false`）。
+    dispatchActive: async () => ({ state: 'known', active: true }),
     managementChatIds: new Set(),
     logger: { log: () => {} },
   });

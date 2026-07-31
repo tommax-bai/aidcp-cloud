@@ -18,6 +18,7 @@
  */
 
 import type { AccountState } from '../account-state.js';
+import type { AutomationDispatchActivity } from '../kernel/operator-command-port.js';
 import type { CommandActions } from './commands.js';
 
 /**
@@ -44,8 +45,22 @@ export interface PanelCommandActions {
     accountId: string,
     action: 'start' | 'stop',
   ): Promise<{ accountId: string; dispatch: 'started' | 'stopped'; changed: boolean; edgesOnline: number }>;
-  /** 调度引擎当前是否活跃（dashboard summary 读）。未注入则该字段回 null（「读不到」，不是「没在跑」）。 */
-  dispatchActive?(): boolean;
+  /**
+   * 调度引擎当前活跃状态（dashboard summary 读）。
+   *
+   * **异步 + 三态，且这两点都是必须的**（task 1.3a，用户 2026-07-31 拍板取「显示未知 / 按钮仍可点 /
+   * 点了失败给明确提示」这一版）：
+   *   - **异步**：调度引擎在 automation 进程里，api 独立起进程时这一读是一次跨进程调用；
+   *   - **三态**：`unavailable` ≠ `active:false`。「读不到调度引擎」与「调度引擎正常停着」
+   *     在面板上长得一模一样，但一个要人去查进程、另一个什么都不用做。
+   *
+   * 压成同步布尔的后果**有先例**：派生 api 仓的手写入口里那句 `dispatchActive: () => false`
+   * 就是这么来的——把「不知道」答成「停着」，运营看到「停着」会去点启动，
+   * 而那条指令其实根本送不到。**MUST NOT 为了图省事再压一次。**
+   *
+   * 未注入则该字段回 null（同样是「读不到」，不是「没在跑」）。
+   */
+  dispatchActive?(): Promise<AutomationDispatchActivity>;
 }
 
 export type EdgeResumeOutcome =

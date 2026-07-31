@@ -121,7 +121,8 @@ const deps = {
       dispatchActiveState = want;
       return { accountId: id, dispatch: want ? ('started' as const) : ('stopped' as const), changed, edgesOnline: 3 };
     },
-    dispatchActive: () => dispatchActiveState,
+    // task 1.3a：状态灯读改成异步三态。
+    dispatchActive: async () => ({ state: 'known' as const, active: dispatchActiveState }),
   },
   // change cloud-coupling-phase5 P5-1：面板不再持有 RiskController。
   // 写 = 异步命令端口（提交只回 commandId）；读 = 只读投影端口（这里仍接真 controller，保住配额断言的成色）。
@@ -1032,6 +1033,7 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
       alerts: { severity: string }[];
       attributionPending: boolean;
       dispatchActive: boolean | null;
+      dispatchUnknownReason: string | null;
     };
     // change dashboard-refresh-clarity：asOf = 服务端该次查询当前时刻（数据新鲜度，console 渲染「数据截至」）
     assert.equal(typeof sumBody.asOf, 'number');
@@ -1056,6 +1058,7 @@ test('HTTP 集成：version 公开、登录签发 JWT、受保护读接口、404
     assert.equal(sumBody.alerts[0].severity, 'P0');
     // V1 task 9.4：调度引擎态
     assert.equal(sumBody.dispatchActive, true);
+    assert.equal(sumBody.dispatchUnknownReason, null, '读得到时 MUST 没有原因');
 
     // /api/version 暴露告警分级枚举（task 5.4 follow-up）+ 厂商全集 + DTO 字段指纹（console-cloud-panel-hardening #4/#5/#6）
     const ver2 = (await (await fetch(`${base}/api/version`)).json()) as {
@@ -2885,5 +2888,41 @@ test('HTTP DelegatedTask API: console draft auto-queues (no confirm card), contr
     assert.equal(((await cancelled.json()) as { task: { status: string } }).task.status, 'cancelled');
   } finally {
     await h.close();
+  }
+});
+
+/**
+ * 调度引擎状态灯的三态（task 1.3a，用户 2026-07-31 拍板取「显示未知 / 按钮仍可点 / 点了失败给明确提示」）。
+ *
+ * **要钉的不是「有三个分支」，是「后两个分支绝不会落成 false」。**
+ * 面板上 `false` 的含义是「调度引擎正常停着」——运营看到它什么都不做。把「端口没接」或
+ * 「远端读失败」压成 false，等于告诉运营一切正常，而真相是这条链根本不通。
+ * 派生 api 仓那句 `dispatchActive: () => false` 就是这么写出来的，所以这条用例必须存在。
+ */
+test('调度状态灯：读不到 MUST 落 null + 具名原因，MUST NOT 落 false', async () => {
+  const readers: Array<[string, (typeof deps)['commandActions']['dispatchActive'], string]> = [
+    ['端口没注入', undefined, 'not_wired'],
+    ['远端答不可用', async () => ({ state: 'unavailable' as const, reason: 'handler_not_wired' }), 'handler_not_wired'],
+    ['远端读抛错', async () => { throw new Error('automation unreachable'); }, 'automation unreachable'],
+  ];
+  for (const [label, reader, expectedReason] of readers) {
+    const server = await startPanelApi(
+      { ...deps, commandActions: { ...deps.commandActions, dispatchActive: reader } },
+      makeConfig(),
+    );
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const body = (await (await fetch(`${base}/api/dashboard/summary`, {
+        headers: { authorization: `Bearer ${await loginToken(base)}` },
+      })).json()) as { dispatchActive: boolean | null; dispatchUnknownReason: string | null };
+      assert.equal(body.dispatchActive, null, `${label}：MUST 是 null，绝不是 false`);
+      assert.match(
+        body.dispatchUnknownReason ?? '',
+        new RegExp(expectedReason),
+        `${label}：MUST 带具名原因，否则「未知」对运营没有可操作性`,
+      );
+    } finally {
+      await server.close();
+    }
   }
 });

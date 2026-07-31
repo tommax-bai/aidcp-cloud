@@ -12,6 +12,7 @@
  */
 
 import http from 'node:http';
+import type { AutomationDispatchActivity } from '../kernel/operator-command-port.js';
 import { randomUUID } from 'node:crypto';
 import { signJwt, verifyJwt } from './jwt.js';
 import { parseBearer, verifyCredentials } from './auth.js';
@@ -70,6 +71,37 @@ const MAX_FB_PUBLISH_UPLOAD_BODY_BYTES = 64 * 1024 * 1024;
 
 function isCuratedSourcePostType(contentType: string): boolean {
   return contentType === 'image_text' || contentType === 'video';
+}
+
+/**
+ * 调度引擎活跃状态的三态读（task 1.3a）。
+ *
+ * **三条分支各自对应一个不同的现实，压成两态就会有一条永远说谎**：
+ *   - 读到了 → 真值 + 无原因；
+ *   - 端口没注入 → **null**（本进程没接这条通道），不是 false；
+ *   - 读了但失败 → **null** + 原因（对面没起来 / 网络不通 / 令牌不对），同样不是 false。
+ *
+ * 面板上 `false` 的含义是「调度引擎正常停着」——运营看到它什么都不会做。
+ * 把后两种落成 false，等于告诉运营「一切正常、只是停着」，而真相是这条链根本不通。
+ */
+async function readDispatchActivity(
+  deps: { commandActions: { dispatchActive?: () => Promise<AutomationDispatchActivity> } },
+): Promise<{ dispatchActive: boolean | null; dispatchUnknownReason: string | null }> {
+  const read = deps.commandActions.dispatchActive;
+  if (!read) return { dispatchActive: null, dispatchUnknownReason: 'not_wired' };
+  try {
+    const activity = await read();
+    return activity.state === 'known'
+      ? { dispatchActive: activity.active, dispatchUnknownReason: null }
+      : { dispatchActive: null, dispatchUnknownReason: activity.reason };
+  } catch (err) {
+    // 读失败**不是**「停着」。仪表盘一次读不到不该拖垮整个 summary，所以吞掉异常——
+    // 但吞掉的同时必须把原因交出去，否则就退化成了本条注释开头说的那种谎。
+    return {
+      dispatchActive: null,
+      dispatchUnknownReason: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -1529,7 +1561,9 @@ function createRequestHandler(
         // 归因已落地：按账号切片为真数字（保留键 default 即单账号现实下的真实账号）。
         attributionPending: false,
         // 调度引擎状态（V1 task 9.4：单全局 RoleDispatcher；per-edge 拆分见 design 步骤 8）。
-        dispatchActive: deps.commandActions.dispatchActive ? deps.commandActions.dispatchActive() : null,
+        // task 1.3a：读是异步三态。**读失败 MUST 落 null + 具名原因，MUST NOT 落 false**——
+        // 面板上 false 是「正常停着」，运营看到它什么都不会做；而真相可能是这条通道根本不通。
+        ...(await readDispatchActivity(deps)),
       };
       sendJson(res, 200, summary);
       return;
@@ -2567,7 +2601,13 @@ function createRequestHandler(
     if (method === 'POST' && url.startsWith('/api/accounts/') && url.endsWith('/dispatch')) {
       const accountId = decodeURIComponent(url.slice('/api/accounts/'.length, -'/dispatch'.length));
       if (!deps.commandActions.dispatch) {
-        sendJson(res, 503, { error: 'dispatch_unavailable' });
+        // 本进程根本没有这条通道（api 独立进程且未配 automation 地址 / 令牌）。
+        // 形状照前端既有约定：`error` 是**给人看的文案**（客户端直接上屏），
+        // `reason` 是机器码。别把码塞进 error——那样运营看到的就是一串 dispatch_unavailable。
+        sendJson(res, 503, {
+          error: '这台机器没有接调度引擎，本次启停没有下发',
+          reason: 'dispatch_not_wired',
+        });
         return;
       }
       let body: unknown;
@@ -2582,7 +2622,19 @@ function createRequestHandler(
         sendJson(res, 400, { error: 'bad_request', reason: 'unknown_action' });
         return;
       }
-      sendJson(res, 200, await deps.commandActions.dispatch(accountId, action));
+      // task 1.3a：下发失败 MUST 说清「这次没下发出去」，MUST NOT 让它落进外层兜底、
+      // 在前端变成一句看不出所以然的「操作失败」。用户 2026-07-31 选的就是「按钮仍可点，
+      // 点了失败给明确提示」这一版——提示要有内容，这一行就是内容的来源。
+      try {
+        sendJson(res, 200, await deps.commandActions.dispatch(accountId, action));
+      } catch (err) {
+        sendJson(res, 502, {
+          error: `调度引擎没应答，本次${action === 'start' ? '启动' : '停止'}未生效：${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          reason: 'dispatch_unreachable',
+        });
+      }
       return;
     }
 

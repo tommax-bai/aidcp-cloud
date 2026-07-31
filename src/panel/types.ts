@@ -561,8 +561,15 @@ export interface DashboardSummary {
   alerts: PanelAlert[];
   /** 归因已落地：恒 false；保留键供旧前端兼容。 */
   attributionPending: boolean;
-  /** 调度引擎当前是否活跃（V1 task 9.4）；未注入 dispatchActive 时 null。 */
+  /** 调度引擎当前是否活跃（V1 task 9.4）；**读不到时 null**（不是 false）。 */
   dispatchActive: boolean | null;
+  /**
+   * `dispatchActive` 为 null 时的具名原因（task 1.3a）；能读到时为 null。
+   *
+   * 加这个字段是因为「未知」本身对运营没有可操作性——是没配这条通道、还是对面进程没起来、
+   * 还是令牌不对？三者的处置完全不同。前端把它显示出来即可，**MUST NOT 参与任何判定**。
+   */
+  dispatchUnknownReason: string | null;
 }
 
 // ── 精选内容后台管理（change curated-content-admin-page）────────────────────────

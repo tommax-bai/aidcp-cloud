@@ -251,9 +251,28 @@ export class FeishuWsReceiver {
    * 抽成纯方法（接收 message 子集）以便单测：无需真实长连接即可验证路由。
    */
   async handleMessage(message: FeishuWsMessage): Promise<void> {
-    if (message.message_type !== 'text') return;
+    // ── 入站可见性 ────────────────────────────────────────────────────────────────
+    // 在这之前，这条链的**成功路径一行日志都没有**（只有 catch 里记 error）。后果不是难看，
+    // 是**没法验**：想确认一条飞书指令到底有没有到，运维视角下「消息压根没送到本进程」与
+    // 「到了但在下面某个静默 return 里被丢掉」**完全同形**——两者都是日志里什么都没有。
+    // 2026-07-31 的真机验收就是这么卡住的：发了一条 /delegate，两台机器都查不出所以然。
+    // 只记信封 + 首个词（命令名）+ 是否有正文，**不记正文本身**：定位够用，
+    // 且不把用户消息内容抄进日志。
+    const firstWord = extractText(message.content).trim().split(/\s+/)[0] ?? '';
+    this.logger.log(
+      `[feishu] 入站 chat=${message.chat_id} msg=${message.message_id}`
+        + ` type=${message.message_type} cmd=${firstWord || '-'}`,
+    );
+    if (message.message_type !== 'text') {
+      // 忽略非文本是对的（图片 / 文件不是命令），但「忽略了」与「没收到」必须分得开。
+      this.logger.log(`[feishu] 入站忽略：非文本消息 type=${message.message_type}`);
+      return;
+    }
     const text = extractText(message.content);
-    if (!text) return;
+    if (!text) {
+      this.logger.log('[feishu] 入站忽略：文本为空');
+      return;
+    }
 
     // 已读即贴「敲键盘」表情回应，告诉用户"我看到了、正在处理"（best-effort，不阻断）。
     if (this.messenger) void this.messenger.addReaction(message.message_id, 'Typing');
@@ -266,6 +285,12 @@ export class FeishuWsReceiver {
     void this.commandRouter
       .handleBatch(text, { chatId: message.chat_id, messageId: message.message_id })
       .then((results) => {
+        // 路由结果也留一行：**「命令没被认出来」与「认出来了但静默受理」在日志里同样长得一样**，
+        // 而前者是要改写法、后者是正常。0 条结果尤其要说出来。
+        this.logger.log(
+          `[feishu] 指令路由完成 msg=${message.message_id} 子命令=${results.length}`
+            + ` 静默=${results.filter((r) => r.silent).length}`,
+        );
         for (const result of results) {
           // 静默受理（精确命令直接排队）：不发卡，只留已读表情；结果由任务自身的业务结果卡回报。
           if (result.silent || !this.messenger) continue;
