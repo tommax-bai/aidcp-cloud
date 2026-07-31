@@ -287,9 +287,18 @@ export class FeishuWsReceiver {
       .then((results) => {
         // 路由结果也留一行：**「命令没被认出来」与「认出来了但静默受理」在日志里同样长得一样**，
         // 而前者是要改写法、后者是正常。0 条结果尤其要说出来。
+        //
+        // **逐条记 ok，不只记条数**（2026-07-31 真机验收当场撞到的）：只记条数时，
+        // 「命令成功了」与「命令回了一张错误卡」在日志里**完全同形**——两者都是「1 个子命令、非静默」。
+        // 那次只能靠人去飞书上把卡读出来才知道结果，日志帮不上任何忙。
+        // 只记标题不记正文：够定位，且不把可能含账号 / 内容的正文抄进日志。
+        const outcomes = results
+          .map((r) => `${r.ok ? 'ok' : `fail(${r.level ?? 'error'})`}:${r.title}`)
+          .join(' | ');
         this.logger.log(
           `[feishu] 指令路由完成 msg=${message.message_id} 子命令=${results.length}`
-            + ` 静默=${results.filter((r) => r.silent).length}`,
+            + ` 静默=${results.filter((r) => r.silent).length}`
+            + (outcomes ? ` 结果=${outcomes}` : ''),
         );
         for (const result of results) {
           // 静默受理（精确命令直接排队）：不发卡，只留已读表情；结果由任务自身的业务结果卡回报。
