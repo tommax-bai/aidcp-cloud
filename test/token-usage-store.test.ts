@@ -303,3 +303,75 @@ test('billingPriceTargets groups T-1/T-2 usage with inferred provider', async ()
     },
   ]);
 });
+
+/* ─────────────────── recordUsage（task 2.4d-用量，跨进程提交口） */
+
+/** 装一个只记参数 / 按脚本失败的假池。构造时不连库，query 全部被替换掉。 */
+function storeWithStubPool(fail: (callIndex: number) => boolean = () => false): {
+  store: TokenUsageStore;
+  calls: unknown[][];
+} {
+  const store = new TokenUsageStore({ schemaEnsurer: ensureCapabilitySchema });
+  const calls: unknown[][] = [];
+  (store as unknown as { pool: { query: (sql: string, params: unknown[]) => Promise<unknown> } }).pool = {
+    query: async (_sql: string, params: unknown[]) => {
+      const index = calls.length;
+      calls.push(params);
+      if (fail(index)) throw new Error('stub upsert failure');
+      return { rows: [] };
+    },
+  };
+  return { store, calls };
+}
+
+const increment = (bucketStartMs: number, model = 'm') => ({
+  bucketStartMs,
+  accountId: 'acc-1',
+  role: 'browse:x',
+  provider: 'dashscope',
+  model,
+  promptTokens: 3,
+  completionTokens: 4,
+  totalTokens: 7,
+  calls: 1,
+  okCalls: 1,
+});
+
+/**
+ * **这条是本组里最重要的一条，别当冗余删掉。**
+ * 跨进程之后属主若用自己的钟重算时间桶，一整批账会整体挪进错误的桶——曲线平移，且**零报错**。
+ * 所以要断的不是「写进去了」，是「写进去的那个桶起点，逐字是调用方给的那个」。
+ * 特意用一个绝不会等于「现在」的桶起点：属主一旦重算，这条立刻红。
+ */
+test('recordUsage 逐字沿用调用方给的桶起点，绝不用自己的钟重算', async () => {
+  const { store, calls } = storeWithStubPool();
+  const callerBucket = 1_600_000_000_000; // 远在过去，且是 10 分钟的整数倍
+  const applied = await store.recordUsage([increment(callerBucket)]);
+  assert.equal(applied, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]![0], callerBucket);
+});
+
+/**
+ * 「对面明确说它一行没写」与「压根没问到对面」在调用方那里必须分得开。
+ * 回 0 会把两者压成同一个样子，而后者恰恰是必须被看见的那个。
+ */
+test('recordUsage 一行都没落上时抛，MUST NOT 回 0', async () => {
+  const { store } = storeWithStubPool(() => true);
+  await assert.rejects(() => store.recordUsage([increment(1_600_000_000_000)]));
+  // 空数组是另一回事：调用方的合并窗口里什么都没发生，回 0 且不抛。
+  const { store: empty } = storeWithStubPool(() => true);
+  assert.equal(await empty.recordUsage([]), 0);
+});
+
+/** 部分成功回真落库行数，缺额交给调用方留痕——这里绝不重投（可交换累加计数器上重投即翻倍）。 */
+test('recordUsage 部分成功回真落库行数', async () => {
+  const { store, calls } = storeWithStubPool((i) => i === 1);
+  const applied = await store.recordUsage([
+    increment(1_600_000_000_000, 'a'),
+    increment(1_600_000_000_000, 'b'),
+    increment(1_600_000_000_000, 'c'),
+  ]);
+  assert.equal(applied, 2);
+  assert.equal(calls.length, 3, '失败那行 MUST NOT 被重投');
+});

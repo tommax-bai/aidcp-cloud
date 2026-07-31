@@ -11,6 +11,10 @@
 // 图片 usageRecorder）+ src/publish-agent/roles/image-generator.ts 的图片生成出口；保留清理随表主人走（§4.6.5 第 9 项）。
 import pg from 'pg';
 import { resolveEnvPgConfig } from '../kernel/pg-config.js';
+import type {
+  LlmUsageIncrement,
+  LlmUsageRecordingPort,
+} from '../kernel/llm-usage-recording-port.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import type {
   LlmUsageBucket,
@@ -205,7 +209,7 @@ export interface TokenUsageStoreOptions {
   flushMs?: number;
 }
 
-export class TokenUsageStore {
+export class TokenUsageStore implements LlmUsageRecordingPort {
   private readonly pool: pg.Pool;
   private readonly flushMs: number;
   private buffer = new Map<string, Accum>();
@@ -322,6 +326,63 @@ export class TokenUsageStore {
     });
   }
 
+  /**
+   * 单行落库。**只做一行，错误原样抛**——吞不吞由调用方定：本地 `flush()` 吞成 `droppedFlushes`
+   * （用量是可丢的观测数据，绝不拖垮模型调用路径），跨进程的 {@link recordUsage} 则要如实回报。
+   *
+   * 两条路径共用这一段是有意的：本地落库与远端落库一旦各写一份，就是 CLAUDE §8.4 点名那种
+   * 「两侧各自编译通过、各自测试通过，只有真跑起来才发现对不上」的第二份实现。
+   */
+  private async writeIncrement(row: LlmUsageIncrement): Promise<void> {
+    await this.pool.query(UPSERT_SQL, [
+      row.bucketStartMs,
+      row.accountId,
+      row.role,
+      row.provider,
+      row.model,
+      row.promptTokens,
+      row.completionTokens,
+      row.totalTokens,
+      row.calls,
+      row.okCalls,
+    ]);
+  }
+
+  /**
+   * 跨进程用量提交口（task 2.4d-用量，实现 kernel 的 `LlmUsageRecordingPort`）。
+   *
+   * **与 {@link add} 是两条不同的路，别读成 add 的异步版**：`add` 收单次调用、用**本进程自己的钟**
+   * 打时间桶、攒在内存里；本方法收的是**调用方已经合并好**的增量，桶起点由调用方在调用发生那一刻戳定。
+   * 属主这边绝不重算——跨进程后重算等于把一整批账悄悄挪进错误的时间桶，曲线整体平移且零报错。
+   *
+   * 失败语义按端口写死的三条办：空数组合法回 0；部分成功回**真落库的行数**、缺额由调用方留痕；
+   * **一行都没落上则抛**。最后一条不是洁癖：回 0 会让「对面明确说它一行没写」与「压根没问到对面」
+   * 在调用方那里长成同一个样子，而后者恰恰是必须被看见的那个。
+   */
+  async recordUsage(increments: readonly LlmUsageIncrement[]): Promise<number> {
+    if (increments.length === 0) return 0;
+    let applied = 0;
+    let firstError: unknown;
+    for (const row of increments) {
+      try {
+        await this.writeIncrement(row);
+        applied += 1;
+      } catch (err) {
+        if (firstError === undefined) firstError = err;
+      }
+    }
+    // 「全军覆没」与「丢了几行」是两件事。前者是系统性故障（池断了、表没了），
+    // 而调用方拿到一个数字只会当成「属主确实只写了这么多」，所以这里必须抛。
+    if (applied === 0) throw firstError;
+    if (applied < increments.length) {
+      console.warn(
+        `[token-usage] recordUsage 部分落库：提交 ${increments.length} 行、落上 ${applied} 行。`
+          + '缺额如实回给调用方，**绝不在这里重投**——可交换累加计数器上重投即翻倍。',
+      );
+    }
+    return applied;
+  }
+
   async flush(): Promise<void> {
     if (this.flushing || this.buffer.size === 0) return;
     this.flushing = true;
@@ -330,18 +391,20 @@ export class TokenUsageStore {
     try {
       for (const a of snapshot.values()) {
         try {
-          await this.pool.query(UPSERT_SQL, [
-            a.bucketMs,
-            a.accountId,
-            a.role,
-            a.provider,
-            a.model,
-            a.promptTokens,
-            a.completionTokens,
-            a.totalTokens,
-            a.calls,
-            a.okCalls,
-          ]);
+          // 行为逐位不变：仍是逐行 try/catch、仍只计 droppedFlushes、仍不抛回调用方。
+          // 与 recordUsage 的差别只有两处——入参从私有 buffer 换成外部数组、返回从 void 换成成功行数。
+          await this.writeIncrement({
+            bucketStartMs: a.bucketMs,
+            accountId: a.accountId,
+            role: a.role,
+            provider: a.provider,
+            model: a.model,
+            promptTokens: a.promptTokens,
+            completionTokens: a.completionTokens,
+            totalTokens: a.totalTokens,
+            calls: a.calls,
+            okCalls: a.okCalls,
+          });
         } catch (err) {
           this.droppedFlushes += 1;
           if (this.droppedFlushes <= 3 || this.droppedFlushes % 50 === 0) {

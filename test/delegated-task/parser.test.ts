@@ -62,9 +62,15 @@ test('/task 前缀不属于业务文本：带与不带 MUST 解析成同一个�
     '让 小明 参考今日灵感发布一篇稿件',
     '让 小明 生成 2 篇候选稿但暂不发布',
   ];
+  // ⚠️ **两次解析 MUST 喂同一个时钟，别删回 `{ source: 'feishu' }`。**
+  // 解析器不传 now 时取 `Date.now()` 并据此算截止时刻，而本用例把同一句话解析两次再逐字段深比较：
+  // 两次调用之间只要跨过 1 毫秒，截止时刻就差 1，deepEqual 当场不等。单独跑几乎跨不过去，
+  // **全量并发下就会**——本用例因此在 2026-07-31 的两次全量里各红一次，而单独跑与重跑都绿，
+  // 看着像并发偶发，其实是这条用例自己带着一个时钟。它要钉的是「前缀有没有被吃进昵称」，与时间无关。
+  const now = Date.UTC(2026, 6, 31, 4, 0, 0);
   for (const sentence of cases) {
-    const bare = parseDelegatedText(sentence, { source: 'feishu' });
-    const prefixed = parseDelegatedText(`/task ${sentence}`, { source: 'feishu' });
+    const bare = parseDelegatedText(sentence, { source: 'feishu', now });
+    const prefixed = parseDelegatedText(`/task ${sentence}`, { source: 'feishu', now });
     assert.equal(bare.ok, true, `裸句 MUST 解析得出：${sentence}`);
     assert.equal(prefixed.ok, true, `带 /task MUST 同样解析得出：${sentence}`);
     // ⚠️ **这里写错过一次，值得留着当判例**：第一版比的是 `kind === 'task'`，而真实取值是

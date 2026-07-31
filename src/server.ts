@@ -507,6 +507,7 @@ import type { FacebookPublishMediaPort } from './kernel/facebook-publish-media-p
 import {
   FacebookPublishMediaAuthorityHttpClient,
   registerFacebookPublishMediaAuthorityRoutes,
+  registerLlmUsageRecordingAuthorityRoutes,
 } from './transport/content-media-usage-http.js';
 import { registerReviewCardDeliveryRoutes } from './transport/review-card-delivery-http.js';
 import type { ReviewCardDeliveryDecision, ReviewCardDeliveryPort } from './kernel/review-card-delivery-port.js';
@@ -2088,6 +2089,28 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
     } else {
       console.warn(
         '[aidcp-cloud] content 内部 API：curated-write-authority 路由未注册（CuratedContentStore 不可用）',
+      );
+    }
+    // 模型用量记账（task 2.4d-用量）：同样各注册各的。
+    //
+    // **这一条与同批其它几条不同：它今天没有 automation 侧的调用方，而这不是遗漏。**
+    // 用量记账的调用点是模型客户端的 onCall 钩子，那个钩子挂在 segA 建的那个文本模型客户端上；
+    // segA 今天每个进程都跑，所以 automation 进程记的账是走本地属主实例、还自己开着一条 content 库的池。
+    // 那条池要等 segA 三分（tasks 3.1 的 `main()`）才收得掉——**到那时** automation 的 `main()`
+    // 会自己建模型客户端，它的 onCall 就该经本路由提交，合并缓冲也落在那里。
+    // 本轮把「属主这边接得住」做完（写口 + 路由），让那条依赖变得**可满足**；调用方是第 3 段的事。
+    // MUST NOT 因为「现在没人调」就不注册：那会让第 3 段写 main() 时才发现对面根本没有这条路由。
+    if (ctx.tokenUsageStore) {
+      registerLlmUsageRecordingAuthorityRoutes(
+        httpServer,
+        ctx.tokenUsageStore,
+        contentAuthorityToken,
+        ctx.deploymentTarget,
+      );
+      capabilities.push('llm-usage-recording-authority');
+    } else {
+      console.warn(
+        '[aidcp-cloud] content 内部 API：llm-usage-recording-authority 路由未注册（TokenUsageStore 不可用）',
       );
     }
     // 图内文字卡转写（task 2.4e）：同样各注册各的。属主是内容段构造的转写器实例，
