@@ -107,20 +107,34 @@ export function parseDelegatedText(text: string, opts: ParseDelegatedTextOptions
   const raw = (text ?? '').trim();
   if (!raw) return { ok: false, code: 'empty_request', message: '请描述要委托的业务目标。' };
 
-  const control = /^(?:\/task\s+)?(暂停|恢复|取消|查看|状态)\s*(?:任务)?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(raw);
+  /**
+   * `/task` 是**路由层的触发前缀，不是业务文本的一部分**，在这里一次剥掉。
+   *
+   * 2026-07-31 真机验收撞到的：飞书路由把 `/task …` 明确当作委托触发词放行
+   * （`commands.ts` 的 `delegatedText` 判据里第一条就是它），而这里**只有控制类那条正则**
+   * 写了 `(?:\/task\s+)?`，业务类六条一条都没有。于是 `/task 让 小明 发布一篇稿件` 会被
+   * 底下那些 `^(?:让|请)?(?<nickname>.+?)…` 惰性匹配成昵称 = `/task 让 小明`，
+   * 再去解析账号——**报出来的是「需要补充信息」，指向的方向完全不对**。
+   * 实测：同一句话去掉 `/task` 前缀立刻成功建单，带上就连试六次全败。
+   *
+   * 剥的是**匹配用的文本**；`baseIntent` 仍存原始 `raw`，任务上记的是运营真正打的那句话。
+   */
+  const body = raw.replace(/^\/task\s+/i, '');
+
+  const control = /^(?:\/task\s+)?(暂停|恢复|取消|查看|状态)\s*(?:任务)?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(body);
   if (control) {
     const actionMap: Record<string, DelegatedControlAction> = { 暂停: 'pause', 恢复: 'resume', 取消: 'cancel', 查看: 'status', 状态: 'status' };
     return { ok: true, kind: 'control', action: actionMap[control[1]], taskId: control[2].toLowerCase() };
   }
 
-  const slashPublish = /^\/?(?:aidcp\s+)?\/?publish\s+(.+)$/i.exec(raw);
+  const slashPublish = /^\/?(?:aidcp\s+)?\/?publish\s+(.+)$/i.exec(body);
   if (slashPublish) {
     const nickname = slashPublish[1].trim();
     return withIntent(nickname, baseIntent(raw, 'publish_post', 1, { ...opts, source: 'legacy_command' }, {
       target: { manualSingle: true },
     }));
   }
-  const slashComment = /^\/?(?:aidcp\s+)?\/?comment\s+(.+)$/i.exec(raw);
+  const slashComment = /^\/?(?:aidcp\s+)?\/?comment\s+(.+)$/i.exec(body);
   if (slashComment) {
     const tokens = slashComment[1].trim().split(/\s+/);
     const flags = tokens.filter((v) => /^--/.test(v));
@@ -138,7 +152,7 @@ export function parseDelegatedText(text: string, opts: ParseDelegatedTextOptions
     return withIntent(nickname, baseIntent(raw, join ? 'facebook_group_comment' : 'comment_batch', 1, { ...opts, source: 'legacy_command' }, { target: targetConstraints }));
   }
 
-  const candidateControl = /^(?:让|请)?(?<nickname>.+?)\s*(批准|驳回|修改)\s*候选稿\s*#?(\d+)(?:\s+(.+))?$/.exec(raw);
+  const candidateControl = /^(?:让|请)?(?<nickname>.+?)\s*(批准|驳回|修改)\s*候选稿\s*#?(\d+)(?:\s+(.+))?$/.exec(body);
   if (candidateControl?.groups?.nickname) {
     const action = candidateControl[2] === '批准' ? 'approve_candidate' : candidateControl[2] === '驳回' ? 'reject_candidate' : 'modify_candidate';
     const patch = candidateControl[4]?.trim();
@@ -150,7 +164,7 @@ export function parseDelegatedText(text: string, opts: ParseDelegatedTextOptions
     }));
   }
 
-  const curated = /^(?:让|请)?(?<nickname>.+?)\s*(?:对|评论)\s*(?:指定)?精选(?:内容)?\s*#?(\d+)\s*(?:发起)?评论/.exec(raw);
+  const curated = /^(?:让|请)?(?<nickname>.+?)\s*(?:对|评论)\s*(?:指定)?精选(?:内容)?\s*#?(\d+)\s*(?:发起)?评论/.exec(body);
   if (curated?.groups?.nickname) {
     return withIntent(curated.groups.nickname, baseIntent(raw, 'comment_curated', 1, opts, {
       target: { curatedId: curated[2] },
@@ -160,30 +174,30 @@ export function parseDelegatedText(text: string, opts: ParseDelegatedTextOptions
     return { ok: false, code: 'curated_target_required', message: '请提供明确的精选内容 id，系统不会改选相似内容。' };
   }
 
-  const candidates = /^(?:让|请)?(?<nickname>.+?)\s*生成\s*(\d+)\s*(?:个|篇)候选稿(?:但)?(?:暂不|不要|不)发布/.exec(raw);
+  const candidates = /^(?:让|请)?(?<nickname>.+?)\s*生成\s*(\d+)\s*(?:个|篇)候选稿(?:但)?(?:暂不|不要|不)发布/.exec(body);
   if (candidates?.groups?.nickname) {
     const count = Number(candidates[2]);
     return withIntent(candidates.groups.nickname, baseIntent(raw, 'generate_candidates', count, opts));
   }
 
-  const groupComment = /^(?:让|请)?(?<nickname>.+?)\s*(?:在|加入)?(?:指定)?(?:Facebook|FB)?\s*群(?:组)?(?:里)?(?:完成|发布|发)\s*(\d+)?\s*条?评论/.exec(raw);
+  const groupComment = /^(?:让|请)?(?<nickname>.+?)\s*(?:在|加入)?(?:指定)?(?:Facebook|FB)?\s*群(?:组)?(?:里)?(?:完成|发布|发)\s*(\d+)?\s*条?评论/.exec(body);
   if (groupComment?.groups?.nickname) {
     const count = groupComment[2] ? Number(groupComment[2]) : 1;
-    const url = /https?:\/\/\S+/.exec(raw)?.[0];
+    const url = /https?:\/\/\S+/.exec(body)?.[0];
     return withIntent(groupComment.groups.nickname, baseIntent(raw, 'facebook_group_comment', count, opts, {
       target: { joinGroup: true, ...(url ? { groupUrl: url } : {}) },
     }));
   }
 
-  const comment = /^(?:让|请)?(?<nickname>.+?)(?:在?今晚前|今天内|今日内)?\s*完成\s*(\d+)\s*条(?:有效)?评论/.exec(raw);
+  const comment = /^(?:让|请)?(?<nickname>.+?)(?:在?今晚前|今天内|今日内)?\s*完成\s*(\d+)\s*条(?:有效)?评论/.exec(body);
   if (comment?.groups?.nickname) {
     const targetConstraints: TaskConstraints = {};
-    const url = /https?:\/\/\S+/.exec(raw)?.[0];
+    const url = /https?:\/\/\S+/.exec(body)?.[0];
     if (url) targetConstraints.url = url;
     return withIntent(comment.groups.nickname, baseIntent(raw, 'comment_batch', Number(comment[2]), opts, { target: targetConstraints }));
   }
 
-  const publish = /^(?:让|请)?(?<nickname>.+?)\s*(?:参考今日灵感)?\s*发布一篇稿件/.exec(raw);
+  const publish = /^(?:让|请)?(?<nickname>.+?)\s*(?:参考今日灵感)?\s*发布一篇稿件/.exec(body);
   if (publish?.groups?.nickname) {
     const inspired = /参考今日灵感/.test(raw);
     return withIntent(publish.groups.nickname, baseIntent(raw, inspired ? 'publish_from_inspiration' : 'publish_post', 1, opts, {
