@@ -4,11 +4,11 @@
   "claimBlocked": true,
   "claim": "api, automation, and content are independently bootable without foreign owner pools, stores, or synchronous in-process dependencies",
   "summary": {
-    "total": 54,
+    "total": 53,
     "byCategory": {
       "4b-mirror": 14,
       "operator-command": 3,
-      "content-owner": 8,
+      "content-owner": 7,
       "composition-root": 29
     }
   },
@@ -257,22 +257,7 @@
       "closingChange": "future",
       "evidence": [
         "src/server.ts#segAApiFoundation:new:TokenUsageStore",
-        "src/server.ts#segCAutomation:identifier-use:tokenUsageStore",
         "src/server.ts#segDApiServing:identifier-use:tokenUsageStore"
-      ]
-    },
-    {
-      "id": "content-textcard-transcription-authority",
-      "category": "content-owner",
-      "owner": "content",
-      "consumer": "automation",
-      "closingChange": "future",
-      "evidence": [
-        "src/server.ts#segCAutomation:new:OpenAiCompatVisionClient",
-        "src/server.ts#segCAutomation:call:createCoverFormSensor",
-        "src/server.ts#segCAutomation:call:createTextCardTranscriber",
-        "src/server.ts#segCAutomation:call:resolveTextCardTranscriptionProvider",
-        "src/server.ts#segCAutomation:call:resolveTextCardTranscriptionModel"
       ]
     },
     {

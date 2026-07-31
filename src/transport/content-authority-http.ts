@@ -2,9 +2,12 @@
  * automation → content 两条属主端口的传输三件套（路由常量 + 服务端注册 + 类型化客户端），
  * **本轮只定义、不接线**（不改组装根、不改默认注入、不改 `src/server.ts`）。
  *
- * 覆盖的两个端口（都已在 kernel 定义好，本文件一个字都不改它们）：
+ * 覆盖的端口（都已在 kernel 定义好，本文件一个字都不改它们）：
  *   - {@link file://../kernel/concept-pool-port.ts} 概念池 6 个方法；
- *   - {@link file://../kernel/curated-selection-port.ts} 精选库召回 2 个方法。
+ *   - {@link file://../kernel/curated-selection-port.ts} 精选库召回 2 个方法；
+ *   - {@link file://../kernel/curated-write-port.ts} 精选库写口 5 个方法；
+ *   - {@link file://../kernel/text-card-transcriber-port.ts} 图内文字卡转写 1 个方法
+ *     （`enabled()` 具名不上线，理由见该组路由表注释）。
  * 失败信号统一走 {@link file://../kernel/content-port-error.ts}。
  *
  * **三件套同文件是硬要求**（CLAUDE §8.4）：拆成「属主仓写服务端、消费方仓写客户端」两份，
@@ -58,6 +61,11 @@ import type {
   CuratedCommentArchiveInput,
   CuratedWritePort,
 } from '../kernel/curated-write-port.js';
+import type {
+  TextCardTranscriber,
+  TextCardTranscriberInput,
+  TextCardTranscriberOutcome,
+} from '../kernel/text-card-transcriber-port.js';
 import type { InternalHttpClient, InternalHttpServer } from './internal-http.js';
 import {
   ApiDirectHttpError,
@@ -895,6 +903,156 @@ export class CuratedWriteAuthorityHttpClient implements CuratedWritePort {
       'curated-write.markBotAction',
       { accountId, sourceId, action, content },
       isVoidAck,
+    );
+  }
+}
+
+/* ═══════════════════════════════════ 图内文字卡转写（automation → content） */
+
+/**
+ * 转写口的**远端面只有一条**：`transcribe`。
+ *
+ * `enabled()` 刻意不上线。它答的是「运营把这个旗标开着吗」——旗标是部署配置，两个进程读的是
+ * 同一份，本地读得到、且本来就是同步的。为它开一条路由有两处坏：角色每评一篇笔记要为一个布尔
+ * 多走一次网络往返；且那一跳失败时这个**同步**方法无处报错，只能编一个答案回去，
+ * 而它编出来的那个答案会被角色当成三态里的一态如实打进日志——正是本端口存在的理由要防的形态。
+ *
+ * 代价是「两台机器的旗标配得不一样」本地看不出来。**所以应答里带回属主那一侧的取值**，
+ * 客户端比对不上就告警一次（见 {@link TextCardTranscriptionAuthorityHttpClient}）。
+ * 两个方向不对称，而不对称的方向恰好是对的：
+ *   - 自动化侧关、属主侧开 ⇒ 压根不发起调用，角色如实报 `flag_off`。**这就是正确行为**：
+ *     运营在自动化侧关掉了它，本来就该不转写，属主那边开着与否不改变这个结论；
+ *   - 自动化侧开、属主侧关 ⇒ 调用发出去、属主原样退回、一个字也没转写，
+ *     而角色会报 `active`。**这一支才是有害的那支，也正是回显能抓住的那支。**
+ *
+ * `satisfies` 里显式 `Exclude` 掉 `enabled`：端口将来新增任何方法仍会在此 typecheck 当场红，
+ * 只有这一条是具名豁免的。写成 `Record<string, string>` 就把这道保护整个丢了。
+ */
+export const TEXT_CARD_TRANSCRIPTION_AUTHORITY_ROUTES = {
+  transcribe: 'content-authority/text-card-transcription/v1/transcribe',
+} as const satisfies Record<Exclude<keyof TextCardTranscriber, 'enabled'>, string>;
+
+/** 线格式：属主回执 = 端口结果 + 属主那一侧的旗标取值（后者只用于对账，不进端口类型）。 */
+interface TextCardTranscribeWireResult {
+  outcome: TextCardTranscriberOutcome;
+  ownerFlagEnabled: boolean;
+}
+
+function transcribeInput(value: unknown): TextCardTranscriberInput {
+  const record = requireRecord(value, 'text card transcribe');
+  // 图集不做「不是数组就当空数组」的兜底：那会把一次坏载荷读成「这篇没有图可转写」，
+  // 而后者是一个完全正常的成功结局——坏载荷与真·无图长得一模一样，正是红线点名的形态。
+  if (!Array.isArray(record.images)) {
+    throw new ApiDirectHttpError('api_direct_invalid_request', 'images must be an array');
+  }
+  return {
+    accountId: requireString(record.accountId, 'accountId'),
+    sourceId: requireString(record.sourceId, 'sourceId'),
+    // 图集与读穿缓存的**内容**仍由属主规范化（同 upsertObservation / refreshReferenceImages 的口径）：
+    // 这一跳只校验行身份与外层形状，不在传输层重做一遍属主的归一（两份归一必然漂）。
+    images: record.images as CuratedReferenceImageInput[],
+    snapshotAt: requireFiniteNumber(record.snapshotAt, 'snapshotAt'),
+    ...(record.cached === undefined
+      ? {}
+      : { cached: (record.cached ?? null) as CuratedTextCardContext | null }),
+  };
+}
+
+/**
+ * 回执守卫。`images` 是行身份必需的（转写器恒返回规范化后的整组图），
+ * `transcription` 作可选增强透传——它缺失表示这一轮没转出东西，不是坏回执。
+ * `ownerFlagEnabled` MUST 在场且是布尔：它缺席就等于回显对账这道闸没生效，
+ * 而那正好是**静默**失效——一个字都不会说。
+ */
+function isTextCardTranscribeWireResult(value: unknown): value is TextCardTranscribeWireResult {
+  if (!isRecord(value)) return false;
+  if (typeof value.ownerFlagEnabled !== 'boolean') return false;
+  const outcome = value.outcome;
+  return isRecord(outcome) && Array.isArray(outcome.images) && typeof outcome.cacheHit === 'boolean';
+}
+
+/* ─────────────────────────── 服务端注册（content 侧） */
+
+/**
+ * 转写一条路由。与精选库读写各组**一样各注册各的**：转写起不来不该连带关掉召回或写口。
+ */
+export function registerTextCardTranscriptionAuthorityRoutes(
+  server: InternalHttpServer,
+  local: TextCardTranscriber,
+  callerToken: string,
+  executionTarget: DeploymentTarget,
+): void {
+  server.registerBearer(
+    TEXT_CARD_TRANSCRIPTION_AUTHORITY_ROUTES.transcribe,
+    callerToken,
+    async (args: unknown): Promise<TextCardTranscribeWireResult> => {
+      // 信封先解、且在 try 之外：口径同本文件其余各组。
+      const input = parseApiDirectEnvelope(args, executionTarget, transcribeInput);
+      return runOwnerCall(
+        'text-card-transcription.transcribe',
+        ownerHasMethod(local, 'transcribe'),
+        async () => ({
+          outcome: await local.transcribe(input),
+          // 属主自己那一侧的旗标取值，原样回显、不做任何解释。
+          ownerFlagEnabled: local.enabled(),
+        }),
+      );
+    },
+  );
+}
+
+/* ─────────────────────────── 客户端（automation 侧） */
+
+/**
+ * 转写口的跨进程实现。
+ *
+ * `enabledLocally` 由组装根注入**同一个**取值闭包（不是这里自己读 env）：读同一份配置这件事
+ * 因此在组装根一眼可见，且这个类在测试里不必依赖进程环境。
+ */
+export class TextCardTranscriptionAuthorityHttpClient implements TextCardTranscriber {
+  private readonly channel: ContentAuthorityChannel;
+  private flagMismatchWarned = false;
+
+  constructor(
+    http: InternalHttpClient,
+    callerToken: string,
+    executionTarget: DeploymentTarget,
+    private readonly enabledLocally: () => boolean,
+    private readonly logger: Pick<Console, 'warn'> = console,
+  ) {
+    this.channel = { http, callerToken, executionTarget };
+  }
+
+  enabled(): boolean {
+    return this.enabledLocally();
+  }
+
+  async transcribe(input: TextCardTranscriberInput): Promise<TextCardTranscriberOutcome> {
+    const result = await callContentAuthority(
+      this.channel,
+      TEXT_CARD_TRANSCRIPTION_AUTHORITY_ROUTES.transcribe,
+      'text-card-transcription.transcribe',
+      input,
+      isTextCardTranscribeWireResult,
+    );
+    this.noteFlagMismatch(result.ownerFlagEnabled);
+    return result.outcome;
+  }
+
+  /**
+   * 旗标对账。只在**有害的那个方向**才会走到这里（另一个方向压根不发起调用，见路由表注释），
+   * 所以这条一响就是真事：本进程以为在转写，属主那边一个字也没转。
+   * 告警**只响一次**：它是配置态、不是逐条事件，每篇笔记刷一行会把它自己淹掉。
+   */
+  private noteFlagMismatch(ownerFlagEnabled: boolean): void {
+    if (ownerFlagEnabled === this.enabledLocally()) return;
+    if (this.flagMismatchWarned) return;
+    this.flagMismatchWarned = true;
+    this.logger.warn(
+      '[text-card-transcription] 旗标两侧不一致：本进程 AIDCP_TEXTCARD_OCR='
+        + `${this.enabledLocally()}，content 属主进程=${ownerFlagEnabled}。`
+        + '本进程会照常发起转写调用，但属主那侧按自己的旗标原样退回——'
+        + '结果是角色报「正在转写」而实际一个字也没转。请让两侧配置一致。',
     );
   }
 }

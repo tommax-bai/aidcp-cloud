@@ -1142,56 +1142,32 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       },
     ],
   },
-  /**
-   * 0.3d: the text-card OCR sub-chain was missing from this ledger entirely.
-   * segC builds two vision clients, the cover-form sensor and the transcriber
-   * in-process; all four modules are content-owned (`src/llm/vision.ts`,
-   * `src/publish-agent/cover-form-sensor.ts`,
-   * `src/publish-agent/text-card-transcriber.ts`) and none of them exists in
-   * the automation package, so an automation-only process cannot construct
-   * this chain at all. The two provider/model closures are listed as separate
-   * probes because they resolve content-owned model selection, which survives
-   * even if the clients themselves were repointed.
-   */
-  {
-    id: 'content-textcard-transcription-authority',
-    category: 'content-owner',
-    owner: 'content',
-    consumer: 'automation',
-    closingChange: 'future',
-    probes: [
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segCAutomation',
-        kind: 'new',
-        symbol: 'OpenAiCompatVisionClient',
-      },
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segCAutomation',
-        kind: 'call',
-        symbol: 'createCoverFormSensor',
-      },
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segCAutomation',
-        kind: 'call',
-        symbol: 'createTextCardTranscriber',
-      },
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segCAutomation',
-        kind: 'call',
-        symbol: 'resolveTextCardTranscriptionProvider',
-      },
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segCAutomation',
-        kind: 'call',
-        symbol: 'resolveTextCardTranscriptionModel',
-      },
-    ],
-  },
+  // `content-textcard-transcription-authority` retired 2026-07-31 (change
+  // split-cloud-automation-production-runtime, task 2.4e). **Resolved by wiring** — the same kind of
+  // retirement as `content-role-factories`, not the bookkeeping kind.
+  //
+  // The entry (0.3d) was accurate when written: segC built two vision clients, the admission form
+  // sensor and the transcriber in-process, and all of those modules are content-owned
+  // (`src/llm/vision.ts`, `src/publish-agent/cover-form-sensor.ts`,
+  // `src/publish-agent/text-card-transcriber.ts`), absent from the automation package. What removed
+  // them was a relocation plus a port:
+  //   - the whole sub-chain now builds in segB (content). That move is also what finally lets the
+  //     *content* process serve this capability at all: its only construction site used to live in a
+  //     segment content does not run, so the transcribe route could never be registered there;
+  //   - segC now picks one of three explicit paths — the content HTTP client under `automation`, the
+  //     segB-built instance through `crossSegment` when content did run, and a loud
+  //     `cross_segment_drop` otherwise. **None of the three names a content-owned symbol.**
+  //
+  // **Unlike role-factories, the probes here could notice, and all five stopped matching on their
+  // own.** That is precisely why the guard is not the probe: a probe that stops matching cannot
+  // distinguish "the coupling is gone" from "someone deleted the wiring" — both read as silence.
+  // The reappearance assertion in composition-root-4a-inventory.test.ts asks the runnable question
+  // instead, in two halves: segC MUST NOT construct a transcriber, **and** the automation branch
+  // MUST still be there. **If either half fails, this entry comes back.**
+  //
+  // Not retired with it, and deliberately: the note evaluator still takes a transcriber handle, but
+  // that handle is typed as the kernel port, so it is no longer a content dependency of the
+  // automation root. The curated store write those roles do is a separate, live entry.
   /**
    * 0.3d: segC constructs the interaction reply generator in-process.
    * `src/interactions/reply-ai.ts` is content-owned and absent from the

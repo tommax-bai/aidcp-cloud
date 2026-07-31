@@ -228,6 +228,46 @@ test('content-role-factories 已撤：那张角色工厂表里没有任何 conte
   );
 });
 
+/**
+ * `content-textcard-transcription-authority` 撤条的**复活断言**（2026-07-31，task 2.4e）。
+ *
+ * 这条撤条与角色工厂那条的成因相反：那条的探针恒为真、看不出真问题；**这条的五个探针是自己全部
+ * 停止匹配的**。而「探针不再匹配」恰恰分不出两件事——耦合真的没了，还是有人把接线删了。
+ * 两者在派生输出里长得一模一样：都是安静地少一条。
+ *
+ * 所以判据写成两半，缺一不可：
+ *   ① 自动化段 MUST NOT 再就地造转写器（三个构造类符号一个都不许回来）；
+ *   ② 自动化那条取用分支 MUST 还在（否则自动化进程根本拿不到这个能力，而 ① 照样绿）。
+ *
+ * **任一半红 = 那条台账 MUST 复活。** 别改这里的期望值绕过去。
+ */
+test('content-textcard-transcription-authority 已撤：自动化段不再造转写器，且远端取用分支仍在', async () => {
+  // ① 三个构造类符号在自动化段一个都不许有。
+  for (const symbol of [
+    'createTextCardTranscriber',
+    'createCoverFormSensor',
+    'OpenAiCompatVisionClient',
+  ]) {
+    assert.equal(
+      await evidenceForProbe({
+        sourceFile: 'src/server.ts',
+        scope: 'segCAutomation',
+        kind: symbol === 'OpenAiCompatVisionClient' ? 'new' : 'call',
+        symbol,
+      }),
+      null,
+      `自动化段又就地造转写链（${symbol}）⇒ 撤条前提失效，MUST 复活 content-textcard-transcription-authority`,
+    );
+  }
+  // ② 远端取用分支必须还在。只断 ① 的话，把整条接线删干净反而是「更绿」的。
+  const source = await readFile(new URL('../../src/server.ts', import.meta.url), 'utf8');
+  assert.ok(
+    source.includes('contentAuthorityClients.textCardTranscription'),
+    'automation 模式下取 content 转写客户端的那条分支不见了 ⇒ 自动化进程拿不到转写能力，'
+    + 'MUST 复活 content-textcard-transcription-authority',
+  );
+});
+
 test('full-root blocker ledger exactly matches source-derived composition blockers', async () => {
   const [ledger, actual] = await Promise.all([
     loadJson<BlockerLedger>(
@@ -263,12 +303,13 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
   );
   assert.equal(
     actual.filter((blocker) => blocker.category === 'content-owner').length,
-    8,
+    7,
     'content-owner blockers: draft refinement, facebook publish media, concept, curated,'
-    + ' generic llm, token usage, text-card transcription, reply generation.'
+    + ' generic llm, token usage, reply generation.'
     + ' It was 10. Publish rejection evidence was retired as mis-attributed (task 2.9); role'
-    + ' factories was retired as RESOLVED on 2026-07-31 (tasks 0.7 + 2.4b) — a different kind of'
-    + ' retirement, and the only one so far earned by wiring rather than by bookkeeping. Both have'
+    + ' factories (tasks 0.7 + 2.4b) and text-card transcription (task 2.4e) were retired as'
+    + ' RESOLVED on 2026-07-31 — a different kind of retirement, earned by wiring rather than by'
+    + ' bookkeeping. All three have'
     + ' retirement notes in composition-root-4a-census.ts and a dedicated reappearance assertion.'
     + ' This count only ever goes DOWN by adjudication — a drop with no matching retirement note'
     + ' means a probe stopped matching, which is a regression, not progress.',
@@ -289,7 +330,17 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
   assert.ok(actual.some((blocker) => blocker.id === 'content-facebook-publish-media-authority'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-generic-llm-authority'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-token-usage-authority'));
-  assert.ok(actual.some((blocker) => blocker.id === 'content-textcard-transcription-authority'));
+  assert.equal(
+    actual.some((blocker) => blocker.id === 'content-textcard-transcription-authority'),
+    false,
+    'content-textcard-transcription-authority was retired as RESOLVED (task 2.4e): the whole OCR'
+    + ' sub-chain moved to segB (content) — which is also what finally lets the content process serve'
+    + ' the transcribe route — and segC now picks the content HTTP client, the segB instance through'
+    + ' crossSegment, or a loud drop. If it is back, segC is constructing a transcriber again; fix the'
+    + ' composition root rather than re-adding the entry. The two-half reappearance assertion above is'
+    + ' the guard that matters — all five probes stopped matching on their own, and silence cannot'
+    + ' distinguish "coupling gone" from "wiring deleted".',
+  );
   assert.ok(actual.some((blocker) => blocker.id === 'content-reply-generation-authority'));
   assert.equal(
     actual.some((blocker) =>

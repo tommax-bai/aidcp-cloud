@@ -498,6 +498,10 @@ import {
 import type { ConceptPoolPort } from './kernel/concept-pool-port.js';
 import type { CuratedSelectionPort } from './kernel/curated-selection-port.js';
 import type { CuratedWritePort } from './kernel/curated-write-port.js';
+import {
+  TextCardTranscriptionAuthorityHttpClient,
+  registerTextCardTranscriptionAuthorityRoutes,
+} from './transport/content-authority-http.js';
 import type { AutomationDispatchActivity } from './kernel/operator-command-port.js';
 import type { FacebookPublishMediaPort } from './kernel/facebook-publish-media-port.js';
 import {
@@ -1129,6 +1133,14 @@ interface CompositionContext {
   handlePublishDraftImageRemove?: ReturnType<typeof createPublishDraftImageRemoveHandler>;
   hotLeadConfigStore: HotLeadConfigStore;
   imageProvider?: RoutingImageProvider;
+  /**
+   * 图内文字卡转写器（**content 段构造**，task 2.4e）。
+   *
+   * 它此前建在自动化段里，那让内容进程根本拿不到它——而内容进程恰恰是要**对外提供**这条能力的那个。
+   * 现在建在内容段：内容模式据此注册转写路由，单体模式由自动化段经 `crossSegment` 取用，
+   * 自动化模式改取 content 的 HTTP 客户端。
+   */
+  textCardTranscriber?: TextCardTranscriber;
   interactionCustomerApi?: InteractionCustomerApi | undefined;
   // Block② 数据网关：收件箱读侧窄面本地实例（segC 构造），additive 挂 ctx 供 segD 组建 DataGateway 聚合；不改其构造/时机。
   interactionStore?: InteractionStore | undefined;
@@ -2076,6 +2088,23 @@ async function startContentReadApi(ctx: CompositionContext): Promise<void> {
     } else {
       console.warn(
         '[aidcp-cloud] content 内部 API：curated-write-authority 路由未注册（CuratedContentStore 不可用）',
+      );
+    }
+    // 图内文字卡转写（task 2.4e）：同样各注册各的。属主是内容段构造的转写器实例，
+    // 它起不来与精选库、与 FB 素材都无关。**只在内容段真跑过的进程里才有它**——
+    // 没有就具名 warn，绝不注册一条把调用悄悄吞掉的空路由。
+    if (ctx.textCardTranscriber) {
+      registerTextCardTranscriptionAuthorityRoutes(
+        httpServer,
+        ctx.textCardTranscriber,
+        contentAuthorityToken,
+        ctx.deploymentTarget,
+      );
+      capabilities.push('text-card-transcription-authority');
+    } else {
+      console.warn(
+        '[aidcp-cloud] content 内部 API：text-card-transcription-authority 路由未注册'
+          + '（本进程未运行内容段，无转写器实例）',
       );
     }
     // FB 发帖素材状态流转（task 2.4d）：同样各注册各的。属主是另一个存储，它起不来与精选库无关。
@@ -3992,6 +4021,44 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
     timeoutMs: Number(process.env.AIDCP_VISUAL_AUDIT_TIMEOUT_MS ?? 60_000),
   });
   const visualFidelityAuditor = createVisualFidelityAuditor({ vision: visualAuditVision });
+  // ── 精选准入文字卡识别/转写（change transcribe-textcard-image-text）────────────
+  // 独立于上面那组发布时封面感知：自己的旗标、自己的模型解析，形态识别与转写仍是两个隔离的视觉请求。
+  //
+  // **task 2.4e：这一块从自动化段搬到了这里。** 原来建在自动化段，于是内容进程压根拿不到它——
+  // 而内容进程恰恰是要对外提供这条能力的那个，那条路由因此永远注册不上。
+  // 搬过来之后：内容模式据此注册路由；单体模式由自动化段经 crossSegment 取用；
+  // 自动化模式那边改建 HTTP 客户端、根本不走这里。
+  const textCardOcrEnabled = (): boolean => process.env.AIDCP_TEXTCARD_OCR === 'true';
+  const textCardOcrProvider = (): string => resolveTextCardTranscriptionProvider(resolveCoverFormProvider);
+  const textCardOcrModel = (): string => resolveTextCardTranscriptionModel(resolveCoverFormModel);
+  const admissionFormVision = new OpenAiCompatVisionClient({
+    getModel: resolveCoverFormModel,
+    getProvider: resolveCoverFormProvider,
+    providerRuntime,
+    onCall: recordVisionCall,
+  });
+  const admissionFormSensor = createCoverFormSensor({
+    vision: admissionFormVision,
+    enabled: textCardOcrEnabled,
+    getModel: resolveCoverFormModel,
+    getProvider: resolveCoverFormProvider,
+    logger: console,
+  });
+  const textCardOcrVision = new OpenAiCompatVisionClient({
+    getModel: textCardOcrModel,
+    getProvider: textCardOcrProvider,
+    providerRuntime,
+    onCall: recordVisionCall,
+    timeoutMs: Number(process.env.AIDCP_TEXTCARD_OCR_TIMEOUT_MS ?? 120_000),
+  });
+  ctx.textCardTranscriber = createTextCardTranscriber({
+    vision: textCardOcrVision,
+    formSensor: admissionFormSensor,
+    enabled: textCardOcrEnabled,
+    getModel: textCardOcrModel,
+    getProvider: textCardOcrProvider,
+    logger: console,
+  });
   // 帖级形态档服务（change textcard-carousel-form-parity，阶段0 影子）：AIDCP_POST_FORM_PROFILE 默认关。
   // 开=CoverCardWriter 复用封面感知结果 + 对内页 senseAt 有界并发判形、只把形态档写审计（不改渲染）；关=不计算、byte-identical。
   // 依赖感知旗标 AIDCP_COVER_FORM_SENSING（senseAt 受同一 enabled 门控；感知关时形态档恒 generative）。
@@ -4192,7 +4259,7 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
 }
 
 async function segCAutomation(ctx: CompositionContext): Promise<void> {
-  const { accountDisplayName, accountState, accountStore, apiPool, automationPool, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookOperationPolicyStore, facebookGroupCommentPolicyStore, facebookRuleModeStore, facebookRuleModeRuntimeStore, facebookConsumptionModeRuntimeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, providerRuntime, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore, tokenUsageStore } = ctx;
+  const { accountDisplayName, accountState, accountStore, apiPool, automationPool, cache, categoryConfigStore, clientUserStore, conceptStore, configMirrorPool, contentScheduleStore, curatedContentStore, delegatedTaskService, delegatedTaskStore, deploymentTarget, draftRefinementStore, eventBus, facebookCommentAuditStore, facebookCommentConfigStore, facebookOperationPolicyStore, facebookGroupCommentPolicyStore, facebookRuleModeStore, facebookRuleModeRuntimeStore, facebookConsumptionModeRuntimeStore, facebookGroupJoinAuditStore, facebookGroupJoinAutomationStore, facebookGroupMembershipStore, facebookGroupTargetStore, facebookPublishMediaStore, firstPostOnboardingStore, getSoul, hotLeadConfigStore, imageProvider, llm, manualCommentAccounts, mirrorVersionStore, modelConfigStore, ossUploader, pacingConfigStore, personaAutoFillStore, personaPanel, personaStore, planner, port, publishApprovalAuthority, publishApprovalDecisionWriter, publishApprovalStore, publishLogStore, quotaConfigStore, resolvePersona, resumeConfigStore, roleConfigStore, sessionConfigStore } = ctx;
   const seamMode = serviceModeFromEnv();
   let apiDirectPorts = ctx.apiDirectAuthorities ?? {};
   if (seamMode === 'automation') {
@@ -4253,6 +4320,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     curatedSelection: CuratedSelectionPort;
     curatedWrite: CuratedWritePort;
     facebookPublishMedia: FacebookPublishMediaPort;
+    textCardTranscription: TextCardTranscriber;
   } | undefined => {
     if (seamMode !== 'automation') return undefined;
     const contentUrl = readEnvString('AIDCP_CONTENT_URL');
@@ -4274,6 +4342,15 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         http,
         callerToken,
         deploymentTarget,
+      ),
+      // 转写口（task 2.4e）。第四个参数是「旗标开没开」的**本地**取值闭包——两个进程读同一份部署配置，
+      // 所以这里不为一个布尔多走一次网络往返；客户端拿到应答后会比对属主回显的取值，
+      // 不一致就告警一次。理由与两个方向为何不对称，见该组路由表注释。
+      textCardTranscription: new TextCardTranscriptionAuthorityHttpClient(
+        http,
+        callerToken,
+        deploymentTarget,
+        () => process.env.AIDCP_TEXTCARD_OCR === 'true',
       ),
     };
   })();
@@ -6911,51 +6988,21 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   // 每个连接握手时由 buildDispatcher 造一束 RoleDispatcher：私有总线 / 该连接真实账号 controller / 定向下发。
   // 人设以取值口注入（account-persona-config）：派发时按当前账号热加载，PUT 后无需重启。
   // opts.getSoul 仅供预览实例注入示例人设（见 previewDispatcher）；运行时连接一律用严格 getSoul。
-  // ── 精选准入文字卡识别/转写（change transcribe-textcard-image-text）────────────
-  // 独立于发布时封面感知：OCR 旗标开启才调用；形态识别与转写仍是两个隔离的视觉请求。
-  // 此处必须在 server.start 之前装配，避免重启后抢先握手的 Edge 得到缺少转写依赖的 dispatcher。
-  const textCardOcrEnabled = (): boolean => process.env.AIDCP_TEXTCARD_OCR === 'true';
-  const textCardOcrProvider = (): string => resolveTextCardTranscriptionProvider(resolveCoverFormProvider);
-  const textCardOcrModel = (): string => resolveTextCardTranscriptionModel(resolveCoverFormModel);
-  // 用量上报接线点②（视觉 LLM 出口）：经 TokenUsageStore 单一接口写归 aidcp-content 的 llm_token_usage，MUST NOT 直写（方案 §4.6.6）。
-  const recordVisionCall = (info: VisionCallInfo): void => {
-    console.log(
-      `[llm] account=${info.accountId ?? '-'} role=${info.role ?? '-'} provider=${info.provider ?? '-'} model=${info.model} ms=${info.ms} ok=${info.ok} tokens=${info.totalTokens ?? 0}`,
-    );
-    try {
-      tokenUsageStore.add(info);
-    } catch {
-      /* metrics never breaks llm */
-    }
-  };
-  const admissionFormVision = new OpenAiCompatVisionClient({
-    getModel: resolveCoverFormModel,
-    getProvider: resolveCoverFormProvider,
-    providerRuntime,
-    onCall: recordVisionCall,
-  });
-  const admissionFormSensor = createCoverFormSensor({
-    vision: admissionFormVision,
-    enabled: textCardOcrEnabled,
-    getModel: resolveCoverFormModel,
-    getProvider: resolveCoverFormProvider,
-    logger: console,
-  });
-  const textCardOcrVision = new OpenAiCompatVisionClient({
-    getModel: textCardOcrModel,
-    getProvider: textCardOcrProvider,
-    providerRuntime,
-    onCall: recordVisionCall,
-    timeoutMs: Number(process.env.AIDCP_TEXTCARD_OCR_TIMEOUT_MS ?? 120_000),
-  });
-  const textCardTranscriber = createTextCardTranscriber({
-    vision: textCardOcrVision,
-    formSensor: admissionFormSensor,
-    enabled: textCardOcrEnabled,
-    getModel: textCardOcrModel,
-    getProvider: textCardOcrProvider,
-    logger: console,
-  });
+  // ── 精选准入文字卡识别/转写（task 2.4e：构造已搬到内容段，这里只取用）────────────
+  // 三条取用路径，逐条都是显式的：
+  //   automation ⇒ content 的 HTTP 客户端（本地根本没有属主实现，也不该有）；
+  //   跑了内容段的模式（单体 / content）⇒ 内容段构造的那个实例；
+  //   跑了自动化段但没跑内容段、又不是 automation 模式（今天只有 core）⇒ crossSegment 响亮记一笔并留空，
+  //     角色随即按 `unavailable` 如实留痕。**MUST NOT 在这里回落成本地新建一个**：
+  //     那需要视觉客户端与模型解析，全是 content 的东西，正是本块要消灭的形态。
+  const textCardTranscriber: TextCardTranscriber | undefined = contentAuthorityClients
+    ? contentAuthorityClients.textCardTranscription
+    : crossSegment(
+        ctx.textCardTranscriber,
+        '图内文字卡转写',
+        '内容段',
+        '精选准入评估会按「能力未接线」如实跳过转写（不会静默少一段图内文字）',
+      );
 
   const buildDispatcher = (ctx: DispatcherBuildContext, opts?: { getSoul?: (accountId?: string) => Soul }): RoleDispatcher => {
     // 通知联系人名册（notification-contact-registry）：订阅该连接私有总线的 notification.items.arrived
