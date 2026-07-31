@@ -4,11 +4,11 @@
   "claimBlocked": true,
   "claim": "api, automation, and content are independently bootable without foreign owner pools, stores, or synchronous in-process dependencies",
   "summary": {
-    "total": 55,
+    "total": 54,
     "byCategory": {
       "4b-mirror": 14,
       "operator-command": 3,
-      "content-owner": 9,
+      "content-owner": 8,
       "composition-root": 29
     }
   },
@@ -234,16 +234,6 @@
         "src/server.ts#segAApiFoundation:new:CuratedContentStore",
         "src/server.ts#segCAutomation:identifier-use:curatedContentStore",
         "src/server.ts#segDApiServing:identifier-use:curatedContentStore"
-      ]
-    },
-    {
-      "id": "content-role-factories",
-      "category": "content-owner",
-      "owner": "content",
-      "consumer": "automation",
-      "closingChange": "future",
-      "evidence": [
-        "src/server.ts#segCAutomation:identifier:CONTENT_ROLE_FACTORIES"
       ]
     },
     {

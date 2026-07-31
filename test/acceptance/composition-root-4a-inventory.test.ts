@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import {
   PRODUCTION_CONSUMER_BINDINGS,
   assertNoIndependentRootBlockers,
+  contentOwnedSymbolsInRoleFactoryTable,
   deriveIndependentRootBlockers,
   deriveSeamSuppressedProbeMatches,
   deriveSurface,
@@ -210,6 +211,23 @@ test('4a inventory excludes local-only, 3b and 4b methods from every remote surf
   );
 });
 
+/**
+ * `content-role-factories` 撤条的**复活断言**（2026-07-31，tasks 0.7 + 2.4b）。
+ *
+ * 那条台账的探针只问「segC 里有没有提到那张工厂表」，而一个要派角色的组装根**必然**有这张表——
+ * 探针恒为真，它看不出「表里还需不需要 content 的东西」这个真正的问题。所以撤条不挂在探针上，
+ * 挂在这条可跑的判据上：表里所有符号逐个解析到 import 来源、查归属表，**一个 content 都不许有**。
+ *
+ * **这条红 = 那条台账 MUST 复活。** 别改这里的期望值绕过去。
+ */
+test('content-role-factories 已撤：那张角色工厂表里没有任何 content 属主符号', async () => {
+  assert.deepEqual(
+    await contentOwnedSymbolsInRoleFactoryTable(),
+    [],
+    '角色工厂表里又出现了 content 属主符号 ⇒ content-role-factories 的撤条前提失效，MUST 复活该条目',
+  );
+});
+
 test('full-root blocker ledger exactly matches source-derived composition blockers', async () => {
   const [ledger, actual] = await Promise.all([
     loadJson<BlockerLedger>(
@@ -245,11 +263,13 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
   );
   assert.equal(
     actual.filter((blocker) => blocker.category === 'content-owner').length,
-    9,
+    8,
     'content-owner blockers: draft refinement, facebook publish media, concept, curated,'
-    + ' role factories, generic llm, token usage, text-card transcription, reply generation.'
-    + ' It was 10: publish rejection evidence was retired as mis-attributed (task 2.9, see the'
-    + ' retirement note in composition-root-4a-census.ts and the dedicated assertion above).'
+    + ' generic llm, token usage, text-card transcription, reply generation.'
+    + ' It was 10. Publish rejection evidence was retired as mis-attributed (task 2.9); role'
+    + ' factories was retired as RESOLVED on 2026-07-31 (tasks 0.7 + 2.4b) — a different kind of'
+    + ' retirement, and the only one so far earned by wiring rather than by bookkeeping. Both have'
+    + ' retirement notes in composition-root-4a-census.ts and a dedicated reappearance assertion.'
     + ' This count only ever goes DOWN by adjudication — a drop with no matching retirement note'
     + ' means a probe stopped matching, which is a regression, not progress.',
   );
@@ -267,7 +287,6 @@ test('full-root blocker ledger exactly matches source-derived composition blocke
     );
   }
   assert.ok(actual.some((blocker) => blocker.id === 'content-facebook-publish-media-authority'));
-  assert.ok(actual.some((blocker) => blocker.id === 'content-role-factories'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-generic-llm-authority'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-token-usage-authority'));
   assert.ok(actual.some((blocker) => blocker.id === 'content-textcard-transcription-authority'));

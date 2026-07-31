@@ -1055,25 +1055,33 @@ const REVIEWED_BLOCKER_BINDINGS: readonly BlockerBinding[] = [
       },
     ],
   },
-  {
-    id: 'content-role-factories',
-    category: 'content-owner',
-    owner: 'content',
-    consumer: 'automation',
-    closingChange: 'future',
-    probes: [
-      {
-        sourceFile: 'src/server.ts',
-        scope: 'segCAutomation',
-        // Stays `identifier` on purpose: this is a module-level import, not a
-        // `ctx` destructure entry. Inside the segC body it has zero declaration
-        // bindings, so its only occurrence already is a real use and
-        // `identifier-use` would be the same probe with a longer name.
-        kind: 'identifier',
-        symbol: 'CONTENT_ROLE_FACTORIES',
-      },
-    ],
-  },
+  // `content-role-factories` retired 2026-07-31 (change split-cloud-automation-production-runtime,
+  // tasks 0.7 + 2.4b). **Resolved, not mis-attributed** — the distinction matters, because the two
+  // retirements already in this file are of the other kind and someone will otherwise read this as a
+  // third bookkeeping correction.
+  //
+  // The entry was accurate when written: the four role classes were content-owned, so automation
+  // could not import them and the composition root had to hand the dispatcher a table of factories.
+  // Two things then removed the content side of it entirely:
+  //   - task 0.7 re-adjudicated the four role classes, their shared base and the curated gate to
+  //     automation (six files, all now resident in aidcp-automation/src);
+  //   - task 2.4b moved the two-hop narrowing anchor from the content-owned store class to the
+  //     kernel curated write port, which was the table's last content-owned symbol.
+  //
+  // What is left in that table is a composition-root concern, and every composition root is written
+  // by hand per repo — the automation root needs nothing content-owned to write its own.
+  //
+  // **The probe could not have noticed any of this.** It asks whether segC mentions the table, and
+  // the answer is permanently yes: a composition root that dispatches roles has to have one. So the
+  // retirement is anchored on a different, runnable question instead — see
+  // {@link contentOwnedSymbolsInRoleFactoryTable}, pinned by a dedicated case in
+  // composition-root-4a-inventory.test.ts. **If that ever returns a symbol, this entry comes back.**
+  //
+  // Not retired with it, and deliberately: the roles do still write to the content-owned curated
+  // store, and the note evaluator still takes a content-owned transcriber handle. Those are
+  // `content-curated-write-authority` and `content-textcard-transcription-authority`, both live.
+  // This entry was the third count of the same two dependencies, in terms of code ownership that no
+  // longer holds.
   {
     id: 'content-generic-llm-authority',
     category: 'content-owner',
@@ -1922,6 +1930,51 @@ function importedOwners(
     }
   }
   return result;
+}
+
+/**
+ * 组装根那张 content 角色工厂表里，**仍然指向 content 属主文件**的符号。
+ *
+ * 这是 `content-role-factories` 撤条的**唯一前提**，写成可跑的判据而不是一句结论：
+ * 该条目的证据探针只问「segC 里有没有提到这张表」，答案恒为是——它是一张组装根必须有的表。
+ * 真正该问的是「这张表还需不需要 content 的东西」。task 0.7 把四个角色类与基类改判 automation、
+ * task 2.4b 把两跳窄化的锚点从 content 属主的存储类换成 kernel 的写口之后，答案是不需要。
+ *
+ * **返回非空即撤条失效**：说明有人又把一个 content 属主符号引进了这张表，那条台账 MUST 复活。
+ * 返回具体符号名而不是布尔，是为了让复活的人知道从哪一个符号查起。
+ */
+export async function contentOwnedSymbolsInRoleFactoryTable(): Promise<string[]> {
+  const [server, ownershipRaw] = await Promise.all([
+    sourceFile('src/server.ts'),
+    readFile(resolve(REPO_ROOT, 'boundaries/module-ownership.json'), 'utf8'),
+  ]);
+  const owners = importedOwners(server, JSON.parse(ownershipRaw) as OwnershipEntry[]);
+  let table: ts.Expression | null = null;
+  function findTable(node: ts.Node): void {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.name.text === 'CONTENT_ROLE_FACTORIES'
+      && node.initializer
+    ) {
+      table = node.initializer;
+    }
+    ts.forEachChild(node, findTable);
+  }
+  findTable(server);
+  if (table === null) {
+    // 表整个不见了 MUST NOT 悄悄读成「零个 content 符号」——那会让撤条的前提凭空成立。
+    throw new Error('CONTENT_ROLE_FACTORIES not found in src/server.ts');
+  }
+  const found = new Set<string>();
+  function visit(node: ts.Node): void {
+    if (ts.isIdentifier(node) && owners.get(node.text)?.owner === 'content') {
+      found.add(node.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(table);
+  return [...found].sort();
 }
 
 function variableNameFor(node: ts.Node): string {
