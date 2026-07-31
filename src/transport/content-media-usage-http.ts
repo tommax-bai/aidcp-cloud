@@ -376,7 +376,7 @@ export const CONTENT_MEDIA_USAGE_WIRING_DEBT = [
 export const CONTENT_MEDIA_USAGE_WIRING_DEBT_CLOSED = [
   'FB 素材三条路由已在 content 监听上独立注册，automation 侧客户端已按模式取好，两个消费点（下发器窄口 + 组装根审批驳回直调）都已改指端口',
   'publish-dispatcher 的静默 return 已拆成两支：「这条稿没有素材保留」仍是正常返回，「本进程没有这条端口」计入 dropped 并具名报错、说出后果（素材会停在 reserved 无人回收）',
-  'publish-dispatcher 写失败那支已补可计数信号（与 dropped 分开数，两者处置不同）。⚠️ **兜底回收扫描仍未做**——欠账原文是「补可计数信号 or 兜底回收扫描」，这里只取了前一半：计数让「漏了多少」问得出来，但漏掉的那些素材今天仍然没有任何东西会把它们放回可用池",
+  'publish-dispatcher 写失败那支已补可计数信号（与 dropped 分开数，两者处置不同）。⚠️ 兜底回收扫描仍未做——欠账原文是「补可计数信号 or 兜底回收扫描」，这里只取了前一半：计数让「漏了多少」问得出来，但漏掉的那些素材今天仍然没有任何东西会把它们放回可用池',
   'content-authority-http.ts 的私有译码副本已删，改指 content-authority-wire.ts 公共那一份（结清前逐条比过两份实现，语义一致、尚未漂移 ⇒ 这次是防患不是修 bug）',
   '两个 kernel 端口文件已同时进 ownership-rules.json 的 fileOverrides 与 kernel-non-members.json 的 kernelRoster.members',
   '本文件与 content-authority-wire.ts 已进控制仓 scripts/sync-split-repos 的 TRANSPORT_MEMBERS',
