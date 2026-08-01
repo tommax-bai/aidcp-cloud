@@ -331,6 +331,10 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
   }> = [];
   const operationView = () => ({
     envKey: 'env-fb',
+    primarySurface: 'reels' as const,
+    surfaceRevision: 1,
+    surfaceUpdatedAt: null,
+    surfaceUpdatedBy: null,
     baseMode,
     effectiveMode,
     policyRevision: operationRevision,

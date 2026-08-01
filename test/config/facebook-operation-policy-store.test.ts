@@ -39,6 +39,14 @@ interface GlobalPolicyRow {
   updated_by: string;
 }
 
+interface SurfaceRow {
+  env_key: string;
+  primary_surface: 'feed' | 'reels';
+  revision: number;
+  updated_at: Date;
+  updated_by: string;
+}
+
 function readySchema(withGlobal = false): SchemaProber {
   return async (_pool, tables) => ({
     tables: new Set(tables),
@@ -66,6 +74,22 @@ function readySchema(withGlobal = false): SchemaProber {
       'facebook_operation_policy_audit.request_id',
       'facebook_operation_policy_audit.reason',
       'facebook_operation_policy_audit.created_at',
+      'facebook_primary_browse_surface_policy.env_key',
+      'facebook_primary_browse_surface_policy.primary_surface',
+      'facebook_primary_browse_surface_policy.revision',
+      'facebook_primary_browse_surface_policy.updated_at',
+      'facebook_primary_browse_surface_policy.updated_by',
+      'facebook_primary_browse_surface_policy_audit.audit_id',
+      'facebook_primary_browse_surface_policy_audit.env_key',
+      'facebook_primary_browse_surface_policy_audit.prior_revision',
+      'facebook_primary_browse_surface_policy_audit.new_revision',
+      'facebook_primary_browse_surface_policy_audit.before_policy',
+      'facebook_primary_browse_surface_policy_audit.after_policy',
+      'facebook_primary_browse_surface_policy_audit.actor_class',
+      'facebook_primary_browse_surface_policy_audit.actor_id',
+      'facebook_primary_browse_surface_policy_audit.request_id',
+      'facebook_primary_browse_surface_policy_audit.reason',
+      'facebook_primary_browse_surface_policy_audit.created_at',
       ...(withGlobal ? [
         'facebook_operation_global_policy.execution_target',
         'facebook_operation_global_policy.persona_reel_views_per_like',
@@ -102,6 +126,7 @@ function readySchema(withGlobal = false): SchemaProber {
     indexes: new Set([
       'idx_facebook_operation_policy_audit_env_revision',
       'uq_facebook_operation_policy_audit_revision',
+      'idx_facebook_primary_browse_surface_audit_env_revision',
       ...(withGlobal ? [
         'idx_facebook_operation_global_policy_audit_target_revision',
         'idx_facebook_environment_slow_start_completion_target',
@@ -142,6 +167,18 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
   ]);
   let policies = new Map<string, PolicyRow>();
   let audits: unknown[][] = [];
+  let surfaces = new Map<string, SurfaceRow>(
+    [...environments]
+      .filter(([, environment]) => environment.platform === 'facebook' || environment.platform === 'fb')
+      .map(([envKey]) => [envKey, {
+        env_key: envKey,
+        primary_surface: 'reels' as const,
+        revision: 1,
+        updated_at: new Date('2026-08-01T00:00:00.000Z'),
+        updated_by: 'migration:0105',
+      }]),
+  );
+  let surfaceAudits: unknown[][] = [];
   let globalRow: GlobalPolicyRow = {
     execution_target: options.executionTarget ?? 'dev',
     persona_reel_views_per_like: 4,
@@ -224,6 +261,29 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
         ? [...policies.values()].filter((row) => row.cadence_source === 'global')
         : [...policies.values()];
       return { rows, rowCount: rows.length };
+    }
+    if (sql.startsWith('SELECT env_key,primary_surface') && !sql.includes('WHERE env_key=')) {
+      return { rows: [...surfaces.values()], rowCount: surfaces.size };
+    }
+    if (sql.startsWith('SELECT env_key,primary_surface') && sql.includes('WHERE env_key=')) {
+      const row = surfaces.get(String(params[0]));
+      return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+    }
+    if (sql.startsWith('UPDATE facebook_primary_browse_surface_policy')) {
+      const prior = surfaces.get(String(params[0]))!;
+      const row: SurfaceRow = {
+        ...prior,
+        primary_surface: params[1] as SurfaceRow['primary_surface'],
+        revision: prior.revision + 1,
+        updated_at: new Date(),
+        updated_by: String(params[2]),
+      };
+      surfaces.set(row.env_key, row);
+      return { rows: [row], rowCount: 1 };
+    }
+    if (sql.startsWith('INSERT INTO facebook_primary_browse_surface_policy_audit')) {
+      surfaceAudits.push(params);
+      return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('SELECT env_key,enabled,updated_at,updated_by')) {
       if (sql.includes('WHERE env_key=')) {
@@ -358,6 +418,8 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
         | {
             policies: Map<string, PolicyRow>;
             audits: unknown[][];
+            surfaces: Map<string, SurfaceRow>;
+            surfaceAudits: unknown[][];
             slow: Map<string, Date | null>;
             globalRow: GlobalPolicyRow;
             globalAudits: unknown[][];
@@ -376,6 +438,8 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
             snapshot = {
               policies: new Map([...policies].map(([key, row]) => [key, { ...row }])),
               audits: audits.map((row) => [...row]),
+              surfaces: new Map([...surfaces].map(([key, row]) => [key, { ...row }])),
+              surfaceAudits: surfaceAudits.map((row) => [...row]),
               slow: new Map([...environments].map(([key, env]) => [key, env.slowStartSince])),
               globalRow: { ...globalRow },
               globalAudits: globalAudits.map((row) => [...row]),
@@ -393,6 +457,8 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
             if (snapshot) {
               policies = snapshot.policies;
               audits = snapshot.audits;
+              surfaces = snapshot.surfaces;
+              surfaceAudits = snapshot.surfaceAudits;
               globalRow = snapshot.globalRow;
               globalAudits = snapshot.globalAudits;
               graduationMarks = snapshot.graduationMarks;
@@ -455,6 +521,8 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
     environments,
     get policies() { return policies; },
     get audits() { return audits; },
+    get surfaces() { return surfaces; },
+    get surfaceAudits() { return surfaceAudits; },
     get globalRow() { return globalRow; },
     get globalAudits() { return globalAudits; },
     get graduationMarks() { return graduationMarks; },
@@ -694,6 +762,58 @@ describe('FacebookOperationPolicyStore', () => {
       assert.equal(saved.view.consumption.viewsPerLike, 7);
     }
     assert.equal(db.audits.length, 1);
+  });
+
+  it('writes primary surface with an independent revision and audit', async () => {
+    const db = database();
+    await db.store.init();
+
+    const written = await db.store.writePrimarySurface(
+      'env-fb',
+      {
+        expectedRevision: 1,
+        primarySurface: 'feed',
+        requestId: 'surface-1',
+        requiredOwnerUserId: 'customer-a',
+      },
+      'client:customer-a',
+    );
+    assert.equal(written.ok, true);
+    if (written.ok) {
+      assert.equal(written.view.primarySurface, 'feed');
+      assert.equal(written.view.surfaceRevision, 2);
+      assert.equal(written.view.policyRevision, 0);
+    }
+    assert.equal(db.surfaces.get('env-fb')?.primary_surface, 'feed');
+    assert.equal(db.surfaceAudits.length, 1);
+    assert.equal(db.revisionAllocations, 0);
+
+    const stale = await db.store.writePrimarySurface(
+      'env-fb',
+      {
+        expectedRevision: 1,
+        primarySurface: 'reels',
+        requestId: 'surface-stale',
+      },
+      'client:customer-a',
+    );
+    assert.equal(stale.ok, false);
+    if (!stale.ok) {
+      assert.equal(stale.reason, 'revision_conflict');
+      assert.equal(stale.current?.primarySurface, 'feed');
+    }
+    assert.equal(db.surfaceAudits.length, 1);
+
+    const unsupported = await db.store.writePrimarySurface(
+      'env-xhs',
+      {
+        expectedRevision: 1,
+        primarySurface: 'reels',
+        requestId: 'surface-xhs',
+      },
+      'client:customer-a',
+    );
+    assert.deepEqual(unsupported, { ok: false, reason: 'unsupported_platform' });
   });
 
   it('reads an unbound slow-start selection from the environment anchor', async () => {

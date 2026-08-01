@@ -11,6 +11,9 @@ export type { FacebookBrowseMode } from '../kernel/facebook-rule-mode-types.js';
 export interface FacebookRuleModeDecision {
   mode: FacebookBrowseMode;
   blocker: string | null;
+  /** Environment authority pinned by the dispatcher when the browse session starts. */
+  primarySurface?: 'feed' | 'reels';
+  surfaceRevision?: number;
   /** Present only when the environment operation-policy projection is authoritative. */
   policyRevision?: number;
   rulePolicy?: FacebookRulePolicySnapshot;

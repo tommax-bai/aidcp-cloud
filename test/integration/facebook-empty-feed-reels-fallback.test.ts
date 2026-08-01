@@ -10,6 +10,88 @@ const soul: Soul = {
 
 const llm = { complete: async () => '{"verdict":"skip","reason":"test"}' };
 
+test('Facebook Reels 主入口在四种运行方式下都先丢弃首批 Feed 并只发配置入口命令', () => {
+  const modes = ['persona', 'slow_start', 'facebook_rule', 'consumption'] as const;
+  for (const mode of modes) {
+    const commands: EdgeCommand[] = [];
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm,
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({
+        mode,
+        blocker: null,
+        primarySurface: 'reels',
+        surfaceRevision: 3,
+        policyRevision: 9,
+      }),
+      sendCommand: (command) => commands.push(command),
+    });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    dispatcher.bus.emit('page.cards.arrived', {
+      cards: [{
+        index: 0,
+        title: 'must not be evaluated',
+        likeCount: 0,
+        collectCount: 0,
+        noteId: 'https://www.facebook.com/a/posts/feed-bootstrap',
+        noteIdKind: 'content_ref',
+      }],
+      listKind: 'feed',
+      ts: 1,
+    });
+    dispatcher.bus.emit('feed.empty.confirmed', { ts: 2 });
+
+    assert.equal(
+      commands.filter(
+        (command) => command.action === 'scroll' && command.reason === 'facebook_reels_primary',
+      ).length,
+      1,
+      `${mode} must authorize configured Reels exactly once`,
+    );
+    assert.equal(
+      commands.some((command) => command.action === 'open_note'),
+      false,
+      `${mode} must not evaluate or open the Feed bootstrap card`,
+    );
+    assert.equal(
+      commands.some((command) => command.reason === 'empty_feed_reels_fallback'),
+      false,
+      `${mode} must not relabel configured entry as evidence fallback`,
+    );
+    dispatcher.endSession('test');
+  }
+});
+
+test('Facebook 主浏览入口按会话固定，配置变化从下一场生效', () => {
+  const commands: EdgeCommand[] = [];
+  let primarySurface: 'feed' | 'reels' = 'feed';
+  const dispatcher = new RoleDispatcher({
+    soul,
+    llm,
+    accountPlatform: 'facebook',
+    facebookRuleModeDecision: () => ({
+      mode: 'persona',
+      blocker: null,
+      primarySurface,
+      surfaceRevision: primarySurface === 'feed' ? 1 : 2,
+    }),
+    sendCommand: (command) => commands.push(command),
+  });
+  dispatcher.setup();
+  dispatcher.startSession();
+  primarySurface = 'reels';
+  dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'feed', ts: 1 });
+  assert.equal(commands.some((command) => command.reason === 'facebook_reels_primary'), false);
+
+  dispatcher.restartSession();
+  dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'feed', ts: 2 });
+  assert.equal(commands.some((command) => command.reason === 'facebook_reels_primary'), true);
+  dispatcher.endSession('test');
+});
+
 test('Facebook 明确空 Feed：Cloud 每场只用现有 scroll 命令授权一次 Reels fallback', () => {
   const commands: EdgeCommand[] = [];
   const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });

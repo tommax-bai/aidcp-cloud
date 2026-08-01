@@ -753,6 +753,8 @@ export class RoleDispatcher {
   private pendingFeedFloorMs = 0;
   /** Facebook Feed→Reels 握手状态；pending 只在可读 Reel 卡到达后才升级 confirmed。 */
   private reelsFallbackState: 'idle' | 'pending' | 'confirmed' = 'idle';
+  private reelsEntryReason: 'facebook_reels_primary' | 'empty_feed_reels_fallback' | null = null;
+  private sessionFacebookPrimarySurface: 'feed' | 'reels' = 'feed';
   /** pending 期间已真正下发的有界恢复次数；被调度/配额闸抑制不消耗次数。 */
   private reelsFallbackRecoveryAttempts = 0;
   /** 本场已用掉的 Reels epoch 重开次数（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。 */
@@ -1040,6 +1042,14 @@ export class RoleDispatcher {
       console.warn(`[facebook-rule] mode authority unavailable account=${this.currentAccountId}: ${(err as Error).message}`);
       return { mode: 'blocked', blocker: 'rule_projection_unavailable' };
     }
+  }
+
+  private pinFacebookPrimarySurface(): void {
+    if (this.accountPlatform !== 'facebook') {
+      this.sessionFacebookPrimarySurface = 'feed';
+      return;
+    }
+    this.sessionFacebookPrimarySurface = this.facebookRuleDecision().primarySurface ?? 'feed';
   }
 
   private isFacebookAutomatedBrowseMode(): boolean {
@@ -2259,7 +2269,9 @@ export class RoleDispatcher {
   }
 
   /** Reels fallback 保留兼容握手 reason，同时复用浏览配额与统一命令准入闸。 */
-  private sendFacebookReelsFallbackCommand(): boolean {
+  private sendFacebookReelsEntryCommand(
+    reason: 'facebook_reels_primary' | 'empty_feed_reels_fallback',
+  ): boolean {
     if (!this.viewQuotaSleeping) {
       const decision = this.explainView();
       if (!decision.allowed) {
@@ -2267,7 +2279,31 @@ export class RoleDispatcher {
         return false;
       }
     }
-    return this.sendCommand({ action: 'scroll', reason: 'empty_feed_reels_fallback' });
+    return this.sendCommand({ action: 'scroll', reason });
+  }
+
+  private authorizeFacebookPrimaryReels(): boolean {
+    if (
+      this.accountPlatform !== 'facebook'
+      || !this.sessionActive
+      || this.sessionFacebookPrimarySurface !== 'reels'
+      || this.reelsFallbackState !== 'idle'
+    ) return false;
+    const sent = this.sendFacebookReelsEntryCommand('facebook_reels_primary');
+    if (!sent) return false;
+    this.reelsEntryReason = 'facebook_reels_primary';
+    this.reelsFallbackState = 'pending';
+    this.reelsFallbackRecoveryAttempts = 0;
+    console.log('[RoleDispatcher] Facebook 主浏览入口为 Reels → 授权进入 Reels 列表');
+    return true;
+  }
+
+  private authorizeFacebookReelsFromFeedObservation(
+    source: 'empty_feed' | 'feed_exhausted' | 'present_unreportable',
+  ): boolean {
+    return this.sessionFacebookPrimarySurface === 'reels'
+      ? this.authorizeFacebookPrimaryReels()
+      : this.authorizeFacebookReelsFallback(source);
   }
 
   /**
@@ -2277,13 +2313,19 @@ export class RoleDispatcher {
    * 确认到底。只有命令真正下发后才置幂等闸；若被软暂停/评论支线等抑制，后续诚实重报仍可重试。
    */
   private authorizeFacebookReelsFallback(source: 'empty_feed' | 'feed_exhausted' | 'present_unreportable'): boolean {
-    if (this.accountPlatform !== 'facebook' || !this.sessionActive || this.reelsFallbackState !== 'idle') return false;
-    const sent = this.sendFacebookReelsFallbackCommand();
+    if (
+      this.accountPlatform !== 'facebook'
+      || !this.sessionActive
+      || this.sessionFacebookPrimarySurface !== 'feed'
+      || this.reelsFallbackState !== 'idle'
+    ) return false;
+    const sent = this.sendFacebookReelsEntryCommand('empty_feed_reels_fallback');
     if (!sent) {
       console.log(`[RoleDispatcher] Facebook ${source} → Reels fallback 命令被当前调度闸抑制，保留后续重试资格`);
       return false;
     }
     this.reelsFallbackState = 'pending';
+    this.reelsEntryReason = 'empty_feed_reels_fallback';
     this.reelsFallbackRecoveryAttempts = 0;
     const message = source === 'empty_feed'
       ? '[RoleDispatcher] Facebook 首页明确空 Feed → 授权切换 Reels 列表'
@@ -2309,7 +2351,9 @@ export class RoleDispatcher {
       this.reelsFallbackRecoveryAttempts = 0;
       return false;
     }
-    const sent = this.sendFacebookReelsFallbackCommand();
+    const sent = this.sendFacebookReelsEntryCommand(
+      this.reelsEntryReason ?? 'empty_feed_reels_fallback',
+    );
     if (!sent) {
       console.log(`[RoleDispatcher] Facebook Reels pending 恢复被当前调度/配额闸抑制，不消耗恢复次数`);
       return false;
@@ -2323,6 +2367,7 @@ export class RoleDispatcher {
 
   private resetFacebookReelsFallback(): void {
     this.reelsFallbackState = 'idle';
+    this.reelsEntryReason = null;
     this.reelsFallbackRecoveryAttempts = 0;
   }
 
@@ -2859,6 +2904,7 @@ export class RoleDispatcher {
     this.roles.forEach((r) => r.subscribe());
     this.setupCommandTranslation();
     this.setupEdgeEventSubscriptions();
+    this.pinFacebookPrimarySurface();
     this.sessionActive = true;
     this.sessionStartedAt = this.clock();
     this.reelsReentryCount = 0; // 重开次数按**场**计（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。
@@ -2999,6 +3045,7 @@ export class RoleDispatcher {
     this.roles.forEach((r) => r.subscribe());
     this.setupCommandTranslation();
     this.setupEdgeEventSubscriptions();
+    this.pinFacebookPrimarySurface();
     this.sessionActive = true;
     this.sessionStartedAt = this.clock();
     this.reelsReentryCount = 0; // 重开次数按**场**计（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。
@@ -4045,16 +4092,24 @@ export class RoleDispatcher {
 
       // Facebook 首页显式空态：Edge 只观察，Cloud 才选择列表。每场只授权一次，复用现有 scroll 命令。
       this.eventBus.on('feed.empty.confirmed', () => {
-        this.authorizeFacebookReelsFallback('empty_feed');
+        this.authorizeFacebookReelsFromFeedObservation('empty_feed');
       }),
 
       // Facebook 首页物理卡连续 8 轮仍无法形成可信身份：与明确空态同样只由 Cloud 单点选择列表。
       this.eventBus.on('feed.present_unreportable.confirmed', () => {
-        this.authorizeFacebookReelsFallback('present_unreportable');
+        this.authorizeFacebookReelsFromFeedObservation('present_unreportable');
       }),
 
       // Edge 上报可见卡片 → 更新数据并触发评估
       this.eventBus.on('page.cards.arrived', (payload) => {
+        if (
+          this.accountPlatform === 'facebook'
+          && payload.listKind === 'feed'
+          && this.sessionFacebookPrimarySurface === 'reels'
+        ) {
+          this.authorizeFacebookPrimaryReels();
+          return;
+        }
         for (const card of payload.cards ?? []) {
           if (card.noteId && card.noteIdKind === 'content_ref') this.contentRefNoteIds.add(card.noteId);
         }
@@ -4090,7 +4145,7 @@ export class RoleDispatcher {
         ) {
           this.reelsFallbackState = 'confirmed';
           this.reelsFallbackRecoveryAttempts = 0;
-          console.log('[RoleDispatcher] Facebook Reels 可读卡已到达 → fallback confirmed');
+          console.log('[RoleDispatcher] Facebook Reels 可读卡已到达 → entry confirmed');
         }
         this.updateVisibleCards(payload.cards);
         this.maybeDispatchFacebookPresentedVideoLike(payload.cards, payload.listKind);
@@ -4365,7 +4420,7 @@ export class RoleDispatcher {
           this.accountPlatform === 'facebook' &&
           this.sessionActive
         ) {
-          this.authorizeFacebookReelsFallback('feed_exhausted');
+          this.authorizeFacebookReelsFromFeedObservation('feed_exhausted');
           return;
         }
         // 阶段 0 边缘不上报 feed_exhausted ⇒ 惰性；feed_refresh 能力关时 canRefresh()===false ⇒ 不误发。
@@ -4412,7 +4467,7 @@ export class RoleDispatcher {
               );
             }
           }
-          if (this.authorizeFacebookReelsFallback('feed_exhausted')) return;
+          if (this.authorizeFacebookReelsFromFeedObservation('feed_exhausted')) return;
           console.warn(
             `[RoleDispatcher] Facebook 滚动无目标且无法给出下一步（reason=${payload.reason}）→ 诚实结束本场，绝不无命令悬停`,
           );

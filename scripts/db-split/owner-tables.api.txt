@@ -1,6 +1,6 @@
 # generated from boundaries/table-ownership.json — DO NOT EDIT BY HAND
 # regenerate: npx tsx scripts/db-split/generate-owner-table-lists.ts
-# owner=api count=61
+# owner=api count=63
 account_comment_approval_policy
 account_content_schedule
 account_facebook_comment_config
@@ -35,6 +35,8 @@ facebook_operation_global_policy
 facebook_operation_global_policy_audit
 facebook_operation_policy
 facebook_operation_policy_audit
+facebook_primary_browse_surface_policy
+facebook_primary_browse_surface_policy_audit
 facebook_rule_mode_config
 facebook_rule_mode_environment_config
 first_post_onboarding

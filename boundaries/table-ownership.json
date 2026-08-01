@@ -64,6 +64,8 @@
     { "table": "facebook_operation_global_policy_audit", "owner": "api", "basis": "change add-configurable-facebook-consumption-mode；全局数值策略审计随配置权威同属 api" },
     { "table": "facebook_operation_policy", "owner": "api", "basis": "change add-configurable-facebook-consumption-mode；环境级 Facebook 基础模式与生效节奏快照由 Console/API 单写" },
     { "table": "facebook_operation_policy_audit", "owner": "api", "basis": "change add-configurable-facebook-consumption-mode；环境操作策略审计随配置权威同属 api" },
+    { "table": "facebook_primary_browse_surface_policy", "owner": "api", "basis": "change configure-facebook-primary-browse-surface；环境级 Facebook 主浏览入口由客户 API 单写" },
+    { "table": "facebook_primary_browse_surface_policy_audit", "owner": "api", "basis": "change configure-facebook-primary-browse-surface；主浏览入口审计随配置权威同属 api" },
     { "table": "facebook_region_comment_template_config", "owner": "automation", "basis": "change facebook-global-group-regional-comment-templates；群区域通用评论模板由 automation 在确定评论目标后解析并单写" },
     { "table": "facebook_rule_batch", "owner": "automation", "basis": "change facebook-rule-mode-cadence；规则批次与动作终态是 target-scoped 自动化运行事实，唯一写入方 src/orchestrator/facebook-rule-mode-runtime-store.ts 属 automation" },
     { "table": "facebook_rule_mode_config", "owner": "api", "basis": "change facebook-rule-mode-cadence；账号规则开关是 Console/API 配置权威，写入方经 Panel API 与 configPool 属 api。注：change environment-level-rule-mode-and-approval 之后本表停止参与运行时读写，只作可回滚数据留存" },

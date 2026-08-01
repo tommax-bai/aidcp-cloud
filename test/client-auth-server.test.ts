@@ -2063,6 +2063,8 @@ function makeFacebookOperationPolicyDep(options: {
 } = {}) {
   const calls: Array<Record<string, unknown>> = [];
   let currentRevision = 7;
+  let surfaceRevision = 1;
+  let primarySurface: 'feed' | 'reels' = 'reels';
   let currentMode: 'persona' | 'rule' | 'consumption' = options.initialMode ?? 'persona';
   let slowStartState: 'active' | 'off' | 'unknown' = options.slowStartActive
     ? 'active'
@@ -2070,6 +2072,10 @@ function makeFacebookOperationPolicyDep(options: {
   let updatedAt: string | null = null;
   const view = (envKey: string): FacebookOperationPolicyView => ({
     envKey,
+    primarySurface,
+    surfaceRevision,
+    surfaceUpdatedAt: null,
+    surfaceUpdatedBy: null,
     baseMode: currentMode,
     effectiveMode: slowStartState === 'active' ? 'slow_start' : null,
     policyRevision: currentRevision,
@@ -2126,6 +2132,15 @@ function makeFacebookOperationPolicyDep(options: {
       currentMode = input.mode === 'slow_start' ? 'persona' : input.mode;
       slowStartState = input.mode === 'slow_start' ? 'active' : 'off';
       updatedAt = '2026-07-30T08:00:00.000Z';
+      return { ok: true as const, view: view(envKey) };
+    },
+    async writePrimarySurface(envKey, input, actor) {
+      calls.push({ action: 'write_surface', envKey, input, actor });
+      if (input.expectedRevision !== surfaceRevision) {
+        return { ok: false as const, reason: 'revision_conflict' as const, current: view(envKey) };
+      }
+      primarySurface = input.primarySurface;
+      surfaceRevision += 1;
       return { ok: true as const, view: view(envKey) };
     },
     async writeLegacyRuleMode(envKey, input, actor) {
@@ -3014,8 +3029,12 @@ test('统一运行模式：未绑定 fb 别名环境可读写，DTO 无节奏/�
         'blocker',
         'effectiveMode',
         'policyRevision',
+        'primarySurface',
         'slowStart',
+        'surfaceRevision',
       ]);
+      assert.equal(readBody.data.facebookOperationPolicy.primarySurface, 'reels');
+      assert.equal(readBody.data.facebookOperationPolicy.surfaceRevision, 1);
       assert.deepEqual(readBody.data.facebookOperationPolicy.slowStart, { state: 'unknown' });
       for (const banned of [
         'accountId',
@@ -3047,6 +3066,56 @@ test('统一运行模式：未绑定 fb 别名环境可读写，DTO 无节奏/�
       assert.deepEqual(
         Object.keys(authorityWrite.input as Record<string, unknown>).sort(),
         ['expectedRevision', 'mode', 'requestId', 'requiredOwnerUserId'],
+      );
+      assert.equal(
+        (authorityWrite.input as { requiredOwnerUserId?: string }).requiredOwnerUserId,
+        'u1',
+      );
+    },
+  );
+});
+
+test('主浏览入口：独立 CAS 写 Feed，不改变当前运行方式', async () => {
+  const fx = ownerOfP1();
+  fx.envPlatforms.set('p1', 'facebook');
+  const policy = makeFacebookOperationPolicyDep({ initialMode: 'consumption' });
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookOperationPolicy: policy.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const write = await fetch(`${base}/environments/p1/facebook-primary-surface`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ expectedRevision: 1, primarySurface: 'feed' }),
+      });
+      assert.equal(write.status, 200);
+      const body = await write.json() as {
+        data: { facebookOperationPolicy: {
+          primarySurface: string;
+          surfaceRevision: number;
+          baseMode: string;
+          policyRevision: number;
+        } };
+      };
+      assert.deepEqual(body.data.facebookOperationPolicy, {
+        primarySurface: 'feed',
+        surfaceRevision: 2,
+        baseMode: 'consumption',
+        effectiveMode: null,
+        policyRevision: 7,
+        slowStart: { state: 'unknown' },
+        blocker: null,
+      });
+      const authorityWrite = policy.calls.find((call) => call.action === 'write_surface')!;
+      assert.deepEqual(
+        Object.keys(authorityWrite.input as Record<string, unknown>).sort(),
+        ['expectedRevision', 'primarySurface', 'requestId', 'requiredOwnerUserId'],
       );
       assert.equal(
         (authorityWrite.input as { requiredOwnerUserId?: string }).requiredOwnerUserId,

@@ -121,10 +121,12 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   // Reel 模式节奏只扩展 API 属主的目标全局配置表，不进入 automation 运行库。
   assert.ok(api.includes('0104_facebook_reel_mode_cadence'));
   assert.ok(!automation.includes('0104_facebook_reel_mode_cadence'));
+  assert.ok(api.includes('0105_facebook_primary_browse_surface'));
+  assert.ok(!automation.includes('0105_facebook_primary_browse_surface'));
   // 每加一条迁移都要在这里同步抬。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0104_facebook_reel_mode_cadence',
+    '0105_facebook_primary_browse_surface',
   );
 });
 

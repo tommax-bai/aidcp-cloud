@@ -14,6 +14,10 @@ const reelCadenceMigrationUrl = new URL(
   '../../migrations/0104_facebook_reel_mode_cadence.sql',
   import.meta.url,
 );
+const surfaceMigrationUrl = new URL(
+  '../../migrations/0105_facebook_primary_browse_surface.sql',
+  import.meta.url,
+);
 
 describe('facebook operation policy migration', () => {
   it('allocates a global revision after the fixed schema version in every seed row', async () => {
@@ -93,5 +97,19 @@ describe('facebook operation policy migration', () => {
       /ALTER TABLE facebook_operation_policy\b/,
       'Reel cadence is global-only and must not add environment override columns',
     );
+  });
+
+  it('seeds every existing Facebook environment to an independently audited Reels surface', async () => {
+    const sql = await readFile(surfaceMigrationUrl, 'utf8');
+    assert.match(
+      sql,
+      /CREATE TABLE IF NOT EXISTS facebook_primary_browse_surface_policy[\s\S]*primary_surface\s+TEXT NOT NULL DEFAULT 'reels'[\s\S]*revision\s+BIGINT NOT NULL DEFAULT 1/,
+    );
+    assert.match(
+      sql,
+      /SELECT\s+e\.env_key,\s+'reels',\s+1,[\s\S]*lower\(btrim\(COALESCE\(e\.platform, ''\)\)\) IN \('facebook', 'fb'\)/,
+    );
+    assert.match(sql, /seed_existing_facebook_environment_to_reels/);
+    assert.doesNotMatch(sql, /facebook_operation_policy_revision_seq/);
   });
 });

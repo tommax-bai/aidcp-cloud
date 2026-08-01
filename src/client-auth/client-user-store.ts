@@ -60,6 +60,7 @@ import {
   FACEBOOK_OPERATION_POLICY_BOUNDS,
   type FacebookBaseOperationMode,
   type FacebookEffectiveOperationMode,
+  type FacebookPrimaryBrowseSurface,
   type FacebookRequestedOperationMode,
 } from '../config/facebook-operation-policy-store.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
@@ -524,6 +525,8 @@ export type WriteEnvironmentProxyAuthorityResult =
     };
 
 export interface ClientProvisionedFacebookOperationPolicy {
+  primarySurface: FacebookPrimaryBrowseSurface;
+  surfaceRevision: number;
   baseMode: FacebookBaseOperationMode;
   effectiveMode: FacebookEffectiveOperationMode | null;
   policyRevision: number;
@@ -544,6 +547,7 @@ export type CompleteProvisioningIntentResult =
         'invalid_environment' | 'invalid_proxy_authority' | 'proxy_authority_mismatch' |
         /** 慢启动与规则模式开启意图同时为真：互斥，整请求拒绝，MUST NOT 静默取其一。 */
         'conflicting_run_mode' | 'intent_operation_mode_mismatch' |
+        'intent_primary_surface_mismatch' |
         'operation_policy_refresh_unavailable' |
         'environment_already_registered' | 'env_already_assigned' | 'schema_unavailable';
       currentFacebookOperationPolicy?: ClientProvisionedFacebookOperationPolicy;
@@ -654,6 +658,8 @@ interface ProvisioningOperationPolicyDbRow {
   base_mode: string;
   policy_revision: number | string;
   slow_start_since: Date | string | null;
+  primary_surface: string;
+  surface_revision: number | string;
 }
 
 function projectProvisioningOperationPolicy(
@@ -666,8 +672,17 @@ function projectProvisioningOperationPolicy(
     return null;
   }
   const policyRevision = Number(row.policy_revision);
-  if (!Number.isSafeInteger(policyRevision) || policyRevision < 1) return null;
+  const surfaceRevision = Number(row.surface_revision);
+  if (
+    !Number.isSafeInteger(policyRevision)
+    || policyRevision < 1
+    || (row.primary_surface !== 'feed' && row.primary_surface !== 'reels')
+    || !Number.isSafeInteger(surfaceRevision)
+    || surfaceRevision < 1
+  ) return null;
   return {
+    primarySurface: row.primary_surface,
+    surfaceRevision,
     baseMode: row.base_mode,
     effectiveMode: null,
     policyRevision,
@@ -1829,6 +1844,8 @@ export class ClientUserStore {
       facebookRuleModeEnabled?: boolean;
       /** Facebook 专属统一运行模式；与两个 legacy 运行意图字段互斥。 */
       facebookOperationMode?: FacebookRequestedOperationMode;
+      /** Facebook primary content surface, independent from the operation mode. */
+      facebookPrimarySurface?: FacebookPrimaryBrowseSurface;
       /** Facebook 专属创建意图：环境评论审批覆盖模式。省略 = 不写策略行（= 按来源规则）。 */
       commentApprovalMode?: string;
       proxyAuthority: unknown;
@@ -1855,11 +1872,19 @@ export class ClientUserStore {
     ) {
       return { ok: false, reason: 'invalid_environment' };
     }
+    if (
+      input.facebookPrimarySurface !== undefined
+      && input.facebookPrimarySurface !== 'feed'
+      && input.facebookPrimarySurface !== 'reels'
+    ) {
+      return { ok: false, reason: 'invalid_environment' };
+    }
     // 创建意图闸全部**先于任何写入**判定，任一不过整请求拒绝、不部分登记环境：
     //   ① Facebook 专属字段只在 platform=facebook 时接受；
     //   ② 审批模式只接受两个枚举值；
     //   ③ 统一模式不得与任一 legacy 运行布尔共存，legacy 慢启动与规则也不得同时为真。
     const facebookOnlyIntent = input.facebookOperationMode !== undefined
+      || input.facebookPrimarySurface !== undefined
       || input.slowStartEnabled === true
       || input.facebookRuleModeEnabled === true
       || input.commentApprovalMode !== undefined;
@@ -1885,6 +1910,8 @@ export class ClientUserStore {
         : input.facebookRuleModeEnabled === true
           ? 'rule'
           : 'persona');
+    const resolvedFacebookPrimarySurface: FacebookPrimaryBrowseSurface =
+      input.facebookPrimarySurface ?? 'reels';
     const slowStartSince = platform === 'facebook'
       && resolvedFacebookOperationMode === 'slow_start'
       ? new Date(shanghaiDayStartMs(Date.now()))
@@ -1955,9 +1982,11 @@ export class ClientUserStore {
         let currentFacebookOperationPolicy: ClientProvisionedFacebookOperationPolicy | undefined;
         if (platform === 'facebook') {
           const policyResult = await client.query<ProvisioningOperationPolicyDbRow>(
-            `SELECT p.base_mode,p.policy_revision,e.slow_start_since
+            `SELECT p.base_mode,p.policy_revision,e.slow_start_since,
+                    s.primary_surface,s.revision AS surface_revision
                FROM facebook_operation_policy p
                JOIN client_environments e ON e.env_key=p.env_key
+               JOIN facebook_primary_browse_surface_policy s ON s.env_key=p.env_key
               WHERE p.env_key=$1`,
             [envKey],
           );
@@ -1975,6 +2004,14 @@ export class ClientUserStore {
             return {
               ok: false,
               reason: 'intent_operation_mode_mismatch',
+              currentFacebookOperationPolicy,
+            };
+          }
+          if (projected.primarySurface !== resolvedFacebookPrimarySurface) {
+            await client.query('ROLLBACK');
+            return {
+              ok: false,
+              reason: 'intent_primary_surface_mismatch',
               currentFacebookOperationPolicy,
             };
           }
@@ -2139,8 +2176,32 @@ export class ClientUserStore {
             intentId,
           ],
         );
+        await client.query(
+          `INSERT INTO facebook_primary_browse_surface_policy
+             (env_key,primary_surface,revision,updated_at,updated_by)
+           VALUES ($1,$2,1,now(),$3)`,
+          [envKey, resolvedFacebookPrimarySurface, provisioningActor],
+        );
+        await client.query(
+          `INSERT INTO facebook_primary_browse_surface_policy_audit
+             (env_key,prior_revision,new_revision,before_policy,after_policy,
+              actor_class,actor_id,request_id,reason,created_at)
+           VALUES ($1,0,1,NULL,$2::jsonb,'client-provision',$3,$4,
+                   'provision_initial_primary_surface',now())`,
+          [
+            envKey,
+            JSON.stringify({
+              primarySurface: resolvedFacebookPrimarySurface,
+              surfaceRevision: 1,
+            }),
+            intentId,
+            intentId,
+          ],
+        );
         await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
         provisionedFacebookOperationPolicy = {
+          primarySurface: resolvedFacebookPrimarySurface,
+          surfaceRevision: 1,
           baseMode,
           effectiveMode: null,
           policyRevision,

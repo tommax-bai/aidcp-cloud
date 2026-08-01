@@ -965,6 +965,8 @@ test('创建意图：consumption 使用一次全局 revision 写 policy + audit 
       assignedAt: result.ok ? result.environment.assignedAt : 0,
     },
     facebookOperationPolicy: {
+      primarySurface: 'reels',
+      surfaceRevision: 1,
       baseMode: 'consumption',
       effectiveMode: null,
       policyRevision: 41,
@@ -1105,6 +1107,8 @@ test('创建意图：提交后 authority refresh 失败不回成功，重试可�
     ok: false,
     reason: 'operation_policy_refresh_unavailable',
     currentFacebookOperationPolicy: {
+      primarySurface: 'reels',
+      surfaceRevision: 1,
       baseMode: 'consumption',
       effectiveMode: null,
       policyRevision: 41,
@@ -1193,6 +1197,7 @@ test('创建意图：已完成 intent 的幂等重试只回既成归属，MUST N
       }] };
       if (/FROM facebook_operation_policy p/.test(sql)) return { rows: [{
         base_mode: 'rule', policy_revision: 41, slow_start_since: null,
+        primary_surface: 'reels', surface_revision: 1,
       }] };
       return { rows: [] };
     },
@@ -1257,6 +1262,8 @@ test('创建意图：completed intent 读回真实 policy，模式碰撞返回 c
           base_mode: 'consumption',
           policy_revision: 73,
           slow_start_since: null,
+          primary_surface: 'reels',
+          surface_revision: 1,
         }] };
         return { rows: [] };
       },
@@ -1298,6 +1305,8 @@ test('创建意图：completed intent 读回真实 policy，模式碰撞返回 c
     ok: false,
     reason: 'intent_operation_mode_mismatch',
     currentFacebookOperationPolicy: {
+      primarySurface: 'reels',
+      surfaceRevision: 1,
       baseMode: 'consumption',
       effectiveMode: null,
       policyRevision: 73,

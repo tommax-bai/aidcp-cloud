@@ -7149,6 +7149,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               : undefined;
       return {
         ...decision,
+        primarySurface: policy.primarySurface,
+        surfaceRevision: policy.surfaceRevision,
         policyRevision: policy.policyRevision,
         rulePolicy: policy.rule,
         consumptionPolicy: policy.consumption,

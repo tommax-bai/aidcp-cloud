@@ -83,6 +83,7 @@ export const DEFAULT_FACEBOOK_SLOW_START_DAILY_CAPS: FacebookSlowStartDailyCaps[
 
 export type FacebookBaseOperationMode = 'persona' | 'rule' | 'consumption';
 export type FacebookRequestedOperationMode = FacebookBaseOperationMode | 'slow_start';
+export type FacebookPrimaryBrowseSurface = 'feed' | 'reels';
 export type FacebookCadenceSource = 'global' | 'environment';
 export type FacebookEffectiveOperationMode =
   | FacebookBaseOperationMode
@@ -112,6 +113,10 @@ export interface FacebookGlobalReelCadenceParameters {
 
 export interface FacebookOperationPolicyView {
   envKey: string;
+  primarySurface: FacebookPrimaryBrowseSurface;
+  surfaceRevision: number;
+  surfaceUpdatedAt: string | null;
+  surfaceUpdatedBy: string | null;
   baseMode: FacebookBaseOperationMode;
   effectiveMode: FacebookEffectiveOperationMode | null;
   policyRevision: number;
@@ -179,6 +184,8 @@ export type FacebookOperationPolicyWriteResult =
       current?: FacebookOperationPolicyView;
     };
 
+export type FacebookPrimaryBrowseSurfaceWriteResult = FacebookOperationPolicyWriteResult;
+
 export type FacebookOperationPolicyLegacySlowStartWriteResult =
   | (Extract<FacebookOperationPolicyWriteResult, { ok: true }> & {
       slowStartSince: number | null;
@@ -232,6 +239,8 @@ export type FacebookOperationPolicyEnvironmentSlowStartResolver = (input: {
 
 export interface FacebookOperationPolicyAccountDecision {
   mode: FacebookEffectiveOperationMode;
+  primarySurface: FacebookPrimaryBrowseSurface | null;
+  surfaceRevision: number | null;
   baseMode: FacebookBaseOperationMode | null;
   policyRevision: number | null;
   envKey: string | null;
@@ -243,6 +252,8 @@ export interface FacebookOperationPolicyAccountDecision {
 
 export interface FacebookOperationPolicyBaseProjection {
   envKey: string;
+  primarySurface: FacebookPrimaryBrowseSurface;
+  surfaceRevision: number;
   baseMode: FacebookBaseOperationMode;
   policyRevision: number;
   cadenceSource: FacebookCadenceSource;
@@ -270,6 +281,21 @@ interface OperationPolicyDbRow {
   cadence_source: FacebookCadenceSource;
   updated_at: Date | string;
   updated_by: string;
+}
+
+interface PrimaryBrowseSurfaceDbRow {
+  env_key: string;
+  primary_surface: FacebookPrimaryBrowseSurface;
+  revision: number | string;
+  updated_at: Date | string;
+  updated_by: string;
+}
+
+interface CachedPrimaryBrowseSurface {
+  primarySurface: FacebookPrimaryBrowseSurface;
+  surfaceRevision: number;
+  surfaceUpdatedAt: string | null;
+  surfaceUpdatedBy: string | null;
 }
 
 interface EnvironmentDbRow {
@@ -318,7 +344,10 @@ interface LegacyRuleModeDbRow {
   updated_by: string;
 }
 
-type CachedPolicy = FacebookOperationPolicyBaseProjection;
+type CachedPolicy = Omit<
+  FacebookOperationPolicyBaseProjection,
+  'primarySurface' | 'surfaceRevision'
+>;
 
 const OPERATION_POLICY_REQUIREMENT = {
   tables: new Map([
@@ -337,6 +366,26 @@ const OPERATION_POLICY_REQUIREMENT = {
       'updated_by',
     ])],
     ['facebook_operation_policy_audit', new Set([
+      'audit_id',
+      'env_key',
+      'prior_revision',
+      'new_revision',
+      'before_policy',
+      'after_policy',
+      'actor_class',
+      'actor_id',
+      'request_id',
+      'reason',
+      'created_at',
+    ])],
+    ['facebook_primary_browse_surface_policy', new Set([
+      'env_key',
+      'primary_surface',
+      'revision',
+      'updated_at',
+      'updated_by',
+    ])],
+    ['facebook_primary_browse_surface_policy_audit', new Set([
       'audit_id',
       'env_key',
       'prior_revision',
@@ -394,6 +443,10 @@ const OPERATION_POLICY_REQUIREMENT = {
     [
       'uq_facebook_operation_policy_audit_revision',
       'facebook_operation_policy_audit',
+    ],
+    [
+      'idx_facebook_primary_browse_surface_audit_env_revision',
+      'facebook_primary_browse_surface_policy_audit',
     ],
     [
       'idx_facebook_operation_global_policy_audit_target_revision',
@@ -756,6 +809,25 @@ function normalizedLegacyRuleWrite(
   return { ok: true };
 }
 
+function normalizedPrimarySurfaceWrite(input: {
+  primarySurface: FacebookPrimaryBrowseSurface;
+  expectedRevision: number;
+  requestId: string;
+  reason?: string | null;
+}): { ok: true } | { ok: false; reason: 'invalid_value' } {
+  if (input.primarySurface !== 'feed' && input.primarySurface !== 'reels') {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  if (!String(input.requestId || '').trim()) return { ok: false, reason: 'invalid_value' };
+  if (input.reason !== undefined && input.reason !== null && typeof input.reason !== 'string') {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  return { ok: true };
+}
+
 export class FacebookOperationPolicyStore {
   private readonly pool: pg.Pool;
   private readonly ownedPool?: pg.Pool;
@@ -767,6 +839,7 @@ export class FacebookOperationPolicyStore {
   private environmentSlowStartResolver?: FacebookOperationPolicyEnvironmentSlowStartResolver;
   private slowStartRefresh?: () => Promise<void>;
   private cache = new Map<string, CachedPolicy>();
+  private surfaceCache = new Map<string, CachedPrimaryBrowseSurface>();
   private legacyFallbackCache = new Map<string, CachedPolicy>();
   private globalPolicy?: FacebookOperationGlobalPolicyView;
   private ready = false;
@@ -818,11 +891,14 @@ export class FacebookOperationPolicyStore {
           tables: new Map(
             [...OPERATION_POLICY_REQUIREMENT.tables].filter(([table]) =>
               table === 'facebook_operation_policy'
-              || table === 'facebook_operation_policy_audit'),
+              || table === 'facebook_operation_policy_audit'
+              || table === 'facebook_primary_browse_surface_policy'
+              || table === 'facebook_primary_browse_surface_policy_audit'),
           ),
           indexes: new Map(
             [...OPERATION_POLICY_REQUIREMENT.indexes].filter(([, table]) =>
-              table === 'facebook_operation_policy_audit'),
+              table === 'facebook_operation_policy_audit'
+              || table === 'facebook_primary_browse_surface_policy_audit'),
           ),
         };
     const shape = await this.schemaProber(
@@ -834,7 +910,7 @@ export class FacebookOperationPolicyStore {
       throw new SchemaCapabilityError(
         {
           capability: 'facebook_operation_policy',
-          sinceVersion: '0104_facebook_reel_mode_cadence',
+          sinceVersion: '0105_facebook_primary_browse_surface',
           ddl: [],
         },
         verdict,
@@ -848,13 +924,17 @@ export class FacebookOperationPolicyStore {
   }
 
   async refreshFromAuthority(): Promise<void> {
-    const [policyResult, legacyResult, globalResult] = await Promise.all([
+    const [policyResult, surfaceResult, legacyResult, globalResult] = await Promise.all([
       this.pool.query<OperationPolicyDbRow>(
         `SELECT env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,policy_schema_version,
                 policy_revision,cadence_source,updated_at,updated_by
            FROM facebook_operation_policy`,
+      ),
+      this.pool.query<PrimaryBrowseSurfaceDbRow>(
+        `SELECT env_key,primary_surface,revision,updated_at,updated_by
+           FROM facebook_primary_browse_surface_policy`,
       ),
       this.pool.query<LegacyRuleModeDbRow>(
         `SELECT env_key,enabled,updated_at,updated_by
@@ -879,6 +959,9 @@ export class FacebookOperationPolicyStore {
     this.globalPolicy = globalRow ? this.globalFromRow(globalRow) : undefined;
     this.cache = new Map(
       policyResult.rows.map((row) => [row.env_key, this.cachedFromRow(row)]),
+    );
+    this.surfaceCache = new Map(
+      surfaceResult.rows.map((row) => [row.env_key, this.cachedSurfaceFromRow(row)]),
     );
     this.legacyFallbackCache = new Map(
       legacyResult.rows.map((row) => {
@@ -928,7 +1011,9 @@ export class FacebookOperationPolicyStore {
   getBaseForEnv(envKey: string): FacebookOperationPolicyBaseProjection | null {
     const key = String(envKey || '').trim();
     if (!this.ready || !key) return null;
-    return this.policyForEnv(key);
+    const surface = this.surfaceCache.get(key);
+    if (!surface) return null;
+    return { ...this.policyForEnv(key), ...surface };
   }
 
   resolveBaseForAccount(accountId: string): FacebookOperationPolicyBaseResolution {
@@ -943,9 +1028,14 @@ export class FacebookOperationPolicyStore {
       };
     }
     const policy = this.policyForEnv(resolved.envKey);
+    const surface = this.surfaceCache.get(resolved.envKey);
+    if (!surface) {
+      return { ok: false, blocker: 'facebook_primary_browse_surface_unavailable' };
+    }
     return {
       ok: true,
       ...policy,
+      ...surface,
       rule: { ...policy.rule },
       consumption: { ...policy.consumption },
       reels: cloneReelCadence(policy.reels),
@@ -963,10 +1053,12 @@ export class FacebookOperationPolicyStore {
       return null;
     }
     const policy = this.policyForEnv(key);
+    const surface = this.surfaceCache.get(key);
+    if (!surface) return null;
     const duplicate = Number(environment.duplicate_count) > 1;
     const contended = Number(environment.owner_count) > 1;
     if (duplicate || contended) {
-      return this.project(policy, {
+      return this.project(policy, surface, {
         bindingState: 'conflict',
         accountId: environment.account_id,
         accountDisplayName: environment.account_display_name,
@@ -986,7 +1078,7 @@ export class FacebookOperationPolicyStore {
         environment.slow_start_since,
         environment.slow_start_completed_at,
       );
-      return this.project(policy, {
+      return this.project(policy, surface, {
         bindingState: 'unbound',
         accountId: null,
         accountDisplayName: null,
@@ -997,6 +1089,7 @@ export class FacebookOperationPolicyStore {
     }
     return this.projectWithSlowStart(
       policy,
+      surface,
       environment.account_id,
       environment.account_display_name,
       'bound',
@@ -1007,6 +1100,8 @@ export class FacebookOperationPolicyStore {
     if (!this.ready) {
       return {
         mode: 'blocked',
+        primarySurface: null,
+        surfaceRevision: null,
         baseMode: null,
         policyRevision: null,
         envKey: null,
@@ -1020,6 +1115,8 @@ export class FacebookOperationPolicyStore {
     if (!resolved.ok) {
       return {
         mode: 'blocked',
+        primarySurface: null,
+        surfaceRevision: null,
         baseMode: null,
         policyRevision: null,
         envKey: null,
@@ -1034,6 +1131,8 @@ export class FacebookOperationPolicyStore {
     if (slowStart.state === 'unknown') {
       return {
         mode: 'blocked',
+        primarySurface: policy.primarySurface,
+        surfaceRevision: policy.surfaceRevision,
         baseMode: policy.baseMode,
         policyRevision: policy.policyRevision,
         envKey: resolved.envKey,
@@ -1045,6 +1144,8 @@ export class FacebookOperationPolicyStore {
     }
     return {
       mode: slowStart.state === 'active' ? 'slow_start' : policy.baseMode,
+      primarySurface: policy.primarySurface,
+      surfaceRevision: policy.surfaceRevision,
       baseMode: policy.baseMode,
       policyRevision: policy.policyRevision,
       envKey: resolved.envKey,
@@ -1489,6 +1590,132 @@ export class FacebookOperationPolicyStore {
       const view = await this.getForEnv(key);
       if (!view) return { ok: false, reason: 'policy_unavailable' };
       return { ok: true, view };
+    } catch (error) {
+      if (!committed) await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async writePrimarySurface(
+    envKey: string,
+    input: {
+      primarySurface: FacebookPrimaryBrowseSurface;
+      expectedRevision: number;
+      requestId: string;
+      reason?: string | null;
+      requiredOwnerUserId?: string;
+    },
+    actor: string,
+  ): Promise<FacebookPrimaryBrowseSurfaceWriteResult> {
+    if (!this.ready) return { ok: false, reason: 'policy_unavailable' };
+    const key = String(envKey || '').trim();
+    if (!key) return { ok: false, reason: 'environment_not_found' };
+    const validation = normalizedPrimarySurfaceWrite(input);
+    if (!validation.ok) return validation;
+    const requiredOwnerUserId = input.requiredOwnerUserId?.trim();
+    if (input.requiredOwnerUserId !== undefined && !requiredOwnerUserId) {
+      return { ok: false, reason: 'invalid_value' };
+    }
+
+    const client = await this.pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
+      const environment = await this.lockEnvironmentForWrite(client, key);
+      if (!environment) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'environment_not_found' };
+      }
+      if (
+        requiredOwnerUserId
+        && !(await this.environmentOwnedBy(client, requiredOwnerUserId, key))
+      ) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'environment_not_owned' };
+      }
+      try {
+        if (normalizePlatformId(environment.platform) !== 'facebook') {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'unsupported_platform' };
+        }
+      } catch {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'unsupported_platform' };
+      }
+      if (this.hasBindingConflict(environment)) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'binding_conflict' };
+      }
+
+      const currentResult = await client.query<PrimaryBrowseSurfaceDbRow>(
+        `SELECT env_key,primary_surface,revision,updated_at,updated_by
+           FROM facebook_primary_browse_surface_policy
+          WHERE env_key=$1
+          FOR UPDATE`,
+        [key],
+      );
+      const currentRow = currentResult.rows[0];
+      if (!currentRow) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'policy_unavailable' };
+      }
+      const current = this.cachedSurfaceFromRow(currentRow);
+      if (current.surfaceRevision !== input.expectedRevision) {
+        await client.query('ROLLBACK');
+        await this.refreshFromAuthority();
+        const projection = await this.getForEnv(key);
+        return {
+          ok: false,
+          reason: 'revision_conflict',
+          ...(projection ? { current: projection } : {}),
+        };
+      }
+      if (current.primarySurface === input.primarySurface) {
+        await client.query('ROLLBACK');
+        const projection = await this.getForEnv(key);
+        return projection
+          ? { ok: true, view: projection }
+          : { ok: false, reason: 'policy_unavailable' };
+      }
+
+      const written = await client.query<PrimaryBrowseSurfaceDbRow>(
+        `UPDATE facebook_primary_browse_surface_policy
+            SET primary_surface=$2,
+                revision=revision + 1,
+                updated_at=now(),
+                updated_by=$3
+          WHERE env_key=$1
+          RETURNING env_key,primary_surface,revision,updated_at,updated_by`,
+        [key, input.primarySurface, actor],
+      );
+      const next = this.cachedSurfaceFromRow(written.rows[0]);
+      const actorInfo = actorParts(actor);
+      await client.query(
+        `INSERT INTO facebook_primary_browse_surface_policy_audit
+           (env_key,prior_revision,new_revision,before_policy,after_policy,
+            actor_class,actor_id,request_id,reason,created_at)
+         VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,now())`,
+        [
+          key,
+          current.surfaceRevision,
+          next.surfaceRevision,
+          JSON.stringify(this.surfaceAuditSnapshot(current)),
+          JSON.stringify(this.surfaceAuditSnapshot(next)),
+          actorInfo.actorClass,
+          actorInfo.actorId,
+          input.requestId,
+          input.reason ?? null,
+        ],
+      );
+      await client.query('COMMIT');
+      committed = true;
+      this.surfaceCache.set(key, next);
+      const view = await this.getForEnv(key);
+      return view
+        ? { ok: true, view }
+        : { ok: false, reason: 'policy_unavailable' };
     } catch (error) {
       if (!committed) await client.query('ROLLBACK').catch(() => undefined);
       throw error;
@@ -2036,6 +2263,24 @@ export class FacebookOperationPolicyStore {
     };
   }
 
+  private cachedSurfaceFromRow(row: PrimaryBrowseSurfaceDbRow): CachedPrimaryBrowseSurface {
+    return {
+      primarySurface: row.primary_surface,
+      surfaceRevision: Number(row.revision),
+      surfaceUpdatedAt: asIso(row.updated_at),
+      surfaceUpdatedBy: row.updated_by ?? null,
+    };
+  }
+
+  private surfaceAuditSnapshot(
+    surface: CachedPrimaryBrowseSurface,
+  ): Record<string, unknown> {
+    return {
+      primarySurface: surface.primarySurface,
+      surfaceRevision: surface.surfaceRevision,
+    };
+  }
+
   private auditSnapshot(policy: CachedPolicy): Record<string, unknown> {
     return {
       baseMode: policy.baseMode,
@@ -2256,13 +2501,14 @@ export class FacebookOperationPolicyStore {
 
   private async projectWithSlowStart(
     policy: CachedPolicy,
+    surface: CachedPrimaryBrowseSurface,
     accountId: string,
     accountDisplayName: string | null,
     bindingState: 'bound',
   ): Promise<FacebookOperationPolicyView> {
     const slowStart = await this.resolveSlowStart(accountId);
     if (slowStart.state === 'unknown') {
-      return this.project(policy, {
+      return this.project(policy, surface, {
         bindingState,
         accountId,
         accountDisplayName,
@@ -2271,7 +2517,7 @@ export class FacebookOperationPolicyStore {
         blocker: slowStart.blocker,
       });
     }
-    return this.project(policy, {
+    return this.project(policy, surface, {
       bindingState,
       accountId,
       accountDisplayName,
@@ -2283,6 +2529,7 @@ export class FacebookOperationPolicyStore {
 
   private project(
     policy: CachedPolicy,
+    surface: CachedPrimaryBrowseSurface,
     input: {
       bindingState: 'bound' | 'unbound' | 'conflict' | 'unknown';
       accountId: string | null;
@@ -2294,6 +2541,10 @@ export class FacebookOperationPolicyStore {
   ): FacebookOperationPolicyView {
     return {
       envKey: policy.envKey,
+      primarySurface: surface.primarySurface,
+      surfaceRevision: surface.surfaceRevision,
+      surfaceUpdatedAt: surface.surfaceUpdatedAt,
+      surfaceUpdatedBy: surface.surfaceUpdatedBy,
       baseMode: policy.baseMode,
       effectiveMode: input.effectiveMode,
       policyRevision: policy.policyRevision,
