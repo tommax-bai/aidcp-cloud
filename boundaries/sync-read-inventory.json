@@ -455,7 +455,7 @@
         {
           "symbol": "allowsTransportWhenGateUnknown",
           "method": "allowsTransportWhenGateUnknown",
-          "sourceFile": "src/config/mirror-stop-work.ts",
+          "sourceFile": "src/kernel/transport-gate-exemptions.ts",
           "callSiteFiles": ["src/server.ts"],
           "kind": "sync_read"
         }

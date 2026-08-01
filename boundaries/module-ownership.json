@@ -1585,6 +1585,11 @@
     "note": "【待定稿裁决】change lift-shared-contracts-to-kernel 抬入：原 src/publish-agent/title-clamp.ts（纯字形安全标题截断工具，模块级 const 仅 Intl.Segmenter 无 Map/Set/Pool/定时器、零 SQL、零 import），被 2 处跨边界导入。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK1"
   },
   {
+    "path": "src/kernel/transport-gate-exemptions.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 批 D：副本陈旧时传输层出口闸的放行判定。拆进程后两个进程都要问同一个问题（接口进程出口闸 / 自动化进程边-云出口闸），两边各写一份的现形方式不是报错，是某一侧悄悄多扣住一类信封（扣住租约归还 = 槽位永不释放）。纯常量 + 纯函数，刻意不用模块级 new Set（准入正则认写法，类型标注救不了）。api 侧原文件等值再导出，调用点一行未改"
+  },
+  {
     "path": "src/kernel/valuable-comment-types.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/cache/valuable-comment-store.ts 析出纯物：ValuableCommentInput（纯数据模型）+ topicKeysFromTitle（无 LLM 主题键派生纯字符串函数，函数体内局部 Set 非模块级单例）。零 import、零 SQL、无 pg、无进程内活状态。VALUABLE_COMMENT_SCHEMA_SQL + ValuableCommentStore 类 + pg 读写留 valuable-comment-store.ts（automation）。供 content 侧精选评估角色跨边界共导，消 3 条 content->automation 边。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
