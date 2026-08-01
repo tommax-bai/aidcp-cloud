@@ -38,6 +38,11 @@ function stubSensor(result: CoverFormSenseResult, calls?: { count: number }): Co
       if (calls) calls.count++;
       return result;
     },
+    // 封面写手只走 sense()。senseAt 现为必选（task 2.7 层③），桩里给一个**会响的**实现，
+    // 而不是回一个像模像样的错误态 —— 后者一旦被误调，测试会绿着跑完一条根本没判过形的路径。
+    senseAt: async () => {
+      throw new Error('stubSensor.senseAt 不该被调用：封面写手只用 sense()');
+    },
   };
 }
 

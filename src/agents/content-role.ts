@@ -49,6 +49,14 @@ export abstract class ContentRole {
   private readonly llmTimeoutMs?: number;
 
   constructor(options: ContentRoleOptions) {
+    // 「soul / getSoul 至少给一个」此前只在**第一次读** `this.soul` 时才检查。
+    // 那个读点坐在 fire-and-forget + try/catch 里 —— 构造契约被违背时，唯一的表现是
+    // 这个角色悄悄什么都不产出，没有异常、没有日志、下游只看到「它没给结论」。
+    // task 2.7 层④：把检查提到构造期。组装期抛没有任何人接得住，也就不可能被静默吞掉。
+    // 用 new.target 而不是 this.roleName —— 后者是子类字段，super() 返回前还没赋值。
+    if (!options.soul && !options.getSoul) {
+      throw new Error(`${new.target.name} 缺少人设注入（soul / getSoul 至少给一个）`);
+    }
     this.eventBus = options.eventBus;
     this.soulSnapshot = options.soul;
     this.getSoulFn = options.getSoul;

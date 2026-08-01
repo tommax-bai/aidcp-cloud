@@ -172,9 +172,10 @@ export function createTextCardTranscriber(deps: TextCardTranscriberDeps): TextCa
     const indices = images.map((_, sourceArrayIndex) => sourceArrayIndex).filter((index) => !!usableUrl(images[index]));
     const senses = await mapWithConcurrency(indices, FORM_CONCURRENCY, async (sourceArrayIndex) => ({
       sourceArrayIndex,
-      result: deps.formSensor.senseAt
-        ? await deps.formSensor.senseAt(ref, sourceArrayIndex)
-        : { status: 'error' as const, cached: false, detail: 'senseAt unavailable' },
+      // senseAt 现为必选（task 2.7 层③）。此前这里有一个 `? :` 兜底：缺席时把每一张都判成
+      // 错误态，于是选不出任何文字卡、产出恒空，而且不抛不告警——「没有文字卡」与
+      // 「压根没判过」在回执上一模一样。删掉兜底后，缺席是编译期错误。
+      result: await deps.formSensor.senseAt(ref, sourceArrayIndex),
     }));
     const selected: number[] = [];
     for (const { sourceArrayIndex, result } of senses) {

@@ -110,7 +110,13 @@ describe('TextCardTranscriber', () => {
     let calls = 0;
     const service = createTextCardTranscriber({
       vision: { chatVision: async () => { calls++; return '{}'; } },
-      formSensor: { sense: async () => { calls++; return { status: 'error', cached: false }; } },
+      // 本例断言 calls 恒 0（命中缓存即短路，判形与视觉一次都不该发生）。
+      // 两个方法都记在同一个计数上：senseAt 现为必选（task 2.7 层③），
+      // 若哪天缓存短路失效，这里会如实变成非 0，而不是因为「桩没实现 senseAt」被悄悄跳过。
+      formSensor: {
+        sense: async () => { calls++; return { status: 'error', cached: false }; },
+        senseAt: async () => { calls++; return { status: 'error', cached: false }; },
+      },
       enabled: () => true,
       getModel: () => 'ocr-model',
       getProvider: () => 'dashscope',

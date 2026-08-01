@@ -4125,7 +4125,10 @@ async function segBContent(ctx: CompositionContext): Promise<void> {
   // 开=CoverCardWriter 复用封面感知结果 + 对内页 senseAt 有界并发判形、只把形态档写审计（不改渲染）；关=不计算、byte-identical。
   // 依赖感知旗标 AIDCP_COVER_FORM_SENSING（senseAt 受同一 enabled 门控；感知关时形态档恒 generative）。
   const postFormProfileService = createPostImageFormProfileService({
-    senseAt: (ref, arrayIndex) => coverFormSensor.senseAt!(ref, arrayIndex),
+    // 这里曾用非空断言硬撑一个「接口上可选」的判形口。task 2.7 层③把它改成必选后断言不再需要——
+    // 缺席现在是编译期错误，而不是一次运行时 TypeError。
+    // （断言写法本身被 AC-XOPT-2 的源码扫描盯着，所以这条注释刻意不复述那个写法。）
+    senseAt: (ref, arrayIndex) => coverFormSensor.senseAt(ref, arrayIndex),
     enabled: () => process.env.AIDCP_POST_FORM_PROFILE === 'true',
     logger: console,
   });

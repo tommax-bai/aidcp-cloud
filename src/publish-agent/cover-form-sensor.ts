@@ -56,9 +56,16 @@ export interface CoverFormSensor {
   /**
    * 判定参照图数组中**指定下标**那张的形态（change textcard-carousel-form-parity）。
    * 与 sense() 共用同一核心（缓存→视觉→严格解析→回写），红线一致（无负缓存/绝不猜/绝不抛）。
-   * 该下标无可用 URL → status='no_image'。可选：旧 stub 只实现 sense() 仍合法。
+   * 该下标无可用 URL → status='no_image'。
+   *
+   * **必选，`?` 是被刻意删掉的**（change split-cloud-automation-production-runtime，task 2.7 层③）。
+   * 判据与本 change 0.6d 对 Sink 那三个方法的裁定同源：「提供不了」MUST 由实现方
+   * 抛具名原因来说，不许靠不定义方法来说。留着 `?` 的代价很具体——转写器那边缺席时
+   * 每张图都降级成错误态，于是**一张文字卡都选不出、产出恒空、不抛也不告警**；
+   * 帖级形态档那边则靠一个 `!` 断言撑着，缺席即运行时 TypeError。
+   * 两种失败态没有一种是设计出来的，都是「可选」这一个字符的副产物。
    */
-  senseAt?(ref: CoverFormSenseRef, arrayIndex: number): Promise<CoverFormSenseResult>;
+  senseAt(ref: CoverFormSenseRef, arrayIndex: number): Promise<CoverFormSenseResult>;
 }
 
 /** 判定「指定下标一张」的函数型（帖级形态档服务据此判内页；与具体 sensor 解耦，便于单测注入假实现）。 */
