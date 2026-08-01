@@ -12,8 +12,14 @@ import {
   type ContentScheduleSnapshot,
   type FacebookCommentConfigSnapshot,
   type FacebookGroupJoinAutomationConfigSnapshot,
+  type FacebookOperationPolicySnapshot,
   type HotLeadConfigSnapshot,
 } from '../kernel/sync-read-facts.js';
+import {
+  resolveFacebookOperationBase,
+  type FacebookOperationPolicyBaseResolution,
+  type FacebookOperationPolicyEnvironmentResolver,
+} from '../kernel/facebook-operation-policy-resolution.js';
 import {
   AtomicSyncReadMirror,
   PerProcessConfigFreshnessRuntime,
@@ -63,6 +69,7 @@ export class AutomationSyncReadMirrors {
   readonly hotLead: AtomicSyncReadMirror<HotLeadConfigSnapshot>;
   readonly facebookComment: AtomicSyncReadMirror<FacebookCommentConfigSnapshot>;
   readonly facebookGroupJoin: AtomicSyncReadMirror<FacebookGroupJoinAutomationConfigSnapshot>;
+  readonly facebookOperationPolicy: AtomicSyncReadMirror<FacebookOperationPolicySnapshot>;
 
   constructor(
     executionTarget: DeploymentTarget,
@@ -91,6 +98,11 @@ export class AutomationSyncReadMirrors {
       'facebook_group_join_automation_config',
       clock,
     );
+    this.facebookOperationPolicy = mirror(
+      executionTarget,
+      'facebook_operation_policy',
+      clock,
+    );
   }
 
   apply(
@@ -112,6 +124,8 @@ export class AutomationSyncReadMirrors {
         return this.facebookComment.apply(envelope, source);
       case 'facebook_group_join_automation_config':
         return this.facebookGroupJoin.apply(envelope, source);
+      case 'facebook_operation_policy':
+        return this.facebookOperationPolicy.apply(envelope, source);
       default:
         return {
           outcome: 'rejected',
@@ -275,7 +289,9 @@ export class AutomationSyncReadMirrors {
                   : mirrorKey ===
                       'facebook_group_join_automation_config'
                     ? this.facebookGroupJoin
-                    : null;
+                    : mirrorKey === 'facebook_operation_policy'
+                      ? this.facebookOperationPolicy
+                      : null;
     if (!mirror) return 'stale';
     return mirror.view(now).state === 'ready' ? 'fresh' : 'stale';
   }
@@ -320,6 +336,33 @@ export class AutomationSyncReadMirrors {
     };
   }
 
+  /**
+   * Facebook 运营基线取用（批 E-2 步骤 2）。**判定不在这里写**——三样输入拼好就交给 kernel
+   * 那一份，与接口进程属主存储调的是同一个函数。
+   *
+   * `ready` 取的是镜像**真到位没有**：副本没到 / 陈旧时如实报未就绪，
+   * 于是 kernel 判定给出具名 blocker。**MUST NOT 在这里回落成某个默认基线** ——
+   * 那会让一台还没收到快照的机器按凭空的浏览面跑一整天。
+   */
+  facebookOperationBaseFor(
+    accountId: string,
+    resolveEnvironment: FacebookOperationPolicyEnvironmentResolver,
+    now = this.clock(),
+  ): FacebookOperationPolicyBaseResolution {
+    const view = this.facebookOperationPolicy.view(now);
+    const ready = view.state === 'ready' && Boolean(view.value);
+    const environments = view.value?.environments ?? [];
+    return resolveFacebookOperationBase(
+      {
+        ready,
+        resolveEnvironment,
+        baselineForEnv: (envKey) =>
+          environments.find((row) => row.envKey === envKey) ?? null,
+      },
+      accountId,
+    );
+  }
+
   readiness(now = this.clock()) {
     return syncReadProcessReadiness(
       [
@@ -330,6 +373,7 @@ export class AutomationSyncReadMirrors {
         this.hotLead.health(now),
         this.facebookComment.health(now),
         this.facebookGroupJoin.health(now),
+        this.facebookOperationPolicy.health(now),
       ],
       now,
     );
@@ -343,7 +387,8 @@ function mirror<S extends
   | 'content_schedule'
   | 'hot_lead_config'
   | 'facebook_comment_config'
-  | 'facebook_group_join_automation_config'>(
+  | 'facebook_group_join_automation_config'
+  | 'facebook_operation_policy'>(
   executionTarget: DeploymentTarget,
   stream: S,
   clock: () => number,

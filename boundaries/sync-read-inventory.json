@@ -532,9 +532,10 @@
         "content_schedule",
         "hot_lead_config",
         "facebook_comment_config",
-        "facebook_group_join_automation_config"
+        "facebook_group_join_automation_config",
+        "facebook_operation_policy"
       ],
-      "localShape": "four independent local business-config mirrors",
+      "localShape": "five independent local business-config mirrors",
       "freshnessTier": "mixed_gate_parameter",
       "members": [
         {
@@ -576,6 +577,13 @@
           "symbol": "FacebookGroupJoinAutomationStore.getForAccount",
           "method": "getForAccount",
           "sourceFile": "src/config/facebook-group-join-automation-store.ts",
+          "callSiteFiles": ["src/server.ts"],
+          "kind": "sync_read"
+        },
+        {
+          "symbol": "FacebookOperationPolicyStore.resolveBaseForAccount",
+          "method": "resolveBaseForAccount",
+          "sourceFile": "src/config/facebook-operation-policy-store.ts",
           "callSiteFiles": ["src/server.ts"],
           "kind": "sync_read"
         }

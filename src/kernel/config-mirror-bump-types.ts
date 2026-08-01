@@ -46,6 +46,7 @@ export type ConfigMirrorKey =
   | 'hot_lead_config'
   | 'facebook_comment_config'
   | 'facebook_group_join_automation_config'
+  | 'facebook_operation_policy'
   | 'account_status'
   | 'client_environment_slow_start'
   | 'client_environment_automation_gate';

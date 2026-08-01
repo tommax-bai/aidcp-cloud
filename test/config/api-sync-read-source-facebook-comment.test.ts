@@ -31,6 +31,10 @@ test('facebook comment sync-read preserves explicit-mode provenance and maps tem
   };
   const source = new ApiSyncReadSnapshotSource({
     executionTarget: 'dev',
+    // 本组用例不覆盖运营基线流；桩当场抛，避免「空表」被误当成一台没有 FB 环境的机器。
+    facebookOperationBaselines: async () => {
+      throw new Error('facebook_operation_baselines_not_exercised_here');
+    },
     pool: { connect: async () => client } as unknown as pg.Pool,
     parseSoul: () => null,
   });

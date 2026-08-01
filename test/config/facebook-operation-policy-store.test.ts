@@ -656,8 +656,11 @@ describe('FacebookOperationPolicyStore', () => {
     assert.equal(db.globalAudits.length, 1);
     assert.equal(db.audits.length, 3, 'two direct writes plus one propagated audit');
     assert.deepEqual(db.graduationMarks, [['dev', 7], ['dev', 14]]);
-    assert.deepEqual(db.bumps.slice(-2), [
+    assert.deepEqual(db.bumps.slice(-3), [
       'content_schedule',
+      // 批 E-2 步骤 2：运营基线自己的同步读游标靠它推进。少了它，
+      // 自动化进程的基线副本在策略改动后**永远不会重取**，且不报错。
+      'facebook_operation_policy',
       'client_environment_slow_start',
     ]);
 
@@ -1055,6 +1058,7 @@ describe('FacebookOperationPolicyStore', () => {
     assert.equal(missingPolicy.audits.length, 1);
     assert.deepEqual(missingPolicy.bumps, [
       'content_schedule',
+      'facebook_operation_policy',
       'client_environment_slow_start',
     ]);
   });

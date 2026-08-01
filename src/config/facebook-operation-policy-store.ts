@@ -10,6 +10,19 @@ import type { ActionQuota } from '../kernel/risk-contract.js';
 import type { DeploymentTarget } from '../deployment-target.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 import type { MirrorVersionBumper } from './mirror-version-store.js';
+import {
+  cloneFacebookReelCadence,
+  resolveFacebookOperationBase,
+  type FacebookBaseOperationMode,
+  type FacebookCadenceSource,
+  type FacebookConsumptionOperationParameters,
+  type FacebookGlobalReelCadenceParameters,
+  type FacebookOperationPolicyBaseProjection,
+  type FacebookOperationPolicyBaseResolution,
+  type FacebookOperationPolicyEnvironmentResolver,
+  type FacebookPrimaryBrowseSurface,
+  type FacebookRuleOperationParameters,
+} from '../kernel/facebook-operation-policy-resolution.js';
 
 const { Pool } = pg;
 
@@ -81,35 +94,24 @@ export const DEFAULT_FACEBOOK_SLOW_START_DAILY_CAPS: FacebookSlowStartDailyCaps[
   { day: 7, view: 70, like: 18, comment: 5, follow: 5, publish: 1, search: 5, joinGroup: 3 },
 ];
 
-export type FacebookBaseOperationMode = 'persona' | 'rule' | 'consumption';
+// 基线取用的判定与纯数据契约已抬入 kernel（拆进程后两个进程都要问同一个问题）；
+// 此处等值再导出，既有消费方一行不改。
+export type {
+  FacebookBaseOperationMode,
+  FacebookPrimaryBrowseSurface,
+  FacebookCadenceSource,
+  FacebookRuleOperationParameters,
+  FacebookConsumptionOperationParameters,
+  FacebookGlobalReelCadenceParameters,
+  FacebookOperationPolicyBaseProjection,
+  FacebookOperationPolicyBaseResolution,
+  FacebookOperationPolicyEnvironmentResolver,
+};
 export type FacebookRequestedOperationMode = FacebookBaseOperationMode | 'slow_start';
-export type FacebookPrimaryBrowseSurface = 'feed' | 'reels';
-export type FacebookCadenceSource = 'global' | 'environment';
 export type FacebookEffectiveOperationMode =
   | FacebookBaseOperationMode
   | 'slow_start'
   | 'blocked';
-
-export interface FacebookRuleOperationParameters {
-  viewsPerLike: number;
-  joinEveryNRounds: number;
-}
-
-export interface FacebookConsumptionOperationParameters {
-  viewsPerLike: number;
-  confirmedLikesPerJoin: number;
-  confirmedJoinsPerComment: number;
-}
-
-export interface FacebookGlobalReelCadenceParameters {
-  persona: {
-    viewsPerLike: number;
-    viewsPerFollow: number;
-  };
-  slowStart: { viewsPerFollow: number };
-  rule: { viewsPerFollow: number };
-  consumption: { viewsPerFollow: number };
-}
 
 export interface FacebookOperationPolicyView {
   envKey: string;
@@ -206,13 +208,6 @@ export type FacebookOperationPolicyLegacyRuleWriteResult =
       current?: FacebookOperationPolicyView;
     };
 
-export type FacebookOperationPolicyEnvironmentResolver = (accountId: string) =>
-  | { ok: true; envKey: string }
-  | {
-      ok: false;
-      reason: 'binding_unknown' | 'binding_conflict' | 'binding_unavailable';
-    };
-
 export type FacebookOperationPolicySlowStartResolver = (
   accountId: string,
 ) => Promise<
@@ -249,24 +244,6 @@ export interface FacebookOperationPolicyAccountDecision {
   consumption: FacebookConsumptionOperationParameters | null;
   reels: FacebookGlobalReelCadenceParameters | null;
 }
-
-export interface FacebookOperationPolicyBaseProjection {
-  envKey: string;
-  primarySurface: FacebookPrimaryBrowseSurface;
-  surfaceRevision: number;
-  baseMode: FacebookBaseOperationMode;
-  policyRevision: number;
-  cadenceSource: FacebookCadenceSource;
-  rule: FacebookRuleOperationParameters;
-  consumption: FacebookConsumptionOperationParameters;
-  reels: FacebookGlobalReelCadenceParameters;
-  updatedAt: string | null;
-  updatedBy: string | null;
-}
-
-export type FacebookOperationPolicyBaseResolution =
-  | ({ ok: true } & FacebookOperationPolicyBaseProjection)
-  | { ok: false; blocker: string };
 
 interface OperationPolicyDbRow {
   env_key: string;
@@ -497,16 +474,8 @@ function actorParts(actor: string): { actorClass: string; actorId: string } {
   };
 }
 
-function cloneReelCadence(
-  reels: FacebookGlobalReelCadenceParameters,
-): FacebookGlobalReelCadenceParameters {
-  return {
-    persona: { ...reels.persona },
-    slowStart: { ...reels.slowStart },
-    rule: { ...reels.rule },
-    consumption: { ...reels.consumption },
-  };
-}
+/** 实现在 kernel 只此一份（基线投影跨进程传输时两端都要深拷贝）。 */
+const cloneReelCadence = cloneFacebookReelCadence;
 
 function defaultGlobalPolicy(executionTarget: DeploymentTarget): FacebookOperationGlobalPolicyView {
   return {
@@ -1011,35 +980,50 @@ export class FacebookOperationPolicyStore {
   getBaseForEnv(envKey: string): FacebookOperationPolicyBaseProjection | null {
     const key = String(envKey || '').trim();
     if (!this.ready || !key) return null;
-    const surface = this.surfaceCache.get(key);
-    if (!surface) return null;
-    return { ...this.policyForEnv(key), ...surface };
+    return this.baselineForEnv(key);
   }
 
+  /**
+   * 同步读快照发布用：所有**已配浏览面**的环境的基线投影。
+   * 与 `resolveBaseForAccount` 取的是同一个合成口 —— 发布方另写一份合成的现形方式，
+   * 是两个进程对同一个环境按不同节奏跑，而两侧都不报错。
+   */
+  baselineProjections(): FacebookOperationPolicyBaseProjection[] {
+    if (!this.ready) return [];
+    const out: FacebookOperationPolicyBaseProjection[] = [];
+    for (const envKey of [...this.surfaceCache.keys()].sort()) {
+      const baseline = this.baselineForEnv(envKey);
+      if (baseline) out.push(baseline);
+    }
+    return out;
+  }
+
+  /**
+   * 基线取用判定在 kernel 只此一份：自动化进程按同步读快照喂同一个函数。
+   * 各写一份的现形方式不是报错，而是某一侧安静地永远答不出基线 —— 下游就是账号永远不开始浏览。
+   */
   resolveBaseForAccount(accountId: string): FacebookOperationPolicyBaseResolution {
-    if (!this.ready) {
-      return { ok: false, blocker: 'facebook_operation_policy_unavailable' };
-    }
-    const resolved = this.environmentResolver?.(String(accountId || '').trim());
-    if (!resolved?.ok) {
-      return {
-        ok: false,
-        blocker: `operation_environment_${resolved?.reason ?? 'binding_unavailable'}`,
-      };
-    }
-    const policy = this.policyForEnv(resolved.envKey);
-    const surface = this.surfaceCache.get(resolved.envKey);
-    if (!surface) {
-      return { ok: false, blocker: 'facebook_primary_browse_surface_unavailable' };
-    }
-    return {
-      ok: true,
-      ...policy,
-      ...surface,
-      rule: { ...policy.rule },
-      consumption: { ...policy.consumption },
-      reels: cloneReelCadence(policy.reels),
-    };
+    return resolveFacebookOperationBase(
+      {
+        ready: this.ready,
+        resolveEnvironment: (id) =>
+          this.environmentResolver?.(id) ?? {
+            ok: false,
+            reason: 'binding_unavailable',
+          },
+        baselineForEnv: (envKey) => this.baselineForEnv(envKey),
+      },
+      accountId,
+    );
+  }
+
+  /** 环境键 → 基线投影；无浏览面配置即 null（**MUST NOT 给个默认面**）。快照发布方取同一份。 */
+  private baselineForEnv(
+    envKey: string,
+  ): FacebookOperationPolicyBaseProjection | null {
+    const surface = this.surfaceCache.get(envKey);
+    if (!surface) return null;
+    return { ...this.policyForEnv(envKey), ...surface };
   }
 
   async getForEnv(envKey: string): Promise<FacebookOperationPolicyView | null> {
@@ -1351,11 +1335,13 @@ export class FacebookOperationPolicyStore {
       // A shorter duration takes effect in the same transaction.
       await this.markGraduatedInTx(client, next.slowStart.totalDays);
       await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+      await this.mirrorVersionBumper?.bumpInTx(client, 'facebook_operation_policy');
       await this.mirrorVersionBumper?.bumpInTx(client, 'client_environment_slow_start');
       await client.query('COMMIT');
       committed = true;
       await this.refreshFromAuthority();
       this.mirrorVersionBumper?.notifyAfterCommit?.('content_schedule');
+      this.mirrorVersionBumper?.notifyAfterCommit?.('facebook_operation_policy');
       this.mirrorVersionBumper?.notifyAfterCommit?.('client_environment_slow_start');
       await this.slowStartRefresh?.();
       return this.globalPolicy
@@ -1580,11 +1566,13 @@ export class FacebookOperationPolicyStore {
         ],
       );
       await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+      await this.mirrorVersionBumper?.bumpInTx(client, 'facebook_operation_policy');
       await this.mirrorVersionBumper?.bumpInTx(client, 'client_environment_slow_start');
       await client.query('COMMIT');
       committed = true;
       this.cache.set(key, next);
       this.mirrorVersionBumper?.notifyAfterCommit?.('content_schedule');
+      this.mirrorVersionBumper?.notifyAfterCommit?.('facebook_operation_policy');
       this.mirrorVersionBumper?.notifyAfterCommit?.('client_environment_slow_start');
       await this.slowStartRefresh?.();
       const view = await this.getForEnv(key);
@@ -1922,10 +1910,12 @@ export class FacebookOperationPolicyStore {
         ],
       );
       await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+      await this.mirrorVersionBumper?.bumpInTx(client, 'facebook_operation_policy');
       await client.query('COMMIT');
       committed = true;
       this.cache.set(key, next);
       this.mirrorVersionBumper?.notifyAfterCommit?.('content_schedule');
+      this.mirrorVersionBumper?.notifyAfterCommit?.('facebook_operation_policy');
       const view = await this.getForEnv(key);
       if (!view) return { ok: false, reason: 'policy_unavailable' };
       return { ok: true, view, changed: true };
@@ -2124,11 +2114,13 @@ export class FacebookOperationPolicyStore {
         ],
       );
       await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+      await this.mirrorVersionBumper?.bumpInTx(client, 'facebook_operation_policy');
       await this.mirrorVersionBumper?.bumpInTx(client, 'client_environment_slow_start');
       await client.query('COMMIT');
       committed = true;
       this.cache.set(key, next);
       this.mirrorVersionBumper?.notifyAfterCommit?.('content_schedule');
+      this.mirrorVersionBumper?.notifyAfterCommit?.('facebook_operation_policy');
       this.mirrorVersionBumper?.notifyAfterCommit?.('client_environment_slow_start');
       await this.slowStartRefresh?.();
       const view = await this.getForEnv(key);

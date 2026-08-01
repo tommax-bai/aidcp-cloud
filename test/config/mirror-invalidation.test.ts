@@ -227,8 +227,8 @@ function withFreshnessCleanup(fn: () => Promise<void> | void): () => Promise<voi
 
 // ── §1 注册表：闭集合与档位 ───────────────────────────────────────────────────
 
-test('1.1 注册表穷举登记 15 处镜像；闸门镜像必有陈旧上限、参数镜像必为 null', () => {
-  assert.equal(CONFIG_MIRROR_KEYS.length, 15);
+test('1.1 注册表穷举登记 16 处镜像；闸门镜像必有陈旧上限、参数镜像必为 null', () => {
+  assert.equal(CONFIG_MIRROR_KEYS.length, 16);
   for (const key of CONFIG_MIRROR_KEYS) {
     const d = CONFIG_MIRRORS[key];
     assert.equal(d.mirrorKey, key, '键与 mirrorKey 字段必须一致');

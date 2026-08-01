@@ -6,6 +6,7 @@ import {
   coerceFacebookCommentMode,
   facebookCommentModeToWire,
 } from '../kernel/facebook-comment-config-types.js';
+import type { FacebookOperationPolicyBaseProjection } from '../kernel/facebook-operation-policy-resolution.js';
 import type { ConfigMirrorKey } from '../kernel/config-mirror-bump-types.js';
 import {
   makeSyncReadFactEnvelope,
@@ -15,6 +16,7 @@ import {
   type ContentScheduleSnapshot,
   type FacebookCommentConfigSnapshot,
   type FacebookGroupJoinAutomationConfigSnapshot,
+  type FacebookOperationPolicySnapshot,
   type HotLeadConfigSnapshot,
   type SyncReadOwnerSnapshotSource,
   type SyncReadPayloadByStream,
@@ -34,23 +36,39 @@ type ApiOwnedStream =
   | 'content_schedule'
   | 'hot_lead_config'
   | 'facebook_comment_config'
-  | 'facebook_group_join_automation_config';
+  | 'facebook_group_join_automation_config'
+  | 'facebook_operation_policy';
 
 export interface ApiSyncReadSourceOptions {
   executionTarget: DeploymentTarget;
   pool: pg.Pool;
   parseSoul(personaText: string): SyncReadJson | null;
+  /**
+   * Facebook 运营基线的取用口（**必填、无默认**）。
+   *
+   * 刻意不在本文件用 SQL 重算一遍：那三张表的合成规则（全局默认 ← 环境覆盖 ← legacy 回落）
+   * 住在属主存储里，抄第二份的现形方式不是报错，而是两个进程按不同节奏跑同一个环境。
+   * 也刻意不做成可选：缺实现时回落空表 = 告诉自动化进程「这台机器上没有任何 Facebook 环境」，
+   * 于是每个 FB 账号都被一个**错误原因**永久拦住 —— 那正是本 change 的红线形态。
+   */
+  facebookOperationBaselines(): Promise<
+    readonly FacebookOperationPolicyBaseProjection[]
+  >;
 }
 
 export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
   private readonly executionTarget: DeploymentTarget;
   private readonly pool: pg.Pool;
   private readonly parseSoul: (personaText: string) => SyncReadJson | null;
+  private readonly facebookOperationBaselines: () => Promise<
+    readonly FacebookOperationPolicyBaseProjection[]
+  >;
 
   constructor(options: ApiSyncReadSourceOptions) {
     this.executionTarget = options.executionTarget;
     this.pool = options.pool;
     this.parseSoul = options.parseSoul;
+    this.facebookOperationBaselines = options.facebookOperationBaselines;
   }
 
   async snapshot<S extends SyncReadStream>(
@@ -355,6 +373,22 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
           value: SyncReadPayloadByStream[S];
         };
       }
+      case 'facebook_operation_policy': {
+        // **游标先读、基线后取**，顺序是有意的：
+        // 反过来（先取基线再读游标）会发出「新游标 + 旧基线」，消费方按新游标存下旧值、
+        // 且下一轮游标没变就不会再拉 —— 那是会一直错下去的静默陈旧。
+        // 现在这个顺序最坏只是「旧游标 + 新基线」，下一轮游标一变就重取，多一次拉取而已。
+        const cursor = await versionCursor(client, [
+          'facebook_operation_policy',
+        ]);
+        const value: FacebookOperationPolicySnapshot = {
+          environments: await this.facebookOperationBaselines(),
+        };
+        return { cursor, value } as {
+          cursor: string;
+          value: SyncReadPayloadByStream[S];
+        };
+      }
     }
   }
 }
@@ -395,7 +429,8 @@ function isApiOwnedStream(stream: SyncReadStream): stream is ApiOwnedStream {
     stream === 'content_schedule' ||
     stream === 'hot_lead_config' ||
     stream === 'facebook_comment_config' ||
-    stream === 'facebook_group_join_automation_config'
+    stream === 'facebook_group_join_automation_config' ||
+    stream === 'facebook_operation_policy'
   );
 }
 

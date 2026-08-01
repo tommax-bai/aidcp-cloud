@@ -30,7 +30,7 @@ function envelope(
 }
 
 test('stream registry is closed and distinguishes shared from target facts', () => {
-  assert.equal(Object.keys(SYNC_READ_STREAM_DEFINITIONS).length, 12);
+  assert.equal(Object.keys(SYNC_READ_STREAM_DEFINITIONS).length, 13);
   assert.equal(SYNC_READ_STREAM_DEFINITIONS.session_config_global.factScope, 'shared');
   assert.equal(SYNC_READ_STREAM_DEFINITIONS.edge_presence.factScope, 'target');
   assert.equal(SYNC_READ_STREAM_DEFINITIONS.automation_account_projection.factScope, 'shared');

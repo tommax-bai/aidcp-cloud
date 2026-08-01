@@ -91,6 +91,17 @@ export const SYNC_READ_STREAM_DEFINITIONS = {
     factScope: 'shared',
     allowsEmptyValue: true,
   },
+  /**
+   * Facebook 运营基线（批 E-2 步骤 2）。载荷是属主**已合成好的**逐环境基线投影，
+   * 不是三张原始表 —— 合成口只许有一份，发布方与属主现读口取的是同一个。
+   * `allowsEmptyValue: true`：一台没有任何 Facebook 环境的机器上空表是正常态。
+   */
+  facebook_operation_policy: {
+    owner: 'api',
+    consumer: 'automation',
+    factScope: 'shared',
+    allowsEmptyValue: true,
+  },
 } as const satisfies Record<
   string,
   {

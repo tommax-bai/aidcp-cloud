@@ -29,6 +29,7 @@
       "src/kernel/scheduled-automation-catalog.ts",
       "src/kernel/content-schedule-mode.ts",
       "src/kernel/content-schedule-resolution.ts",
+      "src/kernel/facebook-operation-policy-resolution.ts",
       "src/kernel/llm-contract.ts",
       "src/kernel/writing-language.ts",
       "src/kernel/like-affinity.ts",

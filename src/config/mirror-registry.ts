@@ -230,6 +230,15 @@ export const CONFIG_MIRRORS: {
     tier: 'parameter',
     staleMs: null,
   },
+  facebook_operation_policy: {
+    mirrorKey: 'facebook_operation_policy',
+    owner: 'api',
+    consumers: ['automation'],
+    source: 'facebook_operation_policy',
+    holder: 'src/config/facebook-operation-policy-store.ts',
+    tier: 'parameter',
+    staleMs: null,
+  },
 };
 
 /** 全部 mirrorKey（稳定顺序，供刷新器与健康投影遍历）。 */
