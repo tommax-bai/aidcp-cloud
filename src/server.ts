@@ -415,9 +415,10 @@ import { PgAutomationSyncReadGenerationStore } from './transport/automation-sync
 import { SyncReadChangedOutbox } from './transport/sync-read-changed-outbox.js';
 import { createAutomationSyncReadConsumerCheckpointStore } from './transport/automation-sync-read-checkpoint-store.js';
 import { registerSyncReadSnapshotRoute } from './transport/sync-read-snapshot-http.js';
-import type {
-  SyncReadConsumerCheckpoint,
-  SyncReadStream,
+import {
+  SYNC_READ_STREAM_DEFINITIONS,
+  type SyncReadConsumerCheckpoint,
+  type SyncReadStream,
 } from './kernel/sync-read-snapshot.js';
 import type {
   AccountOwnershipAuthorityPort,
@@ -1306,23 +1307,36 @@ async function main(): Promise<void> {
   if (mode === 'api') await startApiInternalApi(ctx);
 }
 
-const API_SYNC_READ_OWNER_STREAMS = [
-  'account_persona',
-  'client_environment_automation',
-  'automation_account_projection',
-  'content_schedule',
-  'hot_lead_config',
-  'facebook_comment_config',
-  'facebook_group_join_automation_config',
-] as const satisfies readonly SyncReadStream[];
+/**
+ * 单体启动时要自举的两组流，**由流定义按属主算出来，不再手抄**。
+ *
+ * 手抄过一次，代价是**单体起不来**：批 E-2 步骤 2 新增 `facebook_operation_policy` 后，
+ * 镜像那边有了第八条、这份名单还是七条，于是第八条恒 `uninitialized`、
+ * 就绪闸判 `monolith_sync_read_not_ready` 直接抛在启动路径上。
+ * 而 `satisfies readonly SyncReadStream[]` **只校验写下的每一条合法，不校验有没有写全**——
+ * typecheck 与全量测试当时都是绿的。
+ * ⇒ 名单类事实一律从唯一定义处派生；要盯「新增流有没有被有意接纳」，用测试断言集合，
+ * 别用一份人肉维护的副本。
+ */
+const API_SYNC_READ_OWNER_STREAMS = syncReadStreamsOwnedBy('api');
 
-const AUTOMATION_SYNC_READ_OWNER_STREAMS = [
-  'session_config_global',
-  'edge_presence',
-  'publish_in_flight',
-  'captcha_availability',
-  'automation_config_mirror_health',
-] as const satisfies readonly SyncReadStream[];
+const AUTOMATION_SYNC_READ_OWNER_STREAMS = syncReadStreamsOwnedBy('automation');
+
+/** 属主过滤的**类型层**同款：让派生出来的数组仍带精确字面量联合，narrowing 与穷举照旧成立。 */
+type SyncReadStreamOwnedBy<O extends 'api' | 'automation'> = {
+  [S in SyncReadStream]: (typeof SYNC_READ_STREAM_DEFINITIONS)[S]['owner'] extends O
+    ? S
+    : never;
+}[SyncReadStream];
+
+function syncReadStreamsOwnedBy<O extends 'api' | 'automation'>(
+  owner: O,
+): readonly SyncReadStreamOwnedBy<O>[] {
+  return (Object.keys(SYNC_READ_STREAM_DEFINITIONS) as SyncReadStream[]).filter(
+    (stream): stream is SyncReadStreamOwnedBy<O> =>
+      SYNC_READ_STREAM_DEFINITIONS[stream].owner === owner,
+  );
+}
 
 const AUTOMATION_RUNTIME_SYNC_READ_STREAMS = [
   'edge_presence',
@@ -1660,6 +1674,8 @@ function restoreAutomationSyncReadCheckpoint(
       return mirrors.facebookComment.restoreCheckpoint(checkpoint);
     case 'facebook_group_join_automation_config':
       return mirrors.facebookGroupJoin.restoreCheckpoint(checkpoint);
+    case 'facebook_operation_policy':
+      return mirrors.facebookOperationPolicy.restoreCheckpoint(checkpoint);
   }
 }
 
@@ -1683,6 +1699,8 @@ function automationSyncReadCheckpoint(
       return mirrors.facebookComment.checkpoint();
     case 'facebook_group_join_automation_config':
       return mirrors.facebookGroupJoin.checkpoint();
+    case 'facebook_operation_policy':
+      return mirrors.facebookOperationPolicy.checkpoint();
   }
 }
 
