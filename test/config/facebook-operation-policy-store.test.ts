@@ -4,6 +4,7 @@ import type pg from 'pg';
 import type { SchemaProber } from '../../src/kernel/schema-capability-contract.js';
 import type { MirrorVersionBumper } from '../../src/config/mirror-version-store.js';
 import { FacebookOperationPolicyStore } from '../../src/config/facebook-operation-policy-store.js';
+import { isSyncReadFactPayload } from '../../src/kernel/sync-read-facts.js';
 
 interface PolicyRow {
   env_key: string;
@@ -765,6 +766,50 @@ describe('FacebookOperationPolicyStore', () => {
       assert.equal(saved.view.consumption.viewsPerLike, 7);
     }
     assert.equal(db.audits.length, 1);
+  });
+
+  /**
+   * **这条是补回归，且它守的是「产出物与契约逐键一致」，不是「产出物长得对」。**
+   *
+   * 批 E-2 步骤 2 上线时单体在启动期挂掉：基线投影当时是两个 spread 合出来的
+   * （`{ ...policyForEnv(env), ...surface }`），而浏览面缓存比契约多带
+   * `surfaceUpdatedAt` / `surfaceUpdatedBy` 两个字段 ⇒ 跨进程载荷校验按精确键集判、
+   * 当场 `invalid_envelope` ⇒ 自举流失败 ⇒ 进程起不来。
+   *
+   * **typecheck 抓不到**（TS 对 spread 结果不做多余属性检查），
+   * **单测也抓不到**——kernel 那边的夹具是照类型手写的，恰好只有 11 个键。
+   * 只有拿**真产出物**去过一遍**真校验器**才看得见。
+   */
+  it('基线投影的键集 MUST 与跨进程契约逐键一致，且能过真校验器', async () => {
+    const db = database();
+    await db.store.init();
+
+    const baseline = db.store.getBaseForEnv('env-fb');
+    assert.ok(baseline, '已配浏览面的环境必须给得出基线');
+    assert.deepEqual(
+      Object.keys(baseline).sort(),
+      [
+        'baseMode',
+        'cadenceSource',
+        'consumption',
+        'envKey',
+        'policyRevision',
+        'primarySurface',
+        'reels',
+        'rule',
+        'surfaceRevision',
+        'updatedAt',
+        'updatedBy',
+      ],
+      '多一个键就是 invalid_envelope，少一个键是消费方读到 undefined —— 两种都会静静停掉浏览',
+    );
+    assert.equal(
+      isSyncReadFactPayload('facebook_operation_policy', {
+        environments: db.store.baselineProjections(),
+      }),
+      true,
+      '发布口的真产出物 MUST 能过跨进程校验器（这正是当初挂在启动期的那一跳）',
+    );
   });
 
   it('writes primary surface with an independent revision and audit', async () => {

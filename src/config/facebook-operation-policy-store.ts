@@ -1017,13 +1017,33 @@ export class FacebookOperationPolicyStore {
     );
   }
 
-  /** 环境键 → 基线投影；无浏览面配置即 null（**MUST NOT 给个默认面**）。快照发布方取同一份。 */
+  /**
+   * 环境键 → 基线投影；无浏览面配置即 null（**MUST NOT 给个默认面**）。快照发布方取同一份。
+   *
+   * **逐字段构造、不用两个 spread**：浏览面缓存比契约多带 `surfaceUpdatedAt` / `surfaceUpdatedBy`
+   * 两个字段，spread 出来的对象在类型上仍算合法（TS 对 spread 结果不做多余属性检查），
+   * 但跨进程载荷校验按精确键集判，多两个键当场 `invalid_envelope` ——
+   * 实测就是这样让单体在启动期挂掉的，而 typecheck 与单测全绿（夹具是照类型手写的、恰好只有 11 个键）。
+   */
   private baselineForEnv(
     envKey: string,
   ): FacebookOperationPolicyBaseProjection | null {
     const surface = this.surfaceCache.get(envKey);
     if (!surface) return null;
-    return { ...this.policyForEnv(envKey), ...surface };
+    const policy = this.policyForEnv(envKey);
+    return {
+      envKey: policy.envKey,
+      primarySurface: surface.primarySurface,
+      surfaceRevision: surface.surfaceRevision,
+      baseMode: policy.baseMode,
+      policyRevision: policy.policyRevision,
+      cadenceSource: policy.cadenceSource,
+      rule: policy.rule,
+      consumption: policy.consumption,
+      reels: policy.reels,
+      updatedAt: policy.updatedAt,
+      updatedBy: policy.updatedBy,
+    };
   }
 
   async getForEnv(envKey: string): Promise<FacebookOperationPolicyView | null> {
