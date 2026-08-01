@@ -1505,7 +1505,7 @@ async function startMonolithSyncReads(ctx: CompositionContext): Promise<void> {
   );
   scheduleSyncReadRefresh('api-owner', 30_000, refreshApiOwned);
   console.log(
-    `[aidcp-cloud] 4b 单体权威镜像已就绪（target=${executionTarget}，API consumer=5，automation consumer=7）`,
+    `[aidcp-cloud] 4b 单体权威镜像已就绪（target=${executionTarget}，API consumer=${AUTOMATION_SYNC_READ_OWNER_STREAMS.length}，automation consumer=${API_SYNC_READ_OWNER_STREAMS.length}）`,
   );
 }
 

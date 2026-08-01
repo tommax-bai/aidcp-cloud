@@ -98,4 +98,14 @@ test('组装根的两组自举名单 MUST 是派生的，不是手抄的字面�
       `${name} 里出现了字面量流名 —— 那就是又抄了一份`,
     );
   }
+  assert.match(
+    source,
+    /API consumer=\$\{AUTOMATION_SYNC_READ_OWNER_STREAMS\.length\}，automation consumer=\$\{API_SYNC_READ_OWNER_STREAMS\.length\}/,
+    '就绪日志里的两类 consumer 数量 MUST 来自各自消费的派生集合，新增流后不能继续报旧数字',
+  );
+  assert.doesNotMatch(
+    source,
+    /(?:API|automation) consumer=\d+\b/,
+    '就绪日志里的 consumer 数量 MUST NOT 退回硬编码',
+  );
 });
