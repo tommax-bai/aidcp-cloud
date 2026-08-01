@@ -109,7 +109,6 @@ import type { ConceptPoolPort } from '../kernel/concept-pool-port.js';
 import { isContentPortError } from '../kernel/content-port-error.js';
 import type { NotificationItem } from '../comm/protocol.js';
 import {
-  FACEBOOK_REELS_FOLLOW_PROBABILITY,
   FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY,
   facebookPostKey,
   hasObviousHighRiskFacebookCaption,
@@ -866,8 +865,10 @@ export class RoleDispatcher {
   private readonly facebookQualityPassedNoteIds = new Set<string>();
   /** 已呈现 Facebook 视频的会话级一次性决策集合；命中/未命中/被安全闸挡住都不得因重报重抽。 */
   private readonly facebookPresentedVideoLikeDecisionNoteIds = new Set<string>();
-  /** 已呈现 Facebook Reel 的会话级关注决策集合；与点赞独立，任何终态都不得因重报重抽。 */
-  private readonly facebookPresentedReelFollowDecisionNoteIds = new Set<string>();
+  /** 已呈现 Facebook Reel 的会话级节奏集合；同一 Reel 只推进当前模式一次。 */
+  private readonly facebookPresentedReelCadenceNoteIds = new Set<string>();
+  /** 四种模式各自的会话级 Reel 访问序号；会话边界清零，不跨账号搬运。 */
+  private readonly facebookReelVisitCountByMode = new Map<string, number>();
   /** 规则选卡的稳定身份去重；真实跨重启去重仍由持久 view fact 负责。 */
   private readonly facebookRuleSelectedContentKeys = new Set<string>();
   /** 规则 view 串行应用，避免同连接并发回执绕过批次单飞。 */
@@ -3344,84 +3345,66 @@ export class RoleDispatcher {
     this.facebookContentSelectedNoteIds.clear();
     this.facebookQualityPassedNoteIds.clear();
     this.facebookPresentedVideoLikeDecisionNoteIds.clear();
-    this.facebookPresentedReelFollowDecisionNoteIds.clear();
+    this.facebookPresentedReelCadenceNoteIds.clear();
+    this.facebookReelVisitCountByMode.clear();
     this.facebookRuleSelectedContentKeys.clear();
   }
 
-  /**
-   * Facebook 当前呈现视频立即做一次普通点赞决策；Feed 额外要求唯一视频、规范身份和安全摘要。
-   * 固定概率只选择意图：所有既有预算/风控/冷却/去重/回执闸保持原样，绝不把命中写成成功。
-   */
+  /** Feed 视频维持既有固定概率；可配置 N 次节奏只属于 Reel。 */
   private maybeDispatchFacebookPresentedVideoLike(
     cards: PageCardsData[],
     listKind: 'feed' | 'reels' | undefined,
   ): void {
     if (this.accountPlatform !== 'facebook' || this.isFacebookAutomatedBrowseMode()) return;
-    let card: PageCardsData | undefined;
-    let source: 'reels' | 'feed_video';
-    if (listKind === 'reels' && cards.length === 1) {
-      card = cards[0];
-      source = 'reels';
-      if (!isCanonicalFacebookReelNoteId(card?.noteId)) {
-        console.log(`[interaction_appraiser] skip reason=facebook_reel_invalid_target action=like note=${card?.noteId ?? ''}`);
-        return;
-      }
-    } else if (listKind === 'feed') {
-      const videos = cards.filter((candidate) => candidate.isVideo === true);
-      if (videos.length !== 1) return;
-      card = videos[0];
-      source = 'feed_video';
-      if (!isCanonicalFacebookFeedVideoNoteId(card.noteId)) {
-        console.log(`[interaction_appraiser] skip reason=facebook_feed_video_invalid_target action=like note=${card.noteId ?? ''}`);
-        return;
-      }
-    } else {
+    if (listKind !== 'feed') return;
+    const videos = cards.filter((candidate) => candidate.isVideo === true);
+    if (videos.length !== 1) return;
+    const card = videos[0];
+    if (!isCanonicalFacebookFeedVideoNoteId(card.noteId)) {
+      console.log(`[interaction_appraiser] skip reason=facebook_feed_video_invalid_target action=like note=${card.noteId ?? ''}`);
       return;
     }
-    if (!card) return;
     const noteId = card.noteId!;
     const key = facebookPostKey(noteId);
     if (this.facebookPresentedVideoLikeDecisionNoteIds.has(key)) {
-      console.log(`[interaction_appraiser] skip reason=facebook_presented_video_duplicate_decision action=like source=${source} note=${noteId}`);
+      console.log(`[interaction_appraiser] skip reason=facebook_presented_video_duplicate_decision action=like source=feed_video note=${noteId}`);
       return;
     }
     // 必须先占决策坑：任何后续预算/风控/冷却/下发失败都不能靠重报重新掷骰。
     this.facebookPresentedVideoLikeDecisionNoteIds.add(key);
-    if (source === 'feed_video') {
-      const caption = card.title.trim();
-      if (!caption) {
-        console.log(`[interaction_appraiser] skip reason=facebook_feed_video_missing_caption action=like note=${noteId}`);
-        return;
-      }
-      if (hasObviousHighRiskFacebookCaption(caption)) {
-        console.log(`[interaction_appraiser] skip reason=facebook_feed_video_obvious_risk action=like note=${noteId}`);
-        return;
-      }
+    const caption = card.title.trim();
+    if (!caption) {
+      console.log(`[interaction_appraiser] skip reason=facebook_feed_video_missing_caption action=like note=${noteId}`);
+      return;
+    }
+    if (hasObviousHighRiskFacebookCaption(caption)) {
+      console.log(`[interaction_appraiser] skip reason=facebook_feed_video_obvious_risk action=like note=${noteId}`);
+      return;
     }
     if (this.remainingBudget('like') <= 0) {
-      console.log(`[interaction_appraiser] skip reason=no_budget action=like source=${source} note=${noteId}`);
+      console.log(`[interaction_appraiser] skip reason=no_budget action=like source=feed_video note=${noteId}`);
       return;
     }
     const roll = this.randomFn();
     if (!Number.isFinite(roll) || roll < 0 || roll >= 1) {
-      console.log(`[interaction_appraiser] skip reason=facebook_presented_video_invalid_random action=like source=${source} note=${noteId}`);
+      console.log(`[interaction_appraiser] skip reason=facebook_presented_video_invalid_random action=like source=feed_video note=${noteId}`);
       return;
     }
     if (roll >= FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY) {
       console.log(
-        `[interaction_appraiser] skip reason=facebook_presented_video_probability_abstain action=like source=${source} probability=${FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY} roll=${roll} note=${noteId}`,
+        `[interaction_appraiser] skip reason=facebook_presented_video_probability_abstain action=like source=feed_video probability=${FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY} roll=${roll} note=${noteId}`,
       );
       return;
     }
     if (!this.canInteract('like')) {
-      console.log(`[interaction_appraiser] skip reason=risk_blocked action=like source=${source} note=${noteId}`);
+      console.log(`[interaction_appraiser] skip reason=risk_blocked action=like source=feed_video note=${noteId}`);
       return;
     }
     if (!this.cooldownPasses('like')) {
-      console.log(`[interaction_appraiser] skip reason=cooldown action=like source=${source} note=${noteId}`);
+      console.log(`[interaction_appraiser] skip reason=cooldown action=like source=feed_video note=${noteId}`);
       return;
     }
-    const reason = source === 'reels' ? 'facebook_reel_probability_hit' : 'facebook_feed_video_probability_hit';
+    const reason = 'facebook_feed_video_probability_hit';
     const sent = this.sendNoteScopedCommand('like', {
       action: 'like',
       reason,
@@ -3433,47 +3416,129 @@ export class RoleDispatcher {
         `[interaction_appraiser] ${reason} action=like probability=${FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY} roll=${roll} note=${noteId}`,
       );
     } else {
-      console.log(`[interaction_appraiser] skip reason=facebook_presented_video_dispatch_suppressed action=like source=${source} note=${noteId}`);
+      console.log(`[interaction_appraiser] skip reason=facebook_presented_video_dispatch_suppressed action=like source=feed_video note=${noteId}`);
     }
   }
 
   /**
-   * Facebook 当前 Reel 的独立普通关注决策。概率只选择意图；Edge 版本能力、本轮预算、RiskController、
-   * 冷却、同账号去重与同 Reel 后置验证仍是权威，命中绝不等于关注成功。
+   * 当前会话每个唯一 Reel 只推进当前模式一次：普通人设可触发点赞和关注，其它模式只触发各自关注。
+   * 达到 N 只选择意图；预算、风险、冷却、能力与同 Reel 后置验证仍是权威。
    */
-  private maybeDispatchFacebookPresentedReelFollow(
+  private maybeDispatchFacebookPresentedReelCadence(
     cards: PageCardsData[],
     listKind: 'feed' | 'reels' | undefined,
   ): void {
     if (
       this.accountPlatform !== 'facebook'
-      || this.isFacebookAutomatedBrowseMode()
       || listKind !== 'reels'
       || cards.length !== 1
     ) return;
-    if (!this.hasReelFollow()) {
-      console.log('[interaction_appraiser] skip reason=facebook_reel_follow_edge_capability_missing action=follow');
-      return;
-    }
-    if (!isOrchestrationCapabilitySupported('facebook', 'reel_follow')) return;
     const card = cards[0];
     const noteId = card?.noteId;
     if (!isCanonicalFacebookReelNoteId(noteId)) {
-      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_invalid_target action=follow note=${noteId ?? ''}`);
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_cadence_invalid_target note=${noteId ?? ''}`);
       return;
     }
-    const authorId = String(card.author ?? '').replace(/\s+/g, ' ').trim();
-    if (!authorId) {
-      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_missing_author action=follow note=${noteId}`);
+    const decision = this.facebookRuleDecision();
+    const mode = decision.mode;
+    if (!['persona', 'slow_start', 'facebook_rule', 'consumption'].includes(mode)) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_cadence_mode_unavailable mode=${mode} note=${noteId}`);
       return;
     }
     const key = facebookPostKey(noteId);
-    if (this.facebookPresentedReelFollowDecisionNoteIds.has(key)) {
-      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_duplicate_decision action=follow note=${noteId}`);
+    const modeReelKey = `${mode}:${key}`;
+    if (this.facebookPresentedReelCadenceNoteIds.has(modeReelKey)) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_cadence_duplicate mode=${mode} note=${noteId}`);
       return;
     }
-    // 先占决策坑：配额恢复、冷却结束或重复 page.cards 均不得让同一 Reel 重新掷骰。
-    this.facebookPresentedReelFollowDecisionNoteIds.add(key);
+    // 先占访问坑：后续任何 gate 失败或重复 page.cards 都不能让同一 Reel 再推进一次。
+    this.facebookPresentedReelCadenceNoteIds.add(modeReelKey);
+    if (mode === 'persona') {
+      // 普通人设 Reel 点赞完全由本节奏负责；未到 N 也不得让 LLM 对同一 Reel 再做一次普通点赞。
+      this.facebookPresentedVideoLikeDecisionNoteIds.add(key);
+    }
+    const cadence = decision.reelCadence;
+    const viewsPerFollow = cadence?.viewsPerFollow;
+    const viewsPerLike = cadence?.viewsPerLike;
+    if (
+      !Number.isInteger(viewsPerFollow)
+      || Number(viewsPerFollow) < 1
+      || Number(viewsPerFollow) > 100
+      || (
+        mode === 'persona'
+        && (
+          !Number.isInteger(viewsPerLike)
+          || Number(viewsPerLike) < 1
+          || Number(viewsPerLike) > 100
+        )
+      )
+    ) {
+      console.warn(`[interaction_appraiser] skip reason=facebook_reel_cadence_policy_invalid mode=${mode} note=${noteId}`);
+      return;
+    }
+    const ordinal = (this.facebookReelVisitCountByMode.get(mode) ?? 0) + 1;
+    this.facebookReelVisitCountByMode.set(mode, ordinal);
+
+    if (mode === 'persona' && ordinal % Number(viewsPerLike) === 0) {
+      this.dispatchFacebookPersonaReelLike(noteId, ordinal, Number(viewsPerLike));
+    }
+    if (ordinal % Number(viewsPerFollow) === 0) {
+      this.dispatchFacebookModeReelFollow(
+        noteId,
+        String(card.author ?? '').replace(/\s+/g, ' ').trim(),
+        mode,
+        ordinal,
+        Number(viewsPerFollow),
+      );
+    }
+  }
+
+  private dispatchFacebookPersonaReelLike(
+    noteId: string,
+    ordinal: number,
+    viewsPerLike: number,
+  ): void {
+    if (this.remainingBudget('like') <= 0) {
+      console.log(`[interaction_appraiser] skip reason=no_budget action=like source=reels ordinal=${ordinal} note=${noteId}`);
+      return;
+    }
+    if (!this.canInteract('like')) {
+      console.log(`[interaction_appraiser] skip reason=risk_blocked action=like source=reels ordinal=${ordinal} note=${noteId}`);
+      return;
+    }
+    if (!this.cooldownPasses('like')) {
+      console.log(`[interaction_appraiser] skip reason=cooldown action=like source=reels ordinal=${ordinal} note=${noteId}`);
+      return;
+    }
+    const sent = this.sendNoteScopedCommand('like', {
+      action: 'like',
+      reason: 'facebook_reel_persona_cadence_hit',
+      params: { noteId, thinkMs: this.thinkNow() },
+    });
+    if (sent) {
+      this.interactionRetry.set('like', { noteId, attempts: 0 });
+      console.log(`[interaction_appraiser] facebook_reel_persona_cadence_hit action=like ordinal=${ordinal} every=${viewsPerLike} note=${noteId}`);
+    } else {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_like_dispatch_suppressed ordinal=${ordinal} note=${noteId}`);
+    }
+  }
+
+  private dispatchFacebookModeReelFollow(
+    noteId: string,
+    authorId: string,
+    mode: string,
+    ordinal: number,
+    viewsPerFollow: number,
+  ): void {
+    if (!authorId) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_missing_author action=follow mode=${mode} ordinal=${ordinal} note=${noteId}`);
+      return;
+    }
+    if (!this.hasReelFollow()) {
+      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_edge_capability_missing action=follow mode=${mode} ordinal=${ordinal} note=${noteId}`);
+      return;
+    }
+    if (!isOrchestrationCapabilitySupported('facebook', 'reel_follow')) return;
     if (this.remainingBudget('follow') <= 0) {
       console.log(`[interaction_appraiser] skip reason=no_budget action=follow source=reels note=${noteId}`);
       return;
@@ -3483,25 +3548,14 @@ export class RoleDispatcher {
       return;
     }
     if (!this.cooldownPasses('follow')) return;
-    const roll = this.randomFn();
-    if (!Number.isFinite(roll) || roll < 0 || roll >= 1) {
-      console.log(`[interaction_appraiser] skip reason=facebook_reel_follow_invalid_random action=follow note=${noteId}`);
-      return;
-    }
-    if (roll >= FACEBOOK_REELS_FOLLOW_PROBABILITY) {
-      console.log(
-        `[interaction_appraiser] skip reason=facebook_reel_follow_probability_abstain action=follow probability=${FACEBOOK_REELS_FOLLOW_PROBABILITY} roll=${roll} note=${noteId}`,
-      );
-      return;
-    }
     const sent = this.sendCommand({
       action: 'follow',
-      reason: 'facebook_reel_follow_probability_hit',
+      reason: 'facebook_reel_mode_cadence_hit',
       params: { authorId, noteId, thinkMs: this.thinkNow() },
     });
     console.log(
       sent
-        ? `[interaction_appraiser] facebook_reel_follow_probability_hit action=follow probability=${FACEBOOK_REELS_FOLLOW_PROBABILITY} roll=${roll} note=${noteId}`
+        ? `[interaction_appraiser] facebook_reel_mode_cadence_hit action=follow mode=${mode} ordinal=${ordinal} every=${viewsPerFollow} note=${noteId}`
         : `[interaction_appraiser] skip reason=facebook_reel_follow_dispatch_suppressed action=follow note=${noteId}`,
     );
   }
@@ -4040,7 +4094,7 @@ export class RoleDispatcher {
         }
         this.updateVisibleCards(payload.cards);
         this.maybeDispatchFacebookPresentedVideoLike(payload.cards, payload.listKind);
-        this.maybeDispatchFacebookPresentedReelFollow(payload.cards, payload.listKind);
+        this.maybeDispatchFacebookPresentedReelCadence(payload.cards, payload.listKind);
         // feed-scroll-card-floor：仅 feed 来源——按本批 noteId 差分"上一批"算新卡数（缺 noteId 计为非新卡），
         // 覆盖写 pendingFeedFloorMs（含写 0），避免 open→return 残留旧值；search 上报不写不消费 feed 集合。
         if (this.sessionContext.sourcePageType === 'feed') {

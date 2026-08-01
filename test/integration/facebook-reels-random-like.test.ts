@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  FACEBOOK_REELS_FOLLOW_PROBABILITY,
   FACEBOOK_REELS_LIKE_PROBABILITY,
   RoleDispatcher,
   type EdgeCommand,
@@ -42,6 +41,9 @@ function startDispatcher(options: {
   cooldownGate?: ActionCooldownGate;
   interactionGuard?: InteractionGuard;
   clock?: () => number;
+  mode?: 'persona' | 'slow_start' | 'facebook_rule' | 'consumption' | 'blocked';
+  modeRef?: { current: 'persona' | 'slow_start' | 'facebook_rule' | 'consumption' | 'blocked' };
+  reelCadence?: { viewsPerLike?: number; viewsPerFollow: number };
 } = {}) {
   const commands: EdgeCommand[] = [];
   let llmCalls = 0;
@@ -55,6 +57,18 @@ function startDispatcher(options: {
     cooldownGate: options.cooldownGate,
     interactionGuard: options.interactionGuard,
     clock: options.clock,
+    facebookRuleModeDecision: () => {
+      const mode = options.modeRef?.current ?? options.mode ?? 'persona';
+      return {
+        mode,
+        blocker: mode === 'blocked' ? 'test_blocked' : null,
+        reelCadence: options.reelCadence ?? (
+          mode === 'persona'
+            ? { viewsPerLike: 4, viewsPerFollow: 10 }
+            : { viewsPerFollow: 15 }
+        ),
+      };
+    },
     sendCommand: (command) => commands.push(command),
   });
   dispatcher.setup();
@@ -78,131 +92,143 @@ function reportFeedVideo(dispatcher: RoleDispatcher, id = '42', title = `feed vi
   });
 }
 
-test('Facebook Reel: random < 0.25 时立即下发一次 note-scoped like 意图', () => {
-  const { dispatcher, commands } = startDispatcher({ randomFn: () => FACEBOOK_REELS_LIKE_PROBABILITY - Number.EPSILON });
-  reportReel(dispatcher);
+test('普通人设 Reel: 默认每 4 个唯一 Reel 只在第 4 个下发 note-scoped like', () => {
+  const { dispatcher, commands } = startDispatcher();
+  for (let id = 1; id <= 4; id += 1) reportReel(dispatcher, String(id), `Author ${id}`);
 
   const likes = commands.filter((command) => command.action === 'like');
   assert.equal(likes.length, 1);
-  assert.equal(likes[0]?.reason, 'facebook_reel_probability_hit');
-  assert.equal(likes[0]?.params?.noteId, 'https://www.facebook.com/reel/42');
+  assert.equal(likes[0]?.reason, 'facebook_reel_persona_cadence_hit');
+  assert.equal(likes[0]?.params?.noteId, 'https://www.facebook.com/reel/4');
   dispatcher.endSession('test');
 });
 
-test('Facebook Reel: random === 0.25 时不下发 like', () => {
-  const { dispatcher, commands } = startDispatcher({ randomFn: () => FACEBOOK_REELS_LIKE_PROBABILITY });
-  reportReel(dispatcher);
+test('普通人设 Reel: Feed、畸形目标和重复 Reel 不推进 N 计数', () => {
+  const { dispatcher, commands } = startDispatcher({
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 100 },
+    randomFn: () => Number.NaN,
+  });
+  dispatcher.bus.emit('page.cards.arrived', { cards: [reelCard('feed')], listKind: 'feed', ts: 1 });
+  dispatcher.bus.emit('page.cards.arrived', { cards: [reelCard('1'), reelCard('2')], listKind: 'reels', ts: 2 });
+  dispatcher.bus.emit('page.cards.arrived', {
+    cards: [{ ...reelCard('bad'), noteId: 'https://evil.example/reel/bad' }], listKind: 'reels', ts: 3,
+  });
+  reportReel(dispatcher, '10', 'A');
+  reportReel(dispatcher, '10', 'A');
   assert.equal(commands.some((command) => command.action === 'like'), false);
+  reportReel(dispatcher, '11', 'B');
+  assert.equal(commands.filter((command) => command.action === 'like').length, 1);
+  assert.equal(commands.find((command) => command.action === 'like')?.params?.noteId, 'https://www.facebook.com/reel/11');
   dispatcher.endSession('test');
 });
 
-test('Facebook Reel: 同一规范身份重报不重抽、不重复下发', () => {
-  let randomCalls = 0;
-  const { dispatcher, commands } = startDispatcher({ randomFn: () => { randomCalls++; return 0.1; } });
-  reportReel(dispatcher);
-  reportReel(dispatcher);
+test('普通人设 Reel: slow-start、规则、消费均不复用 persona 点赞节奏', () => {
+  for (const mode of ['slow_start', 'facebook_rule', 'consumption'] as const) {
+    const candidate = startDispatcher({
+      mode,
+      reelCadence: { viewsPerFollow: 100 },
+    });
+    reportReel(candidate.dispatcher, mode, 'Bao');
+    assert.equal(candidate.commands.some((command) => command.action === 'like'), false, mode);
+    candidate.dispatcher.endSession('test');
+  }
+});
 
-  assert.equal(randomCalls, 1);
+test('Reel cadence: 会话中模式切换仍按模式分别去重和计数', () => {
+  const modeRef = { current: 'persona' as 'persona' | 'facebook_rule' };
+  const candidate = startDispatcher({
+    modeRef,
+    hasReelFollow: true,
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 2 },
+  });
+  reportReel(candidate.dispatcher, '1', 'A');
+  modeRef.current = 'facebook_rule';
+  reportReel(candidate.dispatcher, '1', 'A');
+  reportReel(candidate.dispatcher, '2', 'B');
+  assert.equal(candidate.commands.filter((command) => command.action === 'follow').length, 1);
+  assert.equal(candidate.commands.some((command) => command.action === 'like'), false);
+
+  modeRef.current = 'persona';
+  reportReel(candidate.dispatcher, '2', 'B');
+  assert.equal(candidate.commands.filter((command) => command.action === 'like').length, 1);
+  assert.equal(candidate.commands.filter((command) => command.action === 'follow').length, 2);
+  candidate.dispatcher.endSession('test');
+});
+
+test('普通人设 Reel: N 边界被风险拒绝不形成补写债', () => {
+  let allowed = false;
+  const { dispatcher, commands } = startDispatcher({
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 100 },
+    canInteract: (action) => action !== 'like' || allowed,
+  });
+  reportReel(dispatcher, '1');
+  reportReel(dispatcher, '2');
+  allowed = true;
+  reportReel(dispatcher, '3');
+  assert.equal(commands.some((command) => command.action === 'like'), false, '第 3 个不得补写第 2 个的债');
+  reportReel(dispatcher, '4');
   assert.equal(commands.filter((command) => command.action === 'like').length, 1);
   dispatcher.endSession('test');
 });
 
-test('Facebook Reel: 非 FB、非 reels、畸形批次和非规范 URL 均 fail-closed', () => {
-  let randomCalls = 0;
-  const randomFn = () => { randomCalls++; return 0.1; };
-  const fb = startDispatcher({ randomFn });
-  fb.dispatcher.bus.emit('page.cards.arrived', { cards: [reelCard()], listKind: 'feed', ts: 1 });
-  fb.dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'reels', ts: 2 });
-  fb.dispatcher.bus.emit('page.cards.arrived', { cards: [reelCard('1'), reelCard('2')], listKind: 'reels', ts: 3 });
-  fb.dispatcher.bus.emit('page.cards.arrived', {
-    cards: [{ ...reelCard(), noteId: 'https://evil.example/reel/42' }], listKind: 'reels', ts: 4,
+test('普通人设 Reel: 会话边界清空 N 计数和 Reel 去重', () => {
+  const { dispatcher, commands } = startDispatcher({
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 100 },
   });
-  assert.equal(fb.commands.some((command) => command.action === 'like'), false);
-  fb.dispatcher.endSession('test');
-
-  const xhs = startDispatcher({ randomFn, platform: 'xiaohongshu' });
-  reportReel(xhs.dispatcher);
-  assert.equal(xhs.commands.some((command) => command.action === 'like'), false);
-  xhs.dispatcher.endSession('test');
-  assert.equal(randomCalls, 0);
-});
-
-test('Facebook Reel: 概率命中但风险闸拒绝时不下发、不假成功', () => {
-  const { dispatcher, commands } = startDispatcher({ randomFn: () => 0.1, canInteract: () => false });
-  reportReel(dispatcher);
-  assert.equal(commands.some((command) => command.action === 'like'), false);
-  dispatcher.endSession('test');
-});
-
-test('Facebook Reel: 新会话清空一次性决策集合，同一 Reel 可重新抽一次', () => {
-  let randomCalls = 0;
-  const { dispatcher, commands } = startDispatcher({ randomFn: () => { randomCalls++; return 0.1; } });
-  reportReel(dispatcher);
+  reportReel(dispatcher, '1');
   dispatcher.endSession('first');
   dispatcher.startSession();
-  reportReel(dispatcher);
-
-  assert.equal(randomCalls, 2);
-  assert.equal(commands.filter((command) => command.action === 'like').length, 2);
+  reportReel(dispatcher, '1');
+  assert.equal(commands.some((command) => command.action === 'like'), false);
+  reportReel(dispatcher, '2');
+  assert.equal(commands.filter((command) => command.action === 'like').length, 1);
   dispatcher.endSession('second');
 });
 
-test('Facebook Reel follow: 独立 10% 掷骰命中并下发作者与 Reel 双锚点', () => {
-  const rolls = [FACEBOOK_REELS_LIKE_PROBABILITY, FACEBOOK_REELS_FOLLOW_PROBABILITY - Number.EPSILON];
-  const { dispatcher, commands } = startDispatcher({
+test('Reel follow: 当前模式独立 N 计数并保留作者与 Reel 双锚点', () => {
+  const persona = startDispatcher({
     hasReelFollow: true,
-    randomFn: () => rolls.shift() ?? 0.5,
+    reelCadence: { viewsPerLike: 100, viewsPerFollow: 2 },
   });
-  reportReel(dispatcher, '88', ' Salon   de Comolis ');
+  reportReel(persona.dispatcher, '1', 'A');
+  reportReel(persona.dispatcher, '2', ' Salon   de Comolis ');
+  const follow = persona.commands.find((command) => command.action === 'follow');
+  assert.equal(follow?.reason, 'facebook_reel_mode_cadence_hit');
+  assert.equal(follow?.params?.noteId, 'https://www.facebook.com/reel/2');
+  assert.equal(follow?.params?.authorId, 'Salon de Comolis');
+  persona.dispatcher.endSession('test');
 
-  assert.equal(commands.some((command) => command.action === 'like'), false, '关注与点赞独立，点赞可弃权');
-  const follows = commands.filter((command) => command.action === 'follow');
-  assert.equal(follows.length, 1);
-  assert.equal(follows[0]?.reason, 'facebook_reel_follow_probability_hit');
-  assert.equal(follows[0]?.params?.noteId, 'https://www.facebook.com/reel/88');
-  assert.equal(follows[0]?.params?.authorId, 'Salon de Comolis');
-  dispatcher.endSession('test');
+  const rule = startDispatcher({
+    mode: 'facebook_rule',
+    hasReelFollow: true,
+    reelCadence: { viewsPerFollow: 2 },
+  });
+  reportReel(rule.dispatcher, '10', 'A');
+  reportReel(rule.dispatcher, '11', 'B');
+  assert.equal(rule.commands.filter((command) => command.action === 'follow').length, 1);
+  assert.equal(rule.commands.some((command) => command.action === 'like'), false);
+  rule.dispatcher.endSession('test');
 });
 
-test('Facebook Reel follow: 0.10 边界弃权，同一 Reel 重报不重抽', () => {
-  let randomCalls = 0;
-  const rolls = [FACEBOOK_REELS_LIKE_PROBABILITY, FACEBOOK_REELS_FOLLOW_PROBABILITY];
-  const { dispatcher, commands } = startDispatcher({
-    hasReelFollow: true,
-    randomFn: () => { randomCalls++; return rolls.shift() ?? 0; },
-  });
-  reportReel(dispatcher, '89', 'Bao');
-  reportReel(dispatcher, '89', 'Bao');
-
-  assert.equal(randomCalls, 2, '首次分别为点赞/关注掷骰；重复卡片不再掷骰');
-  assert.equal(commands.some((command) => command.action === 'follow'), false);
-  dispatcher.endSession('test');
-});
-
-test('Facebook Reel follow: 旧 Edge、缺作者、会话配额耗尽均在掷骰前失败关闭', () => {
-  let randomCalls = 0;
-  const randomFn = () => { randomCalls++; return 0.5; };
-
-  const oldEdge = startDispatcher({ randomFn });
+test('Reel follow: 旧 Edge、缺作者、会话配额耗尽均在 N 边界失败关闭', () => {
+  const oldEdge = startDispatcher({ reelCadence: { viewsPerLike: 100, viewsPerFollow: 1 } });
   reportReel(oldEdge.dispatcher, '90', 'Bao');
   assert.equal(oldEdge.commands.some((command) => command.action === 'follow'), false);
   oldEdge.dispatcher.endSession('test');
 
-  const missingAuthor = startDispatcher({ hasReelFollow: true, randomFn });
+  const missingAuthor = startDispatcher({ hasReelFollow: true, reelCadence: { viewsPerLike: 100, viewsPerFollow: 1 } });
   reportReel(missingAuthor.dispatcher, '91');
   assert.equal(missingAuthor.commands.some((command) => command.action === 'follow'), false);
   missingAuthor.dispatcher.endSession('test');
 
-  const exhausted = startDispatcher({ hasReelFollow: true, randomFn });
+  const exhausted = startDispatcher({ hasReelFollow: true, reelCadence: { viewsPerLike: 100, viewsPerFollow: 1 } });
   while (exhausted.dispatcher.consumeBudget('follow')) { /* exhaust the bounded session quota */ }
   reportReel(exhausted.dispatcher, '92', 'Bao');
   assert.equal(exhausted.commands.some((command) => command.action === 'follow'), false);
   exhausted.dispatcher.endSession('test');
-
-  assert.equal(randomCalls, 3, '三例都只允许既有点赞掷骰，关注不得掷骰');
 });
 
-test('Facebook Reel follow: RiskController、动作冷却与作者去重逐层拦截', () => {
+test('Reel follow: RiskController、动作冷却与作者去重逐层拦截', () => {
   const now = 1_000_000;
   const cooldownGate = new ActionCooldownGate({ startedAtMs: 0, restartQuietMs: 0 });
   cooldownGate.markActed('__unbound__', 'follow', now - 1_000);
@@ -210,9 +236,9 @@ test('Facebook Reel follow: RiskController、动作冷却与作者去重逐层�
   guard.complete(InteractionGuard.keyFor('follow', { authorId: 'Bao' }));
 
   const cases = [
-    startDispatcher({ hasReelFollow: true, randomFn: () => 0, canInteract: (action) => action !== 'follow' }),
-    startDispatcher({ hasReelFollow: true, randomFn: () => 0, cooldownGate, clock: () => now }),
-    startDispatcher({ hasReelFollow: true, randomFn: () => 0, interactionGuard: guard }),
+    startDispatcher({ hasReelFollow: true, reelCadence: { viewsPerLike: 100, viewsPerFollow: 1 }, canInteract: (action) => action !== 'follow' }),
+    startDispatcher({ hasReelFollow: true, reelCadence: { viewsPerLike: 100, viewsPerFollow: 1 }, cooldownGate, clock: () => now }),
+    startDispatcher({ hasReelFollow: true, reelCadence: { viewsPerLike: 100, viewsPerFollow: 1 }, interactionGuard: guard }),
   ];
   for (const [index, candidate] of cases.entries()) {
     reportReel(candidate.dispatcher, String(100 + index), 'Bao');
@@ -222,10 +248,9 @@ test('Facebook Reel follow: RiskController、动作冷却与作者去重逐层�
 });
 
 test('Facebook Reel follow: 下发不扣配额，只有新关注成功回执扣一次', () => {
-  const rolls = [FACEBOOK_REELS_LIKE_PROBABILITY, 0];
   const { dispatcher, commands } = startDispatcher({
     hasReelFollow: true,
-    randomFn: () => rolls.shift() ?? 0.5,
+    reelCadence: { viewsPerLike: 100, viewsPerFollow: 1 },
   });
   const before = dispatcher.remainingFollows;
   reportReel(dispatcher, '120', 'Bao');

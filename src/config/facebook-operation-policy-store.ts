@@ -15,7 +15,7 @@ const { Pool } = pg;
 
 export const FACEBOOK_OPERATION_POLICY_SCHEMA_VERSION = 'facebook_operation_policy@1';
 export const FACEBOOK_OPERATION_GLOBAL_POLICY_SCHEMA_VERSION =
-  'facebook_operation_global_policy@1';
+  'facebook_operation_global_policy@2';
 
 export const FACEBOOK_OPERATION_POLICY_BOUNDS = {
   rule: {
@@ -31,6 +31,21 @@ export const FACEBOOK_OPERATION_POLICY_BOUNDS = {
 
 export const FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS = {
   ...FACEBOOK_OPERATION_POLICY_BOUNDS,
+  reels: {
+    persona: {
+      viewsPerLike: { min: 1, max: 100, default: 4 },
+      viewsPerFollow: { min: 1, max: 100, default: 10 },
+    },
+    slowStart: {
+      viewsPerFollow: { min: 1, max: 100, default: 15 },
+    },
+    rule: {
+      viewsPerFollow: { min: 1, max: 100, default: 15 },
+    },
+    consumption: {
+      viewsPerFollow: { min: 1, max: 100, default: 15 },
+    },
+  },
   slowStart: {
     totalDays: { min: 1, max: 30, default: 7 },
     dailyCaps: {
@@ -85,6 +100,16 @@ export interface FacebookConsumptionOperationParameters {
   confirmedJoinsPerComment: number;
 }
 
+export interface FacebookGlobalReelCadenceParameters {
+  persona: {
+    viewsPerLike: number;
+    viewsPerFollow: number;
+  };
+  slowStart: { viewsPerFollow: number };
+  rule: { viewsPerFollow: number };
+  consumption: { viewsPerFollow: number };
+}
+
 export interface FacebookOperationPolicyView {
   envKey: string;
   baseMode: FacebookBaseOperationMode;
@@ -116,6 +141,7 @@ export interface FacebookOperationGlobalPolicyView {
   schemaVersion: string;
   rule: FacebookRuleOperationParameters;
   consumption: FacebookConsumptionOperationParameters;
+  reels: FacebookGlobalReelCadenceParameters;
   slowStart: {
     totalDays: number;
     dailyCaps: FacebookSlowStartDailyCaps[];
@@ -212,6 +238,7 @@ export interface FacebookOperationPolicyAccountDecision {
   blocker: string | null;
   rule: FacebookRuleOperationParameters | null;
   consumption: FacebookConsumptionOperationParameters | null;
+  reels: FacebookGlobalReelCadenceParameters | null;
 }
 
 export interface FacebookOperationPolicyBaseProjection {
@@ -221,6 +248,7 @@ export interface FacebookOperationPolicyBaseProjection {
   cadenceSource: FacebookCadenceSource;
   rule: FacebookRuleOperationParameters;
   consumption: FacebookConsumptionOperationParameters;
+  reels: FacebookGlobalReelCadenceParameters;
   updatedAt: string | null;
   updatedBy: string | null;
 }
@@ -266,6 +294,11 @@ interface LockedEnvironmentDbRow {
 
 interface GlobalOperationPolicyDbRow {
   execution_target: DeploymentTarget;
+  persona_reel_views_per_like: number | string;
+  persona_reel_views_per_follow: number | string;
+  slow_start_reel_views_per_follow: number | string;
+  rule_reel_views_per_follow: number | string;
+  consumption_reel_views_per_follow: number | string;
   rule_views_per_like: number | string;
   rule_join_every_n_rounds: number | string;
   consumption_views_per_like: number | string;
@@ -318,6 +351,11 @@ const OPERATION_POLICY_REQUIREMENT = {
     ])],
     ['facebook_operation_global_policy', new Set([
       'execution_target',
+      'persona_reel_views_per_like',
+      'persona_reel_views_per_follow',
+      'slow_start_reel_views_per_follow',
+      'rule_reel_views_per_follow',
+      'consumption_reel_views_per_follow',
       'rule_views_per_like',
       'rule_join_every_n_rounds',
       'consumption_views_per_like',
@@ -406,6 +444,17 @@ function actorParts(actor: string): { actorClass: string; actorId: string } {
   };
 }
 
+function cloneReelCadence(
+  reels: FacebookGlobalReelCadenceParameters,
+): FacebookGlobalReelCadenceParameters {
+  return {
+    persona: { ...reels.persona },
+    slowStart: { ...reels.slowStart },
+    rule: { ...reels.rule },
+    consumption: { ...reels.consumption },
+  };
+}
+
 function defaultGlobalPolicy(executionTarget: DeploymentTarget): FacebookOperationGlobalPolicyView {
   return {
     executionTarget,
@@ -421,6 +470,26 @@ function defaultGlobalPolicy(executionTarget: DeploymentTarget): FacebookOperati
         FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedLikesPerJoin.default,
       confirmedJoinsPerComment:
         FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedJoinsPerComment.default,
+    },
+    reels: {
+      persona: {
+        viewsPerLike:
+          FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.persona.viewsPerLike.default,
+        viewsPerFollow:
+          FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.persona.viewsPerFollow.default,
+      },
+      slowStart: {
+        viewsPerFollow:
+          FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.slowStart.viewsPerFollow.default,
+      },
+      rule: {
+        viewsPerFollow:
+          FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.rule.viewsPerFollow.default,
+      },
+      consumption: {
+        viewsPerFollow:
+          FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.consumption.viewsPerFollow.default,
+      },
     },
     slowStart: {
       totalDays: FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.slowStart.totalDays.default,
@@ -449,6 +518,7 @@ function defaultCachedPolicy(
     consumption: {
       ...defaults.consumption,
     },
+    reels: cloneReelCadence(defaults.reels),
     updatedAt: null,
     updatedBy: null,
   };
@@ -493,6 +563,7 @@ function normalizedGlobalWrite(input: {
   expectedRevision: number;
   rule: FacebookRuleOperationParameters;
   consumption: FacebookConsumptionOperationParameters;
+  reels: FacebookGlobalReelCadenceParameters;
   slowStart: {
     totalDays: number;
     dailyCaps: FacebookSlowStartDailyCaps[];
@@ -521,6 +592,26 @@ function normalizedGlobalWrite(input: {
     || !inIntegerBound(
       input.consumption?.confirmedJoinsPerComment,
       FACEBOOK_OPERATION_POLICY_BOUNDS.consumption.confirmedJoinsPerComment,
+    )
+    || !inIntegerBound(
+      input.reels?.persona?.viewsPerLike,
+      FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.persona.viewsPerLike,
+    )
+    || !inIntegerBound(
+      input.reels?.persona?.viewsPerFollow,
+      FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.persona.viewsPerFollow,
+    )
+    || !inIntegerBound(
+      input.reels?.slowStart?.viewsPerFollow,
+      FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.slowStart.viewsPerFollow,
+    )
+    || !inIntegerBound(
+      input.reels?.rule?.viewsPerFollow,
+      FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.rule.viewsPerFollow,
+    )
+    || !inIntegerBound(
+      input.reels?.consumption?.viewsPerFollow,
+      FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.consumption.viewsPerFollow,
     )
     || !inIntegerBound(
       input.slowStart?.totalDays,
@@ -743,7 +834,7 @@ export class FacebookOperationPolicyStore {
       throw new SchemaCapabilityError(
         {
           capability: 'facebook_operation_policy',
-          sinceVersion: '0103_facebook_operation_global_policy',
+          sinceVersion: '0104_facebook_reel_mode_cadence',
           ddl: [],
         },
         verdict,
@@ -771,7 +862,10 @@ export class FacebookOperationPolicyStore {
       ),
       this.executionTarget
         ? this.pool.query<GlobalOperationPolicyDbRow>(
-            `SELECT execution_target,rule_views_per_like,rule_join_every_n_rounds,
+            `SELECT execution_target,persona_reel_views_per_like,
+                    persona_reel_views_per_follow,slow_start_reel_views_per_follow,
+                    rule_reel_views_per_follow,consumption_reel_views_per_follow,
+                    rule_views_per_like,rule_join_every_n_rounds,
                     consumption_views_per_like,consumption_confirmed_likes_per_join,
                     consumption_confirmed_joins_per_comment,slow_start_total_days,
                     slow_start_daily_caps,revision,updated_at,updated_by
@@ -854,6 +948,7 @@ export class FacebookOperationPolicyStore {
       ...policy,
       rule: { ...policy.rule },
       consumption: { ...policy.consumption },
+      reels: cloneReelCadence(policy.reels),
     };
   }
 
@@ -918,6 +1013,7 @@ export class FacebookOperationPolicyStore {
         blocker: 'facebook_operation_policy_unavailable',
         rule: null,
         consumption: null,
+        reels: null,
       };
     }
     const resolved = this.resolveBaseForAccount(accountId);
@@ -930,6 +1026,7 @@ export class FacebookOperationPolicyStore {
         blocker: resolved.blocker,
         rule: null,
         consumption: null,
+        reels: null,
       };
     }
     const policy = resolved;
@@ -943,6 +1040,7 @@ export class FacebookOperationPolicyStore {
         blocker: slowStart.blocker,
         rule: policy.rule,
         consumption: policy.consumption,
+        reels: cloneReelCadence(policy.reels),
       };
     }
     return {
@@ -953,6 +1051,7 @@ export class FacebookOperationPolicyStore {
       blocker: null,
       rule: policy.rule,
       consumption: policy.consumption,
+      reels: cloneReelCadence(policy.reels),
     };
   }
 
@@ -961,6 +1060,7 @@ export class FacebookOperationPolicyStore {
       expectedRevision: number;
       rule: FacebookRuleOperationParameters;
       consumption: FacebookConsumptionOperationParameters;
+      reels: FacebookGlobalReelCadenceParameters;
       slowStart: {
         totalDays: number;
         dailyCaps: FacebookSlowStartDailyCaps[];
@@ -981,7 +1081,10 @@ export class FacebookOperationPolicyStore {
     try {
       await client.query('BEGIN');
       const currentResult = await client.query<GlobalOperationPolicyDbRow>(
-        `SELECT execution_target,rule_views_per_like,rule_join_every_n_rounds,
+        `SELECT execution_target,persona_reel_views_per_like,
+                persona_reel_views_per_follow,slow_start_reel_views_per_follow,
+                rule_reel_views_per_follow,consumption_reel_views_per_follow,
+                rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
                 consumption_confirmed_joins_per_comment,slow_start_total_days,
                 slow_start_daily_caps,revision,updated_at,updated_by
@@ -1013,23 +1116,36 @@ export class FacebookOperationPolicyStore {
       const nextRevision = current.revision + 1;
       const writtenResult = await client.query<GlobalOperationPolicyDbRow>(
         `UPDATE facebook_operation_global_policy
-            SET rule_views_per_like=$2,
-                rule_join_every_n_rounds=$3,
-                consumption_views_per_like=$4,
-                consumption_confirmed_likes_per_join=$5,
-                consumption_confirmed_joins_per_comment=$6,
-                slow_start_total_days=$7,
-                slow_start_daily_caps=$8::jsonb,
-                revision=$9,
+            SET persona_reel_views_per_like=$2,
+                persona_reel_views_per_follow=$3,
+                slow_start_reel_views_per_follow=$4,
+                rule_reel_views_per_follow=$5,
+                consumption_reel_views_per_follow=$6,
+                rule_views_per_like=$7,
+                rule_join_every_n_rounds=$8,
+                consumption_views_per_like=$9,
+                consumption_confirmed_likes_per_join=$10,
+                consumption_confirmed_joins_per_comment=$11,
+                slow_start_total_days=$12,
+                slow_start_daily_caps=$13::jsonb,
+                revision=$14,
                 updated_at=now(),
-                updated_by=$10
+                updated_by=$15
           WHERE execution_target=$1
-          RETURNING execution_target,rule_views_per_like,rule_join_every_n_rounds,
+          RETURNING execution_target,persona_reel_views_per_like,
+                    persona_reel_views_per_follow,slow_start_reel_views_per_follow,
+                    rule_reel_views_per_follow,consumption_reel_views_per_follow,
+                    rule_views_per_like,rule_join_every_n_rounds,
                     consumption_views_per_like,consumption_confirmed_likes_per_join,
                     consumption_confirmed_joins_per_comment,slow_start_total_days,
                     slow_start_daily_caps,revision,updated_at,updated_by`,
         [
           this.executionTarget,
+          input.reels.persona.viewsPerLike,
+          input.reels.persona.viewsPerFollow,
+          input.reels.slowStart.viewsPerFollow,
+          input.reels.rule.viewsPerFollow,
+          input.reels.consumption.viewsPerFollow,
           input.rule.viewsPerLike,
           input.rule.joinEveryNRounds,
           input.consumption.viewsPerLike,
@@ -1912,6 +2028,9 @@ export class FacebookOperationPolicyStore {
         confirmedLikesPerJoin: Number(row.consumption_confirmed_likes_per_join),
         confirmedJoinsPerComment: Number(row.consumption_confirmed_joins_per_comment),
       },
+      reels: cloneReelCadence(
+        (this.globalPolicy ?? defaultGlobalPolicy(this.executionTarget ?? 'dev')).reels,
+      ),
       updatedAt: asIso(row.updated_at),
       updatedBy: row.updated_by ?? null,
     };
@@ -1945,6 +2064,21 @@ export class FacebookOperationPolicyStore {
         confirmedLikesPerJoin: Number(row.consumption_confirmed_likes_per_join),
         confirmedJoinsPerComment: Number(row.consumption_confirmed_joins_per_comment),
       },
+      reels: {
+        persona: {
+          viewsPerLike: Number(row.persona_reel_views_per_like),
+          viewsPerFollow: Number(row.persona_reel_views_per_follow),
+        },
+        slowStart: {
+          viewsPerFollow: Number(row.slow_start_reel_views_per_follow),
+        },
+        rule: {
+          viewsPerFollow: Number(row.rule_reel_views_per_follow),
+        },
+        consumption: {
+          viewsPerFollow: Number(row.consumption_reel_views_per_follow),
+        },
+      },
       slowStart: { totalDays, dailyCaps },
       bounds: FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS,
       updatedAt: asIso(row.updated_at),
@@ -1959,6 +2093,7 @@ export class FacebookOperationPolicyStore {
       ...policy,
       rule: { ...policy.rule },
       consumption: { ...policy.consumption },
+      reels: cloneReelCadence(policy.reels),
       slowStart: {
         totalDays: policy.slowStart.totalDays,
         dailyCaps: policy.slowStart.dailyCaps.map((row) => ({ ...row })),
@@ -1973,6 +2108,7 @@ export class FacebookOperationPolicyStore {
       executionTarget: policy.executionTarget,
       rule: policy.rule,
       consumption: policy.consumption,
+      reels: policy.reels,
       slowStart: policy.slowStart,
       schemaVersion: policy.schemaVersion,
       revision: policy.revision,

@@ -1075,6 +1075,7 @@ function createRequestHandler(
           'expectedRevision',
           'rule',
           'consumption',
+          'reels',
           'slowStart',
           ...('reason' in body ? ['reason'] : []),
         ])
@@ -1087,6 +1088,21 @@ function createRequestHandler(
           'confirmedLikesPerJoin',
           'confirmedJoinsPerComment',
         ])
+        || !isRecord(body.reels)
+        || !hasExactlyKeys(body.reels, [
+          'persona',
+          'slowStart',
+          'rule',
+          'consumption',
+        ])
+        || !isRecord(body.reels.persona)
+        || !hasExactlyKeys(body.reels.persona, ['viewsPerLike', 'viewsPerFollow'])
+        || !isRecord(body.reels.slowStart)
+        || !hasExactlyKeys(body.reels.slowStart, ['viewsPerFollow'])
+        || !isRecord(body.reels.rule)
+        || !hasExactlyKeys(body.reels.rule, ['viewsPerFollow'])
+        || !isRecord(body.reels.consumption)
+        || !hasExactlyKeys(body.reels.consumption, ['viewsPerFollow'])
         || !isRecord(body.slowStart)
         || !hasExactlyKeys(body.slowStart, ['totalDays', 'dailyCaps'])
         || !Array.isArray(body.slowStart.dailyCaps)
@@ -1109,6 +1125,12 @@ function createRequestHandler(
             viewsPerLike: number;
             confirmedLikesPerJoin: number;
             confirmedJoinsPerComment: number;
+          },
+          reels: body.reels as {
+            persona: { viewsPerLike: number; viewsPerFollow: number };
+            slowStart: { viewsPerFollow: number };
+            rule: { viewsPerFollow: number };
+            consumption: { viewsPerFollow: number };
           },
           slowStart: body.slowStart as {
             totalDays: number;

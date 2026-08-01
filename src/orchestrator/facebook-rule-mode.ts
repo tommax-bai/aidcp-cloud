@@ -15,6 +15,11 @@ export interface FacebookRuleModeDecision {
   policyRevision?: number;
   rulePolicy?: FacebookRulePolicySnapshot;
   consumptionPolicy?: FacebookConsumptionPolicySnapshot;
+  /** Global-only Reel cadence for the already-arbitrated effective mode. */
+  reelCadence?: {
+    viewsPerLike?: number;
+    viewsPerFollow: number;
+  };
 }
 
 /**

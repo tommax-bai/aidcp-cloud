@@ -10,6 +10,10 @@ const globalMigrationUrl = new URL(
   '../../migrations/0103_facebook_operation_global_policy.sql',
   import.meta.url,
 );
+const reelCadenceMigrationUrl = new URL(
+  '../../migrations/0104_facebook_reel_mode_cadence.sql',
+  import.meta.url,
+);
 
 describe('facebook operation policy migration', () => {
   it('allocates a global revision after the fixed schema version in every seed row', async () => {
@@ -66,6 +70,28 @@ describe('facebook operation policy migration', () => {
     assert.match(
       sql,
       /slow_start_total_days[\s\S]*CHECK \(slow_start_total_days BETWEEN 1 AND 30\)/,
+    );
+  });
+
+  it('adds only global Reel cadence fields with safe defaults for every Facebook mode', async () => {
+    const sql = await readFile(reelCadenceMigrationUrl, 'utf8');
+    assert.match(
+      sql,
+      /ALTER TABLE facebook_operation_global_policy[\s\S]*ADD COLUMN IF NOT EXISTS persona_reel_views_per_like[\s\S]*DEFAULT 4/,
+    );
+    assert.match(sql, /persona_reel_views_per_follow[\s\S]*DEFAULT 10/);
+    assert.match(sql, /slow_start_reel_views_per_follow[\s\S]*DEFAULT 15/);
+    assert.match(sql, /rule_reel_views_per_follow[\s\S]*DEFAULT 15/);
+    assert.match(sql, /consumption_reel_views_per_follow[\s\S]*DEFAULT 15/);
+    assert.match(
+      sql,
+      /CHECK \(persona_reel_views_per_like BETWEEN 1 AND 100\)/,
+      'all cadence values must remain bounded before runtime reads them',
+    );
+    assert.doesNotMatch(
+      sql,
+      /ALTER TABLE facebook_operation_policy\b/,
+      'Reel cadence is global-only and must not add environment override columns',
     );
   });
 });

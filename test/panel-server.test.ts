@@ -320,6 +320,12 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
       requestId: string;
       expectedRevision: number;
       slowStart: { totalDays: number };
+      reels: {
+        persona: { viewsPerLike: number; viewsPerFollow: number };
+        slowStart: { viewsPerFollow: number };
+        rule: { viewsPerFollow: number };
+        consumption: { viewsPerFollow: number };
+      };
     };
     actor: string;
   }> = [];
@@ -376,12 +382,18 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
   const globalView = (): FacebookOperationGlobalPolicyView => ({
     executionTarget: 'dev' as const,
     revision: globalRevision,
-    schemaVersion: 'facebook-operation-global-policy/v1',
+    schemaVersion: 'facebook_operation_global_policy@2',
     rule: { viewsPerLike: 5, joinEveryNRounds: 2 },
     consumption: {
       viewsPerLike: 5,
       confirmedLikesPerJoin: 2,
       confirmedJoinsPerComment: 2,
+    },
+    reels: {
+      persona: { viewsPerLike: 4, viewsPerFollow: 10 },
+      slowStart: { viewsPerFollow: 15 },
+      rule: { viewsPerFollow: 15 },
+      consumption: { viewsPerFollow: 15 },
     },
     slowStart: {
       totalDays: 7,
@@ -405,6 +417,21 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
         viewsPerLike: { min: 1, max: 100, default: 5 },
         confirmedLikesPerJoin: { min: 1, max: 20, default: 2 },
         confirmedJoinsPerComment: { min: 1, max: 20, default: 2 },
+      },
+      reels: {
+        persona: {
+          viewsPerLike: { min: 1, max: 100, default: 4 },
+          viewsPerFollow: { min: 1, max: 100, default: 10 },
+        },
+        slowStart: {
+          viewsPerFollow: { min: 1, max: 100, default: 15 },
+        },
+        rule: {
+          viewsPerFollow: { min: 1, max: 100, default: 15 },
+        },
+        consumption: {
+          viewsPerFollow: { min: 1, max: 100, default: 15 },
+        },
       },
       slowStart: {
         totalDays: { min: 1, max: 30, default: 7 },
@@ -592,6 +619,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
         expectedRevision: 2,
         rule: globalPayload.rule,
         consumption: globalPayload.consumption,
+        reels: globalPayload.reels,
         slowStart: globalPayload.slowStart,
         reason: 'update target defaults',
       }),
@@ -603,6 +631,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
     );
     assert.equal(globalWrites[0]?.actor, 'panel:alice');
     assert.equal(globalWrites[0]?.input.slowStart.totalDays, 7);
+    assert.deepEqual(globalWrites[0]?.input.reels, globalPayload.reels);
     assert.match(globalWrites[0]?.input.requestId ?? '', /^[0-9a-f-]{36}$/);
 
     const staleGlobal = await fetch(`${base}/api/facebook/operation-global-policy`, {
@@ -612,6 +641,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
         expectedRevision: 2,
         rule: globalPayload.rule,
         consumption: globalPayload.consumption,
+        reels: globalPayload.reels,
         slowStart: globalPayload.slowStart,
       }),
     });

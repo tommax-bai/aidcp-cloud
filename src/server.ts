@@ -7138,11 +7138,21 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         personaBinding: personaStore.bindingFor(accountId),
         slowStart: ctx.controller.slowStartView(),
       });
+      const reelCadence = decision.mode === 'persona'
+        ? policy.reels.persona
+        : decision.mode === 'slow_start'
+          ? policy.reels.slowStart
+          : decision.mode === 'facebook_rule'
+            ? policy.reels.rule
+            : decision.mode === 'consumption'
+              ? policy.reels.consumption
+              : undefined;
       return {
         ...decision,
         policyRevision: policy.policyRevision,
         rulePolicy: policy.rule,
         consumptionPolicy: policy.consumption,
+        ...(reelCadence ? { reelCadence: { ...reelCadence } } : {}),
       };
     };
     return new RoleDispatcher({
