@@ -23,10 +23,12 @@ const { Pool } = pg;
 // FacebookContainer / FacebookCommentMode / EffectiveFacebookCommentConfig 纯数据模型抬入 kernel
 // （change decouple-longtail-sweep）供 automation 侧评论调度器跨边界共导；本文件从 kernel 导入并等值再导出，
 // 令既有消费方无感。**对人展示一律用 name（缺则「待识别」占位），绝不展示 url 里的 id**（id 对人无辨识度）。
-import type {
-  FacebookContainer,
-  FacebookCommentMode,
-  EffectiveFacebookCommentConfig,
+import {
+  coerceFacebookCommentMode,
+  resolveEffectiveFacebookCommentConfig,
+  type FacebookContainer,
+  type FacebookCommentMode,
+  type EffectiveFacebookCommentConfig,
 } from '../kernel/facebook-comment-config-types.js';
 export type { FacebookContainer, FacebookCommentMode, EffectiveFacebookCommentConfig };
 
@@ -117,9 +119,8 @@ function sanitizeInput(raw: string[] | undefined): string[] | null | undefined {
   return coerceList(raw);
 }
 
-function coerceCommentMode(raw: unknown): FacebookCommentMode {
-  return raw === 'template' ? 'template' : 'generated';
-}
+/** 库列 → 领域写法：实现在 kernel 只此一份（同步读快照的发布方调同一个）。 */
+const coerceCommentMode = coerceFacebookCommentMode;
 
 function sanitizeCommentMode(raw: FacebookCommentMode | undefined): FacebookCommentMode | null | undefined {
   if (raw === undefined) return undefined;
@@ -243,16 +244,12 @@ export class FacebookCommentConfigStore {
     );
   }
 
-  /** 调度器消费点：正文来源 fail-closed；关键词为空是首帖模式，目标群由 joined ledger 另行选择。 */
+  /**
+   * 调度器消费点：正文来源 fail-closed；关键词为空是首帖模式，目标群由 joined ledger 另行选择。
+   * 判定在 kernel 只此一份，automation 进程按同步读快照问的是同一个函数。
+   */
   effectiveConfigFor(accountId: string): EffectiveFacebookCommentConfig {
-    const row = this.getForAccount(accountId);
-    return {
-      enabled: true,
-      keywords: row.keywords,
-      containers: row.containers,
-      commentMode: row.commentModeConfigured ? row.commentMode : 'template',
-      commentTemplates: row.commentTemplates,
-    };
+    return resolveEffectiveFacebookCommentConfig(this.getForAccount(accountId));
   }
 
   /**

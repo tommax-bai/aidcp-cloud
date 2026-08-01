@@ -35,9 +35,17 @@ import {
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 import {
   CONTENT_SCHEDULE_ACTION_MODES,
+  actionModeEnabled,
   type ContentScheduleActionMode,
   type ContentScheduleApprovalMode,
 } from '../kernel/content-schedule-mode.js';
+import {
+  resolveEffectiveActiveWeekMask,
+  resolveEffectiveContentActiveMask,
+  resolveEffectiveContentSchedule,
+  type ContentScheduleGlobalFacts,
+  type EffectiveContentSchedule,
+} from '../kernel/content-schedule-resolution.js';
 import type {
   AutomationConfigCommandsPort,
   ContactCommentAttemptAudit,
@@ -80,8 +88,10 @@ export const CONTENT_POST_DAILY_CAP_MAX = SCHEDULED_CONTENT_DAILY_CAP_MAX;
 /** 联系评论日上限硬上界（change content-schedule-group-comments）：协同 spam 敏感动作，与 50 刻意分开；UI 建议 ≤3。 */
 export const CONTACT_COMMENT_DAILY_CAP_MAX = SCHEDULED_CONTACT_COMMENT_DAILY_CAP_MAX;
 
-export { CONTENT_SCHEDULE_ACTION_MODES };
+export { CONTENT_SCHEDULE_ACTION_MODES, actionModeEnabled };
 export type { ContentScheduleActionMode, ContentScheduleApprovalMode };
+// 生效排期的形状与解析都已抬入 kernel（automation 进程按同步读快照问同一份）；此处等值再导出，既有消费方无感。
+export type { EffectiveContentSchedule };
 
 /** 全局「内容可自动时段」行。contentActiveMask：168 格 '0'/'1'；null = 未配 = 全 0 = 不自动（fail-closed）。 */
 export interface ContentScheduleGlobalRow {
@@ -225,24 +235,6 @@ export interface FacebookJoinGroupAutomationCatalogView {
   } | null;
   updatedAt: string | null;
   updatedBy: string | null;
-}
-
-/** 调度器每 tick 现读的生效排期（effectiveMask 已解析：override ?? global）。 */
-export interface EffectiveContentSchedule {
-  autoEnabled: boolean;
-  postEnabled: boolean;
-  postMode: ContentScheduleActionMode;
-  postDailyCap: number;
-  commentEnabled: boolean;
-  commentMode: ContentScheduleActionMode;
-  commentDailyCap: number;
-  contactCommentEnabled: boolean;
-  contactCommentMode: ContentScheduleActionMode;
-  contactCommentDailyCap: number;
-  /** 账号生效活跃掩码；null = 全周全天活跃。 */
-  effectiveActiveWeekMask: string | null;
-  /** 账号生效内容掩码；旧名保留以避免调度协议面漂移。 */
-  effectiveMask: string | null;
 }
 
 export interface ContentScheduleGlobalPatch {
@@ -438,9 +430,6 @@ export function actionModeFromEnabled(enabled: boolean): ContentScheduleActionMo
   return enabled ? 'review' : 'off';
 }
 
-export function actionModeEnabled(mode: ContentScheduleActionMode): mode is ContentScheduleApprovalMode {
-  return mode !== 'off';
-}
 
 const ACTION_PATCH_FIELDS: Record<
   Exclude<ScheduledAutomationAction, 'join_group'>,
@@ -633,24 +622,34 @@ export class ContentScheduleStore {
   }
 
   /**
-   * 全局活跃周历的**唯一解析点**（task 5.3）：automation 侧现读与 api 侧面板目录投影共用它，
-   * 保证「面板显示的生效掩码」= 「闸实际按的生效掩码」。MUST NOT 在别处另写一份等价逻辑。
+   * 解析所需的全局侧事实。活跃掩码来自注入的只读 provider（会话配置，automation 属主），
+   * 内容掩码来自本 store 的全局行；两者形状与 automation 进程从同步读快照拿到的完全一致。
    */
-  private resolveGlobalActiveWeekMask(): string | null {
-    const globalMask = this.globalActiveWeekMask();
-    return isValidWeekActiveMask(globalMask) ? globalMask : null;
+  private globalScheduleFacts(): ContentScheduleGlobalFacts {
+    return {
+      activeWeekMask: this.globalActiveWeekMask(),
+      contentActiveMask: this.globalCache?.contentActiveMask ?? null,
+    };
   }
 
-  /** 账号活跃覆盖合法才优先；脏覆盖视为缺失并回落全局，绝不因坏值绕过更严格全局闸。 */
+  /**
+   * 全局活跃周历的**唯一解析点**（task 5.3）：automation 侧现读与 api 侧面板目录投影共用它，
+   * 保证「面板显示的生效掩码」= 「闸实际按的生效掩码」。
+   * 判定本身已抬入 kernel，MUST NOT 在别处另写一份等价逻辑。
+   */
   effectiveActiveWeekMaskFor(accountId: string): string | null {
-    const accountMask = this.accountCache.get(accountId)?.activeWeekMask;
-    if (isValidWeekActiveMask(accountMask)) return accountMask;
-    return this.resolveGlobalActiveWeekMask();
+    return resolveEffectiveActiveWeekMask(
+      this.accountCache.get(accountId)?.activeWeekMask,
+      this.globalActiveWeekMask(),
+    );
   }
 
   /** 账号内容覆盖按 null 继承；脏非空值原样交调度器 fail-closed 校验。 */
   effectiveContentActiveMaskFor(accountId: string): string | null {
-    return this.accountCache.get(accountId)?.contentActiveMask ?? this.globalCache?.contentActiveMask ?? null;
+    return resolveEffectiveContentActiveMask(
+      this.accountCache.get(accountId)?.contentActiveMask,
+      this.globalCache?.contentActiveMask,
+    );
   }
 
   /**
@@ -658,36 +657,10 @@ export class ContentScheduleStore {
    * effectiveMask = 账号覆盖 ?? 全局（唯一解析点）；fail-closed 校验由调用方（调度器）用 isValidWeekActiveMask + isWeekActiveAt 做。
    */
   effectiveScheduleFor(accountId: string): EffectiveContentSchedule {
-    const a = this.accountCache.get(accountId);
-    if (!a)
-      return {
-        autoEnabled: false,
-        postEnabled: false,
-        postMode: 'off',
-        postDailyCap: 0,
-        commentEnabled: false,
-        commentMode: 'off',
-        commentDailyCap: 0,
-        contactCommentEnabled: false,
-        contactCommentMode: 'off',
-        contactCommentDailyCap: 0,
-        effectiveActiveWeekMask: this.effectiveActiveWeekMaskFor(accountId),
-        effectiveMask: this.effectiveContentActiveMaskFor(accountId),
-      };
-    return {
-      autoEnabled: a.autoEnabled,
-      postEnabled: a.postEnabled,
-      postMode: a.postMode,
-      postDailyCap: a.postDailyCap,
-      commentEnabled: a.commentEnabled,
-      commentMode: a.commentMode,
-      commentDailyCap: a.commentDailyCap,
-      contactCommentEnabled: a.contactCommentEnabled,
-      contactCommentMode: a.contactCommentMode,
-      contactCommentDailyCap: a.contactCommentDailyCap,
-      effectiveActiveWeekMask: this.effectiveActiveWeekMaskFor(accountId),
-      effectiveMask: this.effectiveContentActiveMaskFor(accountId),
-    };
+    return resolveEffectiveContentSchedule(
+      this.accountCache.get(accountId) ?? null,
+      this.globalScheduleFacts(),
+    );
   }
 
   /**
@@ -969,10 +942,17 @@ export class ContentScheduleStore {
       const hasContentOverrideMask = r.content_active_mask != null;
       // 面板目录的生效掩码走与 automation 侧现读**同一个解析函数**（task 5.3）：
       // api 侧绝不另建 session_config_global 副本、绝不自行合成。
-      const effectiveActiveWeekMask = hasActiveOverrideMask
-        ? r.active_week_mask
-        : this.resolveGlobalActiveWeekMask();
-      const effectiveContentActiveMask = r.content_active_mask ?? this.globalCache?.contentActiveMask ?? null;
+      // 此处原先是就地展开的第二份等价写法（判据相同、只是写法不同）——批 E-2 把它按引用收口到
+      // kernel 那一份，否则「面板显示的生效掩码」与「闸实际按的生效掩码」漂开时不会报错。
+      const globalFacts = this.globalScheduleFacts();
+      const effectiveActiveWeekMask = resolveEffectiveActiveWeekMask(
+        r.active_week_mask,
+        globalFacts.activeWeekMask,
+      );
+      const effectiveContentActiveMask = resolveEffectiveContentActiveMask(
+        r.content_active_mask,
+        globalFacts.contentActiveMask,
+      );
       const postMode = actionModeFromDb(r.post_mode, r.post_enabled);
       const commentMode = actionModeFromDb(r.comment_mode, r.comment_enabled);
       const contactCommentMode = actionModeFromDb(r.contact_comment_mode, r.contact_comment_enabled);

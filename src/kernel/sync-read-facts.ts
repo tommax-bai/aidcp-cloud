@@ -1,6 +1,10 @@
 import type { DeploymentTarget } from '../deployment-target.js';
 import type { ConfigMirrorKey } from './config-mirror-bump-types.js';
 import {
+  FACEBOOK_COMMENT_MODE_WIRE_VALUES,
+  type FacebookCommentModeWire,
+} from './facebook-comment-config-types.js';
+import {
   SYNC_READ_CONTRACT_VERSION,
   SYNC_READ_STREAM_DEFINITIONS,
   type SyncReadJson,
@@ -133,7 +137,12 @@ export type FacebookCommentConfigSnapshot = {
       readonly url: string;
       readonly name?: string;
     }[];
-    readonly commentMode: string;
+    /**
+     * 线缆写法（复数 `templates`），**与领域写法单数 `template` 不同字面量**。
+     * 收窄自裸 `string`：跨进程消费方 MUST 经 `facebookCommentModeFromWire` 还原，
+     * 直接比较字面量会恒 false，且不报错——只是把模板正文静静换成生成式。
+     */
+    readonly commentMode: FacebookCommentModeWire;
     readonly commentModeConfigured: boolean;
     readonly commentTemplates: readonly string[];
   }[];
@@ -497,11 +506,20 @@ function isFacebookCommentAccount(value: unknown): boolean {
         (container.name === undefined ||
           typeof container.name === 'string'),
     ) &&
-    (value.commentMode === 'generated' ||
-      value.commentMode === 'templates') &&
+    isFacebookCommentModeWire(value.commentMode) &&
     typeof value.commentModeConfigured === 'boolean' &&
     Array.isArray(value.commentTemplates) &&
     value.commentTemplates.every(isNonEmptyString)
+  );
+}
+
+/** 线缆写法校验：取 kernel 那一份取值表，MUST NOT 在此另写字面量（写死会与发布方悄悄漂开）。 */
+function isFacebookCommentModeWire(
+  value: unknown,
+): value is FacebookCommentModeWire {
+  return (
+    typeof value === 'string' &&
+    (FACEBOOK_COMMENT_MODE_WIRE_VALUES as readonly string[]).includes(value)
   );
 }
 

@@ -1,7 +1,11 @@
 import type pg from 'pg';
 
 import type { DeploymentTarget } from '../deployment-target.js';
-import { DEFAULT_HOT_LEAD_GATE_CONFIG } from '../kernel/hot-lead-gate-config.js';
+import { resolveHotLeadGateConfig } from '../kernel/hot-lead-gate-config.js';
+import {
+  coerceFacebookCommentMode,
+  facebookCommentModeToWire,
+} from '../kernel/facebook-comment-config-types.js';
 import type { ConfigMirrorKey } from '../kernel/config-mirror-bump-types.js';
 import {
   makeSyncReadFactEnvelope,
@@ -278,15 +282,13 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
             WHERE id=1`,
         );
         const row = rows[0];
-        const value: HotLeadConfigSnapshot = {
-          maxAgeHours: positiveInt(row?.post_age_max_hours) ??
-            DEFAULT_HOT_LEAD_GATE_CONFIG.maxAgeHours,
-          velocityMin: positiveInt(row?.velocity_min) ??
-            DEFAULT_HOT_LEAD_GATE_CONFIG.velocityMin,
-          minLikeFloor: positiveInt(row?.min_like_floor) ??
-            DEFAULT_HOT_LEAD_GATE_CONFIG.minLikeFloor,
-          floorHours: DEFAULT_HOT_LEAD_GATE_CONFIG.floorHours,
-        };
+        // 逐项回落判定取 kernel 那一份：属主存储的现读口调的是同一个函数，
+        // 两处各写一份的现形方式不是报错，而是两个进程按不同阈值筛帖。
+        const value: HotLeadConfigSnapshot = resolveHotLeadGateConfig({
+          postAgeMaxHours: row?.post_age_max_hours,
+          velocityMin: row?.velocity_min,
+          minLikeFloor: row?.min_like_floor,
+        });
         return { cursor, value } as {
           cursor: string;
           value: SyncReadPayloadByStream[S];
@@ -312,8 +314,11 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
             accountId: row.account_id,
             keywords: stringList(row.keywords),
             containers: containerList(row.containers),
-            commentMode:
-              row.comment_mode === 'template' ? 'templates' : 'generated',
+            // 库列（单数 template）→ 领域 → 线缆（复数 templates）：两跳都取 kernel 的具名出口，
+            // 别在此写字面量——线缆与领域刻意不同字面量，手写一份漂了不报错。
+            commentMode: facebookCommentModeToWire(
+              coerceFacebookCommentMode(row.comment_mode),
+            ),
             commentModeConfigured: row.comment_mode_configured === true,
             commentTemplates: stringList(row.comment_templates),
           })),
@@ -403,12 +408,6 @@ function actionMode(
     : enabled
       ? 'review'
       : 'off';
-}
-
-function positiveInt(value: number | string | null | undefined): number | null {
-  if (value === null || value === undefined) return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function stringList(value: unknown): string[] {

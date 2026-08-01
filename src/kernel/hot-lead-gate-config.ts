@@ -22,3 +22,42 @@ export const DEFAULT_HOT_LEAD_GATE_CONFIG: HotLeadGateConfig = {
   minLikeFloor: 500,
   floorHours: 1,
 };
+
+/** 全局覆盖行（三列各自可空；null = 未覆盖、回落写死默认）。`floorHours` 不进 UI、恒用代码默认。 */
+export interface HotLeadConfigOverrides {
+  readonly postAgeMaxHours: number | string | null | undefined;
+  readonly velocityMin: number | string | null | undefined;
+  readonly minLikeFloor: number | string | null | undefined;
+}
+
+/** 有效覆盖值：>= 1 的有限整数（0 / 负数 / 非整 / NaN 视作缺 → 回落写死默认）。 */
+export function hotLeadOverrideValue(
+  raw: number | string | null | undefined,
+): number | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const n = typeof raw === 'string' ? Number(raw) : raw;
+  if (!Number.isInteger(n) || n < 1) return undefined;
+  return n;
+}
+
+/**
+ * 「覆盖行 → 生效闸配置」的**纯判定段**：逐项回落写死默认，永不抛。
+ * 属主存储的现读口与同步读快照的发布口都调它——各写一份的现形方式不是报错，
+ * 而是两个进程对同一张表算出不同的阈值，而两侧测试都会绿。
+ */
+export function resolveHotLeadGateConfig(
+  overrides: HotLeadConfigOverrides | null | undefined,
+): HotLeadGateConfig {
+  return {
+    maxAgeHours:
+      hotLeadOverrideValue(overrides?.postAgeMaxHours) ??
+      DEFAULT_HOT_LEAD_GATE_CONFIG.maxAgeHours,
+    velocityMin:
+      hotLeadOverrideValue(overrides?.velocityMin) ??
+      DEFAULT_HOT_LEAD_GATE_CONFIG.velocityMin,
+    minLikeFloor:
+      hotLeadOverrideValue(overrides?.minLikeFloor) ??
+      DEFAULT_HOT_LEAD_GATE_CONFIG.minLikeFloor,
+    floorHours: DEFAULT_HOT_LEAD_GATE_CONFIG.floorHours,
+  };
+}

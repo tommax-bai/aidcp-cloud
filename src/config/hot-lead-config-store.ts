@@ -15,7 +15,11 @@
 import pg from 'pg';
 import { DEFAULT_PG_CONFIG } from '../kernel/pg-config.js';
 import { writeWithMirrorBump, type MirrorVersionBumper } from './mirror-version-store.js';
-import { DEFAULT_HOT_LEAD_GATE_CONFIG, type HotLeadGateConfig } from '../kernel/hot-lead-gate-config.js';
+import {
+  hotLeadOverrideValue,
+  resolveHotLeadGateConfig,
+  type HotLeadGateConfig,
+} from '../kernel/hot-lead-gate-config.js';
 import type { SchemaEnsurer } from '../kernel/schema-capability-contract.js';
 
 const { Pool } = pg;
@@ -68,13 +72,11 @@ interface DbRow {
   updated_by: string | null;
 }
 
-/** 有效覆盖值：>= 1 的有限整数（0/负数/非整/NaN 视作缺 → 回落写死默认）。 */
-export function validPositiveInt(raw: number | string | null | undefined): number | undefined {
-  if (raw === null || raw === undefined) return undefined;
-  const n = typeof raw === 'string' ? Number(raw) : raw;
-  if (!Number.isInteger(n) || n < 1) return undefined;
-  return n;
-}
+/**
+ * 有效覆盖值：>= 1 的有限整数（0/负数/非整/NaN 视作缺 → 回落写死默认）。
+ * 实现已抬入 kernel（同步读快照的发布方也要用同一份），此处只等值再导出、既有消费方无感。
+ */
+export const validPositiveInt = hotLeadOverrideValue;
 
 export class HotLeadConfigStore {
   private readonly pool: pg.Pool;
@@ -131,14 +133,12 @@ export class HotLeadConfigStore {
     };
   }
 
-  /** 判定角色现读的过滤闸配置：库内合法覆盖优先、逐项回落写死默认（floorHours 恒用代码默认）。永不抛。 */
+  /**
+   * 判定角色现读的过滤闸配置：库内合法覆盖优先、逐项回落写死默认（floorHours 恒用代码默认）。永不抛。
+   * 判定本身在 kernel 只此一份，同步读快照的发布方调的是同一个函数。
+   */
   getGateConfig(): HotLeadGateConfig {
-    return {
-      maxAgeHours: validPositiveInt(this.cache?.postAgeMaxHours) ?? DEFAULT_HOT_LEAD_GATE_CONFIG.maxAgeHours,
-      velocityMin: validPositiveInt(this.cache?.velocityMin) ?? DEFAULT_HOT_LEAD_GATE_CONFIG.velocityMin,
-      minLikeFloor: validPositiveInt(this.cache?.minLikeFloor) ?? DEFAULT_HOT_LEAD_GATE_CONFIG.minLikeFloor,
-      floorHours: DEFAULT_HOT_LEAD_GATE_CONFIG.floorHours,
-    };
+    return resolveHotLeadGateConfig(this.cache);
   }
 
   /** 取全局覆盖行（无行 undefined，面板审计 / overridden 判定用）。 */

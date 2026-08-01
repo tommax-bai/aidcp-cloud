@@ -1195,6 +1195,11 @@
     "note": "【待定稿裁决】change bulk-lift-all-shared-types 从 src/config/content-schedule-store.ts 析出：CONTENT_SCHEDULE_ACTION_MODES 常量 + ContentScheduleActionMode/ContentScheduleApprovalMode 纯类型，零 import、零 SQL、零活状态。排期存储（含建表读写 SQL）留 content-schedule-store.ts。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK2"
   },
   {
+    "path": "src/kernel/content-schedule-resolution.ts",
+    "layer": "kernel",
+    "note": "change split-cloud-automation-production-runtime 批 E-2 步骤 1（用户 2026-08-01 拍板走「析出纯判定段进 kernel」，与配置副本停手闸那次同一条路）：从 src/config/content-schedule-store.ts（api）析出「给定快照 + 账号 → 生效排期」纯段（EffectiveContentSchedule 形状 + resolveEffectiveContentSchedule / resolveEffectiveActiveWeekMask / resolveEffectiveContentActiveMask）。存储残壳留 api 并等值再导出，既有消费方零改动。拆仓后 api 进程按内存镜像问、automation 进程按同步读快照问同一个问题，各写一份的现形方式不是报错而是两侧对同一账号算出不同生效时段。仅 import kernel（content-schedule-mode / week-active-mask），零 SQL / HTTP / LLM / 模块级 Set|Map / 活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-E2-1"
+  },
+  {
     "path": "src/kernel/content-visual-brief.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/content-visual-brief.ts 整体 git mv：整文件为正文视觉 brief 的纯归一/兜底/格式化函数与纯数据（normalizeContentVisualBrief / ensureContentVisualCategory / createFallbackContentVisualBrief / formatContentVisualCategoryBrief / categorySafetyInstruction / inferContentVisualKind / CONTENT_VISUAL_CATEGORY_LABELS 等），唯一 import 为 kernel 的 visual-reference-types 类型。零 SQL / HTTP / LLM / 模块级 Set-Map（nonEmpty 内的 new Set 为函数体局部量、非模块级单例）。原路径 publish-agent/content-visual-brief.ts 保留为 re-export 桩，content 层内部消费方无感。为 visual-fidelity-audit-prompt 能进 kernel 而抬入（其构建依赖本文件两个格式化函数）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
