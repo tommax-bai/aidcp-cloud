@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runTargetedCommentTask } from '../../src/comment-agent/comment-task-runner.js';
-import type { NoteForComment, TargetedCommentSteps } from '../../src/comment-agent/comment-task-runner.js';
+import type { CommentPostResult, NoteForComment, TargetedCommentSteps } from '../../src/comment-agent/comment-task-runner.js';
 import type { CommentCandidateCard } from '../../src/agents/comment-target-picker.js';
 
 const silent = { log: () => {}, warn: () => {} };
@@ -26,6 +26,7 @@ interface StubConfig {
   composeText?: string | null;
   contactInfo?: string | null;
   postOk?: boolean;
+  postResult?: CommentPostResult;
 }
 
 function makeSteps(cfg: StubConfig) {
@@ -62,7 +63,9 @@ function makeSteps(cfg: StubConfig) {
     post: async (noteId) => {
       calls.post.push(noteId);
       // 7.6 三态：postOk 缺省/true → confirmed（写去重）；false → not_dispatched（→ post_failed）。
-      return (cfg.postOk ?? true) ? { status: 'confirmed' as const } : { status: 'not_dispatched' as const };
+      return cfg.postResult ?? (
+        (cfg.postOk ?? true) ? { status: 'confirmed' as const } : { status: 'not_dispatched' as const }
+      );
     },
     recordCommented: async (noteId) => {
       calls.record.push(noteId);
@@ -183,6 +186,16 @@ test('发布未真成功 → post_failed，不记账', async () => {
   const r = await runTargetedCommentTask(steps, { noteId: 'target-1', searchTerm: 't' }, { logger: silent });
   assert.equal(r.outcome, 'post_failed');
   assert.deepEqual(calls.record, []); // 记账只挂真实回执
+});
+
+test('提交已派发但未确认 → submitted_unconfirmed，写去重且不重投', async () => {
+  const { steps, calls } = makeSteps({
+    harvests: [[card(0, 'target-1')]],
+    postResult: { status: 'submitted_unconfirmed' },
+  });
+  const r = await runTargetedCommentTask(steps, { noteId: 'target-1', searchTerm: 't' }, { logger: silent });
+  assert.equal(r.outcome, 'submitted_unconfirmed');
+  assert.deepEqual(calls.record, ['target-1']);
 });
 
 test('带联系方式：合并终稿含联系方式（text\\n联系方式），post 收到正文与联系方式分离', async () => {

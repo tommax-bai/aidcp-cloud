@@ -7,7 +7,7 @@
  *
  * 红线：
  *  - honest：边端离线（pushToEdges 送达 0）/ 超时无上报 → 该步空/失败，不假成功。
- *  - 去重：发布前滤掉本账号已评过的；发布**真回执 ok** 后才记一笔。
+ *  - 去重：发布前滤掉本账号已评过的；确认成功或提交已派发但结果未知后记一笔，后者不计确认成功。
  *  - 每步超时压在边端单步 ~30s 内（缺省 28s）。
  *  - 不读库越权：去重经注入的 dedup（已按账号绑定）。
  *
@@ -59,6 +59,16 @@ export interface EdgeCommentStepsDeps {
 
 const DEFAULT_STEP_TIMEOUT_MS = 28_000;
 const DEFAULT_MAX_CANDIDATES = 12;
+// 精确闭集：不能仅凭 submitted_ 前缀把未来未知语义升级成“提交已派发”。
+const SUBMITTED_UNKNOWN_COMMENT_REASONS: ReadonlySet<string> = new Set([
+  'submitted_unconfirmed',
+  'submitted_editor_not_cleared',
+  'submitted_ack_unreadable',
+]);
+
+function isSubmittedUnknownCommentReason(reason: string | undefined): boolean {
+  return reason !== undefined && SUBMITTED_UNKNOWN_COMMENT_REASONS.has(reason);
+}
 
 /**
  * 发命令并等待该连接私有总线上的下一条匹配上报（超时 / 边端离线 → null）。
@@ -354,7 +364,7 @@ export function buildEdgeCommentSteps(deps: EdgeCommentStepsDeps): {
       // 三态归一（7.6/HOLE-8）：确认成功 / 提交已派发未确认（可能已发出，写去重不重投）/ 被抢占（放弃本轮）/ 压根没发出。
       if (completed?.ok === true) return { status: 'confirmed' };
       const reason = completed?.reason;
-      if (reason === 'submitted_unconfirmed') return { status: 'submitted_unconfirmed' };
+      if (isSubmittedUnknownCommentReason(reason)) return { status: 'submitted_unconfirmed' };
       if (isPreemptionReason(reason)) return { status: 'preempted', reason };
       log.warn(`[comment-edge] 发评论 ${noteId} 未确认发出：${reason ?? '超时/边端离线'}`);
       return { status: 'not_dispatched', reason: reason ?? undefined };

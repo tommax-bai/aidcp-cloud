@@ -265,11 +265,27 @@ describe('buildEdgeCommentSteps', () => {
     assert.equal((await steps.post('a', 'x')).status, 'not_dispatched');
   });
 
-  it('7.6 post：ok:false + reason=submitted_unconfirmed → submitted_unconfirmed（可能已发出，上游写去重不重投）', async () => {
+  it('post：三个提交后不确定 reason 均归一为 submitted_unconfirmed（上游写去重不重投）', async () => {
+    for (const reason of [
+      'submitted_unconfirmed',
+      'submitted_editor_not_cleared',
+      'submitted_ack_unreadable',
+    ]) {
+      const bus = new EventBus();
+      const { pusher } = makeEnv(bus, { postOk: false, postReason: reason });
+      const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
+      assert.deepEqual(await steps.post('a', 'x'), { status: 'submitted_unconfirmed' }, reason);
+    }
+  });
+
+  it('post：未知失败 reason 仍为 not_dispatched，不凭 submitted_ 前缀升级语义', async () => {
     const bus = new EventBus();
-    const { pusher } = makeEnv(bus, { postOk: false, postReason: 'submitted_unconfirmed' });
+    const { pusher } = makeEnv(bus, { postOk: false, postReason: 'submitted_unknown_future_reason' });
     const steps = buildEdgeCommentSteps({ bus, pusher, edgeId: 'e1', dedup: makeDedup() });
-    assert.deepEqual(await steps.post('a', 'x'), { status: 'submitted_unconfirmed' });
+    assert.deepEqual(await steps.post('a', 'x'), {
+      status: 'not_dispatched',
+      reason: 'submitted_unknown_future_reason',
+    });
   });
 
   it('7.6 post：ok:false + reason=preempted_by_task → preempted（提交前被抢占，放弃本轮不写去重）', async () => {
