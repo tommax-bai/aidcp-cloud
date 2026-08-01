@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0105_facebook_primary_browse_surface';
+export const REQUIRED_SCHEMA_VERSION = '0106_automation_sync_read_facebook_operation_policy';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -182,8 +182,13 @@ export const REQUIRED_SCHEMA_VERSION = '0105_facebook_primary_browse_surface';
  *
  * 注：`0105_facebook_primary_browse_surface` 增加环境级 Feed/Reels 主入口权威及审计。
  * Facebook 浏览会话启动必须读到该权威，故 REQUIRED 与 KNOWN_MAX 抬到 0105。
+ *
+ * 注：`0106_automation_sync_read_facebook_operation_policy` 只放宽同步读检查点表的流名取值域，
+ * 收下新流 `facebook_operation_policy`。**REQUIRED 一并抬到 0106**：自动化消费者启动时
+ * 就会写这条流的检查点，没跑这条迁移的机器上进程直接起不来（约束拒收 → 启动期抛错），
+ * 所以它不是「早抬会埋雷」那一类，而是「不抬就起不来」的硬依赖。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0105_facebook_primary_browse_surface';
+export const KNOWN_MAX_SCHEMA_VERSION = '0106_automation_sync_read_facebook_operation_policy';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

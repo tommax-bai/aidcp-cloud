@@ -1,6 +1,6 @@
 // aidcp:test-owner=cloud
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { test } from 'node:test';
 
 import { loadMigrationFiles } from '../../src/schema/migration-files.js';
@@ -10,6 +10,10 @@ import {
   versionsForOwner,
 } from '../../src/schema/migration-owners.js';
 import { KNOWN_MAX_SCHEMA_VERSION } from '../../src/schema/schema-contract.js';
+import {
+  SYNC_READ_STREAM_DEFINITIONS,
+  type SyncReadStream,
+} from '../../src/kernel/sync-read-snapshot.js';
 
 const migrations = [
   {
@@ -123,10 +127,17 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!automation.includes('0104_facebook_reel_mode_cadence'));
   assert.ok(api.includes('0105_facebook_primary_browse_surface'));
   assert.ok(!automation.includes('0105_facebook_primary_browse_surface'));
+  // 同步读检查点表归 automation 属主库，故放宽其流名取值域的迁移只进 automation 组。
+  assert.ok(
+    automation.includes('0106_automation_sync_read_facebook_operation_policy'),
+  );
+  assert.ok(
+    !api.includes('0106_automation_sync_read_facebook_operation_policy'),
+  );
   // 每加一条迁移都要在这里同步抬。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0105_facebook_primary_browse_surface',
+    '0106_automation_sync_read_facebook_operation_policy',
   );
 });
 
@@ -189,4 +200,48 @@ test('0087 stores the B4 shared cursor on the shared projection state row', asyn
   assert.match(sql, /sync_read_source_as_of_ms IS NOT NULL/);
   assert.doesNotMatch(sql.replace(/^--.*$/gm, ''), /\bCREATE TABLE\b/);
   assert.doesNotMatch(sql.replace(/^--.*$/gm, ''), /\bDROP\b/i);
+});
+
+/**
+ * 检查点表的 CHECK 约束里那份流名清单，是同一份名单的**第四个手抄副本**
+ * （另三份：组装根自举名单、automation 私有组装根的消费流清单、镜像类的 apply 分支）。
+ *
+ * **前三份漏了会被 typecheck 或用例接住；这一份漏了只有真连库才现形** ——
+ * 实测代价是：进程起得来、快照也拉到了，写检查点时被约束拒收 → 启动期抛错 → 服务起不来。
+ * 批 E-2 步骤 2 就是这么让 dev 挂了一次（0106 是补的那条迁移）。
+ *
+ * 故这里按**流定义**算出应有集合去比对，而不是再写一份人肉清单。
+ */
+test('检查点表允许的流名 MUST 覆盖全部 automation 消费流（第四份手抄副本的防漂移闸）', async () => {
+  const files = (await readdir(new URL('../../migrations/', import.meta.url)))
+    .filter((name) => name.endsWith('.sql'))
+    .sort();
+  const allowed = new Set<string>();
+  for (const file of files) {
+    const sql = await readFile(
+      new URL(`../../migrations/${file}`, import.meta.url),
+      'utf8',
+    );
+    if (!sql.includes('automation_sync_read_consumer_checkpoint')) continue;
+    const block = sql.match(/stream\s+IN\s*\(([^)]*)\)/i);
+    if (!block) continue;
+    // 后一条迁移整体重建约束 ⇒ 以最后出现的那份为准。
+    allowed.clear();
+    for (const raw of block[1].split(',')) {
+      const name = raw.trim().replace(/^'|'$/g, '');
+      if (name) allowed.add(name);
+    }
+  }
+
+  const expected = (
+    Object.keys(SYNC_READ_STREAM_DEFINITIONS) as SyncReadStream[]
+  ).filter(
+    (stream) => SYNC_READ_STREAM_DEFINITIONS[stream].consumer === 'automation',
+  );
+  assert.deepEqual(
+    [...allowed].sort(),
+    [...expected].sort(),
+    '约束里的流名集合与 automation 消费流对不上 —— 少一条就是「进程起不来」，'
+      + '多一条是允许写入一个本进程根本不消费的流',
+  );
 });
