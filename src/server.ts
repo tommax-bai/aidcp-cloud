@@ -403,7 +403,10 @@ import {
   type ServiceMode,
 } from './gateway/service-mode.js';
 import { InternalHttpClient, InternalHttpServer, INTERNAL_HTTP_TIMEOUT_CEILING_MS } from './transport/internal-http.js';
-import { ApiSyncReadSnapshotSource } from './config/api-sync-read-source.js';
+import {
+  ApiSyncReadSnapshotSource,
+  createApiSyncReadSnapshotSource,
+} from './config/api-sync-read-source.js';
 import { ApiSyncReadMirrors } from './config/api-sync-read-mirrors.js';
 import { createApiSyncReadConsumerCheckpointStore } from './config/api-sync-read-checkpoint-store.js';
 import { AutomationSyncReadMirrors } from './transport/automation-sync-read-mirrors.js';
@@ -1535,7 +1538,7 @@ function createApiSyncReadSource(
   ctx: CompositionContext,
   executionTarget: 'dev' | 'ol',
 ): ApiSyncReadSnapshotSource {
-  return new ApiSyncReadSnapshotSource({
+  return createApiSyncReadSnapshotSource({
     executionTarget,
     pool: ctx.apiPool,
     parseSoul: (personaText) => {
@@ -1550,17 +1553,12 @@ function createApiSyncReadSource(
     // 取用口**在快照期才解**（不是装配期）：句柄由本段稍后赋值，装配期读必然 undefined。
     // 缺了就响亮抛 —— 回落空表等于告诉自动化进程「这台机器没有任何 Facebook 环境」，
     // 于是每个 FB 账号都被一个错误原因永久拦住。
-    facebookOperationBaselines: async () => {
-      const store = requireSegment(
+    facebookOperationPolicyStore: () =>
+      requireSegment(
         ctx.facebookOperationPolicyStore,
         'facebookOperationPolicyStore',
         'api',
-      );
-      // 发布前先按库回读：本进程的内存镜像可能落后于已经推进的版本游标，
-      // 那会发出「新游标 + 旧值」，消费方存下就再也不会重取。
-      await store.refreshFromAuthority();
-      return store.baselineProjections();
-    },
+      ),
   });
 }
 

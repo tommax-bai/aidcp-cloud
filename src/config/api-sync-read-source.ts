@@ -56,6 +56,40 @@ export interface ApiSyncReadSourceOptions {
   >;
 }
 
+export interface FacebookOperationPolicyBaselineStore {
+  refreshFromAuthority(): Promise<void>;
+  baselineProjections(): readonly FacebookOperationPolicyBaseProjection[];
+}
+
+export interface ApiSyncReadCompositionOptions extends Omit<
+  ApiSyncReadSourceOptions,
+  'facebookOperationBaselines'
+> {
+  /** Late-bound because segA assigns the store after the API source is described. */
+  facebookOperationPolicyStore(): FacebookOperationPolicyBaselineStore;
+}
+
+/**
+ * Production composition seam shared by monolith and `AIDCP_SERVICE=api`.
+ * Refreshing before projection prevents publishing a new cursor with stale
+ * policy data. Missing stores and refresh failures remain loud; an empty
+ * fallback would falsely mean that this deployment has no Facebook envs.
+ */
+export function createApiSyncReadSnapshotSource(
+  options: ApiSyncReadCompositionOptions,
+): ApiSyncReadSnapshotSource {
+  return new ApiSyncReadSnapshotSource({
+    executionTarget: options.executionTarget,
+    pool: options.pool,
+    parseSoul: options.parseSoul,
+    facebookOperationBaselines: async () => {
+      const store = options.facebookOperationPolicyStore();
+      await store.refreshFromAuthority();
+      return store.baselineProjections();
+    },
+  });
+}
+
 export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
   private readonly executionTarget: DeploymentTarget;
   private readonly pool: pg.Pool;
