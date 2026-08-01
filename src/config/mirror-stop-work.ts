@@ -18,17 +18,33 @@
  */
 
 import {
-  mirrorStateOf,
-  noteMirrorStaleRefusal,
+  configMirrorFreshnessSource,
   type ConfigMirrorKey,
 } from '../config-mirror-freshness.js';
+import { createConfigMirrorGate } from '../kernel/config-mirror-gate.js';
 import { CONFIG_MIRRORS, CONFIG_MIRROR_KEYS } from './mirror-registry.js';
+
+/**
+ * 本进程的闸门档镜像键（参数档永不入列——它们陈旧只告警、不停手）。
+ * 单体里 = 描述表里全部 gate 档；三等分后各进程只有自己那部分，故它是 kernel 工厂的**入参**。
+ */
+const GATE_MIRROR_KEYS: readonly ConfigMirrorKey[] = CONFIG_MIRROR_KEYS.filter(
+  (key) => CONFIG_MIRRORS[key].tier === 'gate',
+);
+
+/**
+ * 停手判定单写在 kernel 的无状态工厂里（定稿 §4.7 2026-08-01 裁决）：拆进程后自动化进程要判同一件事，
+ * 而它够不着本文件（api 属主，且依赖 api 属主的镜像描述表）。本文件保留的是**属主那一部分**——
+ * 哪些键属于闸门档，那是描述表说了算。
+ */
+const gate = createConfigMirrorGate({
+  source: configMirrorFreshnessSource,
+  gateMirrorKeys: GATE_MIRROR_KEYS,
+});
 
 /** 当前处于陈旧态的闸门镜像（参数镜像永不入列——它们陈旧只告警、不停手）。 */
 export function staleGateMirrors(): ConfigMirrorKey[] {
-  return CONFIG_MIRROR_KEYS.filter(
-    (key) => CONFIG_MIRRORS[key].tier === 'gate' && mirrorStateOf(key) === 'stale',
-  );
+  return gate.staleGateMirrors();
 }
 
 /**
@@ -46,11 +62,7 @@ import type { PlatformActionHalt } from '../kernel/config-mirror-bump-types.js';
  * **分别计数**，绝不混计。
  */
 export function platformActionHalt(context?: string): PlatformActionHalt {
-  const stale = staleGateMirrors();
-  const mirrorKey = stale[0];
-  if (!mirrorKey) return { halted: false };
-  noteMirrorStaleRefusal(mirrorKey, context);
-  return { halted: true, mirrorKey };
+  return gate.platformActionHalt(context);
 }
 
 /** 便捷判据（不需要知道是哪个镜像时用）。 */
@@ -64,7 +76,7 @@ export function shouldHaltNewPlatformActions(context?: string): boolean {
  * 真正拒绝的那一跳（会话启动闸、命令泵）自己调 `platformActionHalt` / `noteMirrorStaleRefusal`。
  */
 export function hasStaleGateMirror(): boolean {
-  return staleGateMirrors().length > 0;
+  return gate.hasStaleGateMirror();
 }
 
 

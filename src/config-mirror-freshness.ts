@@ -38,11 +38,37 @@ import type { ConfigMirrorKey } from './kernel/config-mirror-bump-types.js';
 export type { MirrorReadState, ConfigMirrorFreshnessSource } from './kernel/config-mirror-bump-types.js';
 import type { MirrorReadState, ConfigMirrorFreshnessSource } from './kernel/config-mirror-bump-types.js';
 
+import { createConfigMirrorGate } from './kernel/config-mirror-gate.js';
+
 let installedSource: ConfigMirrorFreshnessSource | null = null;
+
+/**
+ * 两条 fail-safe 策略（未安装 → fresh、事实源抛错 → 按 stale 收敛）**单写在 kernel 的无状态工厂里**
+ * （定稿 §4.7 2026-08-01 裁决）。理由是拆进程后出现了第二个读者：自动化进程要判同一件事，
+ * 而它够不着本文件（api 属主）。两边各写一份的现形方式不是报错，是**该停手的时候没停**。
+ *
+ * 本文件保留的正是**不能进 kernel 的那一部分**：上面那个模块级可变槽位。
+ * `source` 传闭包而非取值：装卸载（含秒级回滚）即时生效，与改造前逐位一致。
+ * 闸门键清单在本口用不到（本文件只做单键查询），故传空——`staleGateMirrors` 那一族在
+ * `src/config/mirror-stop-work.ts` 侧按镜像描述表给。
+ */
+const singleKeyGate = createConfigMirrorGate({
+  source: () => installedSource,
+  gateMirrorKeys: [],
+});
 
 /** 装配期安装事实源（传 null 卸载，供单测与秒级回滚）。 */
 export function installConfigMirrorFreshnessSource(source: ConfigMirrorFreshnessSource | null): void {
   installedSource = source;
+}
+
+/**
+ * 取当前事实源（未安装 → `null`）。**只供构造停手闸用**：
+ * MUST NOT 拿它直接做判定 —— 那会绕开 kernel 工厂里那两条 fail-safe 策略
+ * （未安装 → fresh、事实源抛错 → 按 stale 收敛），而绕开的后果不是报错，是判错。
+ */
+export function configMirrorFreshnessSource(): ConfigMirrorFreshnessSource | null {
+  return installedSource;
 }
 
 /** 当前是否已安装事实源（= 是否已按跨进程副本语义运行）。 */
@@ -52,26 +78,15 @@ export function isConfigMirrorFreshnessInstalled(): boolean {
 
 /** 同步、零 IO、永不抛：某镜像此刻的副本状态。未安装事实源 → `fresh`（见头注）。 */
 export function mirrorStateOf(mirrorKey: ConfigMirrorKey): MirrorReadState {
-  if (!installedSource) return 'fresh';
-  try {
-    return installedSource.stateOf(mirrorKey);
-  } catch {
-    // 查询口本身必须永不抛（热路径契约）。事实源异常时不敢断言新鲜——按 stale 收敛（停手侧安全）。
-    return 'stale';
-  }
+  return singleKeyGate.stateOf(mirrorKey);
 }
 
 /** 便捷判据。热路径大量调用，保持同步零 IO。 */
 export function isMirrorStale(mirrorKey: ConfigMirrorKey): boolean {
-  return mirrorStateOf(mirrorKey) === 'stale';
+  return singleKeyGate.isStale(mirrorKey);
 }
 
 /** 记一次「因镜像陈旧而拒绝」。永不抛——记账失败绝不能连累停手本身。 */
 export function noteMirrorStaleRefusal(mirrorKey: ConfigMirrorKey, context?: string): void {
-  if (!installedSource) return;
-  try {
-    installedSource.noteStaleRefusal(mirrorKey, context);
-  } catch {
-    /* 记账是可观测性，不是判定；吞掉 */
-  }
+  singleKeyGate.noteStaleRefusal(mirrorKey, context);
 }

@@ -1170,6 +1170,11 @@
     "note": "【待定稿裁决】change block3-l3-config-mirror-bump-decouple 抬入：跨域配置镜像失效通道的契约段（ConfigMirrorKey 闭集合纯类型 + MirrorQueryable/MirrorVersionBumper 接口 + writeWithMirrorBump「同一笔提交」包装 + ConfigMirrorBumpSink 消费端口）。原分散在 src/config-mirror-freshness.ts（ConfigMirrorKey）与 src/config/mirror-version-store.ts（api）；automation 属主的四个限频配置 store 与 api 属主的十余个配置 store 都要引用它们，留在任一属主域都必然造出跨域 import（原状即 4 条 automation->api 豁免）。只 import type pg 与同层 pg-owner-connection-resolver，无 SQL 字面量（BEGIN/COMMIT/ROLLBACK 是事务控制、不是 DML/DDL）、无 HTTP 路由、无 LLM、无进程内活状态、不反向依赖业务层。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
   },
   {
+    "path": "src/kernel/config-mirror-gate.ts",
+    "layer": "kernel",
+    "note": "定稿 §4.7 2026-08-01 裁决（change split-cloud-automation-production-runtime）：配置副本停手闸的纯判定段。拆进程后出现第二个读者——自动化进程要判同一件事而够不着 api 属主的实现；两边各写一份的现形方式不是报错，是该停手时没停。零 IO / 零定时器 / 零 SQL / 零模块级可变状态，KERNEL_ADMISSION_CHECKS 实跑通过。api 侧那两份保留属主并改为调它，7 个 api 消费方一行未改"
+  },
+  {
     "path": "src/kernel/config-panel-ports.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】P2-1 从 src/panel/types.ts 析出后台四张配置表（quota_config / pacing_floor_config / session_config_global / resume_config_global）的**窄写接口契约与纯载荷类型**（PanelQuotaConfig / PanelPacingConfig / PanelSessionLimits / PanelResumeConfig + 各自 View / PatchInput / SetResult + SessionInteractionBudget）。接口由 api 持有、由 automation 的四个外观实现，两侧都要引：留在 api 会让 automation 侧四个外观各造一条反向边。纯类型 + 接口，四禁全过，唯一 import 是同层 risk-read-types.js（档位/动作枚举不重抄第三份）；pacing 的 operation 按 §10.9 收窄成裸串、词表校验留 automation 外观。请求回写 §4.7 见 docpatch RK-P2-1"
