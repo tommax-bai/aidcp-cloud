@@ -498,3 +498,65 @@ test('manual billing refresh reports missing Aliyun billing credentials as aliyu
   assert.equal(result.skipped[0].provider, 'dashscope');
   assert.equal(result.skipped[0].reason, 'missing_credentials');
 });
+
+// ── 「库内读失败」与「库里没配」必须分得开（change split-cloud-automation-production-runtime，A-3）─────
+// 两者都回落 env、都可能落到 missing_credentials，回执上**看不出区别**。
+// 唯一的区别信号就是那行告警：没有它，属主侧漏注册 route 这类接线错误会长期
+// 伪装成「本来就没配」。下面两条一正一反，缺一条都钉不住这个区别。
+
+test('billing credential read FAILURE is reported, never swallowed as not-configured', async () => {
+  const warnings: string[] = [];
+  let calls = 0;
+  const refresh = createBillingPriceRefresh({
+    nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
+    env: {} as NodeJS.ProcessEnv,
+    logger: { warn: (msg: unknown) => warnings.push(String(msg)) },
+    credentials: {
+      getSecretForRuntime: async () => {
+        calls += 1;
+        throw new Error('unknown_route:provider-secret/get-for-runtime');
+      },
+    },
+    tokenUsage: {
+      billingPriceTargets: async () => [target()],
+      upsertBillingPrices: async () => {
+        throw new Error('must_not_write');
+      },
+    },
+  });
+
+  const result = await refresh.refresh();
+  // 回执与「真没配」完全一样 —— 这正是为什么区别只能靠日志。
+  assert.deepEqual(result.missingCredentials, ['aliyun']);
+  assert.ok(calls > 0, '前置：本用例必须真的调到库内读');
+  // **每一次失败都要有一行**：允许少报即等于允许静默。
+  assert.equal(warnings.length, calls);
+  for (const line of warnings) {
+    assert.match(line, /读失败/);
+    assert.match(line, /不代表库里没配/);
+    assert.match(line, /aliyun/);
+  }
+});
+
+test('billing credential genuinely absent stays quiet (otherwise the distinction is worthless)', async () => {
+  const warnings: string[] = [];
+  const refresh = createBillingPriceRefresh({
+    nowMs: () => Date.parse('2026-07-05T03:30:00.000Z'),
+    env: {} as NodeJS.ProcessEnv,
+    logger: { warn: (msg: unknown) => warnings.push(String(msg)) },
+    credentials: {
+      // 读成功、库里就是没有这一项 —— 端口契约里这是 null，不是异常。
+      getSecretForRuntime: async () => null,
+    },
+    tokenUsage: {
+      billingPriceTargets: async () => [target()],
+      upsertBillingPrices: async () => {
+        throw new Error('must_not_write');
+      },
+    },
+  });
+
+  const result = await refresh.refresh();
+  assert.deepEqual(result.missingCredentials, ['aliyun']);
+  assert.deepEqual(warnings, [], '没配不是失败：这里一旦也告警，上面那条就分不出任何东西了');
+});

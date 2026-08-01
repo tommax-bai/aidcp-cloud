@@ -34,6 +34,8 @@ export interface BillingPriceRefreshOptions {
   env?: NodeJS.ProcessEnv;
   fetch?: FetchLike;
   nowMs?: () => number;
+  /** 库内凭据读失败时的告警出口。缺省 console —— **不是**可选到「不告警」，见 readStoredBillingCredential。 */
+  logger?: Pick<Console, 'warn'>;
 }
 
 interface BillingCredentialPair {
@@ -60,6 +62,7 @@ export function createBillingPriceRefresh(options: BillingPriceRefreshOptions) {
   const runFetch = options.fetch ?? fetch;
   const env = options.env ?? process.env;
   const nowMs = options.nowMs ?? (() => Date.now());
+  const logger = options.logger ?? console;
 
   return {
     async refresh(): Promise<BillingPriceRefreshResult> {
@@ -93,7 +96,7 @@ export function createBillingPriceRefresh(options: BillingPriceRefreshOptions) {
           continue;
         }
 
-        const creds = await loadBillingCredentials(provider, options.credentials, env);
+        const creds = await loadBillingCredentials(provider, options.credentials, env, logger);
         if (!creds) {
           missingCredentials.add(provider === 'dashscope' ? 'aliyun' : provider);
           for (const target of targetsByProvider[provider]) skipped.push(skipOf(target, 'missing_credentials'));
@@ -188,6 +191,7 @@ async function loadBillingCredentials(
   provider: string,
   store: BillingPriceRefreshCredentials | undefined,
   env: NodeJS.ProcessEnv,
+  logger: Pick<Console, 'warn'>,
 ): Promise<BillingCredentialPair | null> {
   const aliases =
     provider === 'dashscope'
@@ -210,22 +214,40 @@ async function loadBillingCredentials(
           secretEnv: ['VOLCENGINE_BILLING_ACCESS_KEY_SECRET', 'VOLC_SECRETKEY', 'VOLCENGINE_ACCESS_KEY_SECRET'],
         };
   const accessKeyId =
-    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.idField)) ??
-    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.genericIdField)) ??
+    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.idField, logger)) ??
+    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.genericIdField, logger)) ??
     firstEnv(env, aliases.idEnv);
   const accessKeySecret =
-    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.secretField)) ??
-    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.genericSecretField)) ??
+    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.secretField, logger)) ??
+    (await readStoredBillingCredential(store, aliases.storeProvider, aliases.genericSecretField, logger)) ??
     firstEnv(env, aliases.secretEnv);
   return accessKeyId && accessKeySecret ? { accessKeyId, accessKeySecret } : null;
 }
 
+/**
+ * 库内凭据窄读。**「读失败」与「库里没配」必须分得开。**
+ *
+ * 两者都返回 `null` 并回落 env（回落本身保留：属主域抖一下就停掉计价刷新是过度反应），
+ * 但读失败 MUST 留下一行告警 —— 否则拆进程后属主侧路由没注册这类问题会长期表现为
+ * 「本来就没配」，链路悄悄不工作且零信号。跨进程口的文件头明写「失败原样抛」，
+ * 这里是唯一允许接住的地方，代价就是这行日志。
+ */
 async function readStoredBillingCredential(
   store: BillingPriceRefreshCredentials | undefined,
   provider: string,
   field: string,
+  logger: Pick<Console, 'warn'>,
 ): Promise<string | null> {
-  return (await store?.getSecretForRuntime(provider, field).catch(() => null)) ?? null;
+  if (!store) return null;
+  try {
+    return (await store.getSecretForRuntime(provider, field)) ?? null;
+  } catch (error) {
+    logger.warn(
+      `[billing-price] 库内凭据读失败（provider=${provider} field=${field}）⇒ 本次回落 env；` +
+        `这不代表库里没配：${(error as Error).message}`,
+    );
+    return null;
+  }
 }
 
 function firstEnv(env: NodeJS.ProcessEnv, keys: string[]): string | null {
