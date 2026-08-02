@@ -17,9 +17,13 @@ import { CuratedContentUnavailableError } from '../../src/kernel/curated-content
 import type { ConceptPoolPort } from '../../src/kernel/concept-pool-port.js';
 import type { CuratedSelectionPort } from '../../src/kernel/curated-selection-port.js';
 import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import type { CuratedPanelRow, CuratedTargetReader } from '../../src/kernel/curated-content-types.js';
 import {
   CONCEPT_POOL_AUTHORITY_ROUTES,
   CURATED_SELECTION_AUTHORITY_ROUTES,
+  CURATED_TARGET_AUTHORITY_ROUTES,
+  CuratedTargetAuthorityHttpClient,
+  registerCuratedTargetAuthorityRoutes,
   ConceptPoolAuthorityHttpClient,
   CuratedSelectionAuthorityHttpClient,
   CURATED_WRITE_AUTHORITY_ROUTES,
@@ -566,5 +570,122 @@ test('写侧回执：0 与 null 是领域答案，属主失败仍是具名抛出
         '非整数回执 MUST 判形状不符，MUST NOT 取 0',
       );
     },
+  );
+});
+
+/* ═══════════════════ 委托任务的精选目标校验（automation → content） */
+
+async function withCuratedTarget(
+  local: CuratedTargetReader,
+  run: (client: CuratedTargetReader) => Promise<void>,
+  opts: { serverTarget?: DeploymentTarget; clientTarget?: DeploymentTarget } = {},
+): Promise<void> {
+  const server = new InternalHttpServer();
+  registerCuratedTargetAuthorityRoutes(server, local, TOKEN, opts.serverTarget ?? 'dev');
+  const listening = await server.listen(0);
+  const http = new InternalHttpClient(`http://127.0.0.1:${listening}`);
+  try {
+    await run(new CuratedTargetAuthorityHttpClient(http, TOKEN, opts.clientTarget ?? 'dev'));
+  } finally {
+    await server.close();
+  }
+}
+
+function panelRow(): CuratedPanelRow {
+  return {
+    id: 7,
+    accountId: 'a1',
+    contentType: 'image_text',
+    sourceId: 'note-7',
+    title: '可定位标题',
+    body: null,
+    author: null,
+    sourceUrl: null,
+    topics: [],
+    likeCount: null,
+    collectCount: null,
+    commentCount: null,
+    countsCapturedAt: null,
+    sourcePublishedAtText: null,
+    sourcePublishedAt: null,
+    sourcePublishedAtPrecision: null,
+    sourcePublishedAtStatus: null,
+    sourcePublishedAtObservedAt: null,
+    botLiked: false,
+    botCollected: false,
+    admitReason: null,
+    firstSeenAt: 1,
+    updatedAt: 2,
+    referenceImages: [],
+  };
+}
+
+/**
+ * 委托任务的两个目标校验钩子据这条读判「目标存不存在 / 归不归这个账号 / 有没有可定位标题」，
+ * 所以三件事逐条钉：命中原样过、`null` 作为领域答案原样过、**属主失败 MUST 仍是具名抛出**。
+ *
+ * 第三条是这组端口存在的全部理由：走裸那条路由时，属主的缺表错误跨这一跳只剩一个普通传输错误，
+ * 调用方的守卫恒 false ⇒ 「精选库不可用」被报成「目标不存在或归属不符」，
+ * 而运营会照着那句话去查一个根本没问题的目标。
+ */
+test('精选目标校验：命中与 null 原样往返，属主失败仍是具名 ContentPortError', async () => {
+  await withCuratedTarget(
+    { getOneForAccount: async (id, accountId) => (id === 7 && accountId === 'a1' ? panelRow() : null) },
+    async (client) => {
+      assert.deepEqual(await client.getOneForAccount(7, 'a1'), panelRow());
+      assert.equal(await client.getOneForAccount(7, 'other'), null, 'null 是属主的领域答案，MUST 原样过');
+    },
+  );
+  await withCuratedTarget(
+    {
+      getOneForAccount: async () => {
+        throw new CuratedContentUnavailableError('curated_content missing');
+      },
+    },
+    async (client) => {
+      await assert.rejects(
+        () => client.getOneForAccount(7, 'a1'),
+        (err: unknown) => isContentPortError(err) && err.reason === 'remote_error',
+        '库读不到 MUST 抛具名失败，MUST NOT 变成 null（那是「这条不存在」的意思）',
+      );
+    },
+  );
+});
+
+/** 回执形状不符 MUST 抛，MUST NOT 兜底成 `null` —— 那会把契约漂移伪装成一句确定的「目标不存在」。 */
+test('精选目标校验：坏回执判形状不符，绝不兜底成 null', async () => {
+  const server = new InternalHttpServer();
+  server.registerBearer(
+    CURATED_TARGET_AUTHORITY_ROUTES.getOneForAccount,
+    TOKEN,
+    async () => ({ id: 7, accountId: 'a1' }),
+  );
+  const listening = await server.listen(0);
+  const http = new InternalHttpClient(`http://127.0.0.1:${listening}`);
+  try {
+    await assert.rejects(
+      () => new CuratedTargetAuthorityHttpClient(http, TOKEN, 'dev').getOneForAccount(7, 'a1'),
+      (err: unknown) => isContentPortError(err) && err.reason === 'malformed_response',
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+/** target 漂移当场被拒，且属主一次都没被调用（DEV/OL 长期共库，放过去就是在另一台机器上真读了）。 */
+test('精选目标校验：target 不符即拒，属主一次都不被调用', async () => {
+  let calls = 0;
+  await withCuratedTarget(
+    {
+      getOneForAccount: async () => {
+        calls += 1;
+        return panelRow();
+      },
+    },
+    async (client) => {
+      await assert.rejects(() => client.getOneForAccount(7, 'a1'));
+      assert.equal(calls, 0);
+    },
+    { serverTarget: 'dev', clientTarget: 'ol' },
   );
 });

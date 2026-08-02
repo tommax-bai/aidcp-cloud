@@ -333,6 +333,26 @@ export interface CuratedContentReader {
   getOneForAccount(id: number, accountId: string): Promise<CuratedPanelRow | null>;
 }
 
+/**
+ * 委托任务**目标校验**用的窄读面：只按「精选条目 id + 账号」取一行。
+ *
+ * **它与上面那个 reader 是同一条读，分出来是为了分开跨进程的那一跳**：
+ * `CuratedContentReader` 今天由 `curated-content-http.ts` 那组**裸形态**路由承载
+ * （无 Bearer、无信封、无 executionTarget 校验，且客户端是光秃秃的 `http.call`），
+ * 那组的现役消费方只有 `DataGateway` 的 `gatewayMode === 'http'` 旁路。
+ *
+ * **委托任务不能走那一条，理由是失败语义、不是风格**（change
+ * split-cloud-automation-production-runtime 2026-08-04 裁决）：目标校验的两个钩子必须分得出
+ * 「精选库不可用」与「这一行不存在」——把前者报成后者，运营看到的是「目标不存在或归属不符」，
+ * 于是去查一个没有问题的目标。裸那条客户端不做按码还原，跨进程后对面的缺表错误只剩一个
+ * 普通传输错误，`isCuratedContentUnavailableError` 恒 false，那个谎会静静地成立。
+ * 受鉴权那一族（`content-authority-http.ts`）按码还原成 `ContentPortError`，
+ * 而 {@link curatedContentFailureReason} **两类抛出物都认**，这条读因此走那一族。
+ *
+ * 用 `Pick` 而不是重写签名：签名只有一份，漂不了。
+ */
+export type CuratedTargetReader = Pick<CuratedContentReader, 'getOneForAccount'>;
+
 /** 面板筛选面：驱动筛选下拉 + 清理前影响预览（按账号）。 */
 export interface CuratedFacets {
   /** 该账号实际出现的纳入原因去重 + 各自计数 + 携机器人点赞/收藏标记的高权重行数。 */

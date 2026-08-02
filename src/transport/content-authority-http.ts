@@ -52,9 +52,11 @@ import type {
   CuratedActionContent,
   CuratedContentTypeFilter,
   CuratedObservation,
+  CuratedPanelRow,
   CuratedReferenceImageInput,
   CuratedSelectItem,
   CuratedSourceContentType,
+  CuratedTargetReader,
   CuratedTextCardContext,
 } from '../kernel/curated-content-types.js';
 import type {
@@ -914,6 +916,94 @@ export class CuratedWriteAuthorityHttpClient implements CuratedWritePort {
       'curated-write.markBotAction',
       { accountId, sourceId, action, content },
       isVoidAck,
+    );
+  }
+}
+
+/* ═══════════════════════════════ 委托任务的精选目标校验（automation → content） */
+
+/**
+ * 只有一条读：按「精选条目 id + 账号」取一行，供委托任务的两个目标校验钩子判
+ * 「目标存不存在 / 归不归这个账号 / 有没有可定位标题」。
+ *
+ * **为什么不复用既有的 `curated-content/get-one-for-account`**：那条是更早期的裸形态
+ * （`server.register`，无 Bearer、无信封、无 target 校验），且它的客户端是光秃秃的 `http.call`
+ * ——跨进程后对面的缺表错误只剩一个普通传输错误，`isCuratedContentUnavailableError` 恒 false，
+ * 于是「精选库不可用」会被如实报成「目标不存在或归属不符」。那是委托任务链上的一句谎，
+ * 而单体那两处代码正明写着 MUST NOT 这么报。理由与裁决见 kernel `CuratedTargetReader` 的文件注释。
+ *
+ * **属主实例结构上即满足本端口**（`CuratedContentStore.getOneForAccount`），content 侧原样注入。
+ */
+export const CURATED_TARGET_AUTHORITY_ROUTES = {
+  getOneForAccount: 'content-authority/curated-target/v1/get-one-for-account',
+} as const satisfies Record<keyof CuratedTargetReader, string>;
+
+function curatedTargetInput(value: unknown): { id: number; accountId: string } {
+  const input = requireRecord(value, 'curated target query');
+  // 下限取 1：`id=0` 是个退化请求，属主会诚实地回 `null`，而调用方读到的 `null` 与
+  // 「这条真不存在」一模一样——把一次问错了的提问伪装成一个答案。口径同上面的 `requireLimit`。
+  return {
+    id: requireInteger(input.id, 'id', 1),
+    accountId: requireString(input.accountId, 'accountId'),
+  };
+}
+
+/**
+ * 回执守卫：`null` 是**属主的领域答案**（这一行不存在 / 不归这个账号），合法且必须过。
+ * 非 null 时只认调用方真正据以判断的那几个字段——形状不符 MUST 抛，
+ * MUST NOT 兜底成 `null`：那会把一次契约漂移伪装成一句确定的「目标不存在」。
+ */
+function isCuratedPanelRowOrNull(value: unknown): value is CuratedPanelRow | null {
+  if (value === null) return true;
+  if (!isRecord(value)) return false;
+  return (
+    isNonNegativeInteger(value.id)
+    && typeof value.accountId === 'string'
+    && typeof value.contentType === 'string'
+    && typeof value.sourceId === 'string'
+    && (value.title === null || typeof value.title === 'string')
+  );
+}
+
+export function registerCuratedTargetAuthorityRoutes(
+  server: InternalHttpServer,
+  local: CuratedTargetReader,
+  callerToken: string,
+  executionTarget: DeploymentTarget,
+): void {
+  server.registerBearer(
+    CURATED_TARGET_AUTHORITY_ROUTES.getOneForAccount,
+    callerToken,
+    async (args: unknown): Promise<CuratedPanelRow | null> => {
+      // 信封先解、且在 try 之外：口径同本文件其余各组。
+      const input = parseApiDirectEnvelope(args, executionTarget, curatedTargetInput);
+      return runOwnerCall(
+        'curated-target.getOneForAccount',
+        ownerHasMethod(local, 'getOneForAccount'),
+        () => local.getOneForAccount(input.id, input.accountId),
+      );
+    },
+  );
+}
+
+export class CuratedTargetAuthorityHttpClient implements CuratedTargetReader {
+  private readonly channel: ContentAuthorityChannel;
+
+  constructor(
+    http: InternalHttpClient,
+    callerToken: string,
+    executionTarget: DeploymentTarget,
+  ) {
+    this.channel = { http, callerToken, executionTarget };
+  }
+
+  getOneForAccount(id: number, accountId: string): Promise<CuratedPanelRow | null> {
+    return callContentAuthority(
+      this.channel,
+      CURATED_TARGET_AUTHORITY_ROUTES.getOneForAccount,
+      'curated-target.getOneForAccount',
+      { id, accountId },
+      isCuratedPanelRowOrNull,
     );
   }
 }
