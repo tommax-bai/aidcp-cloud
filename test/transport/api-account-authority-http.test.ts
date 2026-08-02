@@ -72,6 +72,9 @@ async function withAccountServer(
       ownerCalls.push(`recordNickname:${accountId}:${nickname}`);
       return { outcome: 'updated', nickname };
     },
+    async pauseAccount(accountId, reason) {
+      ownerCalls.push(`pauseAccount:${accountId}:${reason}`);
+    },
   };
   const server = new InternalHttpServer();
   registerAccountRosterRoutes(server, roster, TOKEN, 'dev');
@@ -97,6 +100,7 @@ test('account 4a routes keep 1/3/4 method parity and omit claimExecutionTarget',
     'getPlatformOrNull',
     'getContactInfo',
     'recordNickname',
+    'pauseAccount',
   ]);
 
   await withAccountServer(async (baseUrl, calls) => {
@@ -121,7 +125,11 @@ test('account 4a routes keep 1/3/4 method parity and omit claimExecutionTarget',
       outcome: 'updated',
       nickname: 'Alice',
     });
-    assert.equal(calls.length, 8);
+    // 批 H：暂停账号。原因随命令一起过去 —— 属主要把它写进日志，
+    // 缺了运营只会把这条暂停当成误操作。
+    await runtime.pauseAccount('acct-1', 'join_failed');
+    assert.equal(calls.at(-1), 'pauseAccount:acct-1:join_failed');
+    assert.equal(calls.length, 9);
   });
 });
 

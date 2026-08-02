@@ -431,6 +431,7 @@ import type {
   AutomationConfigCommandsPort,
   AutomationPublishLogPort,
   CommentApprovalPolicyPort,
+  ScheduleFeedbackAuthorityPort,
   EdgePublishCommandPort,
   EdgeResumeCommandPort,
   EnvironmentHandshakePort,
@@ -453,6 +454,7 @@ import {
   AutomationConfigCommandsHttpClient,
   AutomationPublishLogHttpClient,
   CommentApprovalPolicyHttpClient,
+  ScheduleFeedbackHttpClient,
   EdgePublishCommandHttpClient,
   EdgeResumeCommandHttpClient,
   EnvironmentHandshakeHttpClient,
@@ -473,6 +475,7 @@ import {
   registerAutomationConfigCommandsRoutes,
   registerAutomationPublishLogRoutes,
   registerCommentApprovalPolicyRoutes,
+  registerScheduleFeedbackRoutes,
   registerEdgePublishCommandRoutes,
   registerEdgeResumeCommandRoutes,
   registerEnvironmentHandshakeRoutes,
@@ -1042,6 +1045,11 @@ interface ApiDirectAuthorities {
   accountPersona?: AccountPersonaAuthorityPort;
   environmentHandshake?: EnvironmentHandshakePort;
   commentApprovalPolicy?: CommentApprovalPolicyPort;
+  /**
+   * 排期名额回程（批 H）。**晚绑定**：排期器在本段之后才构造，
+   * 而它的小时格账本是进程内的，所以这里只能持一个转发闭包、不能持快照。
+   */
+  scheduleFeedback?: ScheduleFeedbackAuthorityPort;
   notificationContacts?: NotificationContactsPort;
   firstPostProgress?: FirstPostProgressPort;
   automationConfigCommands?: AutomationConfigCommandsPort;
@@ -1052,6 +1060,11 @@ interface ApiDirectAuthorities {
 interface CompositionContext {
   // late-bound real-ring ports & forward-declared handles (assigned in a later segment than a referencing closure)
   scheduledPublishReconciler?: ScheduledPublishReconciler | null;
+  /**
+   * 排期名额回程的**实现**（批 H）。排期器在自动化段末尾才构造，而路由在更早的一段注册，
+   * 所以这里放一个晚绑定槽：注册的是转发器，真实现到位后填进来。
+   */
+  scheduledTaskNotStartedSink?: ScheduleFeedbackAuthorityPort['reportScheduledTaskNotStarted'];
   publishScheduler?: PublishScheduler;
   uiSnapshot?: UiSnapshotService;
   interactionSender?: InteractionSendOrchestrator;
@@ -1753,6 +1766,8 @@ async function startApiInternalApi(ctx: CompositionContext): Promise<void> {
     registerEnvironmentHandshakeRoutes(httpServer, direct.environmentHandshake!, directToken, ctx.deploymentTarget!));
   registerDirect('commentApprovalPolicy', () =>
     registerCommentApprovalPolicyRoutes(httpServer, direct.commentApprovalPolicy!, directToken, ctx.deploymentTarget!));
+  registerDirect('scheduleFeedback', () =>
+    registerScheduleFeedbackRoutes(httpServer, direct.scheduleFeedback!, directToken, ctx.deploymentTarget!));
   registerDirect('notificationContacts', () =>
     registerNotificationContactsRoutes(httpServer, direct.notificationContacts!, directToken, ctx.deploymentTarget!));
   registerDirect('firstPostProgress', () =>
@@ -3931,8 +3946,28 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
       getPlatformOrNull: (accountId) => accountStore.getPlatformOrNull!(accountId),
       getContactInfo: (accountId) => accountStore.getContactInfo!(accountId),
       recordNickname: (accountId, nickname) => accountStore.recordNickname!(accountId, nickname),
+      // 批 H：自动化侧的自我保护出口（加群连续失败到顶时停掉该账号）。
+      // **走状态管理器而不是直写存储**：它同时维护进程内投影，绕过去会让本进程随后
+      // 的判定还以为这个账号是活的。
+      pauseAccount: async (accountId, reason) => {
+        await accountState.pause(accountId);
+        console.warn(`[account-state] 账号已暂停 account=${accountId} reason=${reason}`);
+      },
     };
   }
+  // 批 H：排期名额回程。**注册的是转发器**——排期器要到自动化段末尾才构造，
+  // 而路由在更早一段就注册完了。缺席时**响亮抛错**而不是回 false：
+  // 回 false 读作「排期器看过了、没接管」，与「这个进程里根本没有排期器」完全同形，
+  // 而后者是配置问题、必须有人去修。抛错在客户端那侧按传输失败处置（结果卡照发），方向安全。
+  apiDirectAuthorities.scheduleFeedback = {
+    reportScheduledTaskNotStarted: async (accountId, action, reason) => {
+      const sink = ctx.scheduledTaskNotStartedSink;
+      if (!sink) {
+        throw new Error('content_scheduler_not_running_in_this_process');
+      }
+      return sink(accountId, action, reason);
+    },
+  };
   ctx.apiDirectAuthorities = apiDirectAuthorities;
 }
 
@@ -4378,6 +4413,7 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       accountPersona: new AccountPersonaHttpClient(http, token, deploymentTarget),
       environmentHandshake: new EnvironmentHandshakeHttpClient(http, token, deploymentTarget),
       commentApprovalPolicy: new CommentApprovalPolicyHttpClient(http, token, deploymentTarget),
+      scheduleFeedback: new ScheduleFeedbackHttpClient(http, token, deploymentTarget),
       notificationContacts: new NotificationContactsHttpClient(http, token, deploymentTarget),
       firstPostProgress: new FirstPostProgressHttpClient(http, token, deploymentTarget),
       automationConfigCommands: new AutomationConfigCommandsHttpClient(
@@ -5783,7 +5819,6 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
    * 晚绑定的排期调度器引用（change browser-slot-scheduling）：评论管线要在任务跑完、发现「根本没开始」时
    * 把这一小时的名额还回去；但它构造得比 ContentScheduler 早（后者依赖它），只能这样回指。
    */
-  let contentSchedulerRef: ContentScheduler | undefined;
 
   // Feishu is API-owned. segD composes the command face, cards and WS ingress;
   // this automation segment exposes only its domain services through ctx/ports.
@@ -7636,8 +7671,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
   commentScheduler = new CommentScheduler({
     // 排期任务「根本没开始」→ 归还这一小时的名额（change browser-slot-scheduling）。
     // 晚绑定：ContentScheduler 在下面才建（它依赖 commentScheduler），这里只能持一个引用。
-    onScheduledTaskNotStarted: (accountId, action, reason) =>
-      contentSchedulerRef?.reportNotStarted(accountId, action, reason),
+    // 走 api 属主端口而不是直接抓排期器实例（batch H）：单体下它就是那个晚绑定转发器
+    // （逐字节等价、零 HTTP），automation 进程下是指向接口进程的客户端。
+    // 端口整体缺席 = 这台机器上根本没接这条回流 ⇒ 如实回 false（结果卡照发），绝不冒充已接管。
+    onScheduledTaskNotStarted: async (accountId, action, reason) =>
+      apiDirectPorts.scheduleFeedback
+        ? apiDirectPorts.scheduleFeedback.reportScheduledTaskNotStarted(accountId, action, reason)
+        : false,
     resolveConnection: (accountId) => ctx.runtimes?.runtimeForAccount(accountId) ?? null,
     pusher: { pushToEdges: (env, edgeId) => (ctx.edgeServer ? ctx.edgeServer.pushToEdges(env as Envelope, edgeId) : 0) },
     edgeTaskLeases,
@@ -7835,9 +7875,14 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     recordSessionJoin: (accountId, edgeId) =>
       ctx.runtimes?.consumeSessionBudgetForAccount(accountId, 'join_group', edgeId) ?? false,
     isFacebookAccount: async (accountId) => (await accountStore?.getPlatform?.(accountId)) === 'facebook',
+    // 同上：走 api 属主端口（单体下即本地实现，automation 进程下是跨进程客户端）。
+    // 端口缺席时**响亮抛错**——暂停是自我保护动作，吞掉它会让「以为停了、其实没停」，
+    // 而那个账号明天还会照常撞同一堵墙。
     pauseAccount: async (accountId, reason) => {
-      await accountState.pause(accountId);
-      console.warn(`[fb-group-join] account paused account=${accountId} reason=${reason}`);
+      if (!apiDirectPorts.accountRuntime) {
+        throw new Error('account_runtime_authority_unavailable');
+      }
+      await apiDirectPorts.accountRuntime.pauseAccount(accountId, reason);
     },
     retryBackoffMs: readEnvNumber('AIDCP_FB_GROUP_JOIN_RETRY_BACKOFF_HOURS', 6) * 60 * 60 * 1000,
     maxAttempts: Math.max(1, Math.trunc(readEnvNumber('AIDCP_FB_GROUP_JOIN_MAX_ATTEMPTS', 3))),
@@ -8210,7 +8255,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         },
         logger: console,
       });
-      contentSchedulerRef = contentScheduler; // 供评论管线回流「没开始」，见 onScheduledTaskNotStarted
+      // 批 H：同一条回流的**跨进程入口**。拆开后评论管线跑在自动化进程，
+      // 而小时格账本是排期器进程内的，所以只能由它自己判「这一格是不是我点的火」。
+      // 与上面那条本地闭包**共用同一个方法**，不是第二条路径。
+      // 批 H：把真实现填进那个晚绑定槽。**与上面那条本地闭包共用同一个方法**，
+      // 不是第二条路径 —— 小时格账本只有排期器自己那一本。
+      ctx.scheduledTaskNotStartedSink = async (accountId, action, reason) =>
+        contentScheduler.reportNotStarted(accountId, action, reason);
       contentScheduler.start(60_000);
       console.log('[aidcp-cloud] ContentScheduler 已启动（每分钟心跳、按账号错峰；账号配置为唯一产品授权）');
     } else {

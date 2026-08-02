@@ -363,7 +363,17 @@ export interface CommentSchedulerDeps {
    * 只对自动排期任务回调；手动 /comment 与排期名额无关。
    */
   /** 返回 true 表示排期器已接管本次自动任务的重试与最终放弃通知，可抑制逐次结果卡。 */
-  onScheduledTaskNotStarted?: (accountId: string, action: 'comment' | 'contact_comment', reason: string) => boolean | void;
+  /**
+   * 允许异步：拆进程后这条回流要跨进程问排期器（它的小时格账本是**进程内**的，
+   * 只有它自己判得了「这一格是不是我点的火」）。
+   * **抛错即视作没接管** —— 下面那个 catch 就是这条判据的落点：
+   * 不抑制只是多发一张卡，而把「问不到」当成「已接管」会吞掉一张本该发出去的失败卡。
+   */
+  onScheduledTaskNotStarted?: (
+    accountId: string,
+    action: 'comment' | 'contact_comment',
+    reason: string,
+  ) => boolean | void | Promise<boolean | void>;
   /** 原生筛选（缺省 most_collected / one_day）。 */
   sort?: string;
   timeWindow?: string;
@@ -1954,11 +1964,11 @@ export class CommentScheduler {
     if (result.outcome === 'not_started' && priority === 'automatic') {
       try {
         // contactInfo 非空 = 本次是联系评论（injectContact），两者的排期名额是分开的小时格。
-        scheduledNotStartedHandled = this.deps.onScheduledTaskNotStarted?.(
+        scheduledNotStartedHandled = (await this.deps.onScheduledTaskNotStarted?.(
           accountId,
           contactInfo ? 'contact_comment' : 'comment',
           leaseFailureCode ?? 'not_started',
-        ) === true;
+        )) === true;
       } catch (err) {
         log.warn(`[comment-scheduler] onScheduledTaskNotStarted 回调异常：${(err as Error).message}`);
       }

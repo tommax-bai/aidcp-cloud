@@ -18,6 +18,7 @@ import {
   type ReconcileActiveOffboardSnapshotInput,
   type ReconcileActiveOffboardSnapshotOutcome,
   type RecordMaterializationReceiptInput,
+  type ScheduleFeedbackAuthorityPort,
   type RecordMaterializationReceiptOutcome,
   type StructuredNotificationDeliveryInput,
   type StructuredNotificationDeliveryPort,
@@ -67,6 +68,13 @@ export const COMMENT_APPROVAL_POLICY_ROUTES = {
   getAccountCommentMode:
     'api-direct/comment-approval-policy/v1/get-account-comment-mode',
 } as const satisfies Record<keyof CommentApprovalPolicyPort, string>;
+
+export const SCHEDULE_FEEDBACK_CONTRACT_VERSION = API_DIRECT_CONTRACT_VERSION;
+
+export const SCHEDULE_FEEDBACK_ROUTES = {
+  reportScheduledTaskNotStarted:
+    'api-direct/schedule-feedback/v1/report-scheduled-task-not-started',
+} as const satisfies Record<keyof ScheduleFeedbackAuthorityPort, string>;
 
 export const NOTIFICATION_CONTACTS_ROUTES = {
   appendEvents: 'api-direct/notification-contacts/v1/append-events',
@@ -499,6 +507,53 @@ export function registerCommentApprovalPolicyRoutes(
   );
 }
 
+/**
+ * 排期名额回程。服务端就跑在排期器所在的那个进程里 ——
+ * **这条口刻意不带幂等键**：属主自己按「这一格是不是我点的火」判，
+ * 重复上报在它那边天然是 no-op（第一次已经把那格删了，第二次对不上就回 false）。
+ * 在这一层再加一层幂等表反而会造出第二本账，而两本账一定会漂。
+ */
+export function registerScheduleFeedbackRoutes(
+  server: InternalHttpServer,
+  local: ScheduleFeedbackAuthorityPort,
+  callerToken: string,
+  executionTarget: DeploymentTarget,
+): void {
+  server.registerBearer(
+    SCHEDULE_FEEDBACK_ROUTES.reportScheduledTaskNotStarted,
+    callerToken,
+    (args) => {
+      const input = parseApiDirectEnvelope(args, executionTarget, notStartedInput);
+      return local.reportScheduledTaskNotStarted(
+        input.accountId,
+        input.action,
+        input.reason,
+      );
+    },
+  );
+}
+
+function notStartedInput(value: unknown): {
+  accountId: string;
+  action: 'comment' | 'contact_comment';
+  reason: string;
+} {
+  const input = requireRecord(value);
+  const action = input.action;
+  if (action !== 'comment' && action !== 'contact_comment') {
+    throw new ApiDirectHttpError(
+      'api_direct_invalid_request',
+      'action must be comment or contact_comment',
+    );
+  }
+  return {
+    accountId: requireString(input.accountId, 'accountId'),
+    action,
+    // 原因是必填：属主要把它写进那条「归还小时格」的日志，缺了就查不出是哪类没起来。
+    reason: requireString(input.reason, 'reason'),
+  };
+}
+
 export function registerNotificationContactsRoutes(
   server: InternalHttpServer,
   local: NotificationContactsPort,
@@ -662,6 +717,29 @@ export class CommentApprovalPolicyHttpClient implements CommentApprovalPolicyPor
       this.callerToken, this.executionTarget, { accountId },
       (value): value is AccountCommentApprovalMode =>
         value === 'source_rules' || value === 'auto_approve_all',
+    );
+  }
+}
+
+export class ScheduleFeedbackHttpClient implements ScheduleFeedbackAuthorityPort {
+  constructor(
+    private readonly http: InternalHttpClient,
+    private readonly callerToken: string,
+    private readonly executionTarget: DeploymentTarget,
+  ) {}
+
+  reportScheduledTaskNotStarted(
+    accountId: string,
+    action: 'comment' | 'contact_comment',
+    reason: string,
+  ): Promise<boolean> {
+    return callApiDirectWrite(
+      this.http,
+      SCHEDULE_FEEDBACK_ROUTES.reportScheduledTaskNotStarted,
+      this.callerToken,
+      this.executionTarget,
+      { accountId, action, reason },
+      (value): value is boolean => typeof value === 'boolean',
     );
   }
 }

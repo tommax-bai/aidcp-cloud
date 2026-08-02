@@ -211,6 +211,15 @@ export const SURFACE_BINDINGS: readonly SurfaceBinding[] = [
     clientClass: 'CommentApprovalPolicyHttpClient',
   },
   {
+    id: 'schedule-feedback',
+    direction: 'automation-to-api',
+    interfaceName: 'ScheduleFeedbackAuthorityPort',
+    transportFile: 'src/transport/api-aux-authority-http.ts',
+    routesConstant: 'SCHEDULE_FEEDBACK_ROUTES',
+    registerFunction: 'registerScheduleFeedbackRoutes',
+    clientClass: 'ScheduleFeedbackHttpClient',
+  },
+  {
     id: 'notification-contacts',
     direction: 'automation-to-api',
     interfaceName: 'NotificationContactsPort',
@@ -347,6 +356,18 @@ export const PRODUCTION_CONSUMER_BINDINGS: readonly ProductionConsumerBinding[] 
     method: 'recordNickname',
     sourceFile: 'src/orchestrator/connection-runtime.ts',
     callPath: 'this.deps.recordNickname',
+  },
+  {
+    groupId: 'account-runtime-authority',
+    method: 'pauseAccount',
+    sourceFile: 'src/server.ts',
+    callPath: 'apiDirectPorts.accountRuntime.pauseAccount',
+  },
+  {
+    groupId: 'schedule-feedback',
+    method: 'reportScheduledTaskNotStarted',
+    sourceFile: 'src/server.ts',
+    callPath: 'apiDirectPorts.scheduleFeedback.reportScheduledTaskNotStarted',
   },
   {
     groupId: 'publish-log-for-automation',

@@ -44,11 +44,21 @@ export const ACCOUNT_RUNTIME_ROUTES = {
   getPlatformOrNull: 'api-direct/account-runtime/v1/get-platform-or-null',
   getContactInfo: 'api-direct/account-runtime/v1/get-contact-info',
   recordNickname: 'api-direct/account-runtime/v1/record-nickname',
+  pauseAccount: 'api-direct/account-runtime/v1/pause-account',
 } as const satisfies Record<keyof AccountRuntimeAuthorityPort, string>;
 
 function accountIdInput(value: unknown): { accountId: string } {
   const input = requireRecord(value);
   return { accountId: requireString(input.accountId, 'accountId') };
+}
+
+function pauseAccountInput(value: unknown): { accountId: string; reason: string } {
+  const input = requireRecord(value);
+  return {
+    accountId: requireString(input.accountId, 'accountId'),
+    // 原因是必填：一条没有原因的暂停，运营在后台看到只会当成误操作。
+    reason: requireString(input.reason, 'reason'),
+  };
 }
 
 function setTargetInput(value: unknown): { accountId: string; target: DeploymentTarget } {
@@ -204,6 +214,12 @@ export function registerAccountRuntimeRoutes(
     const input = parseApiDirectEnvelope(args, executionTarget, nicknameInput);
     return local.recordNickname(input.accountId, input.nickname);
   });
+  server.registerBearer(ACCOUNT_RUNTIME_ROUTES.pauseAccount, callerToken, async (args) => {
+    const input = parseApiDirectEnvelope(args, executionTarget, pauseAccountInput);
+    await local.pauseAccount(input.accountId, input.reason);
+    // 幂等：重复暂停同一个账号无副作用，故只回一个受理位、不回状态。
+    return { accepted: true };
+  });
 }
 
 export class AccountRosterHttpClient implements AccountRosterAuthorityPort {
@@ -317,6 +333,19 @@ export class AccountRuntimeHttpClient implements AccountRuntimeAuthorityPort {
       this.executionTarget,
       { accountId, nickname },
       isNicknameOutcome,
+    );
+  }
+
+  async pauseAccount(accountId: string, reason: string): Promise<void> {
+    // **失败照抛**：暂停是自我保护动作，吞掉它会让「以为停了、其实没停」——
+    // 而那个账号明天还会照常撞同一堵墙，且没有任何地方说得出为什么。
+    await callApiDirectWrite(
+      this.http,
+      ACCOUNT_RUNTIME_ROUTES.pauseAccount,
+      this.callerToken,
+      this.executionTarget,
+      { accountId, reason },
+      isVoidAck,
     );
   }
 }

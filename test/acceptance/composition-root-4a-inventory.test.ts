@@ -53,22 +53,22 @@ async function loadJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8')) as T;
 }
 
-test('4a source-derived census is exactly 20 groups and 55 method slots', async () => {
+test('4a source-derived census is exactly 21 groups and 57 method slots', async () => {
   const [inventory, derived] = await Promise.all([
     loadJson<SurfaceInventory>(
       '../../boundaries/composition-root-4a-authority-surface.json',
     ),
     deriveSurface(),
   ]);
-  assert.equal(inventory.expectedGroups, 20);
-  assert.equal(inventory.expectedMethodSlots, 55);
-  assert.equal(inventory.expectedProductionConsumerSlots, 55);
-  assert.equal(inventory.groups.length, 20);
+  assert.equal(inventory.expectedGroups, 21);
+  assert.equal(inventory.expectedMethodSlots, 57);
+  assert.equal(inventory.expectedProductionConsumerSlots, 57);
+  assert.equal(inventory.groups.length, 21);
   assert.equal(
     inventory.groups.reduce((sum, group) => sum + group.methods.length, 0),
-    55,
+    57,
   );
-  assert.equal(derived.groups.length, 20);
+  assert.equal(derived.groups.length, 21);
 
   const expectedById = new Map(inventory.groups.map((group) => [group.id, group]));
   for (const actual of derived.groups) {
@@ -137,17 +137,17 @@ test('4a source-derived census is exactly 20 groups and 55 method slots', async 
     );
   }
   assert.deepEqual(inventory.directions, {
-    'automation-to-api': { groups: 16, methodSlots: 50 },
+    'automation-to-api': { groups: 17, methodSlots: 52 },
     'api-to-automation': { groups: 3, methodSlots: 4 },
     'api-to-content': { groups: 1, methodSlots: 1 },
   });
   const consumerSlotKeys = PRODUCTION_CONSUMER_BINDINGS.map(
     (binding) => `${binding.groupId}:${binding.method}`,
   );
-  assert.equal(consumerSlotKeys.length, 55);
+  assert.equal(consumerSlotKeys.length, 57);
   assert.equal(
     new Set(consumerSlotKeys).size,
-    55,
+    57,
     'production consumer bindings must cover each admitted slot exactly once',
   );
 });

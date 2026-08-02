@@ -104,6 +104,38 @@ export interface AccountRuntimeAuthorityPort {
   getPlatformOrNull(accountId: string): Promise<PlatformId | null>;
   getContactInfo(accountId: string): Promise<string | null>;
   recordNickname(accountId: string, nickname: string): Promise<RecordNicknameOutcome>;
+  /**
+   * 暂停账号（自动化侧的自我保护：加群连续失败到顶时停掉它，免得明天再撞同一堵墙）。
+   *
+   * **幂等**：重复暂停同一个账号无副作用，故不带幂等键。
+   * **刻意只有暂停、没有恢复**：恢复是运营的动作；这条口只许往更严的方向拨。
+   */
+  pauseAccount(accountId: string, reason: string): Promise<void>;
+}
+
+/**
+ * 排期名额回程（automation → api）。
+ *
+ * 排期器的小时格账本是**进程内**的——它记着「这一格是我点的火」，只有对得上才归还。
+ * 所以这条口只能是「报告一次事实、由属主自己决定归不归还」，
+ * **MUST NOT** 把小时格状态搬到自动化侧去重算：两份账本一定会漂，而漂开的现形方式
+ * 是某一小时被归还两次（同一格重复触发）或一次都不还（那一小时白丢）。
+ */
+export interface ScheduleFeedbackAuthorityPort {
+  /**
+   * 报告某次排期触发**根本没开始**（未接管边端：浏览器唤不醒 / 边端掉线 / 超时）。
+   *
+   * 返回 `true` 表示属主已接管本次重试（或重试已用尽、它自己回了卡），
+   * 调用方据此**抑制逐次结果卡**；`false` 表示没接管，结果卡照发。
+   *
+   * **传输失败时调用方 MUST 按 `false` 处置**：不抑制只是多发一张卡，
+   * 而把「没接管」当成「已接管」会吞掉一张本该发出去的失败卡。
+   */
+  reportScheduledTaskNotStarted(
+    accountId: string,
+    action: 'comment' | 'contact_comment',
+    reason: string,
+  ): Promise<boolean>;
 }
 
 /* Publish log and Edge-originated API commands. */
@@ -580,7 +612,13 @@ export interface PersonaGeneratorAuthorityPort {
 export const API_DIRECT_PORT_INVENTORY = {
   accountRoster: ['listAccountIdentities'],
   accountOwnership: ['getExecutionTarget', 'resolveExecutionTarget', 'setExecutionTarget'],
-  accountRuntime: ['ensureAccount', 'getPlatformOrNull', 'getContactInfo', 'recordNickname'],
+  accountRuntime: [
+    'ensureAccount',
+    'getPlatformOrNull',
+    'getContactInfo',
+    'recordNickname',
+    'pauseAccount',
+  ],
   publishLog: [
     'loadForDispatch',
     'updateStatus',
@@ -613,6 +651,7 @@ export const API_DIRECT_PORT_INVENTORY = {
   accountPersona: ['generate', 'persist'],
   environmentHandshake: ['registerHandshakeEnvironment'],
   commentApprovalPolicy: ['getAccountCommentMode'],
+  scheduleFeedback: ['reportScheduledTaskNotStarted'],
   notificationContacts: ['appendEvents'],
   firstPostProgress: ['getFirstPostProgress'],
   automationConfigCommands: [

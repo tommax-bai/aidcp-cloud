@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "change": "split-cloud-api-composition-root-4a",
   "baseCloudSha": "67941e495ad52c22b08e4a85ef530245b2fac517",
-  "expectedGroups": 20,
-  "expectedMethodSlots": 55,
-  "expectedProductionConsumerSlots": 55,
+  "expectedGroups": 21,
+  "expectedMethodSlots": 57,
+  "expectedProductionConsumerSlots": 57,
   "directions": {
     "automation-to-api": {
-      "groups": 16,
-      "methodSlots": 50
+      "groups": 17,
+      "methodSlots": 52
     },
     "api-to-automation": {
       "groups": 3,
@@ -26,7 +26,9 @@
       "owner": "api",
       "ownerSourceFile": "src/account-store.ts",
       "consumer": "automation account projection and Facebook scope guard",
-      "methods": ["listAccountIdentities"]
+      "methods": [
+        "listAccountIdentities"
+      ]
     },
     {
       "id": "account-ownership",
@@ -34,15 +36,25 @@
       "owner": "api",
       "ownerSourceFile": "src/account-store.ts",
       "consumer": "automation handshake and risk ownership",
-      "methods": ["getExecutionTarget", "resolveExecutionTarget", "setExecutionTarget"]
+      "methods": [
+        "getExecutionTarget",
+        "resolveExecutionTarget",
+        "setExecutionTarget"
+      ]
     },
     {
       "id": "account-runtime-authority",
       "direction": "automation-to-api",
       "owner": "api",
       "ownerSourceFile": "src/account-store.ts",
-      "consumer": "automation connection, reply and comment workflows",
-      "methods": ["ensureAccount", "getPlatformOrNull", "getContactInfo", "recordNickname"]
+      "consumer": "automation connection, reply, comment and Facebook group-join workflows",
+      "methods": [
+        "ensureAccount",
+        "getPlatformOrNull",
+        "getContactInfo",
+        "recordNickname",
+        "pauseAccount"
+      ]
     },
     {
       "id": "publish-log-for-automation",
@@ -78,7 +90,10 @@
       "owner": "api",
       "ownerSourceFile": "src/publish-agent/draft-image-remove.ts",
       "consumer": "automation-owned Edge WebSocket command handlers",
-      "methods": ["removeDraftImage", "decidePublishApproval"]
+      "methods": [
+        "removeDraftImage",
+        "decidePublishApproval"
+      ]
     },
     {
       "id": "interaction-auth-gate",
@@ -86,7 +101,10 @@
       "owner": "api",
       "ownerSourceFile": "src/interactions/interaction-auth-gate.ts",
       "consumer": "automation interaction writes",
-      "methods": ["authorizeAuthStateWrite", "checkAccountScope"]
+      "methods": [
+        "authorizeAuthStateWrite",
+        "checkAccountScope"
+      ]
     },
     {
       "id": "interaction-api-writes",
@@ -94,7 +112,11 @@
       "owner": "api",
       "ownerSourceFile": "src/interactions/interaction-api-writes.ts",
       "consumer": "automation interaction outbox, retention and offboard",
-      "methods": ["insertAuditEvent", "purgeReplyConfigForAccount", "purgeExpiredAuditEvents"]
+      "methods": [
+        "insertAuditEvent",
+        "purgeReplyConfigForAccount",
+        "purgeExpiredAuditEvents"
+      ]
     },
     {
       "id": "reply-config-resolver",
@@ -102,7 +124,11 @@
       "owner": "api",
       "ownerSourceFile": "src/interactions/reply-config-store.ts",
       "consumer": "automation reply workflow",
-      "methods": ["resolve", "getPublished", "getSnapshotForJob"]
+      "methods": [
+        "resolve",
+        "getPublished",
+        "getSnapshotForJob"
+      ]
     },
     {
       "id": "account-persona",
@@ -110,7 +136,10 @@
       "owner": "api",
       "ownerSourceFile": "src/config/account-persona-service.ts",
       "consumer": "automation Edge command handler",
-      "methods": ["generate", "persist"]
+      "methods": [
+        "generate",
+        "persist"
+      ]
     },
     {
       "id": "environment-handshake",
@@ -118,7 +147,9 @@
       "owner": "api",
       "ownerSourceFile": "src/client-auth/client-user-store.ts",
       "consumer": "automation Edge handshake",
-      "methods": ["registerHandshakeEnvironment"]
+      "methods": [
+        "registerHandshakeEnvironment"
+      ]
     },
     {
       "id": "comment-approval-policy",
@@ -126,7 +157,19 @@
       "owner": "api",
       "ownerSourceFile": "src/config/approval-policy-store.ts",
       "consumer": "automation comment approval gate",
-      "methods": ["getAccountCommentMode"]
+      "methods": [
+        "getAccountCommentMode"
+      ]
+    },
+    {
+      "id": "schedule-feedback",
+      "direction": "automation-to-api",
+      "owner": "api",
+      "ownerSourceFile": "src/orchestrator/content-scheduler.ts",
+      "consumer": "automation comment scheduler reporting a slot that never started",
+      "methods": [
+        "reportScheduledTaskNotStarted"
+      ]
     },
     {
       "id": "notification-contacts",
@@ -134,7 +177,9 @@
       "owner": "api",
       "ownerSourceFile": "src/cache/notification-contact-store.ts",
       "consumer": "automation notification observer",
-      "methods": ["appendEvents"]
+      "methods": [
+        "appendEvents"
+      ]
     },
     {
       "id": "first-post-progress",
@@ -142,7 +187,9 @@
       "owner": "api",
       "ownerSourceFile": "src/onboarding/first-post-onboarding-store.ts",
       "consumer": "automation daily usage snapshot",
-      "methods": ["getFirstPostProgress"]
+      "methods": [
+        "getFirstPostProgress"
+      ]
     },
     {
       "id": "automation-config-commands",
@@ -150,7 +197,11 @@
       "owner": "api",
       "ownerSourceFile": "src/config/content-schedule-store.ts",
       "consumer": "automation browse and comment workflows",
-      "methods": ["countContactAttemptsToday", "recordContactCommentAttempt", "resolveFacebookContainerName"]
+      "methods": [
+        "countContactAttemptsToday",
+        "recordContactCommentAttempt",
+        "resolveFacebookContainerName"
+      ]
     },
     {
       "id": "offboard-admission-ledger",
@@ -158,7 +209,11 @@
       "owner": "api",
       "ownerSourceFile": "src/client-auth/client-user-store.ts",
       "consumer": "automation-owned offboard reconcile loop",
-      "methods": ["reconcileActiveOffboardSnapshot", "claimPendingMaterializations", "recordMaterializationReceipt"]
+      "methods": [
+        "reconcileActiveOffboardSnapshot",
+        "claimPendingMaterializations",
+        "recordMaterializationReceipt"
+      ]
     },
     {
       "id": "api-notification-exit",
@@ -166,7 +221,9 @@
       "owner": "api",
       "ownerSourceFile": "src/feishu/messenger.ts",
       "consumer": "automation notices",
-      "methods": ["deliver"]
+      "methods": [
+        "deliver"
+      ]
     },
     {
       "id": "edge-resume-command",
@@ -174,7 +231,9 @@
       "owner": "automation",
       "ownerSourceFile": "src/comm/ws-server.ts",
       "consumer": "API account resume command face",
-      "methods": ["resumeEdgesForAccount"]
+      "methods": [
+        "resumeEdgesForAccount"
+      ]
     },
     {
       "id": "facebook-scope-commands",
@@ -182,7 +241,10 @@
       "owner": "automation",
       "ownerSourceFile": "src/comment-agent/facebook-group-store.ts",
       "consumer": "API Facebook group panel",
-      "methods": ["importTargets", "replaceTargetScopes"]
+      "methods": [
+        "importTargets",
+        "replaceTargetScopes"
+      ]
     },
     {
       "id": "publish-ui-update",
@@ -190,7 +252,9 @@
       "owner": "automation",
       "ownerSourceFile": "src/comm/ui-snapshot.ts",
       "consumer": "API publish preview and state projection",
-      "methods": ["applyPublishUiUpdate"]
+      "methods": [
+        "applyPublishUiUpdate"
+      ]
     },
     {
       "id": "persona-generator",
@@ -198,7 +262,9 @@
       "owner": "content",
       "ownerSourceFile": "src/agents/persona-generator.ts",
       "consumer": "API account persona authority",
-      "methods": ["generate"]
+      "methods": [
+        "generate"
+      ]
     }
   ],
   "approvedAlternates": [
