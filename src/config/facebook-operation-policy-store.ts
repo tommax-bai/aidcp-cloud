@@ -12,7 +12,12 @@ import { shanghaiDayStartMs } from '../time/shanghai-day.js';
 import type { MirrorVersionBumper } from './mirror-version-store.js';
 import {
   cloneFacebookReelCadence,
+  resolveFacebookOperationAccountDecision,
   resolveFacebookOperationBase,
+  type FacebookEffectiveOperationMode,
+  type FacebookOperationPolicyAccountDecision,
+  type FacebookSlowStartResolution,
+  type FacebookSlowStartViewFacts,
   type FacebookBaseOperationMode,
   type FacebookCadenceSource,
   type FacebookConsumptionOperationParameters,
@@ -106,12 +111,14 @@ export type {
   FacebookOperationPolicyBaseProjection,
   FacebookOperationPolicyBaseResolution,
   FacebookOperationPolicyEnvironmentResolver,
+  // 账号最终模式那一段同样已抬入 kernel（批 G 第四片）：自动化进程要按同步读快照
+  // + 自己的风控注册表算同一个决策，两侧各写一份的现形方式不是报错、而是档位悄悄不一致。
+  FacebookEffectiveOperationMode,
+  FacebookSlowStartResolution,
+  FacebookSlowStartViewFacts,
+  FacebookOperationPolicyAccountDecision,
 };
 export type FacebookRequestedOperationMode = FacebookBaseOperationMode | 'slow_start';
-export type FacebookEffectiveOperationMode =
-  | FacebookBaseOperationMode
-  | 'slow_start'
-  | 'blocked';
 
 export interface FacebookOperationPolicyView {
   envKey: string;
@@ -208,21 +215,10 @@ export type FacebookOperationPolicyLegacyRuleWriteResult =
       current?: FacebookOperationPolicyView;
     };
 
+/** 回执形状取 kernel 那一份：拆进程后自动化侧要按同一个形状喂同一个判定。 */
 export type FacebookOperationPolicySlowStartResolver = (
   accountId: string,
-) => Promise<
-  | {
-      state: 'active' | 'off' | 'graduated';
-      since: number | null;
-      globallyDisabled: boolean;
-    }
-  | {
-      state: 'unknown';
-      since: number | null;
-      globallyDisabled: boolean;
-      blocker: string;
-  }
->;
+) => Promise<FacebookSlowStartResolution>;
 
 export type FacebookOperationPolicyEnvironmentSlowStartResolver = (input: {
   envKey: string;
@@ -231,19 +227,6 @@ export type FacebookOperationPolicyEnvironmentSlowStartResolver = (input: {
   completedAt: number | null;
   totalDays: number;
 }) => Promise<'active' | 'off' | 'graduated' | 'unknown'>;
-
-export interface FacebookOperationPolicyAccountDecision {
-  mode: FacebookEffectiveOperationMode;
-  primarySurface: FacebookPrimaryBrowseSurface | null;
-  surfaceRevision: number | null;
-  baseMode: FacebookBaseOperationMode | null;
-  policyRevision: number | null;
-  envKey: string | null;
-  blocker: string | null;
-  rule: FacebookRuleOperationParameters | null;
-  consumption: FacebookConsumptionOperationParameters | null;
-  reels: FacebookGlobalReelCadenceParameters | null;
-}
 
 interface OperationPolicyDbRow {
   env_key: string;
@@ -1100,64 +1083,27 @@ export class FacebookOperationPolicyStore {
     );
   }
 
+  /**
+   * 账号最终模式。**判定本身已抬入 kernel**（批 G 第四片）——本方法只负责取两样输入：
+   * 基线（本存储的缓存）与慢启动（注入的风控投影解析器）。
+   *
+   * 自动化进程会拿**另外两样输入**（同步读快照 + 它自己的风控注册表）喂同一个函数。
+   * 原先「未就绪」那条早返也一并交给 kernel：`resolveBaseForAccount` 已经把 `ready`
+   * 喂进去了，早返只是把同一个 blocker 又写了一遍。
+   */
   async resolveForAccount(accountId: string): Promise<FacebookOperationPolicyAccountDecision> {
-    if (!this.ready) {
-      return {
-        mode: 'blocked',
-        primarySurface: null,
-        surfaceRevision: null,
-        baseMode: null,
-        policyRevision: null,
-        envKey: null,
-        blocker: 'facebook_operation_policy_unavailable',
-        rule: null,
-        consumption: null,
-        reels: null,
-      };
+    const base = this.resolveBaseForAccount(accountId);
+    // 基线拿不到就别去问慢启动了：那一问要物化风控控制器，而结论已经确定是 blocked。
+    if (!base.ok) {
+      return resolveFacebookOperationAccountDecision({
+        base,
+        slowStart: { state: 'off', since: null, globallyDisabled: false },
+      });
     }
-    const resolved = this.resolveBaseForAccount(accountId);
-    if (!resolved.ok) {
-      return {
-        mode: 'blocked',
-        primarySurface: null,
-        surfaceRevision: null,
-        baseMode: null,
-        policyRevision: null,
-        envKey: null,
-        blocker: resolved.blocker,
-        rule: null,
-        consumption: null,
-        reels: null,
-      };
-    }
-    const policy = resolved;
-    const slowStart = await this.resolveSlowStart(accountId);
-    if (slowStart.state === 'unknown') {
-      return {
-        mode: 'blocked',
-        primarySurface: policy.primarySurface,
-        surfaceRevision: policy.surfaceRevision,
-        baseMode: policy.baseMode,
-        policyRevision: policy.policyRevision,
-        envKey: resolved.envKey,
-        blocker: slowStart.blocker,
-        rule: policy.rule,
-        consumption: policy.consumption,
-        reels: cloneReelCadence(policy.reels),
-      };
-    }
-    return {
-      mode: slowStart.state === 'active' ? 'slow_start' : policy.baseMode,
-      primarySurface: policy.primarySurface,
-      surfaceRevision: policy.surfaceRevision,
-      baseMode: policy.baseMode,
-      policyRevision: policy.policyRevision,
-      envKey: resolved.envKey,
-      blocker: null,
-      rule: policy.rule,
-      consumption: policy.consumption,
-      reels: cloneReelCadence(policy.reels),
-    };
+    return resolveFacebookOperationAccountDecision({
+      base,
+      slowStart: await this.resolveSlowStart(accountId),
+    });
   }
 
   async writeGlobal(

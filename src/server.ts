@@ -679,6 +679,7 @@ import {
   FacebookOperationPolicyStore,
   type FacebookOperationPolicySlowStartResolver,
 } from './config/facebook-operation-policy-store.js';
+import { resolveFacebookSlowStartFromView } from './kernel/facebook-operation-policy-resolution.js';
 import { FacebookGroupCommentPolicyStore } from './config/facebook-group-comment-policy-store.js';
 import { FacebookRuleModeRuntimeStore } from './orchestrator/facebook-rule-mode-runtime-store.js';
 import { FacebookConsumptionModeRuntimeStore } from './orchestrator/facebook-consumption-mode-runtime-store.js';
@@ -4875,25 +4876,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     },
     logger: console,
   });
-  facebookOperationPolicyStore?.bindSlowStartResolver((async (accountId) => {
-    const view = (await riskRegistry.getController(accountId)).slowStartView();
-    if (
-      view.ineligibleReason
-      && view.ineligibleReason !== 'globally_disabled'
-    ) {
-      return {
-        state: 'unknown',
-        since: view.since ?? null,
-        globallyDisabled: false,
-        blocker: `slow_start_${view.ineligibleReason}`,
-      };
-    }
-    return {
-      state: view.state,
-      since: view.since ?? null,
-      globallyDisabled: view.ineligibleReason === 'globally_disabled',
-    };
-  }) satisfies FacebookOperationPolicySlowStartResolver);
+  // 「风控慢启动投影 → 慢启动解析」这一段已抬入 kernel（批 G 第四片）：自动化进程要拿
+  // **它自己的**风控控制器喂同一个映射。在这里另写一遍就是第二份实现——两份漂开的现形方式
+  // 不是报错，而是某一侧把一个还在爬坡的新账号直接按满档跑。
+  facebookOperationPolicyStore?.bindSlowStartResolver((async (accountId) =>
+    resolveFacebookSlowStartFromView(
+      (await riskRegistry.getController(accountId)).slowStartView(),
+    )) satisfies FacebookOperationPolicySlowStartResolver);
   console.log(`[aidcp-cloud] 冷启动配额爬坡 ${coldStartRampEnabled ? '已开启(AIDCP_COLDSTART_RAMP=true)' : '已禁用(默认·直接走安全限额配置)'}`);
   if (slowStartDisabled) {
     console.log('[aidcp-cloud] 环境级慢启动 已被全局停用(AIDCP_SLOW_START_DISABLED=true·无视所有环境开关)');
