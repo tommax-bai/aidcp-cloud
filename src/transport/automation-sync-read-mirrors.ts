@@ -363,6 +363,35 @@ export class AutomationSyncReadMirrors {
     );
   }
 
+  /**
+   * 账号 → 环境键（批 H）。它是 {@link facebookOperationBaseFor} 那个必填解析器在
+   * **本进程唯一的**实现——接口进程走属主的环境表，自动化进程走这条镜像。
+   *
+   * 三条具名理由的口径必须与接口进程一致（下游按串分诊）：
+   * - 镜像没到位 / 陈旧 → `binding_unavailable`（「问不到」，不是「没绑」）；
+   * - 快照里没有这个账号，或有行但没带环境键 → `binding_unknown`；
+   * - 该账号绑了多个环境 → `binding_conflict`。
+   *
+   * **MUST NOT 在歧义时挑一个环境键**：生产端已经因此把 `envKey` 发成 `null`，
+   * 这里再挑一次就是替运营做了一个没人复核得了的选择。
+   */
+  facebookEnvironmentForAccount(
+    accountId: string,
+    now = this.clock(),
+  ): ReturnType<FacebookOperationPolicyEnvironmentResolver> {
+    const view = this.environment.view(now);
+    if (deliveryState(view.state) !== 'fresh' || !view.value) {
+      return { ok: false, reason: 'binding_unavailable' };
+    }
+    const row = view.value.slowStartAnchors.find(
+      (candidate) => candidate.accountId === accountId,
+    );
+    if (!row) return { ok: false, reason: 'binding_unknown' };
+    if (row.ambiguous) return { ok: false, reason: 'binding_conflict' };
+    if (!row.envKey) return { ok: false, reason: 'binding_unknown' };
+    return { ok: true, envKey: row.envKey };
+  }
+
   readiness(now = this.clock()) {
     return syncReadProcessReadiness(
       [

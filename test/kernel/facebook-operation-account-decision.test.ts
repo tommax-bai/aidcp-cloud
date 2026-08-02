@@ -162,3 +162,71 @@ test('组装根的慢启动映射 MUST 走 kernel 那一份', () => {
     'MUST NOT 在组装根里手拼 blocker 串',
   );
 });
+
+/* ─────── 环境绑定：账号 → 环境键这一跳（批 H 补的载荷字段） ─────── */
+
+test('绑定歧义时载荷 MUST NOT 带出某一个环境键', async () => {
+  const { isSyncReadFactPayload } = await import('../../src/kernel/sync-read-facts.js');
+  const row = (over: Record<string, unknown>) => ({
+    blockedEnvironmentKeys: [],
+    slowStartAnchors: [
+      {
+        accountId: 'acc-1',
+        envKey: null,
+        slowStartSince: null,
+        slowStartCompletedAt: null,
+        ambiguous: true,
+        ...over,
+      },
+    ],
+  });
+  assert.equal(isSyncReadFactPayload('client_environment_automation', row({})), true);
+  assert.equal(
+    isSyncReadFactPayload('client_environment_automation', row({ envKey: 'env-a' })),
+    false,
+    '歧义 + 带环境键 = 替下游做了一个它复核不了的选择，校验器必须拦',
+  );
+});
+
+test('环境键这个键本身是必填 —— 少一个键就不是合法载荷', async () => {
+  const { isSyncReadFactPayload } = await import('../../src/kernel/sync-read-facts.js');
+  assert.equal(
+    isSyncReadFactPayload('client_environment_automation', {
+      blockedEnvironmentKeys: [],
+      slowStartAnchors: [
+        {
+          accountId: 'acc-1',
+          slowStartSince: null,
+          slowStartCompletedAt: null,
+          ambiguous: false,
+        },
+      ],
+    }),
+    false,
+  );
+});
+
+test('生产者的真输出必须过真校验器 —— 手写夹具只证明契约自洽', async () => {
+  const { projectClientEnvironmentAutomationSnapshot } = await import(
+    '../../src/config/api-sync-read-source.js'
+  );
+  const { isSyncReadFactPayload } = await import('../../src/kernel/sync-read-facts.js');
+  const produced = projectClientEnvironmentAutomationSnapshot([
+    { env_key: 'env-a', lifecycle_state: 'active', account_id: 'acc-1', slow_start_since: null, slow_start_completed_at: null },
+    { env_key: 'env-b', lifecycle_state: 'retired', account_id: 'acc-2', slow_start_since: null, slow_start_completed_at: null },
+    { env_key: 'env-c', lifecycle_state: 'active', account_id: 'acc-2', slow_start_since: null, slow_start_completed_at: null },
+    { env_key: 'env-d', lifecycle_state: 'active', account_id: 'default', slow_start_since: null, slow_start_completed_at: null },
+  ]);
+  assert.equal(
+    isSyncReadFactPayload('client_environment_automation', produced),
+    true,
+    '真产出物必须过校验器',
+  );
+  const byAccount = new Map(produced.slowStartAnchors.map((row) => [row.accountId, row]));
+  assert.equal(byAccount.get('acc-1')!.envKey, 'env-a', '单绑账号要带出环境键');
+  assert.equal(byAccount.get('acc-1')!.ambiguous, false);
+  assert.equal(byAccount.get('acc-2')!.envKey, null, '绑了两个环境就不许挑一个');
+  assert.equal(byAccount.get('acc-2')!.ambiguous, true);
+  assert.equal(byAccount.has('default'), false, 'default 不是真实账号');
+  assert.deepEqual(produced.blockedEnvironmentKeys, ['env-b']);
+});

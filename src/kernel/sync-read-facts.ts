@@ -90,6 +90,14 @@ export type ClientEnvironmentAutomationSnapshot = {
   readonly blockedEnvironmentKeys: readonly string[];
   readonly slowStartAnchors: readonly {
     readonly accountId: string;
+    /**
+     * 该账号绑定的环境键（批 H：自动化进程解析 Facebook 运营基线要用它）。
+     *
+     * **`ambiguous` 为真时恒为 `null`** —— 一个账号绑了多个环境时，挑其中一个发过去
+     * 等于替下游做了一个它没法复核的选择；下游据此报 `binding_conflict`，那是准确的。
+     * 生产端本来就查着这一列，此前只是没发。
+     */
+    readonly envKey: string | null;
     readonly slowStartSince: number | null;
     readonly slowStartCompletedAt: number | null;
     readonly ambiguous: boolean;
@@ -315,11 +323,15 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
             isRecord(row) &&
             hasExactKeys(row, [
               'accountId',
+              'envKey',
               'slowStartSince',
               'slowStartCompletedAt',
               'ambiguous',
             ]) &&
             isNonEmptyString(row.accountId) &&
+            (row.envKey === null || isNonEmptyString(row.envKey)) &&
+            // 绑定歧义时 MUST NOT 带出某一个环境键：挑一个等于替下游做它复核不了的选择。
+            (row.ambiguous !== true || row.envKey === null) &&
             (row.slowStartSince === null ||
               isNonNegativeInteger(row.slowStartSince)) &&
             (row.slowStartCompletedAt === null ||

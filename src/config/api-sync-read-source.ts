@@ -196,39 +196,7 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
             ORDER BY env_key`,
           [this.executionTarget],
         );
-        const grouped = new Map<string, Array<{
-          since: number | null;
-          completedAt: number | null;
-        }>>();
-        for (const row of rows) {
-          const accountId = row.account_id?.trim();
-          if (!accountId || accountId === 'default') continue;
-          const values = grouped.get(accountId) ?? [];
-          values.push({
-            since: row.slow_start_since === null
-              ? null
-              : new Date(row.slow_start_since).getTime(),
-            completedAt: row.slow_start_completed_at === null
-              ? null
-              : new Date(row.slow_start_completed_at).getTime(),
-          });
-          grouped.set(accountId, values);
-        }
-        const value: ClientEnvironmentAutomationSnapshot = {
-          blockedEnvironmentKeys: rows
-            .filter((row) => row.lifecycle_state !== 'active')
-            .map((row) => row.env_key),
-          slowStartAnchors: [...grouped]
-            .map(([accountId, values]) => ({
-              accountId,
-              slowStartSince: values.length === 1 ? values[0]!.since : null,
-              slowStartCompletedAt: values.length === 1
-                ? values[0]!.completedAt
-                : null,
-              ambiguous: values.length !== 1,
-            }))
-            .sort((a, b) => a.accountId.localeCompare(b.accountId)),
-        };
+        const value = projectClientEnvironmentAutomationSnapshot(rows);
         return { cursor, value } as {
           cursor: string;
           value: SyncReadPayloadByStream[S];
@@ -507,4 +475,62 @@ function containerList(
     out.push(name ? { url: row.url.trim(), name } : { url: row.url.trim() });
   }
   return out;
+}
+
+/**
+ * 「环境行 → 客户端环境自动化快照」的**纯投影段**（批 H 析出）。
+ *
+ * 析出的理由不是好看：跨进程载荷的键集不变量**必须用生产者的真输出过真校验器**才算证明。
+ * 埋在读库的分支里就只能靠手写夹具，而手写夹具证明的是「契约自洽」——
+ * 已经实测过一次：夹具照类型手写、恰好少两个键，多带键的真产出物一路绿到线上。
+ */
+export function projectClientEnvironmentAutomationSnapshot(
+  rows: readonly {
+    env_key: string;
+    lifecycle_state: string;
+    account_id: string | null;
+    slow_start_since: Date | string | null;
+    slow_start_completed_at: Date | string | null;
+  }[],
+): ClientEnvironmentAutomationSnapshot {
+  const grouped = new Map<string, Array<{
+    envKey: string;
+    since: number | null;
+    completedAt: number | null;
+  }>>();
+  for (const row of rows) {
+    const accountId = row.account_id?.trim();
+    if (!accountId || accountId === 'default') continue;
+    const values = grouped.get(accountId) ?? [];
+    values.push({
+      // 批 H：环境键随锚点一起发。这一列本来就在查询里，只是此前没进载荷 ——
+      // 而自动化进程解析 Facebook 运营基线**必须**有它（拿不到基线 = 那个账号永远不开始浏览）。
+      envKey: row.env_key,
+      since: row.slow_start_since === null
+        ? null
+        : new Date(row.slow_start_since).getTime(),
+      completedAt: row.slow_start_completed_at === null
+        ? null
+        : new Date(row.slow_start_completed_at).getTime(),
+    });
+    grouped.set(accountId, values);
+  }
+  return {
+    blockedEnvironmentKeys: rows
+      .filter((row) => row.lifecycle_state !== 'active')
+      .map((row) => row.env_key),
+    slowStartAnchors: [...grouped]
+      .map(([accountId, values]) => ({
+        accountId,
+        // 歧义时**恒 null**：挑其中一个发过去等于替下游做了一个它复核不了的选择。
+        // 与下面三个字段同一条判据，故用同一个 `values.length === 1`。
+        envKey: values.length === 1 ? values[0]!.envKey : null,
+        slowStartSince: values.length === 1 ? values[0]!.since : null,
+        slowStartCompletedAt: values.length === 1
+          ? values[0]!.completedAt
+          : null,
+        ambiguous: values.length !== 1,
+      }))
+      .sort((a, b) => a.accountId.localeCompare(b.accountId)),
+  };
 }

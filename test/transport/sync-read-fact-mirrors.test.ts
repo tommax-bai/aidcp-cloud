@@ -176,12 +176,14 @@ test('B2 missing, ambiguous and stale slow-start evidence never collapse into kn
         slowStartAnchors: [
           {
             accountId: 'known',
+            envKey: 'env-known',
             slowStartSince: null,
             slowStartCompletedAt: null,
             ambiguous: false,
           },
           {
             accountId: 'ambiguous',
+            envKey: null,
             slowStartSince: null,
             slowStartCompletedAt: null,
             ambiguous: true,
