@@ -275,13 +275,24 @@ export async function runSchemaContractGate(options?: {
    * 就没有立场声称它的 schema 对或不对。
    */
   owners?: readonly PgOwner[];
+  /**
+   * 日志前缀里的服务名。缺省 `aidcp-cloud`（单体，也是本文件的事实源所在）。
+   *
+   * **这不是装饰**：同一份实现会被派生进 `aidcp-automation/src/` 与打包进 `aidcp-transport`，
+   * 由三个各自独立的 systemd 单元调用。写死 `[aidcp-cloud]` 的后果是——自动化进程因 schema
+   * 落后而拒绝启动时，`journalctl -u aidcp-automation` 里打出来的是**别的服务的名字**，
+   * 而这条日志恰好是排查那次启动失败的唯一线索（门刻意跑在任何存储 init 之前、无 try/catch，
+   * 之后什么都不会再打）。派生方 MUST 传自己的名字。
+   */
+  serviceLabel?: string;
 }): Promise<SchemaGateResult> {
   const mode = options?.mode ?? parseSchemaGateMode(readEnvString('AIDCP_SCHEMA_GATE'));
   // 本进程连了哪些属主库就判哪些（缺省全部三个 ⇒ 与改动前逐字节一致）。空集合视为未指定：
   // 「一个库都不判」永远不该是默认结果，那等于把门关掉。
   const owners: readonly PgOwner[] =
     options?.owners && options.owners.length > 0 ? options.owners : PG_OWNERS;
-  const prefix = (owner: PgOwner) => `[aidcp-cloud] schema 契约门（${mode}/${owner}）`;
+  const service = options?.serviceLabel ?? 'aidcp-cloud';
+  const prefix = (owner: PgOwner) => `[${service}] schema 契约门（${mode}/${owner}）`;
   const allowAheadRaw = readEnvString('AIDCP_ALLOW_SCHEMA_AHEAD');
 
   let scopes: Record<PgOwner, OwnerScope> | undefined;
@@ -313,12 +324,12 @@ export async function runSchemaContractGate(options?: {
     }
   } else {
     const groups = buildGroups(owners, options);
-    console.log(`[aidcp-cloud] schema 契约门（${mode}） ${describeTargets(groups, owners)}`);
+    console.log(`[${service}] schema 契约门（${mode}） ${describeTargets(groups, owners)}`);
     if (index.residue.length > 0) {
       // 残留 = 头声明为空、判不出属主、按安全方向计入全部属主的那批（见 migration-owners.ts 文件头第 2 点）。
       // 启动日志只报数（逐条清单由 `npm run migrate status` 打），但绝不省略这一行。
       console.log(
-        `[aidcp-cloud] schema 契约门（${mode}） 残留迁移（头声明为空、计入全部属主）${index.residue.length} 条，逐条见 npm run migrate status`,
+        `[${service}] schema 契约门（${mode}） 残留迁移（头声明为空、计入全部属主）${index.residue.length} 条，逐条见 npm run migrate status`,
       );
     }
 
@@ -354,7 +365,7 @@ export async function runSchemaContractGate(options?: {
   if (waived.length > 0) {
     const operator = readEnvString('AIDCP_MIGRATE_BY') ?? readEnvString('USER') ?? 'unknown';
     const detail = `${waived.map((r) => `[${r.owner}] ${r.conclusion}`).join(' | ')}；放行者 applied_by=${operator}`;
-    console.warn(`[aidcp-cloud] schema 契约门（${mode}） 超前放行已生效：${detail}`);
+    console.warn(`[${service}] schema 契约门（${mode}） 超前放行已生效：${detail}`);
     pendingWaiverAlert = { title: 'schema 契约门超前放行生效', detail };
   }
 
