@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0107_facebook_slow_start_reel_like_cadence';
+export const REQUIRED_SCHEMA_VERSION = '0108_facebook_operation_policy_snapshot_revision';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -192,8 +192,17 @@ export const REQUIRED_SCHEMA_VERSION = '0107_facebook_slow_start_reel_like_caden
  * policy 增加冷启动 Reel 点赞频率。策略 store 的 schema probe 与全量 SELECT 都明确依赖该列，
  * 且不得用进程常量冒充后台配置，故 REQUIRED 与 KNOWN_MAX 一并抬到 0107。属主收窄后
  * automation 仍要求自己的 0106，API 要求 0107。
+ *
+ * 注：`0108_facebook_operation_policy_snapshot_revision`（change
+ * split-cloud-automation-production-runtime 批 H 第 3 片）推进 API 属主
+ * `facebook_operation_policy` 的镜像版本，让 0107 与慢启动曲线两处**新增的快照字段**随新 cursor
+ * 同步生效。**这是硬依赖，不是洁癖**：该流的 cursor 只在有人写配置时才动，缺这条迁移时
+ * 已持有 checkpoint 的消费方重启后会在**旧 cursor 上看见不同的整份 payload**，按
+ * `same_cursor_payload_drift` 正确拒收 —— 而那条拒收发生在单体启动路径上，直接起不来
+ * （dev 上实测到了）。形态与理由同 `0091_facebook_comment_config_snapshot_revision`。
+ * 故 REQUIRED 与 KNOWN_MAX 一并抬到 0108。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0107_facebook_slow_start_reel_like_cadence';
+export const KNOWN_MAX_SCHEMA_VERSION = '0108_facebook_operation_policy_snapshot_revision';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 
