@@ -18,6 +18,10 @@ const surfaceMigrationUrl = new URL(
   '../../migrations/0105_facebook_primary_browse_surface.sql',
   import.meta.url,
 );
+const slowStartReelLikeMigrationUrl = new URL(
+  '../../migrations/0107_facebook_slow_start_reel_like_cadence.sql',
+  import.meta.url,
+);
 
 describe('facebook operation policy migration', () => {
   it('allocates a global revision after the fixed schema version in every seed row', async () => {
@@ -96,6 +100,20 @@ describe('facebook operation policy migration', () => {
       sql,
       /ALTER TABLE facebook_operation_policy\b/,
       'Reel cadence is global-only and must not add environment override columns',
+    );
+  });
+
+  it('adds a global-only slow-start Reel like cadence with a safe bounded default', async () => {
+    const sql = await readFile(slowStartReelLikeMigrationUrl, 'utf8');
+    assert.match(
+      sql,
+      /ALTER TABLE facebook_operation_global_policy[\s\S]*ADD COLUMN IF NOT EXISTS slow_start_reel_views_per_like INTEGER NOT NULL DEFAULT 15/,
+    );
+    assert.match(sql, /CHECK \(slow_start_reel_views_per_like BETWEEN 1 AND 100\)/);
+    assert.doesNotMatch(
+      sql,
+      /ALTER TABLE facebook_operation_policy\b/,
+      'slow-start Reel like cadence must not add an environment override',
     );
   });
 

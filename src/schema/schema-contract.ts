@@ -32,7 +32,7 @@ import { compareVersions } from './migration-plan.js';
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
  */
-export const REQUIRED_SCHEMA_VERSION = '0106_automation_sync_read_facebook_operation_policy';
+export const REQUIRED_SCHEMA_VERSION = '0107_facebook_slow_start_reel_like_cadence';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -187,8 +187,13 @@ export const REQUIRED_SCHEMA_VERSION = '0106_automation_sync_read_facebook_opera
  * 收下新流 `facebook_operation_policy`。**REQUIRED 一并抬到 0106**：自动化消费者启动时
  * 就会写这条流的检查点，没跑这条迁移的机器上进程直接起不来（约束拒收 → 启动期抛错），
  * 所以它不是「早抬会埋雷」那一类，而是「不抬就起不来」的硬依赖。
+ *
+ * 注：`0107_facebook_slow_start_reel_like_cadence` 给 API 属主的全局 Facebook operation
+ * policy 增加冷启动 Reel 点赞频率。策略 store 的 schema probe 与全量 SELECT 都明确依赖该列，
+ * 且不得用进程常量冒充后台配置，故 REQUIRED 与 KNOWN_MAX 一并抬到 0107。属主收窄后
+ * automation 仍要求自己的 0106，API 要求 0107。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0106_automation_sync_read_facebook_operation_policy';
+export const KNOWN_MAX_SCHEMA_VERSION = '0107_facebook_slow_start_reel_like_cadence';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

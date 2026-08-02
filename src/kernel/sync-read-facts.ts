@@ -603,7 +603,7 @@ function isReelCadence(value: unknown): boolean {
   return (
     hasExactKeys(value, ['persona', 'slowStart', 'rule', 'consumption']) &&
     isNumberRecord(value.persona, ['viewsPerLike', 'viewsPerFollow']) &&
-    isNumberRecord(value.slowStart, ['viewsPerFollow']) &&
+    isNumberRecord(value.slowStart, ['viewsPerLike', 'viewsPerFollow']) &&
     isNumberRecord(value.rule, ['viewsPerFollow']) &&
     isNumberRecord(value.consumption, ['viewsPerFollow'])
   );

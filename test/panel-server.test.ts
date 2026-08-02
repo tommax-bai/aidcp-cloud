@@ -322,7 +322,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
       slowStart: { totalDays: number };
       reels: {
         persona: { viewsPerLike: number; viewsPerFollow: number };
-        slowStart: { viewsPerFollow: number };
+        slowStart: { viewsPerLike: number; viewsPerFollow: number };
         rule: { viewsPerFollow: number };
         consumption: { viewsPerFollow: number };
       };
@@ -386,7 +386,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
   const globalView = (): FacebookOperationGlobalPolicyView => ({
     executionTarget: 'dev' as const,
     revision: globalRevision,
-    schemaVersion: 'facebook_operation_global_policy@2',
+    schemaVersion: 'facebook_operation_global_policy@3',
     rule: { viewsPerLike: 5, joinEveryNRounds: 2 },
     consumption: {
       viewsPerLike: 5,
@@ -395,7 +395,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
     },
     reels: {
       persona: { viewsPerLike: 4, viewsPerFollow: 10 },
-      slowStart: { viewsPerFollow: 15 },
+      slowStart: { viewsPerLike: 15, viewsPerFollow: 15 },
       rule: { viewsPerFollow: 15 },
       consumption: { viewsPerFollow: 15 },
     },
@@ -427,8 +427,9 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
           viewsPerLike: { min: 1, max: 100, default: 4 },
           viewsPerFollow: { min: 1, max: 100, default: 10 },
         },
-        slowStart: {
-          viewsPerFollow: { min: 1, max: 100, default: 15 },
+      slowStart: {
+        viewsPerLike: { min: 1, max: 100, default: 15 },
+        viewsPerFollow: { min: 1, max: 100, default: 15 },
         },
         rule: {
           viewsPerFollow: { min: 1, max: 100, default: 15 },
@@ -614,6 +615,23 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
       }),
     });
     assert.equal(invalidGlobal.status, 422);
+    assert.equal(globalWrites.length, 0);
+
+    const missingSlowStartLike = await fetch(`${base}/api/facebook/operation-global-policy`, {
+      method: 'PUT',
+      headers: auth,
+      body: JSON.stringify({
+        expectedRevision: 2,
+        rule: globalPayload.rule,
+        consumption: globalPayload.consumption,
+        reels: {
+          ...globalPayload.reels,
+          slowStart: { viewsPerFollow: globalPayload.reels.slowStart.viewsPerFollow },
+        },
+        slowStart: globalPayload.slowStart,
+      }),
+    });
+    assert.equal(missingSlowStartLike.status, 422);
     assert.equal(globalWrites.length, 0);
 
     const savedGlobal = await fetch(`${base}/api/facebook/operation-global-policy`, {

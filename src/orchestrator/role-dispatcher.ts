@@ -3468,7 +3468,8 @@ export class RoleDispatcher {
   }
 
   /**
-   * 当前会话每个唯一 Reel 只推进当前模式一次：普通人设可触发点赞和关注，其它模式只触发各自关注。
+   * 当前会话每个唯一 Reel 只推进当前模式一次：普通人设和冷启动可触发各自点赞/关注，
+   * 规则与消费模式只触发各自关注。
    * 达到 N 只选择意图；预算、风险、冷却、能力与同 Reel 后置验证仍是权威。
    */
   private maybeDispatchFacebookPresentedReelCadence(
@@ -3500,8 +3501,9 @@ export class RoleDispatcher {
     }
     // 先占访问坑：后续任何 gate 失败或重复 page.cards 都不能让同一 Reel 再推进一次。
     this.facebookPresentedReelCadenceNoteIds.add(modeReelKey);
-    if (mode === 'persona') {
-      // 普通人设 Reel 点赞完全由本节奏负责；未到 N 也不得让 LLM 对同一 Reel 再做一次普通点赞。
+    const hasLikeCadence = mode === 'persona' || mode === 'slow_start';
+    if (hasLikeCadence) {
+      // 有 Reel 点赞节奏的模式完全由本节奏负责；未到 N 也不得让 LLM 对同一 Reel 再做一次点赞。
       this.facebookPresentedVideoLikeDecisionNoteIds.add(key);
     }
     const cadence = decision.reelCadence;
@@ -3512,7 +3514,7 @@ export class RoleDispatcher {
       || Number(viewsPerFollow) < 1
       || Number(viewsPerFollow) > 100
       || (
-        mode === 'persona'
+        hasLikeCadence
         && (
           !Number.isInteger(viewsPerLike)
           || Number(viewsPerLike) < 1
@@ -3526,8 +3528,8 @@ export class RoleDispatcher {
     const ordinal = (this.facebookReelVisitCountByMode.get(mode) ?? 0) + 1;
     this.facebookReelVisitCountByMode.set(mode, ordinal);
 
-    if (mode === 'persona' && ordinal % Number(viewsPerLike) === 0) {
-      this.dispatchFacebookPersonaReelLike(noteId, ordinal, Number(viewsPerLike));
+    if (hasLikeCadence && ordinal % Number(viewsPerLike) === 0) {
+      this.dispatchFacebookModeReelLike(noteId, mode, ordinal, Number(viewsPerLike));
     }
     if (ordinal % Number(viewsPerFollow) === 0) {
       this.dispatchFacebookModeReelFollow(
@@ -3540,8 +3542,9 @@ export class RoleDispatcher {
     }
   }
 
-  private dispatchFacebookPersonaReelLike(
+  private dispatchFacebookModeReelLike(
     noteId: string,
+    mode: 'persona' | 'slow_start',
     ordinal: number,
     viewsPerLike: number,
   ): void {
@@ -3557,14 +3560,17 @@ export class RoleDispatcher {
       console.log(`[interaction_appraiser] skip reason=cooldown action=like source=reels ordinal=${ordinal} note=${noteId}`);
       return;
     }
+    const reason = mode === 'persona'
+      ? 'facebook_reel_persona_cadence_hit'
+      : 'facebook_reel_slow_start_cadence_hit';
     const sent = this.sendNoteScopedCommand('like', {
       action: 'like',
-      reason: 'facebook_reel_persona_cadence_hit',
+      reason,
       params: { noteId, thinkMs: this.thinkNow() },
     });
     if (sent) {
       this.interactionRetry.set('like', { noteId, attempts: 0 });
-      console.log(`[interaction_appraiser] facebook_reel_persona_cadence_hit action=like ordinal=${ordinal} every=${viewsPerLike} note=${noteId}`);
+      console.log(`[interaction_appraiser] ${reason} action=like mode=${mode} ordinal=${ordinal} every=${viewsPerLike} note=${noteId}`);
     } else {
       console.log(`[interaction_appraiser] skip reason=facebook_reel_like_dispatch_suppressed ordinal=${ordinal} note=${noteId}`);
     }

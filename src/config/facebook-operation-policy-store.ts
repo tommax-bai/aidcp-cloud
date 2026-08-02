@@ -33,7 +33,7 @@ const { Pool } = pg;
 
 export const FACEBOOK_OPERATION_POLICY_SCHEMA_VERSION = 'facebook_operation_policy@1';
 export const FACEBOOK_OPERATION_GLOBAL_POLICY_SCHEMA_VERSION =
-  'facebook_operation_global_policy@2';
+  'facebook_operation_global_policy@3';
 
 export const FACEBOOK_OPERATION_POLICY_BOUNDS = {
   rule: {
@@ -55,6 +55,7 @@ export const FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS = {
       viewsPerFollow: { min: 1, max: 100, default: 10 },
     },
     slowStart: {
+      viewsPerLike: { min: 1, max: 100, default: 15 },
       viewsPerFollow: { min: 1, max: 100, default: 15 },
     },
     rule: {
@@ -282,6 +283,7 @@ interface GlobalOperationPolicyDbRow {
   execution_target: DeploymentTarget;
   persona_reel_views_per_like: number | string;
   persona_reel_views_per_follow: number | string;
+  slow_start_reel_views_per_like: number | string;
   slow_start_reel_views_per_follow: number | string;
   rule_reel_views_per_follow: number | string;
   consumption_reel_views_per_follow: number | string;
@@ -362,6 +364,7 @@ const OPERATION_POLICY_REQUIREMENT = {
       'execution_target',
       'persona_reel_views_per_like',
       'persona_reel_views_per_follow',
+      'slow_start_reel_views_per_like',
       'slow_start_reel_views_per_follow',
       'rule_reel_views_per_follow',
       'consumption_reel_views_per_follow',
@@ -484,6 +487,8 @@ function defaultGlobalPolicy(executionTarget: DeploymentTarget): FacebookOperati
           FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.persona.viewsPerFollow.default,
       },
       slowStart: {
+        viewsPerLike:
+          FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.slowStart.viewsPerLike.default,
         viewsPerFollow:
           FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.slowStart.viewsPerFollow.default,
       },
@@ -605,6 +610,10 @@ function normalizedGlobalWrite(input: {
     || !inIntegerBound(
       input.reels?.persona?.viewsPerFollow,
       FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.persona.viewsPerFollow,
+    )
+    || !inIntegerBound(
+      input.reels?.slowStart?.viewsPerLike,
+      FACEBOOK_OPERATION_GLOBAL_POLICY_BOUNDS.reels.slowStart.viewsPerLike,
     )
     || !inIntegerBound(
       input.reels?.slowStart?.viewsPerFollow,
@@ -895,7 +904,8 @@ export class FacebookOperationPolicyStore {
       this.executionTarget
         ? this.pool.query<GlobalOperationPolicyDbRow>(
             `SELECT execution_target,persona_reel_views_per_like,
-                    persona_reel_views_per_follow,slow_start_reel_views_per_follow,
+                    persona_reel_views_per_follow,slow_start_reel_views_per_like,
+                    slow_start_reel_views_per_follow,
                     rule_reel_views_per_follow,consumption_reel_views_per_follow,
                     rule_views_per_like,rule_join_every_n_rounds,
                     consumption_views_per_like,consumption_confirmed_likes_per_join,
@@ -1133,7 +1143,8 @@ export class FacebookOperationPolicyStore {
       await client.query('BEGIN');
       const currentResult = await client.query<GlobalOperationPolicyDbRow>(
         `SELECT execution_target,persona_reel_views_per_like,
-                persona_reel_views_per_follow,slow_start_reel_views_per_follow,
+                persona_reel_views_per_follow,slow_start_reel_views_per_like,
+                slow_start_reel_views_per_follow,
                 rule_reel_views_per_follow,consumption_reel_views_per_follow,
                 rule_views_per_like,rule_join_every_n_rounds,
                 consumption_views_per_like,consumption_confirmed_likes_per_join,
@@ -1169,22 +1180,24 @@ export class FacebookOperationPolicyStore {
         `UPDATE facebook_operation_global_policy
             SET persona_reel_views_per_like=$2,
                 persona_reel_views_per_follow=$3,
-                slow_start_reel_views_per_follow=$4,
-                rule_reel_views_per_follow=$5,
-                consumption_reel_views_per_follow=$6,
-                rule_views_per_like=$7,
-                rule_join_every_n_rounds=$8,
-                consumption_views_per_like=$9,
-                consumption_confirmed_likes_per_join=$10,
-                consumption_confirmed_joins_per_comment=$11,
-                slow_start_total_days=$12,
-                slow_start_daily_caps=$13::jsonb,
-                revision=$14,
+                slow_start_reel_views_per_like=$4,
+                slow_start_reel_views_per_follow=$5,
+                rule_reel_views_per_follow=$6,
+                consumption_reel_views_per_follow=$7,
+                rule_views_per_like=$8,
+                rule_join_every_n_rounds=$9,
+                consumption_views_per_like=$10,
+                consumption_confirmed_likes_per_join=$11,
+                consumption_confirmed_joins_per_comment=$12,
+                slow_start_total_days=$13,
+                slow_start_daily_caps=$14::jsonb,
+                revision=$15,
                 updated_at=now(),
-                updated_by=$15
+                updated_by=$16
           WHERE execution_target=$1
           RETURNING execution_target,persona_reel_views_per_like,
-                    persona_reel_views_per_follow,slow_start_reel_views_per_follow,
+                    persona_reel_views_per_follow,slow_start_reel_views_per_like,
+                    slow_start_reel_views_per_follow,
                     rule_reel_views_per_follow,consumption_reel_views_per_follow,
                     rule_views_per_like,rule_join_every_n_rounds,
                     consumption_views_per_like,consumption_confirmed_likes_per_join,
@@ -1194,6 +1207,7 @@ export class FacebookOperationPolicyStore {
           this.executionTarget,
           input.reels.persona.viewsPerLike,
           input.reels.persona.viewsPerFollow,
+          input.reels.slowStart.viewsPerLike,
           input.reels.slowStart.viewsPerFollow,
           input.reels.rule.viewsPerFollow,
           input.reels.consumption.viewsPerFollow,
@@ -2273,6 +2287,7 @@ export class FacebookOperationPolicyStore {
           viewsPerFollow: Number(row.persona_reel_views_per_follow),
         },
         slowStart: {
+          viewsPerLike: Number(row.slow_start_reel_views_per_like),
           viewsPerFollow: Number(row.slow_start_reel_views_per_follow),
         },
         rule: {

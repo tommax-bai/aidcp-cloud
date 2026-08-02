@@ -28,7 +28,7 @@ const BASE: FacebookOperationPolicyBaseProjection = {
   consumption: { viewsPerLike: 4, confirmedLikesPerJoin: 3, confirmedJoinsPerComment: 2 },
   reels: {
     persona: { viewsPerLike: 6, viewsPerFollow: 12 },
-    slowStart: { viewsPerFollow: 20 },
+    slowStart: { viewsPerLike: 18, viewsPerFollow: 20 },
     rule: { viewsPerFollow: 15 },
     consumption: { viewsPerFollow: 14 },
   },

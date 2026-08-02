@@ -1098,7 +1098,7 @@ function createRequestHandler(
         || !isRecord(body.reels.persona)
         || !hasExactlyKeys(body.reels.persona, ['viewsPerLike', 'viewsPerFollow'])
         || !isRecord(body.reels.slowStart)
-        || !hasExactlyKeys(body.reels.slowStart, ['viewsPerFollow'])
+        || !hasExactlyKeys(body.reels.slowStart, ['viewsPerLike', 'viewsPerFollow'])
         || !isRecord(body.reels.rule)
         || !hasExactlyKeys(body.reels.rule, ['viewsPerFollow'])
         || !isRecord(body.reels.consumption)
@@ -1128,7 +1128,7 @@ function createRequestHandler(
           },
           reels: body.reels as {
             persona: { viewsPerLike: number; viewsPerFollow: number };
-            slowStart: { viewsPerFollow: number };
+            slowStart: { viewsPerLike: number; viewsPerFollow: number };
             rule: { viewsPerFollow: number };
             consumption: { viewsPerFollow: number };
           },

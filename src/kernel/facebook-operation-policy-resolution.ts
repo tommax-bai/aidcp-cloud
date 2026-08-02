@@ -40,7 +40,10 @@ export type FacebookGlobalReelCadenceParameters = {
     viewsPerLike: number;
     viewsPerFollow: number;
   };
-  slowStart: { viewsPerFollow: number };
+  slowStart: {
+    viewsPerLike: number;
+    viewsPerFollow: number;
+  };
   rule: { viewsPerFollow: number };
   consumption: { viewsPerFollow: number };
 };

@@ -33,7 +33,7 @@ const BASELINE: FacebookOperationPolicyBaseProjection = {
   },
   reels: {
     persona: { viewsPerLike: 6, viewsPerFollow: 12 },
-    slowStart: { viewsPerFollow: 20 },
+    slowStart: { viewsPerLike: 18, viewsPerFollow: 20 },
     rule: { viewsPerFollow: 15 },
     consumption: { viewsPerFollow: 10 },
   },
@@ -170,7 +170,10 @@ test('基线载荷校验：三个枚举按取值表判，缺字段 / 越界值�
       environments: [
         {
           ...BASELINE,
-          reels: { ...BASELINE.reels, slowStart: {} },
+          reels: {
+            ...BASELINE.reels,
+            slowStart: { viewsPerFollow: BASELINE.reels.slowStart.viewsPerFollow },
+          },
         },
       ],
     }),

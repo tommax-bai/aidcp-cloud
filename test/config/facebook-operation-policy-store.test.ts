@@ -25,6 +25,7 @@ interface GlobalPolicyRow {
   execution_target: 'dev' | 'ol';
   persona_reel_views_per_like: number;
   persona_reel_views_per_follow: number;
+  slow_start_reel_views_per_like: number;
   slow_start_reel_views_per_follow: number;
   rule_reel_views_per_follow: number;
   consumption_reel_views_per_follow: number;
@@ -95,6 +96,7 @@ function readySchema(withGlobal = false): SchemaProber {
         'facebook_operation_global_policy.execution_target',
         'facebook_operation_global_policy.persona_reel_views_per_like',
         'facebook_operation_global_policy.persona_reel_views_per_follow',
+        'facebook_operation_global_policy.slow_start_reel_views_per_like',
         'facebook_operation_global_policy.slow_start_reel_views_per_follow',
         'facebook_operation_global_policy.rule_reel_views_per_follow',
         'facebook_operation_global_policy.consumption_reel_views_per_follow',
@@ -184,6 +186,7 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
     execution_target: options.executionTarget ?? 'dev',
     persona_reel_views_per_like: 4,
     persona_reel_views_per_follow: 10,
+    slow_start_reel_views_per_like: 15,
     slow_start_reel_views_per_follow: 15,
     rule_reel_views_per_follow: 15,
     consumption_reel_views_per_follow: 15,
@@ -233,19 +236,20 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
         execution_target: String(params[0]) as GlobalPolicyRow['execution_target'],
         persona_reel_views_per_like: Number(params[1]),
         persona_reel_views_per_follow: Number(params[2]),
-        slow_start_reel_views_per_follow: Number(params[3]),
-        rule_reel_views_per_follow: Number(params[4]),
-        consumption_reel_views_per_follow: Number(params[5]),
-        rule_views_per_like: Number(params[6]),
-        rule_join_every_n_rounds: Number(params[7]),
-        consumption_views_per_like: Number(params[8]),
-        consumption_confirmed_likes_per_join: Number(params[9]),
-        consumption_confirmed_joins_per_comment: Number(params[10]),
-        slow_start_total_days: Number(params[11]),
-        slow_start_daily_caps: JSON.parse(String(params[12])),
-        revision: Number(params[13]),
+        slow_start_reel_views_per_like: Number(params[3]),
+        slow_start_reel_views_per_follow: Number(params[4]),
+        rule_reel_views_per_follow: Number(params[5]),
+        consumption_reel_views_per_follow: Number(params[6]),
+        rule_views_per_like: Number(params[7]),
+        rule_join_every_n_rounds: Number(params[8]),
+        consumption_views_per_like: Number(params[9]),
+        consumption_confirmed_likes_per_join: Number(params[10]),
+        consumption_confirmed_joins_per_comment: Number(params[11]),
+        slow_start_total_days: Number(params[12]),
+        slow_start_daily_caps: JSON.parse(String(params[13])),
+        revision: Number(params[14]),
         updated_at: new Date(),
-        updated_by: String(params[14]),
+        updated_by: String(params[15]),
       };
       return { rows: [{ ...globalRow }], rowCount: 1 };
     }
@@ -559,6 +563,10 @@ describe('FacebookOperationPolicyStore', () => {
     await db.store.init();
     assert.equal(db.store.getGlobal()?.executionTarget, 'dev');
     assert.equal(db.store.getGlobal()?.revision, 1);
+    assert.deepEqual(db.store.getGlobal()?.reels.slowStart, {
+      viewsPerLike: 15,
+      viewsPerFollow: 15,
+    });
 
     const inherited = await db.store.writeEnvironment(
       'env-fb',
@@ -610,7 +618,7 @@ describe('FacebookOperationPolicyStore', () => {
         },
         reels: {
           persona: { viewsPerLike: 6, viewsPerFollow: 11 },
-          slowStart: { viewsPerFollow: 16 },
+          slowStart: { viewsPerLike: 12, viewsPerFollow: 16 },
           rule: { viewsPerFollow: 17 },
           consumption: { viewsPerFollow: 18 },
         },
@@ -626,7 +634,7 @@ describe('FacebookOperationPolicyStore', () => {
       assert.equal(updated.view.slowStart.totalDays, 14);
       assert.deepEqual(updated.view.reels, {
         persona: { viewsPerLike: 6, viewsPerFollow: 11 },
-        slowStart: { viewsPerFollow: 16 },
+        slowStart: { viewsPerLike: 12, viewsPerFollow: 16 },
         rule: { viewsPerFollow: 17 },
         consumption: { viewsPerFollow: 18 },
       });
@@ -709,7 +717,12 @@ describe('FacebookOperationPolicyStore', () => {
   });
 
   it('rejects fractional and out-of-range global Reel cadence before writing audit', async () => {
-    for (const invalidViewsPerLike of [1.5, 101]) {
+    for (const [scope, invalidViewsPerLike] of [
+      ['persona', 1.5],
+      ['persona', 101],
+      ['slowStart', 1.5],
+      ['slowStart', 101],
+    ] as const) {
       const db = database({ executionTarget: 'dev' });
       await db.store.init();
       const current = db.store.getGlobal()!;
@@ -720,13 +733,10 @@ describe('FacebookOperationPolicyStore', () => {
           consumption: current.consumption,
           reels: {
             ...current.reels,
-            persona: {
-              ...current.reels.persona,
-              viewsPerLike: invalidViewsPerLike,
-            },
+            [scope]: { ...current.reels[scope], viewsPerLike: invalidViewsPerLike },
           },
           slowStart: current.slowStart,
-          requestId: `bad-reel-cadence-${invalidViewsPerLike}`,
+          requestId: `bad-reel-cadence-${scope}-${invalidViewsPerLike}`,
         },
         'panel:alice',
       );

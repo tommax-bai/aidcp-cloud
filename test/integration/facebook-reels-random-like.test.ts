@@ -65,7 +65,9 @@ function startDispatcher(options: {
         reelCadence: options.reelCadence ?? (
           mode === 'persona'
             ? { viewsPerLike: 4, viewsPerFollow: 10 }
-            : { viewsPerFollow: 15 }
+            : mode === 'slow_start'
+              ? { viewsPerLike: 15, viewsPerFollow: 15 }
+              : { viewsPerFollow: 15 }
         ),
       };
     },
@@ -122,16 +124,45 @@ test('普通人设 Reel: Feed、畸形目标和重复 Reel 不推进 N 计数', 
   dispatcher.endSession('test');
 });
 
-test('普通人设 Reel: slow-start、规则、消费均不复用 persona 点赞节奏', () => {
-  for (const mode of ['slow_start', 'facebook_rule', 'consumption'] as const) {
+test('冷启动 Reel: 独立 N 边界只对唯一规范 Reel 下发 mode-scoped like', () => {
+  const { dispatcher, commands } = startDispatcher({
+    mode: 'slow_start',
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 100 },
+  });
+  reportReel(dispatcher, '20', 'A');
+  reportReel(dispatcher, '20', 'A');
+  assert.equal(commands.some((command) => command.action === 'like'), false);
+  reportReel(dispatcher, '21', 'B');
+  const likes = commands.filter((command) => command.action === 'like');
+  assert.equal(likes.length, 1);
+  assert.equal(likes[0]?.reason, 'facebook_reel_slow_start_cadence_hit');
+  assert.equal(likes[0]?.params?.noteId, 'https://www.facebook.com/reel/21');
+  dispatcher.endSession('test');
+});
+
+test('规则与消费模式不获得 Reel 点赞节奏，即使投影意外夹带 viewsPerLike', () => {
+  for (const mode of ['facebook_rule', 'consumption'] as const) {
     const candidate = startDispatcher({
       mode,
-      reelCadence: { viewsPerFollow: 100 },
+      reelCadence: { viewsPerLike: 1, viewsPerFollow: 100 },
     });
     reportReel(candidate.dispatcher, mode, 'Bao');
     assert.equal(candidate.commands.some((command) => command.action === 'like'), false, mode);
     candidate.dispatcher.endSession('test');
   }
+});
+
+test('冷启动 Reel: 点赞与关注同一 N 边界分别产生一个既有意图', () => {
+  const { dispatcher, commands } = startDispatcher({
+    mode: 'slow_start',
+    hasReelFollow: true,
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 2 },
+  });
+  reportReel(dispatcher, '30', 'A');
+  reportReel(dispatcher, '31', 'B');
+  assert.equal(commands.filter((command) => command.action === 'like').length, 1);
+  assert.equal(commands.filter((command) => command.action === 'follow').length, 1);
+  dispatcher.endSession('test');
 });
 
 test('Reel cadence: 会话中模式切换仍按模式分别去重和计数', () => {
@@ -155,6 +186,25 @@ test('Reel cadence: 会话中模式切换仍按模式分别去重和计数', () 
   candidate.dispatcher.endSession('test');
 });
 
+test('Reel cadence: persona 与冷启动对同一 Reel 分别去重和计数', () => {
+  const modeRef = { current: 'persona' as 'persona' | 'slow_start' };
+  const { dispatcher, commands } = startDispatcher({
+    modeRef,
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 100 },
+  });
+  reportReel(dispatcher, '60', 'A');
+  modeRef.current = 'slow_start';
+  reportReel(dispatcher, '60', 'A');
+  reportReel(dispatcher, '61', 'B');
+  modeRef.current = 'persona';
+  reportReel(dispatcher, '61', 'B');
+  assert.deepEqual(
+    commands.filter((command) => command.action === 'like').map((command) => command.reason),
+    ['facebook_reel_slow_start_cadence_hit', 'facebook_reel_persona_cadence_hit'],
+  );
+  dispatcher.endSession('test');
+});
+
 test('普通人设 Reel: N 边界被风险拒绝不形成补写债', () => {
   let allowed = false;
   const { dispatcher, commands } = startDispatcher({
@@ -171,6 +221,23 @@ test('普通人设 Reel: N 边界被风险拒绝不形成补写债', () => {
   dispatcher.endSession('test');
 });
 
+test('冷启动 Reel: N 边界被风险拒绝不形成补写债', () => {
+  let allowed = false;
+  const { dispatcher, commands } = startDispatcher({
+    mode: 'slow_start',
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 100 },
+    canInteract: (action) => action !== 'like' || allowed,
+  });
+  reportReel(dispatcher, '40');
+  reportReel(dispatcher, '41');
+  allowed = true;
+  reportReel(dispatcher, '42');
+  assert.equal(commands.some((command) => command.action === 'like'), false);
+  reportReel(dispatcher, '43');
+  assert.equal(commands.filter((command) => command.action === 'like').length, 1);
+  dispatcher.endSession('test');
+});
+
 test('普通人设 Reel: 会话边界清空 N 计数和 Reel 去重', () => {
   const { dispatcher, commands } = startDispatcher({
     reelCadence: { viewsPerLike: 2, viewsPerFollow: 100 },
@@ -181,6 +248,21 @@ test('普通人设 Reel: 会话边界清空 N 计数和 Reel 去重', () => {
   reportReel(dispatcher, '1');
   assert.equal(commands.some((command) => command.action === 'like'), false);
   reportReel(dispatcher, '2');
+  assert.equal(commands.filter((command) => command.action === 'like').length, 1);
+  dispatcher.endSession('second');
+});
+
+test('冷启动 Reel: 会话边界清空 N 计数和 Reel 去重', () => {
+  const { dispatcher, commands } = startDispatcher({
+    mode: 'slow_start',
+    reelCadence: { viewsPerLike: 2, viewsPerFollow: 100 },
+  });
+  reportReel(dispatcher, '50');
+  dispatcher.endSession('first');
+  dispatcher.startSession();
+  reportReel(dispatcher, '50');
+  assert.equal(commands.some((command) => command.action === 'like'), false);
+  reportReel(dispatcher, '51');
   assert.equal(commands.filter((command) => command.action === 'like').length, 1);
   dispatcher.endSession('second');
 });
