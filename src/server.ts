@@ -336,6 +336,8 @@ import {
   DelegatedTaskService,
   DelegatedTaskWorker,
   createDelegatedExecutorRouter,
+  listDelegatedAccountCandidates,
+  type DelegatedAccountDirectoryReader,
   type DelegatedTask,
 } from './delegated-task/index.js';
 import { parseDeploymentTarget } from './deployment-target.js';
@@ -3329,10 +3331,20 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   const accountDisplayNameCandidates = (accountId: string): string[] =>
     accountStore?.getDisplayNameCandidates?.(accountId) ?? [];
 
+  /**
+   * 账号目录的取用面（api 属主）。**委托任务的候选清单从这里取，不再直读账号存储的三个方法**：
+   * 拆开之后自动化进程读的是同一条 4a 路由，两边走同一个取用面，才谈得上「行为等价」。
+   * 属主缺这个方法（打桩的账号存储）⇒ 目录不可用 ⇒ 委托控制面按既有口径 fail-closed。
+   */
+  const accountDirectory: DelegatedAccountDirectoryReader | undefined =
+    accountStore?.listAccountDirectory
+      ? { listAccountDirectory: () => accountStore!.listAccountDirectory!() }
+      : undefined;
+
   // Unified user-delegated task control plane. If PG/account facts are unavailable, all public write entries fail closed.
   let delegatedTaskStore: PgDelegatedTaskStore | undefined;
   let delegatedTaskService: DelegatedTaskService | undefined;
-  if (accountStore && deploymentTarget) {
+  if (accountStore && accountDirectory && deploymentTarget) {
     try {
       const store = new PgDelegatedTaskStore({
         executionTarget: deploymentTarget,
@@ -3347,13 +3359,10 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
       delegatedTaskStore = store;
       delegatedTaskService = new DelegatedTaskService({
         store,
-        listAccounts: async () => Promise.all((await accountStore!.listAll()).map(async (row) => ({
-          accountId: row.accountId,
-          displayName: accountDisplayName(row.accountId) ?? null,
-          names: accountDisplayNameCandidates(row.accountId),
-          platform: await accountStore!.getPlatform?.(row.accountId) ?? 'xiaohongshu',
-          status: row.status,
-        }))),
+        // 一次全量目录读。**不再是「列暂停态 + 逐账号问显示名 / 问平台」那三件套**：
+        // 那三件套里两件读的是进程内缓存，跨进程之后自动化侧根本没有那份缓存，
+        // 而按昵称选号恰恰全靠显示名与别名候选。翻译只有一份，见 account-candidates。
+        listAccounts: () => listDelegatedAccountCandidates(accountDirectory),
         prepareTarget: async (intent, account) => {
           if (intent.action === 'approve_candidate' || intent.action === 'reject_candidate' || intent.action === 'modify_candidate') {
             const recordId = Number(intent.targetConstraints?.candidateId);
@@ -3937,6 +3946,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   };
   if (
     accountStore?.listAccountIdentities
+    && accountStore.listAccountDirectory
     && accountStore.getExecutionTarget
     && accountStore.resolveExecutionTarget
     && accountStore.setExecutionTarget
@@ -3947,6 +3957,7 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   ) {
     apiDirectAuthorities.accountRoster = {
       listAccountIdentities: () => accountStore.listAccountIdentities!(),
+      listAccountDirectory: () => accountStore.listAccountDirectory!(),
     };
     apiDirectAuthorities.accountOwnership = {
       getExecutionTarget: (accountId) => accountStore.getExecutionTarget!(accountId),

@@ -23,7 +23,10 @@ import {
   type AccountDisplayNameInput,
 } from './account-display-name.js';
 import type { SchemaEnsurer } from './kernel/schema-capability-contract.js';
-import type { AccountIdentityProjectionRow } from './kernel/account-projection-types.js';
+import type {
+  AccountDirectoryRow,
+  AccountIdentityProjectionRow,
+} from './kernel/account-projection-types.js';
 
 const { Pool } = pg;
 
@@ -136,6 +139,15 @@ export interface AccountStore {
    * accounts 的 SQL 里逐字搬过去的，只有原样值才能保证语义等价。
    */
   listAccountIdentities?(): Promise<readonly AccountIdentityProjectionRow[]>;
+  /**
+   * 账号目录：人类可读身份那一面（显示名 + 别名候选 + 归一后的平台 + 暂停态）。
+   *
+   * 与上面那条守卫花名册**刻意分成两条**：那条要求列值原样、且服务于一条持久投影流；
+   * 这条要的是「运营按昵称能不能选中这个号」，口径正好相反（要归一、要按统一优先级算显示名）。
+   * 实现 MUST 走 `resolveAccountDisplayName` / `accountDisplayNameCandidates` 这一份解析器，
+   * 别在实现里另拼一遍优先级。
+   */
+  listAccountDirectory?(): Promise<readonly AccountDirectoryRow[]>;
   /** upsert 一个账号的暂停态（pause 未注册账号时自动建行）。 */
   setPaused(accountId: string, paused: boolean, at: number | null): Promise<void>;
   /**
@@ -377,6 +389,43 @@ export class PgAccountStore implements AccountStore {
       createdAt: r.created_at ? r.created_at.getTime() : null,
       status: r.status === 'paused' ? 'paused' : 'active',
     }));
+  }
+
+  /**
+   * 账号目录（见 AccountStore.listAccountDirectory 契约）。
+   *
+   * **直读库、不读进程内那份显示名缓存**：缓存服务于握手期的同步读，它的新鲜度只由写路径维护；
+   * 而这条读的消费方是运营入口（按昵称选号），拿一份可能落后的名字去匹配，结果是「明明改了别名
+   * 却选不中」，且不报错。同一句 SQL 里把平台一起取回，省掉逐账号再问一次平台的 N+1。
+   */
+  async listAccountDirectory(): Promise<readonly AccountDirectoryRow[]> {
+    const { rows } = await this.pool.query<{
+      account_id: string;
+      operator_alias: string | null;
+      nickname: string | null;
+      label: string | null;
+      platform: string | null;
+      status: string;
+    }>(
+      'SELECT account_id, operator_alias, nickname, label, platform, status FROM accounts',
+    );
+    return rows.map((r) => {
+      const input: AccountDisplayNameInput = {
+        accountId: r.account_id,
+        operatorAlias: r.operator_alias ?? null,
+        nickname: r.nickname ?? null,
+        label: r.label ?? null,
+      };
+      const display = resolveAccountDisplayName(input);
+      return {
+        accountId: r.account_id,
+        // 回落到裸 ID 时交 null：那不是名字（与通知层 readableAccountDisplayName 同一条判据）。
+        displayName: display.source === 'account_id' ? null : display.name,
+        names: accountDisplayNameCandidates(input),
+        platform: normalizePlatformId(r.platform),
+        status: r.status === 'paused' ? 'paused' : 'active',
+      };
+    });
   }
 
   async setPaused(accountId: string, paused: boolean, at: number | null): Promise<void> {

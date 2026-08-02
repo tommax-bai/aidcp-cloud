@@ -10,7 +10,10 @@ import type {
   ClaimExecutionTargetResult,
   ExecutionTargetResolution,
 } from './account-ownership-port.js';
-import type { AccountIdentityProjectionRow } from './account-projection-types.js';
+import type {
+  AccountDirectoryRow,
+  AccountIdentityProjectionRow,
+} from './account-projection-types.js';
 import type {
   InteractionAuthWriteAuthorization,
   InteractionAuthWriteAuthorizationInput,
@@ -82,6 +85,14 @@ export const CONTENT_COMMAND_TOKEN_ENV = 'AIDCP_CONTENT_INTERNAL_TOKEN' as const
 
 export interface AccountRosterAuthorityPort {
   listAccountIdentities(): Promise<readonly AccountIdentityProjectionRow[]>;
+  /**
+   * 账号目录（人类可读身份那一面）。守卫投影那条读只给原样的平台 / 分组文本，
+   * **不含显示名与别名候选**，而「按昵称选号」这类运营入口要的正是后者。
+   *
+   * 属主 MUST 用统一解析器算 `displayName` / `names`，MUST NOT 各自再拼一遍优先级：
+   * 那个优先级（运营别名 → 平台昵称 → 运营标签 → 裸 ID）只该有一份实现。
+   */
+  listAccountDirectory(): Promise<readonly AccountDirectoryRow[]>;
 }
 
 /** The admitted 4a face intentionally omits the unused claimExecutionTarget. */
@@ -620,7 +631,7 @@ export interface PersonaGeneratorAuthorityPort {
  * and package export tests fail when the admitted surface drifts.
  */
 export const API_DIRECT_PORT_INVENTORY = {
-  accountRoster: ['listAccountIdentities'],
+  accountRoster: ['listAccountIdentities', 'listAccountDirectory'],
   accountOwnership: ['getExecutionTarget', 'resolveExecutionTarget', 'setExecutionTarget'],
   accountRuntime: [
     'ensureAccount',

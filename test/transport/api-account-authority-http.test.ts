@@ -41,6 +41,16 @@ async function withAccountServer(
         status: 'active',
       }];
     },
+    async listAccountDirectory() {
+      ownerCalls.push('listAccountDirectory');
+      return [{
+        accountId: 'acct-1',
+        displayName: '工程师大白',
+        names: ['工程师大白', '大白'],
+        platform: 'facebook',
+        status: 'active',
+      }];
+    },
   };
   const ownership: AccountOwnershipAuthorityPort = {
     async getExecutionTarget(accountId) {
@@ -88,8 +98,11 @@ async function withAccountServer(
   }
 }
 
-test('account 4a routes keep 1/3/4 method parity and omit claimExecutionTarget', async () => {
-  assert.deepEqual(Object.keys(ACCOUNT_ROSTER_ROUTES), ['listAccountIdentities']);
+test('account 4a routes keep 2/3/5 method parity and omit claimExecutionTarget', async () => {
+  assert.deepEqual(Object.keys(ACCOUNT_ROSTER_ROUTES), [
+    'listAccountIdentities',
+    'listAccountDirectory',
+  ]);
   assert.deepEqual(Object.keys(ACCOUNT_OWNERSHIP_ROUTES), [
     'getExecutionTarget',
     'resolveExecutionTarget',
@@ -109,6 +122,17 @@ test('account 4a routes keep 1/3/4 method parity and omit claimExecutionTarget',
     const ownership = new AccountOwnershipHttpClient(http, TOKEN, 'dev');
     const runtime = new AccountRuntimeHttpClient(http, TOKEN, 'dev');
     assert.equal((await roster.listAccountIdentities())[0]?.groupLabel, 'north');
+    // 目录那一条与守卫花名册是**两条不同的路由**，各自往返一次；载荷里的显示名与别名候选
+    // 正是花名册那一条给不出的东西，所以两个字段都断，别只断到货。
+    assert.deepEqual(await roster.listAccountDirectory(), [
+      {
+        accountId: 'acct-1',
+        displayName: '工程师大白',
+        names: ['工程师大白', '大白'],
+        platform: 'facebook',
+        status: 'active',
+      },
+    ]);
     assert.equal(await ownership.getExecutionTarget('acct-1'), 'dev');
     assert.deepEqual(await ownership.resolveExecutionTarget('acct-1'), {
       outcome: 'owned',
@@ -129,7 +153,7 @@ test('account 4a routes keep 1/3/4 method parity and omit claimExecutionTarget',
     // 缺了运营只会把这条暂停当成误操作。
     await runtime.pauseAccount('acct-1', 'join_failed');
     assert.equal(calls.at(-1), 'pauseAccount:acct-1:join_failed');
-    assert.equal(calls.length, 9);
+    assert.equal(calls.length, 10);
   });
 });
 

@@ -3,12 +3,12 @@
   "change": "split-cloud-api-composition-root-4a",
   "baseCloudSha": "67941e495ad52c22b08e4a85ef530245b2fac517",
   "expectedGroups": 21,
-  "expectedMethodSlots": 58,
-  "expectedProductionConsumerSlots": 58,
+  "expectedMethodSlots": 59,
+  "expectedProductionConsumerSlots": 59,
   "directions": {
     "automation-to-api": {
       "groups": 17,
-      "methodSlots": 53
+      "methodSlots": 54
     },
     "api-to-automation": {
       "groups": 3,
@@ -27,7 +27,8 @@
       "ownerSourceFile": "src/account-store.ts",
       "consumer": "automation account projection and Facebook scope guard",
       "methods": [
-        "listAccountIdentities"
+        "listAccountIdentities",
+        "listAccountDirectory"
       ]
     },
     {

@@ -316,6 +316,14 @@ export const PRODUCTION_CONSUMER_BINDINGS: readonly ProductionConsumerBinding[] 
     callPath: 'this.source.listAccountIdentities',
   },
   {
+    // 委托任务的账号候选清单。**消费点刻意不在组装根里**：自动化进程的 `main()` 也要同一份翻译，
+    // 写在组装根就必然复制出第二份，而两份漂开的现形时刻是「按昵称选号」真被用到的那一刻。
+    groupId: 'account-roster-source',
+    method: 'listAccountDirectory',
+    sourceFile: 'src/delegated-task/account-candidates.ts',
+    callPath: 'directory.listAccountDirectory',
+  },
+  {
     groupId: 'account-ownership',
     method: 'getExecutionTarget',
     sourceFile: 'src/orchestrator/connection-runtime.ts',

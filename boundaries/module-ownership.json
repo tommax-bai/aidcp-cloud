@@ -780,6 +780,11 @@
     "note": "【待定稿裁决】§4.7 基线 sha 之后由 change publish-approval-signal-to-database 新增，src/db/ 是 §4.7 里不存在的新目录。按『锁随被保护数据走』落 api：本文件唯一动作是锁 client_environments 的行，该表 §5.1 具名归 aidcp-api 单写、§4.7 的 src/client-auth/ 亦整目录归 api。此处用 fileOverride 而非目录规则，故 src/db/ 后续新增文件仍会逐个待裁决。请求回写 §4.7 见 docpatch R1"
   },
   {
+    "path": "src/delegated-task/account-candidates.ts",
+    "layer": "automation",
+    "note": "§4.7：认领型 worker 范式（整目录 automation，无例外）。**判据是范式，不是当时的文件数**——原文写死「10/10」，目录长到 12 个之后那个数字就只会误导（新增的是 change split-cloud-automation-production-runtime 的运营指令接收方与幂等台账，同属该范式）"
+  },
+  {
     "path": "src/delegated-task/executors.ts",
     "layer": "automation",
     "note": "§4.7：认领型 worker 范式（整目录 automation，无例外）。**判据是范式，不是当时的文件数**——原文写死「10/10」，目录长到 12 个之后那个数字就只会误导（新增的是 change split-cloud-automation-production-runtime 的运营指令接收方与幂等台账，同属该范式）"

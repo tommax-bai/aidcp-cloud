@@ -620,3 +620,48 @@ test('4a composition: content ports are mode-selected and never fall back to the
     'the role factory table must contain no content-owned symbol',
   );
 });
+
+test('4a composition: delegated account candidates come from the roster directory port, once', async () => {
+  const source = await serverSource();
+
+  // ① 组装根这一侧 MUST 是**正向委托**：`listAccounts` 的方法体要真调到那个共享翻译。
+  //    判据刻意不写成「组装根里没有 displayName 字面量」——那种反向判据换个字段名就绕过去了，
+  //    而这里真正要防的是「自动化进程的 main() 里再抄一份」。
+  const delegatedService = between(
+    source,
+    'delegatedTaskService = new DelegatedTaskService({',
+    'prepareTarget: async (intent, account) => {',
+  );
+  assert.match(
+    delegatedService,
+    /listAccounts:\s*\(\)\s*=>\s*listDelegatedAccountCandidates\(accountDirectory\)/,
+    'the delegated account list must delegate to the shared translation, not rebuild it inline',
+  );
+
+  // ② 那一份翻译**只许有一处实现**，且它读的是 4a 目录口。
+  //    直读账号存储的三件套（listAll + 显示名缓存 + 逐账号问平台）在拆开之后自动化侧根本没有，
+  //    照抄过去会静默退化成「每个号都没有可读名」。
+  const candidates = await readFile(
+    new URL('../../src/delegated-task/account-candidates.ts', import.meta.url),
+    'utf8',
+  );
+  assert.match(candidates, /directory\.listAccountDirectory\(\)/);
+  assert.doesNotMatch(
+    candidates,
+    /\b(listAll|getDisplayName|getDisplayNameCandidates|getPlatform)\b/,
+    'the shared translation must not reach past the 4a directory port into the owner store',
+  );
+
+  // ③ 组装根 MUST NOT 再给委托候选拼第二份翻译。按**符号**判：本文件里除了那一处委托调用，
+  //    不许出现第二个构造候选行的地方（`names:` 与 `displayName:` 同时出现即是在拼候选）。
+  const rebuilt = between(
+    source,
+    'const accountDirectory: DelegatedAccountDirectoryReader | undefined =',
+    'console.log(`[aidcp-cloud] DelegatedTaskStore 已就绪',
+  );
+  assert.doesNotMatch(
+    rebuilt,
+    /names:\s*accountDisplayNameCandidates\(/,
+    'the delegated candidate rows must not be rebuilt from the process-local display-name cache',
+  );
+});

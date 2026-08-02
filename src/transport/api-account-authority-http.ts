@@ -10,7 +10,10 @@ import type {
   ClaimExecutionTargetResult,
   ExecutionTargetResolution,
 } from '../kernel/account-ownership-port.js';
-import type { AccountIdentityProjectionRow } from '../kernel/account-projection-types.js';
+import type {
+  AccountDirectoryRow,
+  AccountIdentityProjectionRow,
+} from '../kernel/account-projection-types.js';
 import type { PlatformId } from '../kernel/platform-types.js';
 import type { InternalHttpClient, InternalHttpServer } from './internal-http.js';
 import {
@@ -31,6 +34,7 @@ export const ACCOUNT_RUNTIME_CONTRACT_VERSION = API_DIRECT_CONTRACT_VERSION;
 
 export const ACCOUNT_ROSTER_ROUTES = {
   listAccountIdentities: 'api-direct/account-roster/v1/list-account-identities',
+  listAccountDirectory: 'api-direct/account-roster/v1/list-account-directory',
 } as const satisfies Record<keyof AccountRosterAuthorityPort, string>;
 
 export const ACCOUNT_OWNERSHIP_ROUTES = {
@@ -46,6 +50,18 @@ export const ACCOUNT_RUNTIME_ROUTES = {
   recordNickname: 'api-direct/account-runtime/v1/record-nickname',
   pauseAccount: 'api-direct/account-runtime/v1/pause-account',
 } as const satisfies Record<keyof AccountRuntimeAuthorityPort, string>;
+
+/** 花名册两条读都是无参全量；入参必须是空对象（多余键当场拒，别静默忽略）。 */
+function emptyRosterInput(value: unknown): Record<string, unknown> {
+  const record = requireRecord(value);
+  if (Object.keys(record).length !== 0) {
+    throw new ApiDirectHttpError(
+      'api_direct_invalid_request',
+      'account roster input must be empty',
+    );
+  }
+  return record;
+}
 
 function accountIdInput(value: unknown): { accountId: string } {
   const input = requireRecord(value);
@@ -112,6 +128,29 @@ function isRoster(value: unknown): value is readonly AccountIdentityProjectionRo
   );
 }
 
+/**
+ * 账号目录行的到货校验。
+ *
+ * `platform` 只校验「是个字符串」，与同文件的 {@link isPlatformOrNull} 同口径：属主跑着更新的版本、
+ * 多出一个平台时，整条读 MUST NOT 因此失败——那会把「多了一个平台」放大成「一个账号都读不到」。
+ * `names` 逐元素校验：一个非字符串混进去会让按昵称匹配在比较时静默不命中。
+ */
+function isDirectory(value: unknown): value is readonly AccountDirectoryRow[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (row) =>
+        isRecord(row) &&
+        typeof row.accountId === 'string' &&
+        isNullableString(row.displayName) &&
+        Array.isArray(row.names) &&
+        row.names.every((name) => typeof name === 'string') &&
+        typeof row.platform === 'string' &&
+        (row.status === 'active' || row.status === 'paused'),
+    )
+  );
+}
+
 function isResolution(value: unknown): value is ExecutionTargetResolution {
   if (!isRecord(value)) return false;
   if (value.outcome === 'unowned' || value.outcome === 'account_not_found') return true;
@@ -150,17 +189,16 @@ export function registerAccountRosterRoutes(
     ACCOUNT_ROSTER_ROUTES.listAccountIdentities,
     callerToken,
     (args) => {
-      parseApiDirectEnvelope(args, executionTarget, (input) => {
-        const record = requireRecord(input);
-        if (Object.keys(record).length !== 0) {
-          throw new ApiDirectHttpError(
-            'api_direct_invalid_request',
-            'account roster input must be empty',
-          );
-        }
-        return record;
-      });
+      parseApiDirectEnvelope(args, executionTarget, emptyRosterInput);
       return local.listAccountIdentities();
+    },
+  );
+  server.registerBearer(
+    ACCOUNT_ROSTER_ROUTES.listAccountDirectory,
+    callerToken,
+    (args) => {
+      parseApiDirectEnvelope(args, executionTarget, emptyRosterInput);
+      return local.listAccountDirectory();
     },
   );
 }
@@ -237,6 +275,17 @@ export class AccountRosterHttpClient implements AccountRosterAuthorityPort {
       this.executionTarget,
       {},
       isRoster,
+    );
+  }
+
+  listAccountDirectory(): Promise<readonly AccountDirectoryRow[]> {
+    return callApiDirectRead(
+      this.http,
+      ACCOUNT_ROSTER_ROUTES.listAccountDirectory,
+      this.callerToken,
+      this.executionTarget,
+      {},
+      isDirectory,
     );
   }
 }
