@@ -616,6 +616,12 @@ export const PRODUCTION_CONSUMER_BINDINGS: readonly ProductionConsumerBinding[] 
     callPath: 'this.deps.admissionLedger.recordMaterializationReceipt',
   },
   {
+    groupId: 'offboard-admission-ledger',
+    method: 'hasPendingRevocationHold',
+    sourceFile: 'src/server.ts',
+    callPath: 'ledger.hasPendingRevocationHold',
+  },
+  {
     groupId: 'api-notification-exit',
     method: 'deliver',
     sourceFile: 'src/server.ts',

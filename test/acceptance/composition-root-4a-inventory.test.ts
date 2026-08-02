@@ -53,7 +53,7 @@ async function loadJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(new URL(path, import.meta.url), 'utf8')) as T;
 }
 
-test('4a source-derived census is exactly 21 groups and 57 method slots', async () => {
+test('4a source-derived census is exactly 21 groups and 58 method slots', async () => {
   const [inventory, derived] = await Promise.all([
     loadJson<SurfaceInventory>(
       '../../boundaries/composition-root-4a-authority-surface.json',
@@ -61,12 +61,12 @@ test('4a source-derived census is exactly 21 groups and 57 method slots', async 
     deriveSurface(),
   ]);
   assert.equal(inventory.expectedGroups, 21);
-  assert.equal(inventory.expectedMethodSlots, 57);
-  assert.equal(inventory.expectedProductionConsumerSlots, 57);
+  assert.equal(inventory.expectedMethodSlots, 58);
+  assert.equal(inventory.expectedProductionConsumerSlots, 58);
   assert.equal(inventory.groups.length, 21);
   assert.equal(
     inventory.groups.reduce((sum, group) => sum + group.methods.length, 0),
-    57,
+    58,
   );
   assert.equal(derived.groups.length, 21);
 
@@ -137,17 +137,17 @@ test('4a source-derived census is exactly 21 groups and 57 method slots', async 
     );
   }
   assert.deepEqual(inventory.directions, {
-    'automation-to-api': { groups: 17, methodSlots: 52 },
+    'automation-to-api': { groups: 17, methodSlots: 53 },
     'api-to-automation': { groups: 3, methodSlots: 4 },
     'api-to-content': { groups: 1, methodSlots: 1 },
   });
   const consumerSlotKeys = PRODUCTION_CONSUMER_BINDINGS.map(
     (binding) => `${binding.groupId}:${binding.method}`,
   );
-  assert.equal(consumerSlotKeys.length, 57);
+  assert.equal(consumerSlotKeys.length, 58);
   assert.equal(
     new Set(consumerSlotKeys).size,
-    57,
+    58,
     'production consumer bindings must cover each admitted slot exactly once',
   );
 });

@@ -3,12 +3,12 @@
   "change": "split-cloud-api-composition-root-4a",
   "baseCloudSha": "67941e495ad52c22b08e4a85ef530245b2fac517",
   "expectedGroups": 21,
-  "expectedMethodSlots": 57,
-  "expectedProductionConsumerSlots": 57,
+  "expectedMethodSlots": 58,
+  "expectedProductionConsumerSlots": 58,
   "directions": {
     "automation-to-api": {
       "groups": 17,
-      "methodSlots": 52
+      "methodSlots": 53
     },
     "api-to-automation": {
       "groups": 3,
@@ -212,7 +212,8 @@
       "methods": [
         "reconcileActiveOffboardSnapshot",
         "claimPendingMaterializations",
-        "recordMaterializationReceipt"
+        "recordMaterializationReceipt",
+        "hasPendingRevocationHold"
       ]
     },
     {

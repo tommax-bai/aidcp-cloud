@@ -45,14 +45,15 @@ import {
 
 const TOKEN = 'api-aux-token';
 
-test('aux authority route tables preserve independent 2/1/1/1/1/3/3/1 faces', () => {
+test('aux authority route tables preserve independent 2/1/1/1/1/3/4/1 faces', () => {
   assert.equal(Object.keys(ACCOUNT_PERSONA_ROUTES).length, 2);
   assert.equal(Object.keys(ENVIRONMENT_HANDSHAKE_ROUTES).length, 1);
   assert.equal(Object.keys(COMMENT_APPROVAL_POLICY_ROUTES).length, 1);
   assert.equal(Object.keys(NOTIFICATION_CONTACTS_ROUTES).length, 1);
   assert.equal(Object.keys(FIRST_POST_PROGRESS_ROUTES).length, 1);
   assert.equal(Object.keys(AUTOMATION_CONFIG_COMMANDS_ROUTES).length, 3);
-  assert.equal(Object.keys(OFFBOARD_ADMISSION_LEDGER_ROUTES).length, 3);
+  // 3 写 + 1 读：撤权 hold 的读面与写面同属一本台账，故同组，不另开一组。
+  assert.equal(Object.keys(OFFBOARD_ADMISSION_LEDGER_ROUTES).length, 4);
   assert.equal(Object.keys(STRUCTURED_NOTIFICATION_ROUTES).length, 1);
 });
 
@@ -97,6 +98,10 @@ test('aux clients preserve persona, owner ack, offboard CAS receipt, and deliver
     async recordMaterializationReceipt(input) {
       calls.push(`receipt:${input.commandId}`);
       return { outcome: 'applied', revision: input.expectedRevision + 1 };
+    },
+    async hasPendingRevocationHold(accountId) {
+      calls.push(`hold:${accountId}`);
+      return true;
     },
   };
   const notification: StructuredNotificationDeliveryPort = {
@@ -213,6 +218,12 @@ test('aux clients preserve persona, owner ack, offboard CAS receipt, and deliver
       }),
       { outcome: 'applied', revision: 2 },
     );
+    // 读面同组同往返。**这个布尔的方向要盯住**：`true` = 还挂着 hold = 不放行；
+    // 跨进程这一跳一旦把失败降级成 false，正在被撤权的环境会被重新放开互动写。
+    assert.equal(
+      await offboardClient.hasPendingRevocationHold('acct-1'),
+      true,
+    );
     const notificationClient = new StructuredNotificationHttpClient(http, TOKEN, 'dev');
     assert.deepEqual(
       await notificationClient.deliver({
@@ -237,6 +248,7 @@ test('aux clients preserve persona, owner ack, offboard CAS receipt, and deliver
       'reconcile:reconcile-1',
       'claim:claim-1',
       'receipt:receipt-1',
+      'hold:acct-1',
       'deliver:notice-1',
     ]);
   } finally {
@@ -261,6 +273,10 @@ test('aux method parsers reject incomplete snapshots and unknown notification ki
       async recordMaterializationReceipt() {
         calls += 1;
         return { outcome: 'applied', revision: 1 };
+      },
+      async hasPendingRevocationHold() {
+        calls += 1;
+        return false;
       },
     },
     TOKEN,

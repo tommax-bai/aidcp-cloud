@@ -167,7 +167,17 @@ function snapshotDigest(rows: ReconcileActiveOffboardSnapshotInput['rows']): str
   );
 }
 
-export class PgOffboardAdmissionLedger implements OffboardAdmissionLedgerPort {
+/**
+ * 台账的**写面**实现。
+ *
+ * `hasPendingRevocationHold`（同一本台账的读面）刻意不在这里实现：它要先按账号解析出环境键，
+ * 而那是环境属主存储的读，本类只持 api 池、拿不到。属主那一份已经写着谓词与失败方向的讲究，
+ * 在这里抄第二份的现形方式不是报错，而是某天两份漂开、一个正在被撤权的环境被放行。
+ * ⇒ 组装根把两半合成完整端口；本类用 `Omit` 如实声明自己只覆盖写面，让编译器看得见这件事。
+ */
+export class PgOffboardAdmissionLedger
+  implements Omit<OffboardAdmissionLedgerPort, 'hasPendingRevocationHold'>
+{
   private readonly executionTarget: DeploymentTarget;
 
   constructor(private readonly pool: pg.Pool, executionTarget: DeploymentTarget) {

@@ -437,6 +437,16 @@ export interface OffboardAdmissionLedgerPort {
   recordMaterializationReceipt(
     input: RecordMaterializationReceiptInput,
   ): Promise<RecordMaterializationReceiptOutcome>;
+  /**
+   * 该账号是否还挂着**尚未物化**的清理准入（历史名 hold）。同一本台账的读面，
+   * 故与上面三个写口同组，不另开一组。
+   *
+   * **失败方向必须是抛，MUST NOT 吞成 false。** 消费方（互动读 / 回复 / 私信那道闸）把
+   * `!hasPendingRevocationHold` 当作放行条件 —— false 是「没有 hold、可以放行」。
+   * 把跨进程读失败降级成 false，等于给一个正在被撤权的环境重新放开互动写，
+   * 比读失败本身严重得多。属主实现的注释里逐字写着这条，跨进程这一跳同样适用。
+   */
+  hasPendingRevocationHold(accountId: string): Promise<boolean>;
 }
 
 /* The only cross-owner notification exit. Chat lookup and binding are absent. */
@@ -663,6 +673,7 @@ export const API_DIRECT_PORT_INVENTORY = {
     'reconcileActiveOffboardSnapshot',
     'claimPendingMaterializations',
     'recordMaterializationReceipt',
+    'hasPendingRevocationHold',
   ],
   notificationDelivery: ['deliver'],
   edgeResumeCommand: ['resumeEdgesForAccount'],

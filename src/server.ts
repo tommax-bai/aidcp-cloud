@@ -3920,7 +3920,19 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     ...(notificationContactStore ? { notificationContacts: notificationContactStore } : {}),
     ...(firstPostOnboardingStore ? { firstPostProgress: firstPostOnboardingStore } : {}),
     ...(deploymentTarget
-      ? { offboardAdmissionLedger: new PgOffboardAdmissionLedger(apiPool, deploymentTarget) }
+      ? {
+          offboardAdmissionLedger: Object.assign(
+            new PgOffboardAdmissionLedger(apiPool, deploymentTarget),
+            {
+              // 读面**委托属主自己那一份**，绝不在台账类里把同一条 SQL 再抄一遍：
+              // 它的谓词（`materialized_at IS NULL`）与失败方向（抛，MUST NOT 吞成 false）
+              // 都是有讲究的，抄第二份的现形方式不是报错，而是某天两份谓词漂开、
+              // 一个正在被撤权的环境被重新放行。
+              hasPendingRevocationHold: (accountId: string) =>
+                clientUserStore.hasPendingRevocationHold(accountId),
+            },
+          ),
+        }
       : {}),
   };
   if (
@@ -6047,7 +6059,17 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           return projectRuntimeControls({
             getRuntimeControls: (id) => interactionStore!.getRuntimeControls(id),
             hasPendingOffboard: (id) => interactionInbox!.hasPendingOffboard(id),
-            hasPendingRevocationHold: (id) => clientUserStore.hasPendingRevocationHold(id),
+            // **经 4a 窄端口读，不直调属主存储**：这是一次跨域读（撤权准入台账属接口域），
+            // 单体里两条路指向同一份实现、逐位等价；拆进程后这一跳才有地方可去。
+            // 端口缺席时**具名抛错**，MUST NOT 吞成 false —— false 是「没有 hold、可以放行」，
+            // 把读不到降级成放行，等于给正在被撤权的环境重新放开互动写。
+            hasPendingRevocationHold: (id) => {
+              const ledger = apiDirectPorts.offboardAdmissionLedger;
+              if (!ledger) {
+                throw new Error('offboard_admission_ledger_unavailable');
+              }
+              return ledger.hasPendingRevocationHold(id);
+            },
             globalWriteEnabled: interactionGlobalWriteEnabled,
           }, accountId);
         },

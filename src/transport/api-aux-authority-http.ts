@@ -100,6 +100,8 @@ export const OFFBOARD_ADMISSION_LEDGER_ROUTES = {
     'api-direct/offboard-admission/v1/claim-pending-materializations',
   recordMaterializationReceipt:
     'api-direct/offboard-admission/v1/record-materialization-receipt',
+  hasPendingRevocationHold:
+    'api-direct/offboard-admission/v1/has-pending-revocation-hold',
 } as const satisfies Record<keyof OffboardAdmissionLedgerPort, string>;
 
 export const STRUCTURED_NOTIFICATION_ROUTES = {
@@ -647,6 +649,14 @@ export function registerOffboardAdmissionLedgerRoutes(
         parseApiDirectEnvelope(args, executionTarget, receiptOffboardInput),
       ),
   );
+  server.registerBearer(
+    OFFBOARD_ADMISSION_LEDGER_ROUTES.hasPendingRevocationHold,
+    callerToken,
+    (args) =>
+      local.hasPendingRevocationHold(
+        parseApiDirectEnvelope(args, executionTarget, accountIdInput).accountId,
+      ),
+  );
 }
 
 export function registerStructuredNotificationRoutes(
@@ -843,6 +853,16 @@ export class OffboardAdmissionLedgerHttpClient implements OffboardAdmissionLedge
     return callApiDirectWrite(
       this.http, OFFBOARD_ADMISSION_LEDGER_ROUTES.recordMaterializationReceipt,
       this.callerToken, this.executionTarget, input, isReceiptOutcome,
+    );
+  }
+
+  hasPendingRevocationHold(accountId: string): Promise<boolean> {
+    // 走**读**通道，但失败一律原样抛：这个布尔是放行条件，`false` 意味着「没有 hold、可以放行」。
+    // 任何把跨进程失败降级成 false 的写法都会给正在被撤权的环境重新放开互动写。
+    return callApiDirectRead(
+      this.http, OFFBOARD_ADMISSION_LEDGER_ROUTES.hasPendingRevocationHold,
+      this.callerToken, this.executionTarget, { accountId },
+      (value): value is boolean => typeof value === 'boolean',
     );
   }
 }

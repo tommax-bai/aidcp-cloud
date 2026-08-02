@@ -62,7 +62,11 @@ export interface OffboardAdmissionReconcileInput {
 export interface AutomationOffboardAdmissionReconcilerDeps {
   automationRead: Pick<ClientEnvAutomationReader, 'activeWechatOffboards'>;
   materializationOps: OffboardMaterializationOperations;
-  admissionLedger: OffboardAdmissionLedgerPort;
+  /**
+   * 只用写面三口。**刻意收窄成 `Omit`**：对账循环从不问撤权 hold，
+   * 宽声明会逼每个替身去伪造一个它永远不会被调到的方法 —— 那种伪造正是「看着接好了」的来源。
+   */
+  admissionLedger: Omit<OffboardAdmissionLedgerPort, 'hasPendingRevocationHold'>;
   /** Stable process-worker identity, for example `offboard-reconcile-dev`. */
   workerId: string;
 }

@@ -150,7 +150,7 @@ function routeGuardCoverage(
   return { bearer, versionAndTarget };
 }
 
-test('4a transport covers exactly the kernel 21-group/57-slot inventory', () => {
+test('4a transport covers exactly the kernel 21-group/58-slot inventory', () => {
   assert.equal(Object.keys(API_DIRECT_PORT_INVENTORY).length, 21);
   assert.deepEqual(
     Object.keys(API_DIRECT_ROUTE_INVENTORY),
@@ -167,8 +167,8 @@ test('4a transport covers exactly the kernel 21-group/57-slot inventory', () => 
     slots += expectedMethods.length;
     routeNames.push(...Object.values(routes));
   }
-  assert.equal(slots, 57);
-  assert.equal(new Set(routeNames).size, 57, 'every admitted method has a unique route');
+  assert.equal(slots, 58);
+  assert.equal(new Set(routeNames).size, 58, 'every admitted method has a unique route');
   assert.equal(routeNames.every((route) => route.includes('/v1/')), true);
 });
 
@@ -207,7 +207,7 @@ test('4a owner directions retain three distinct token configuration names', () =
   assert.equal(tokenNames.includes('AIDCP_PUBLISH_APPROVAL_INTERNAL_TOKEN'), false);
 });
 
-test('4a 57-slot error coverage table binds every route to shared guards and translators', async () => {
+test('4a 58-slot error coverage table binds every route to shared guards and translators', async () => {
   const derived = await deriveSurface();
   const methodsById = new Map(
     derived.groups.map((group) => [group.id, group.methods] as const),
@@ -264,10 +264,10 @@ test('4a 57-slot error coverage table binds every route to shared guards and tra
     }
   }
 
-  assert.equal(coverage.length, 57);
+  assert.equal(coverage.length, 58);
   assert.equal(
     new Set(coverage.map((row) => `${row.group}.${row.method}`)).size,
-    57,
+    58,
     'coverage rows must be unique per admitted slot',
   );
   for (const row of coverage) {

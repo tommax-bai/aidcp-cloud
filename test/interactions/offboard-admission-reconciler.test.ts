@@ -79,7 +79,9 @@ function harness(options: HarnessOptions = {}) {
   const claims: Parameters<OffboardAdmissionLedgerPort['claimPendingMaterializations']>[0][] = [];
   const receipts: RecordMaterializationReceiptInput[] = [];
   const materializations: MaterializeEnvironmentOffboardInput[] = [];
-  const ledger: OffboardAdmissionLedgerPort = {
+  // 只实现写面：对账循环从不问撤权 hold，依赖声明也已按 `Omit` 收窄
+  // —— 伪造一个永远不会被调到的方法，只会让「看着接好了」多一处来源。
+  const ledger: Omit<OffboardAdmissionLedgerPort, 'hasPendingRevocationHold'> = {
     async reconcileActiveOffboardSnapshot(input) {
       calls.push('snapshot');
       snapshots.push(input);
