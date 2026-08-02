@@ -10,6 +10,7 @@ import {
   FACEBOOK_PRIMARY_BROWSE_SURFACES,
   type FacebookOperationPolicyBaseProjection,
 } from './facebook-operation-policy-resolution.js';
+import { RISK_ACTIONS, type ActionQuota } from './risk-contract.js';
 import {
   SYNC_READ_CONTRACT_VERSION,
   SYNC_READ_STREAM_DEFINITIONS,
@@ -164,12 +165,31 @@ export type FacebookCommentConfigSnapshot = {
 };
 
 /**
+ * Facebook 慢启动曲线：**逐执行目标一份、全局的**，不是逐环境的。
+ *
+ * 之所以搭在运营基线这条流上而不是另开一条：它与基线出自同一个属主存储、同一次刷新，
+ * 分成两条流会多出「基线新、曲线旧」这种谁都不会去想的错配态。
+ * 但它**MUST NOT 被塞进每个环境行里** —— 那会让同一份数字在载荷里重复 N 遍，
+ * 而「N 份里有一份不一样」是个没人查得出来的态。
+ *
+ * `dailyCaps` 是逐日上限，下标即第几天减一；账号跑到 `totalDays` 之后即毕业、不再 clamp。
+ */
+export type FacebookSlowStartPolicySnapshot = {
+  readonly totalDays: number;
+  readonly dailyCaps: readonly ActionQuota[];
+};
+
+/**
  * Facebook 运营基线快照：属主**已合成好的**逐环境基线投影（全局默认 ← 环境覆盖 ← legacy 回落）。
  * 刻意不发三张原始表 —— 合成规则只许有一份，发不出成品就会逼消费方在本进程里再实现一遍。
  * 只含**已配浏览面**的环境；未配的环境在此缺席，消费方据此报具名 blocker，MUST NOT 给默认面。
+ *
+ * `slowStart` 是**全局兄弟字段**，与 `environments` 平级，理由见
+ * {@link FacebookSlowStartPolicySnapshot}。
  */
 export type FacebookOperationPolicySnapshot = {
   readonly environments: readonly FacebookOperationPolicyBaseProjection[];
+  readonly slowStart: FacebookSlowStartPolicySnapshot;
 };
 
 export type FacebookGroupJoinAutomationConfigSnapshot = {
@@ -407,10 +427,11 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'facebook_operation_policy':
       return (
         isRecord(value) &&
-        hasExactKeys(value, ['environments']) &&
+        hasExactKeys(value, ['environments', 'slowStart']) &&
         Array.isArray(value.environments) &&
         hasUniqueStrings(value.environments, 'envKey') &&
-        value.environments.every(isFacebookOperationBaseline)
+        value.environments.every(isFacebookOperationBaseline) &&
+        isFacebookSlowStartPolicy(value.slowStart)
       );
   }
 }
@@ -557,6 +578,26 @@ function isFacebookCommentModeWire(
   return (
     typeof value === 'string' &&
     (FACEBOOK_COMMENT_MODE_WIRE_VALUES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * 慢启动曲线校验。
+ *
+ * 动作名单取 `RISK_ACTIONS`，MUST NOT 手抄字面量：配额对象少一个动作在类型上是
+ * `Record<RiskAction, number>` 的窟窿，而跨进程收到之后读那一项是 `undefined`
+ * —— 下游拿它去 `min()` 出来的是 `NaN`，不报错，只是那个动作的配额从此没有意义。
+ */
+function isFacebookSlowStartPolicy(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!hasExactKeys(value, ['totalDays', 'dailyCaps'])) return false;
+  if (!isNonNegativeInteger(value.totalDays)) return false;
+  if (!Array.isArray(value.dailyCaps)) return false;
+  return value.dailyCaps.every(
+    (row) =>
+      isRecord(row) &&
+      hasExactKeys(row, RISK_ACTIONS) &&
+      RISK_ACTIONS.every((action) => isNonNegativeInteger(row[action])),
   );
 }
 

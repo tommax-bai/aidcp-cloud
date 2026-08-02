@@ -13,6 +13,7 @@ import {
   type FacebookCommentConfigSnapshot,
   type FacebookGroupJoinAutomationConfigSnapshot,
   type FacebookOperationPolicySnapshot,
+  type FacebookSlowStartPolicySnapshot,
   type HotLeadConfigSnapshot,
 } from '../kernel/sync-read-facts.js';
 import {
@@ -361,6 +362,42 @@ export class AutomationSyncReadMirrors {
       },
       accountId,
     );
+  }
+
+  /**
+   * Facebook 慢启动曲线取用（批 H 第 3 片）。风控养号事实四项里的第四项 ——
+   * 前三项走 {@link accountFor} / {@link slowStartForAccount}，这一项此前**本进程根本没有来源**。
+   *
+   * ## 三态与各自的处置，调用方照此接
+   *
+   * - `fresh` → 用它。
+   * - `stale` → **沿用上一份**（`value` 就是最后一次收到的那份）。
+   *   **MUST NOT 因为陈旧就回落写死默认**：这是参数档不是闸门档，而编译默认很可能比运营配的
+   *   **更松** —— 一陈旧就悄悄放宽，方向正好反了。真正的停手在统一停手闸上，不在这里。
+   * - `uninitialized`（`value` 为 null，本进程一次都没收到过这条流）→ 调用方 MUST
+   *   **整个不提供** `facebookSlowStartPolicy` 这个方法，而不是提供一个返回空 / 零的实现：
+   *   风控缺这个方法会回落到编译期的 FB 曲线（仍然 clamp），而喂一份空曲线等于宣称
+   *   「这个号没有任何逐日上限」，一个还在爬坡的新号会直接按满档跑且不报错。
+   *   契约上 `facebookSlowStartPolicy?()` 也只允许「方法不在」这一种缺席表达 ——
+   *   返回 `undefined` 会让调用点的 `.totalDays` 当场炸。
+   */
+  facebookSlowStartPolicy(
+    now = this.clock(),
+  ): AutomationMirrorLookup<FacebookSlowStartPolicySnapshot> {
+    const view = this.facebookOperationPolicy.view(now);
+    const state = deliveryState(view.state);
+    if (state === 'fresh' && view.value) {
+      return {
+        state: 'fresh',
+        value: view.value.slowStart,
+        asOf: view.metadata!.sourceAsOf,
+      };
+    }
+    return {
+      state: state as Exclude<SyncReadDeliveryState, 'fresh'>,
+      value: view.value?.slowStart ?? null,
+      asOf: view.metadata?.sourceAsOf ?? null,
+    };
   }
 
   /**

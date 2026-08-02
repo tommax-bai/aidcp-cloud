@@ -17,6 +17,7 @@ import {
   type FacebookCommentConfigSnapshot,
   type FacebookGroupJoinAutomationConfigSnapshot,
   type FacebookOperationPolicySnapshot,
+  type FacebookSlowStartPolicySnapshot,
   type HotLeadConfigSnapshot,
   type SyncReadOwnerSnapshotSource,
   type SyncReadPayloadByStream,
@@ -44,26 +45,37 @@ export interface ApiSyncReadSourceOptions {
   pool: pg.Pool;
   parseSoul(personaText: string): SyncReadJson | null;
   /**
-   * Facebook 运营基线的取用口（**必填、无默认**）。
+   * Facebook 运营策略整份载荷的取用口（**必填、无默认**）。
    *
    * 刻意不在本文件用 SQL 重算一遍：那三张表的合成规则（全局默认 ← 环境覆盖 ← legacy 回落）
    * 住在属主存储里，抄第二份的现形方式不是报错，而是两个进程按不同节奏跑同一个环境。
    * 也刻意不做成可选：缺实现时回落空表 = 告诉自动化进程「这台机器上没有任何 Facebook 环境」，
    * 于是每个 FB 账号都被一个**错误原因**永久拦住 —— 那正是本 change 的红线形态。
+   *
+   * **逐环境基线与全局慢启动曲线合成一个取用口，不是两个**：两个口意味着两次取值，
+   * 而属主存储是「先刷新、再读内存」的形态 ⇒ 分两次就多出「基线取自刷新后、曲线取自刷新前」
+   * 这种错配，且两边都不报错。一个口 = 一次刷新一次读，错配在结构上不成立。
    */
-  facebookOperationBaselines(): Promise<
-    readonly FacebookOperationPolicyBaseProjection[]
-  >;
+  facebookOperationPolicy(): Promise<FacebookOperationPolicySnapshot>;
 }
 
 export interface FacebookOperationPolicyBaselineStore {
   refreshFromAuthority(): Promise<void>;
   baselineProjections(): readonly FacebookOperationPolicyBaseProjection[];
+  /**
+   * 当前执行目标的慢启动总天数与逐日上限。
+   *
+   * 属主自己**未配置全局行时会回落编译默认**而不是抛 —— 这条回落在本路径上是安全的，
+   * 因为发布前 `refreshFromAuthority()` 已经 await 过：读不到库会当场抛、整条快照不发出，
+   * 而不是发出一份「看着正常的默认曲线」。真正回落到默认时，那个默认**也正是属主自己
+   * 在用的生效值**（单体里风控拿到的就是它），发过去逐位一致、零回归。
+   */
+  slowStartRuntimePolicy(): FacebookSlowStartPolicySnapshot;
 }
 
 export interface ApiSyncReadCompositionOptions extends Omit<
   ApiSyncReadSourceOptions,
-  'facebookOperationBaselines'
+  'facebookOperationPolicy'
 > {
   /** Late-bound because segA assigns the store after the API source is described. */
   facebookOperationPolicyStore(): FacebookOperationPolicyBaselineStore;
@@ -82,10 +94,14 @@ export function createApiSyncReadSnapshotSource(
     executionTarget: options.executionTarget,
     pool: options.pool,
     parseSoul: options.parseSoul,
-    facebookOperationBaselines: async () => {
+    facebookOperationPolicy: async () => {
       const store = options.facebookOperationPolicyStore();
       await store.refreshFromAuthority();
-      return store.baselineProjections();
+      // 刷新之后**同一个存储实例**上取两样，顺序无关紧要、错配不可能发生。
+      return {
+        environments: store.baselineProjections(),
+        slowStart: store.slowStartRuntimePolicy(),
+      };
     },
   });
 }
@@ -94,15 +110,13 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
   private readonly executionTarget: DeploymentTarget;
   private readonly pool: pg.Pool;
   private readonly parseSoul: (personaText: string) => SyncReadJson | null;
-  private readonly facebookOperationBaselines: () => Promise<
-    readonly FacebookOperationPolicyBaseProjection[]
-  >;
+  private readonly facebookOperationPolicy: () => Promise<FacebookOperationPolicySnapshot>;
 
   constructor(options: ApiSyncReadSourceOptions) {
     this.executionTarget = options.executionTarget;
     this.pool = options.pool;
     this.parseSoul = options.parseSoul;
-    this.facebookOperationBaselines = options.facebookOperationBaselines;
+    this.facebookOperationPolicy = options.facebookOperationPolicy;
   }
 
   async snapshot<S extends SyncReadStream>(
@@ -383,9 +397,7 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
         const cursor = await versionCursor(client, [
           'facebook_operation_policy',
         ]);
-        const value: FacebookOperationPolicySnapshot = {
-          environments: await this.facebookOperationBaselines(),
-        };
+        const value: FacebookOperationPolicySnapshot = await this.facebookOperationPolicy();
         return { cursor, value } as {
           cursor: string;
           value: SyncReadPayloadByStream[S];

@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { ApiSyncReadMirrors } from '../../src/config/api-sync-read-mirrors.js';
 import { makeSyncReadFactEnvelope } from '../../src/kernel/sync-read-facts.js';
 import { AutomationSyncReadMirrors } from '../../src/transport/automation-sync-read-mirrors.js';
+import { RISK_ACTIONS, type ActionQuota } from '../../src/kernel/risk-contract.js';
 
 test('A3/A4 distinguish known zero/empty from unknown and stale evidence', () => {
   let now = 100;
@@ -276,5 +277,57 @@ test('B4 and B5 retain last-good parameters but mark gates stale', () => {
       authorityMode: 'remote-mirror',
       blockers: ['hot_lead_config'],
     },
+  );
+});
+
+/**
+ * Facebook 慢启动曲线的取用（批 H 第 3 片）。三态各钉一条，因为三者的下游处置**互不相同**：
+ * 新鲜用它 / 陈旧沿用上一份 / 一次都没收到过则调用方整个不提供这个能力。
+ *
+ * 特别是中间那条：**陈旧 ≠ 没有**。把陈旧当没有、回落写死默认，方向很可能正好反了 ——
+ * 这是参数档不是闸门档，编译默认很可能比运营配的更松，一陈旧就悄悄放宽。
+ */
+test('慢启动曲线取用：没收到过 → null；新鲜 → 用它；陈旧 → 沿用上一份，绝不回落默认', () => {
+  let now = 100;
+  const mirrors = new AutomationSyncReadMirrors('dev', () => now);
+  const caps = (value: number) =>
+    Object.fromEntries(RISK_ACTIONS.map((action) => [action, value])) as ActionQuota;
+
+  const unseen = mirrors.facebookSlowStartPolicy();
+  assert.equal(unseen.state, 'unknown', '一次都没收到过 → unknown（不是 stale）');
+  assert.equal(
+    unseen.value,
+    null,
+    '一次都没收到过 MUST 是 null —— 调用方据此整个不提供该能力，'
+      + '而不是喂一份空曲线（那等于宣称这个号没有任何逐日上限）',
+  );
+
+  const slowStart = { totalDays: 3, dailyCaps: [caps(5), caps(9)] };
+  assert.equal(
+    mirrors.apply(
+      makeSyncReadFactEnvelope({
+        executionTarget: 'dev',
+        stream: 'facebook_operation_policy',
+        cursor: '1',
+        asOf: 90,
+        freshUntil: 150,
+        value: { environments: [], slowStart },
+      }),
+      'owner_fetch',
+    ).outcome,
+    'applied',
+    '慢启动曲线随运营基线同流下来 —— 被拒说明载荷校验器与生产者对不上',
+  );
+  const fresh = mirrors.facebookSlowStartPolicy();
+  assert.equal(fresh.state, 'fresh');
+  assert.deepEqual(fresh.value, slowStart);
+
+  now = 151;
+  const stale = mirrors.facebookSlowStartPolicy();
+  assert.equal(stale.state, 'stale');
+  assert.deepEqual(
+    stale.value,
+    slowStart,
+    '陈旧 MUST 沿用上一份：回落写死默认很可能比运营配的更松，一陈旧就悄悄放宽',
   );
 });

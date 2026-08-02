@@ -19,6 +19,7 @@ import {
   type SyncReadStream,
 } from '../../src/kernel/sync-read-snapshot.js';
 import { makeSyncReadFactEnvelope } from '../../src/kernel/sync-read-facts.js';
+import { RISK_ACTIONS } from '../../src/kernel/risk-contract.js';
 import { AutomationSyncReadMirrors } from '../../src/transport/automation-sync-read-mirrors.js';
 
 const apiOwned = (Object.keys(SYNC_READ_STREAM_DEFINITIONS) as SyncReadStream[])
@@ -41,7 +42,14 @@ const EMPTY_PAYLOAD: Record<string, unknown> = {
   },
   facebook_comment_config: { accounts: [] },
   facebook_group_join_automation_config: { accounts: [] },
-  facebook_operation_policy: { environments: [] },
+  // 空态 = 没有 FB 环境，但慢启动曲线**仍是必填的**：它是逐执行目标一份的全局值。
+  facebook_operation_policy: {
+    environments: [],
+    slowStart: {
+      totalDays: 1,
+      dailyCaps: [Object.fromEntries(RISK_ACTIONS.map((action) => [action, 1]))],
+    },
+  },
 };
 
 test('喂齐「api 属主」那一组流，自动化镜像就必须到 ready —— 少一条就是单体起不来', () => {

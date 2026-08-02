@@ -16,7 +16,19 @@ import {
   resolveFacebookOperationBase,
   type FacebookOperationPolicyBaseProjection,
 } from '../../src/kernel/facebook-operation-policy-resolution.js';
-import { isSyncReadFactPayload } from '../../src/kernel/sync-read-facts.js';
+import {
+  isSyncReadFactPayload,
+  type FacebookSlowStartPolicySnapshot,
+} from '../../src/kernel/sync-read-facts.js';
+import { RISK_ACTIONS, type ActionQuota } from '../../src/kernel/risk-contract.js';
+
+/** 曲线夹具按动作名单派生，不手写十个键 —— 手写的那种漏一项时自己不会说话。 */
+const SLOW_START: FacebookSlowStartPolicySnapshot = {
+  totalDays: 1,
+  dailyCaps: [
+    Object.fromEntries(RISK_ACTIONS.map((action) => [action, 1])) as ActionQuota,
+  ],
+};
 
 const BASELINE: FacebookOperationPolicyBaseProjection = {
   envKey: 'env-1',
@@ -136,23 +148,50 @@ test('账号标识两侧修剪一致：空白串按「问不到」处理而不�
 /* ───────────────────── 跨进程载荷校验 ───────────────────── */
 
 test('基线载荷校验：三个枚举按取值表判，缺字段 / 越界值一律拒收', () => {
-  const payload = { environments: [BASELINE] };
+  const payload = { environments: [BASELINE], slowStart: SLOW_START };
   assert.equal(isSyncReadFactPayload('facebook_operation_policy', payload), true);
-  // 空表是合法的（一台没有 Facebook 环境的机器）。
+  // 空表是合法的（一台没有 Facebook 环境的机器）——但慢启动曲线**仍然必填**：
+  // 它是逐执行目标一份的全局值，与「这台机器有没有 FB 环境」无关。
+  assert.equal(
+    isSyncReadFactPayload('facebook_operation_policy', {
+      environments: [],
+      slowStart: SLOW_START,
+    }),
+    true,
+  );
+  // 少了慢启动曲线 → 拒收。收下就等于让消费方读到 undefined，
+  // 而那条路径上的处置（整个不提供该能力 vs 提供一份空曲线）差别是「还在爬坡的新号按满档跑」。
   assert.equal(
     isSyncReadFactPayload('facebook_operation_policy', { environments: [] }),
-    true,
+    false,
+  );
+  // 逐日上限少一个动作 → 拒收（跨进程读到 undefined，取 min 得 NaN，不报错）。
+  assert.equal(
+    isSyncReadFactPayload('facebook_operation_policy', {
+      environments: [],
+      slowStart: {
+        totalDays: 1,
+        dailyCaps: [
+          Object.fromEntries(
+            RISK_ACTIONS.filter((action) => action !== 'like').map((a) => [a, 1]),
+          ),
+        ],
+      },
+    }),
+    false,
   );
   // 枚举越界。
   assert.equal(
     isSyncReadFactPayload('facebook_operation_policy', {
       environments: [{ ...BASELINE, primarySurface: 'stories' }],
+      slowStart: SLOW_START,
     }),
     false,
   );
   assert.equal(
     isSyncReadFactPayload('facebook_operation_policy', {
       environments: [{ ...BASELINE, baseMode: 'slow_start' }],
+      slowStart: SLOW_START,
     }),
     false,
   );
@@ -162,6 +201,7 @@ test('基线载荷校验：三个枚举按取值表判，缺字段 / 越界值�
       environments: [
         { ...BASELINE, rule: { viewsPerLike: 5 } },
       ],
+      slowStart: SLOW_START,
     }),
     false,
   );
@@ -239,8 +279,8 @@ test('基线判定与基线合成各只有一份：属主与快照消费方都�
   const publisher = await read('config/api-sync-read-source.ts');
   assert.match(
     publisher,
-    /this\.facebookOperationBaselines\(\)/,
-    '发布方 MUST 经注入的取用口拿基线',
+    /this\.facebookOperationPolicy\(\)/,
+    '发布方 MUST 经注入的取用口拿整份载荷（基线 + 慢启动曲线同一次刷新）',
   );
   assert.doesNotMatch(
     publisher,

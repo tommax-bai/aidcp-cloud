@@ -5,6 +5,7 @@ import type { SchemaProber } from '../../src/kernel/schema-capability-contract.j
 import type { MirrorVersionBumper } from '../../src/config/mirror-version-store.js';
 import { FacebookOperationPolicyStore } from '../../src/config/facebook-operation-policy-store.js';
 import { isSyncReadFactPayload } from '../../src/kernel/sync-read-facts.js';
+import { RISK_ACTIONS } from '../../src/kernel/risk-contract.js';
 
 interface PolicyRow {
   env_key: string;
@@ -813,9 +814,25 @@ describe('FacebookOperationPolicyStore', () => {
       ],
       '多一个键就是 invalid_envelope，少一个键是消费方读到 undefined —— 两种都会静静停掉浏览',
     );
+    // 慢启动曲线是同一条流上的全局兄弟字段（批 H 第 3 片）。这里连它一起过校验器，
+    // 是因为「手写夹具证明的是契约自洽、不是真产出物合规」——夹具照类型抄，真产出物才会带出
+    // 属主那边多出来 / 少掉的键。
+    const slowStart = db.store.slowStartRuntimePolicy();
+    assert.deepEqual(
+      Object.keys(slowStart).sort(),
+      ['dailyCaps', 'totalDays'],
+      '慢启动曲线的键集也在同一份跨进程契约里',
+    );
+    assert.deepEqual(
+      Object.keys(slowStart.dailyCaps[0]).sort(),
+      [...RISK_ACTIONS].sort(),
+      '逐日上限 MUST 覆盖全部风控动作 —— 少一项跨进程读到 undefined，'
+        + '拿去取 min 得到 NaN，那个动作的配额从此没有意义且不报错',
+    );
     assert.equal(
       isSyncReadFactPayload('facebook_operation_policy', {
         environments: db.store.baselineProjections(),
+        slowStart,
       }),
       true,
       '发布口的真产出物 MUST 能过跨进程校验器（这正是当初挂在启动期的那一跳）',

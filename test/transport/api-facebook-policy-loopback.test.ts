@@ -8,6 +8,11 @@ import {
 } from '../../src/config/api-sync-read-source.js';
 import type { FacebookOperationPolicyBaseProjection } from '../../src/kernel/facebook-operation-policy-resolution.js';
 import {
+  isSyncReadFactPayload,
+  type FacebookSlowStartPolicySnapshot,
+} from '../../src/kernel/sync-read-facts.js';
+import { RISK_ACTIONS, type ActionQuota } from '../../src/kernel/risk-contract.js';
+import {
   SYNC_READ_SNAPSHOT_ROUTE,
   SyncReadSnapshotHttpClient,
   registerSyncReadSnapshotRoute,
@@ -40,6 +45,22 @@ const BASELINE: FacebookOperationPolicyBaseProjection = {
   },
   updatedAt: '2026-08-02T00:00:00.000Z',
   updatedBy: 'loopback-test',
+};
+
+/**
+ * 慢启动曲线的桩**按动作名单派生**，不手写十个键。
+ * 手写的夹具证明的只是「契约自洽」——它照类型抄出来，恰好齐了；而真产出物多一个键 / 少一个键
+ * 它一个字都不会说。本 change 已经为此挨过一次（kernel 那份 11 键夹具放一份 13 键的真载荷过去）。
+ */
+function dailyCap(step: number): ActionQuota {
+  return Object.fromEntries(
+    RISK_ACTIONS.map((action, index) => [action, (index + 1) * step]),
+  ) as ActionQuota;
+}
+
+const SLOW_START: FacebookSlowStartPolicySnapshot = {
+  totalDays: 2,
+  dailyCaps: [dailyCap(1), dailyCap(2)],
 };
 
 function fakePool(events: string[]): pg.Pool {
@@ -108,6 +129,10 @@ test('api-mode production source serves Facebook policy to the automation HTTP c
       events.push('project');
       return [BASELINE];
     },
+    slowStartRuntimePolicy() {
+      events.push('slow-start');
+      return SLOW_START;
+    },
   };
 
   await withApiOwnerLoopback(store, events, async (_port, client) => {
@@ -115,14 +140,27 @@ test('api-mode production source serves Facebook policy to the automation HTTP c
     assert.equal(snapshot.executionTarget, 'dev');
     assert.equal(snapshot.factScope, 'shared');
     assert.equal(snapshot.cursor, '90');
-    assert.deepEqual(snapshot.value, { environments: [BASELINE] });
+    assert.deepEqual(snapshot.value, {
+      environments: [BASELINE],
+      slowStart: SLOW_START,
+    });
+    // **真产出物过真校验器**：手写夹具只能证明契约自洽，证明不了发出去的东西合规。
+    // 这一条正是「键集不变量 MUST 用生产者的真输出过真校验器」那条教训的落地。
+    assert.equal(
+      isSyncReadFactPayload('facebook_operation_policy', snapshot.value),
+      true,
+      '发布方发出的载荷没通过跨进程校验器 —— 消费侧会当场 invalid_envelope',
+    );
   });
 
   assert.deepEqual(events, [
     'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY',
     'cursor',
+    // 刷新只有一次，之后两样取值都落在同一次刷新之后 —— 分成两个取用口才会出现的
+    // 「基线取自刷新后、曲线取自刷新前」在结构上不成立。
     'refresh',
     'project',
+    'slow-start',
     'COMMIT',
     'release',
   ]);
@@ -137,6 +175,9 @@ test('api-mode policy failure stays an HTTP 200 error envelope and becomes Inter
     },
     baselineProjections() {
       assert.fail('projection MUST NOT run after refresh failure');
+    },
+    slowStartRuntimePolicy() {
+      return assert.fail('slow-start MUST NOT be read after refresh failure');
     },
   };
 
