@@ -73,6 +73,7 @@ import { normalizePlatformId, resolveReadSurface } from '../platform/index.js';
 import {
   facebookPostKey,
   isCanonicalFacebookFeedVideoNoteId,
+  isCanonicalFacebookReelNoteId,
 } from '../platform/facebook-presented-video.js';
 import { isWritingLanguage } from '../kernel/writing-language.js';
 import type { WritingLanguage } from '../kernel/soul-types.js';
@@ -652,20 +653,21 @@ export class DefaultMessageHandler implements MessageHandler {
         //
         // 仍保留 page.cards.arrived：内容选择、点赞与目标见证继续走现有链路，浏览事实绝不强迫点赞。
         const facebook = normalizePlatformId(session.platform) === 'facebook';
-        if (facebook && listKind === 'reels' && cards.length === 1) {
-          const noteId = cards[0]?.noteId;
+        const reelNoteId = listKind === 'reels' && cards.length === 1 ? cards[0]?.noteId : undefined;
+        if (facebook && isCanonicalFacebookReelNoteId(reelNoteId)) {
+          const noteId = reelNoteId;
           // 先落 outbox 再推进（design D5），与 like/collect/search 同形。入队成功之后才置
           // 「本 Reel 已记 view」标记：入队失败时这一笔既没进账本、也 MUST NOT 被标成已记，
           // 否则随后的 note.detail 会以为它已经算过而整条跳过。
-          await this.enqueueRiskFact(session, env, 'view', noteId ?? '-');
+          await this.enqueueRiskFact(session, env, 'view', noteId);
           session.countedReelViewNoteId = noteId;
           this.bus(session).emit('interaction.occurred', {
             action: 'view',
             accountId: session.accountId,
-            ...(noteId ? { noteId } : {}),
+            noteId,
             ...(this.contentRefKind(session, noteId) ? { noteIdKind: 'content_ref' as const } : {}),
           });
-          if (session.accountId && noteId) {
+          if (session.accountId) {
             presentedRuleView = {
               noteId,
               source: 'reels',

@@ -247,6 +247,11 @@ const EMPTY_CONCEPT_POOL: ConceptPool = { known: [], candidates: [] };
 const VIEW_QUOTA_RECHECK_FALLBACK_MS = 60_000;
 const VIEW_QUOTA_WAKE_GRACE_MS = 250;
 const FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS = 2;
+const FACEBOOK_REELS_TERMINAL_SCROLL_REASONS = new Set([
+  'reels_target_unavailable',
+  'reels_navigation_unconfirmed',
+  'reels_identity_unresolved',
+]);
 /**
  * 一场之内允许「已在 Reels epoch 却又收到普通 Feed 决定性空/到底证据」而重开 epoch 的次数上限
  *（change restore-facebook-post-join-comment-continuity）。
@@ -2339,7 +2344,7 @@ export class RoleDispatcher {
   }
 
   /** route_ready/no_target 均表示首卡尚未形成 Cloud 证据；保持握手 reason 做有界重驱，兼容新旧 Edge。 */
-  private recoverFacebookReelsFallback(reason: 'reels_pending' | 'no_target'): boolean {
+  private recoverFacebookReelsFallback(reason: string): boolean {
     if (
       this.accountPlatform !== 'facebook'
       || !this.sessionActive
@@ -4223,7 +4228,11 @@ export class RoleDispatcher {
         if (this.isFacebookAutomatedBrowseMode()) {
           const videos = payload.cards.filter((card) => card.isVideo === true);
           const presentedViewWillDrive =
-            (payload.listKind === 'reels' && payload.cards.length === 1)
+            (
+              payload.listKind === 'reels'
+              && payload.cards.length === 1
+              && isCanonicalFacebookReelNoteId(payload.cards[0]?.noteId)
+            )
             || (
               payload.listKind === 'feed'
               && videos.length === 1
@@ -4329,7 +4338,12 @@ export class RoleDispatcher {
           && this.accountPlatform === 'facebook'
           && this.reelsFallbackState === 'pending'
         ) {
-          if (payload.reason === 'reels_pending' || payload.reason === 'no_target') {
+          if (
+            payload.reason === 'reels_pending'
+            || payload.reason === 'no_target'
+            || (typeof payload.reason === 'string'
+              && FACEBOOK_REELS_TERMINAL_SCROLL_REASONS.has(payload.reason))
+          ) {
             this.recoverFacebookReelsFallback(payload.reason);
           } else if (payload.reason === 'feed_exhausted') {
             console.log('[RoleDispatcher] Facebook Reels fallback pending 时收到重复 feed_exhausted → 保持 pending，不重复授权');
@@ -4339,6 +4353,21 @@ export class RoleDispatcher {
             );
             this.resetFacebookReelsFallback();
           }
+          return;
+        }
+        if (
+          payload.action === 'scroll'
+          && payload.ok === false
+          && typeof payload.reason === 'string'
+          && FACEBOOK_REELS_TERMINAL_SCROLL_REASONS.has(payload.reason)
+          && this.accountPlatform === 'facebook'
+          && this.reelsFallbackState === 'confirmed'
+          && this.sessionActive
+        ) {
+          console.log(
+            `[RoleDispatcher] Facebook Reels 翻页终态 ${payload.reason} → 经正常配额与停留闸继续下一条`,
+          );
+          this.sendScrollCommand(`continue_after_${payload.reason}`);
           return;
         }
         if (payload.action === 'search' && this.hasSearchActivityReceipt()) {

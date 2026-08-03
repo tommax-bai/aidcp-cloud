@@ -173,17 +173,24 @@ test('Reels 空/畸形多卡不记 view；后续普通 feed detail 保持既有�
     }),
     session,
   );
+  await handler.handle(
+    makeEnvelope('page.cards', 'reel-anonymous', 3, {
+      cards: [{ index: 0, noteId: '-', title: 'anonymous reel', likeCount: 0, collectCount: 0, isVideo: true }],
+      listKind: 'reels', listState: 'ready',
+    }),
+    session,
+  );
   assert.equal(got.filter((e) => e.action === 'view').length, 0);
 
   await handler.handle(
-    makeEnvelope('page.cards', 'feed-card', 3, {
+    makeEnvelope('page.cards', 'feed-card', 4, {
       cards: [{ index: 0, noteId: 'feed-1', title: 'feed', likeCount: 0, collectCount: 0 }],
       listKind: 'feed', listState: 'ready',
     }),
     session,
   );
   await handler.handle(
-    makeEnvelope('note.detail', 'feed-detail', 4, {
+    makeEnvelope('note.detail', 'feed-detail', 5, {
       noteId: 'feed-1', title: 'feed', content: 'content', likeCount: 0, collectCount: 0,
     }),
     session,

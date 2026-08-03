@@ -177,6 +177,34 @@ test('Facebook Reels 卡片到达才把 fallback 确认为完成，之后迟到�
   dispatcher.endSession('test');
 });
 
+test('Facebook confirmed Reels 的 terminal scroll 立即经正常 dwell 闸继续，不等 idle watchdog', () => {
+  const commands: EdgeCommand[] = [];
+  const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
+  dispatcher.setup();
+  dispatcher.startSession();
+
+  dispatcher.bus.emit('feed.empty.confirmed', { ts: 1 });
+  dispatcher.bus.emit('page.cards.arrived', {
+    cards: [{ index: 0, title: 'reel', likeCount: 0, collectCount: 0, noteId: 'https://www.facebook.com/reel/1' }],
+    listKind: 'reels',
+    ts: 2,
+  });
+  dispatcher.bus.emit('action.completed', {
+    action: 'scroll',
+    ok: false,
+    reason: 'reels_navigation_unconfirmed',
+    ts: 3,
+  });
+
+  const continuation = commands.filter(
+    (command) => command.action === 'scroll'
+      && command.reason === 'continue_after_reels_navigation_unconfirmed',
+  );
+  assert.equal(continuation.length, 1);
+  assert.equal(continuation[0]?.params?.dwellMs, 11_000);
+  dispatcher.endSession('test');
+});
+
 test('Facebook 未确认到底：继续普通 Feed 滚动，不授权 Reels', () => {
   const commands: EdgeCommand[] = [];
   const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
