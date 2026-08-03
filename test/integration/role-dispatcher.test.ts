@@ -130,7 +130,7 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.endSession();
   });
 
-  it('facebook: feed_scroll 即使新卡差分为 0 也携带拟人停留 dwellMs', async () => {
+  it('facebook: Feed scroll 出口在 normal 档携带 11s dwellMs 中心', async () => {
     const commands: EdgeCommand[] = [];
     const llm = createMockLlm([]);
     const dispatcher = new RoleDispatcher({
@@ -149,10 +149,46 @@ describe('RoleDispatcher Integration', () => {
 
     const scroll = commands.find((c) => c.action === 'scroll' && c.reason === 'feed_scroll');
     assert.ok(scroll, '应下发 feed_scroll');
-    assert.ok(
-      typeof scroll!.params?.dwellMs === 'number' && (scroll!.params!.dwellMs as number) >= 6000,
-      `FB feed_scroll 应有 6s+ dwellMs 保底，实际=${JSON.stringify(scroll!.params)}`,
+    assert.equal(
+      scroll!.params?.dwellMs,
+      11_000,
+      `FB Feed scroll 出口应有 11s normal 中心，实际=${JSON.stringify(scroll!.params)}`,
     );
+    dispatcher.endSession();
+  });
+
+  it('facebook: Reels 续刷复用同一个 11s dwellMs 中心', async () => {
+    const commands: EdgeCommand[] = [];
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm: createMockLlm([]),
+      sendCommand: (cmd) => commands.push(cmd),
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({
+        mode: 'facebook_rule',
+        blocker: null,
+        policyRevision: 1,
+        rulePolicy: { viewsPerLike: 5, joinEveryNRounds: 2 },
+      }),
+      applyFacebookRuleView: async () => { throw new Error('invalid Reel identity must short-circuit first'); },
+      updateFacebookRuleBatch: async () => undefined,
+    });
+    dispatcher.setCurrentAccountId('fb-acc');
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    dispatcher.bus.emit('facebook.rule.view.confirmed', {
+      accountId: 'fb-acc',
+      noteId: '',
+      sourceDedupeKey: 'reel-without-stable-key',
+      source: 'reels',
+      occurredAt: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const scroll = commands.find((c) => c.action === 'scroll' && c.reason === 'rule_unstable_content_key');
+    assert.ok(scroll, `Reels 续刷应复用统一 scroll 出口，实际=${JSON.stringify(commands)}`);
+    assert.equal(scroll!.params?.dwellMs, 11_000);
     dispatcher.endSession();
   });
 
@@ -669,9 +705,10 @@ describe('RoleDispatcher Integration', () => {
 
     const recover = commands.find((c) => c.action === 'scroll' && c.reason === 'recover_after_search_failed');
     assert.ok(recover, `search 失败后应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
-    assert.ok(
-      typeof recover!.params?.dwellMs === 'number' && (recover!.params!.dwellMs as number) >= 6000,
-      `FB search 恢复 scroll 应有 6s+ dwellMs 保底，实际=${JSON.stringify(recover!.params)}`,
+    assert.equal(
+      recover!.params?.dwellMs,
+      11_000,
+      `FB search 恢复 scroll 应保留共享的 11s normal 中心，实际=${JSON.stringify(recover!.params)}`,
     );
     dispatcher.endSession();
   });

@@ -281,8 +281,8 @@ export const PLATFORM_REGISTRY: Record<PlatformId, PlatformRegistryEntry> = {
       restore: 'none',
       capability: 'identity_read_current_v1',
     },
-    // 泛化旧 facebookScrollDwellMs 的 7s 扫屏地板（虚拟化/permalink 水合导致 newCount 常算成 0 时的保底停留）。
-    pacing: { feedScrollDwellFloorMs: 7_000 },
+    // 泛化旧 facebookScrollDwellMs 的 11s 扫屏地板（虚拟化/permalink 水合导致 newCount 常算成 0 时的保底停留）。
+    pacing: { feedScrollDwellFloorMs: 11_000 },
     scheduler: {
       comment: {
         enabled: true,

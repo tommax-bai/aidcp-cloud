@@ -142,7 +142,7 @@ test('capability + pacing resolvers (with fail-open)', () => {
   assert.equal(isOrchestrationCapabilitySupported('wechat_channels', 'search'), false);
   assert.equal(isOrchestrationCapabilitySupported('xiaohongshu', 'browse'), true);
   assert.equal(isOrchestrationCapabilitySupported('tiktok', 'browse'), true); // fail-open
-  assert.equal(platformFeedScrollFloorMs('facebook'), 7000);
+  assert.equal(platformFeedScrollFloorMs('facebook'), 11000);
   assert.equal(platformFeedScrollFloorMs('xiaohongshu'), undefined);
   assert.equal(platformFeedScrollFloorMs('tiktok'), undefined); // fail-open
 });
