@@ -1546,7 +1546,6 @@ export class FacebookConsumptionModeRuntimeStore {
     keepPolicyRevision: number | null,
     reason: string,
   ): Promise<ActionDbRow[]> {
-    const params = [accountId, this.executionTarget, keepPolicyRevision, reason];
     await client.query(
       `UPDATE facebook_consumption_progress
           SET revision_state='superseded', superseded_at=COALESCE(superseded_at, now()),
@@ -1554,7 +1553,7 @@ export class FacebookConsumptionModeRuntimeStore {
         WHERE account_id=$1 AND execution_target=$2
           AND ($3::bigint IS NULL OR policy_revision <> $3)
           AND revision_state <> 'superseded'`,
-      params,
+      [accountId, this.executionTarget, keepPolicyRevision],
     );
     const updated = await client.query<ActionDbRow>(
       `UPDATE facebook_consumption_action
@@ -1583,7 +1582,7 @@ export class FacebookConsumptionModeRuntimeStore {
           AND ($3::bigint IS NULL OR policy_revision <> $3)
           AND state <> 'terminal'
         RETURNING ${ACTION_COLUMNS}`,
-      params,
+      [accountId, this.executionTarget, keepPolicyRevision, reason],
     );
     const terminalIds = updated.rows
       .filter((row) => row.state === 'terminal')

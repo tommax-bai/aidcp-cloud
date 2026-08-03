@@ -105,6 +105,16 @@ function memoryDatabase(clock: () => number) {
 
   const query = async (text: string, params: unknown[] = []) => {
     const sql = text.replace(/\s+/g, ' ').trim();
+    const parameterNumbers = [...sql.matchAll(/\$(\d+)\b/g)]
+      .map((match) => Number(match[1]));
+    const expectedParameterCount = parameterNumbers.length > 0
+      ? Math.max(...parameterNumbers)
+      : 0;
+    assert.equal(
+      params.length,
+      expectedParameterCount,
+      `PostgreSQL bind count mismatch for query: ${sql}`,
+    );
     queries.push(sql);
     if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
       return { rows: [], rowCount: 0 };
@@ -1070,7 +1080,7 @@ describe('FacebookConsumptionModeRuntimeStore durable state machine', () => {
     assert.equal((await store.getRuntimeView('fb-1', 1))?.activeAction, null);
   });
 
-  it('recovers expired claims, supersedes undispatched work, and lets dispatched work settle without downstream credit', async () => {
+  it('uses PostgreSQL-compatible bindings while superseding undispatched work and settling dispatched work', async () => {
     let now = 1_800_100_000_000;
     const clock = () => now;
     const db = memoryDatabase(clock);
