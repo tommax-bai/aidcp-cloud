@@ -69,6 +69,8 @@ import {
 import type {
   FacebookOperationPolicyLegacyRuleWriteResult,
   FacebookOperationPolicyLegacySlowStartWriteResult,
+  FacebookSlowStartProgressProjection,
+  FacebookSlowStartProgressWriteResult,
   FacebookOperationPolicyView,
   FacebookOperationPolicyWriteResult,
   FacebookPrimaryBrowseSurface,
@@ -99,6 +101,9 @@ export type EnvironmentCommentApprovalPolicyResult =
 
 export interface ClientFacebookOperationPolicyPort {
   getForEnv(envKey: string): Promise<FacebookOperationPolicyView | null>;
+  getSlowStartProgressForEnv(
+    envKey: string,
+  ): Promise<FacebookSlowStartProgressProjection | null>;
   writeEnvironment(
     envKey: string,
     input: {
@@ -109,6 +114,18 @@ export interface ClientFacebookOperationPolicyPort {
     },
     actor: string,
   ): Promise<FacebookOperationPolicyWriteResult>;
+  writeSlowStartProgress(
+    envKey: string,
+    input: {
+      expectedRevision: number;
+      day: number;
+      completed: boolean;
+      requestId: string;
+      reason?: string | null;
+      requiredOwnerUserId?: string;
+    },
+    actor: string,
+  ): Promise<FacebookSlowStartProgressWriteResult>;
   writePrimarySurface(
     envKey: string,
     input: {
@@ -709,6 +726,18 @@ function projectClientFacebookOperationPolicy(
     policyRevision: view.policyRevision,
     slowStart: { state: view.slowStart.state },
     blocker: view.blocker,
+  };
+}
+
+function projectClientFacebookSlowStartProgress(
+  projection: FacebookSlowStartProgressProjection,
+): {
+  facebookOperationPolicy: ReturnType<typeof projectClientFacebookOperationPolicy>;
+  slowStartProgress: FacebookSlowStartProgressProjection['slowStartProgress'];
+} {
+  return {
+    facebookOperationPolicy: projectClientFacebookOperationPolicy(projection.operationPolicy),
+    slowStartProgress: { ...projection.slowStartProgress },
   };
 }
 
@@ -1929,6 +1958,153 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         });
       } catch (error) {
         logger.warn('[client-auth] Facebook operation policy unavailable', {
+          userId,
+          envKey: owned.envKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+      }
+      return;
+    }
+
+    const facebookSlowStartProgressMatch =
+      /^\/environments\/([^/]+)\/facebook-slow-start-progress$/.exec(url);
+    if ((method === 'GET' || method === 'PUT') && facebookSlowStartProgressMatch) {
+      if (!deps.facebookOperationPolicy) {
+        sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+        return;
+      }
+      let envKey: string;
+      try {
+        envKey = decodeURIComponent(facebookSlowStartProgressMatch[1]).trim();
+      } catch {
+        sendJson(res, 400, { error: 'bad_request', reason: 'invalid_env_key' });
+        return;
+      }
+
+      let writeInput: {
+        expectedRevision: number;
+        day: number;
+        completed: boolean;
+      } | null = null;
+      if (method === 'PUT') {
+        let body: unknown;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(res, 400, { error: 'bad_request' });
+          return;
+        }
+        const raw = body as Record<string, unknown>;
+        const keys = Object.keys(raw);
+        if (
+          keys.length !== 3
+          || !keys.includes('expectedRevision')
+          || !keys.includes('day')
+          || !keys.includes('completed')
+          || typeof raw.expectedRevision !== 'number'
+          || !Number.isSafeInteger(raw.expectedRevision)
+          || raw.expectedRevision < 1
+          || typeof raw.day !== 'number'
+          || !Number.isSafeInteger(raw.day)
+          || raw.day < 1
+          || typeof raw.completed !== 'boolean'
+        ) {
+          sendJson(res, 422, {
+            error: 'validation_failed',
+            reason: 'only_expected_revision_day_and_completed_accepted',
+          });
+          return;
+        }
+        writeInput = {
+          expectedRevision: raw.expectedRevision,
+          day: raw.day,
+          completed: raw.completed,
+        };
+      }
+
+      const owned = await resolveOwnedFacebookEnvironment(deps, res, userId, envKey);
+      if (!owned) return;
+      if (owned.binding === 'binding_conflict') {
+        sendJson(res, 409, { error: 'binding_conflict' });
+        return;
+      }
+
+      try {
+        if (method === 'GET') {
+          const projection = await deps.facebookOperationPolicy
+            .getSlowStartProgressForEnv(owned.envKey);
+          if (!projection || projection.operationPolicy.envKey !== owned.envKey) {
+            sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+            return;
+          }
+          sendJson(res, 200, {
+            data: {
+              envKey: owned.envKey,
+              ...projectClientFacebookSlowStartProgress(projection),
+            },
+            meta: { requestId: randomUUID(), asOf: Date.now() },
+          });
+          return;
+        }
+
+        const result = await deps.facebookOperationPolicy.writeSlowStartProgress(
+          owned.envKey,
+          {
+            expectedRevision: writeInput!.expectedRevision,
+            day: writeInput!.day,
+            completed: writeInput!.completed,
+            requestId: randomUUID(),
+            requiredOwnerUserId: userId,
+          },
+          `client:${userId}`,
+        );
+        if (!result.ok) {
+          const current = result.current?.operationPolicy.envKey === owned.envKey
+            ? {
+                envKey: owned.envKey,
+                ...projectClientFacebookSlowStartProgress(result.current),
+              }
+            : null;
+          if (result.reason === 'revision_conflict' && !current) {
+            sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+            return;
+          }
+          const status = result.reason === 'environment_not_found'
+            ? 404
+            : result.reason === 'environment_not_owned'
+              ? 403
+              : result.reason === 'policy_unavailable'
+                ? 503
+                : result.reason === 'revision_conflict'
+                    || result.reason === 'unsupported_platform'
+                    || result.reason === 'binding_conflict'
+                    || result.reason === 'mode_conflict'
+                  ? 409
+                  : 422;
+          sendJson(res, status, {
+            error: result.reason,
+            ...(current ? { current } : {}),
+          });
+          return;
+        }
+        if (result.projection.operationPolicy.envKey !== owned.envKey) {
+          sendJson(res, 503, { error: 'facebook_operation_policy_unavailable' });
+          return;
+        }
+        sendJson(res, 200, {
+          data: {
+            envKey: owned.envKey,
+            ...projectClientFacebookSlowStartProgress(result.projection),
+          },
+          meta: { requestId: randomUUID(), asOf: Date.now() },
+        });
+      } catch (error) {
+        logger.warn('[client-auth] Facebook slow-start progress unavailable', {
           userId,
           envKey: owned.envKey,
           error: error instanceof Error ? error.message : String(error),

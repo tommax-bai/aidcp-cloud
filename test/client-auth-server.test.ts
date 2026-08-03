@@ -2066,9 +2066,11 @@ function makeFacebookOperationPolicyDep(options: {
   let surfaceRevision = 1;
   let primarySurface: 'feed' | 'reels' = 'reels';
   let currentMode: 'persona' | 'rule' | 'consumption' = options.initialMode ?? 'persona';
-  let slowStartState: 'active' | 'off' | 'unknown' = options.slowStartActive
+  let slowStartState: 'active' | 'off' | 'graduated' | 'unknown' = options.slowStartActive
     ? 'active'
     : 'unknown';
+  let slowStartDay = 3;
+  const slowStartTotalDays = 7;
   let updatedAt: string | null = null;
   const view = (envKey: string): FacebookOperationPolicyView => ({
     envKey,
@@ -2117,6 +2119,20 @@ function makeFacebookOperationPolicyDep(options: {
       calls.push({ action: 'get', envKey });
       return options.unavailable ? null : view(envKey);
     },
+    async getSlowStartProgressForEnv(envKey) {
+      calls.push({ action: 'get_slow_start_progress', envKey });
+      if (options.unavailable) return null;
+      return {
+        operationPolicy: view(envKey),
+        slowStartProgress: {
+          day: slowStartState === 'active' || slowStartState === 'graduated'
+            ? slowStartDay
+            : null,
+          totalDays: slowStartTotalDays,
+          completed: slowStartState === 'graduated',
+        },
+      };
+    },
     async writeEnvironment(envKey, input, actor) {
       calls.push({ action: 'write', envKey, input, actor });
       if (options.writeReason) {
@@ -2133,6 +2149,55 @@ function makeFacebookOperationPolicyDep(options: {
       slowStartState = input.mode === 'slow_start' ? 'active' : 'off';
       updatedAt = '2026-07-30T08:00:00.000Z';
       return { ok: true as const, view: view(envKey) };
+    },
+    async writeSlowStartProgress(envKey, input, actor) {
+      calls.push({ action: 'write_slow_start_progress', envKey, input, actor });
+      if (options.writeReason) {
+        const current = {
+          operationPolicy: view(envKey),
+          slowStartProgress: {
+            day: slowStartState === 'active' || slowStartState === 'graduated'
+              ? slowStartDay
+              : null,
+            totalDays: slowStartTotalDays,
+            completed: slowStartState === 'graduated',
+          },
+        };
+        return {
+          ok: false as const,
+          reason: options.writeReason,
+          ...(options.writeReason === 'revision_conflict' ? { current } : {}),
+        };
+      }
+      if (slowStartState !== 'active' && slowStartState !== 'graduated') {
+        return {
+          ok: false as const,
+          reason: 'mode_conflict' as const,
+          current: {
+            operationPolicy: view(envKey),
+            slowStartProgress: {
+              day: null,
+              totalDays: slowStartTotalDays,
+              completed: false,
+            },
+          },
+        };
+      }
+      currentRevision += 1;
+      slowStartDay = input.day;
+      slowStartState = input.completed ? 'graduated' : 'active';
+      updatedAt = '2026-08-03T08:00:00.000Z';
+      return {
+        ok: true as const,
+        projection: {
+          operationPolicy: view(envKey),
+          slowStartProgress: {
+            day: slowStartDay,
+            totalDays: slowStartTotalDays,
+            completed: input.completed,
+          },
+        },
+      };
     },
     async writePrimarySurface(envKey, input, actor) {
       calls.push({ action: 'write_surface', envKey, input, actor });
@@ -3121,6 +3186,167 @@ test('主浏览入口：独立 CAS 写 Feed，不改变当前运行方式', asyn
         (authorityWrite.input as { requiredOwnerUserId?: string }).requiredOwnerUserId,
         'u1',
       );
+    },
+  );
+});
+
+test('冷启动进度：独立读写投影保留旧策略形状并回读 day/completed 真态', async () => {
+  const fx = ownerOfP1();
+  fx.envPlatforms.set('p1', 'facebook');
+  fx.bindings.set('p1', ACCT_P1);
+  const policy = makeFacebookOperationPolicyDep({
+    slowStartActive: true,
+    bindingState: 'bound',
+  });
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookOperationPolicy: policy.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const read = await fetch(`${base}/environments/p1/facebook-slow-start-progress`, {
+        headers,
+      });
+      assert.equal(read.status, 200);
+      const readBody = await read.json() as {
+        data: {
+          envKey: string;
+          facebookOperationPolicy: { policyRevision: number; slowStart: unknown };
+          slowStartProgress: { day: number; totalDays: number; completed: boolean };
+        };
+      };
+      assert.equal(readBody.data.envKey, 'p1');
+      assert.deepEqual(readBody.data.facebookOperationPolicy.slowStart, { state: 'active' });
+      assert.deepEqual(readBody.data.slowStartProgress, {
+        day: 3,
+        totalDays: 7,
+        completed: false,
+      });
+
+      const write = await fetch(`${base}/environments/p1/facebook-slow-start-progress`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          expectedRevision: readBody.data.facebookOperationPolicy.policyRevision,
+          day: 5,
+          completed: true,
+        }),
+      });
+      assert.equal(write.status, 200);
+      const writeBody = await write.json() as {
+        data: {
+          facebookOperationPolicy: { slowStart: { state: string }; policyRevision: number };
+          slowStartProgress: { day: number; totalDays: number; completed: boolean };
+        };
+      };
+      assert.equal(writeBody.data.facebookOperationPolicy.slowStart.state, 'graduated');
+      assert.equal(writeBody.data.facebookOperationPolicy.policyRevision, 8);
+      assert.deepEqual(writeBody.data.slowStartProgress, {
+        day: 5,
+        totalDays: 7,
+        completed: true,
+      });
+      const authorityWrite = policy.calls.find(
+        (call) => call.action === 'write_slow_start_progress',
+      )!;
+      assert.equal(authorityWrite.envKey, 'p1');
+      assert.equal(authorityWrite.actor, 'client:u1');
+      assert.deepEqual(
+        Object.keys(authorityWrite.input as Record<string, unknown>).sort(),
+        ['completed', 'day', 'expectedRevision', 'requestId', 'requiredOwnerUserId'],
+      );
+    },
+  );
+});
+
+test('冷启动进度：严格字段、CAS current 与非冷启动 mode conflict 均 fail-closed', async () => {
+  const fx = ownerOfP1();
+  fx.envPlatforms.set('p1', 'facebook');
+  const strict = makeFacebookOperationPolicyDep({ slowStartActive: true });
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookOperationPolicy: strict.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      for (const body of [
+        { expectedRevision: 7, day: 2, completed: false, accountId: ACCT_P1 },
+        { expectedRevision: 7, day: 0, completed: false },
+        { expectedRevision: 7, day: 2, completed: 'yes' },
+      ]) {
+        const response = await fetch(`${base}/environments/p1/facebook-slow-start-progress`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify(body),
+        });
+        assert.equal(response.status, 422, JSON.stringify(body));
+      }
+      assert.equal(
+        strict.calls.some((call) => call.action === 'write_slow_start_progress'),
+        false,
+      );
+    },
+  );
+
+  const stale = makeFacebookOperationPolicyDep({
+    slowStartActive: true,
+    writeReason: 'revision_conflict',
+  });
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookOperationPolicy: stale.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/environments/p1/facebook-slow-start-progress`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ expectedRevision: 6, day: 2, completed: false }),
+      });
+      assert.equal(response.status, 409);
+      const body = await response.json() as {
+        error: string;
+        current: { slowStartProgress: { day: number; completed: boolean } };
+      };
+      assert.equal(body.error, 'revision_conflict');
+      assert.deepEqual(body.current.slowStartProgress, {
+        day: 3,
+        totalDays: 7,
+        completed: false,
+      });
+    },
+  );
+
+  const persona = makeFacebookOperationPolicyDep();
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      facebookOperationPolicy: persona.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const response = await fetch(`${base}/environments/p1/facebook-slow-start-progress`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ expectedRevision: 7, day: 2, completed: false }),
+      });
+      assert.equal(response.status, 409);
+      assert.equal((await response.json() as { error: string }).error, 'mode_conflict');
     },
   );
 });

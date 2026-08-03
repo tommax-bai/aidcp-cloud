@@ -171,6 +171,17 @@ export interface FacebookSlowStartRuntimePolicy {
   dailyCaps: ActionQuota[];
 }
 
+export interface FacebookSlowStartProgressView {
+  day: number | null;
+  totalDays: number;
+  completed: boolean;
+}
+
+export interface FacebookSlowStartProgressProjection {
+  operationPolicy: FacebookOperationPolicyView;
+  slowStartProgress: FacebookSlowStartProgressView;
+}
+
 export type FacebookOperationGlobalPolicyWriteResult =
   | { ok: true; view: FacebookOperationGlobalPolicyView }
   | {
@@ -189,9 +200,26 @@ export type FacebookOperationPolicyWriteResult =
         | 'binding_conflict'
         | 'unsupported_platform'
         | 'invalid_value'
+        | 'mode_conflict'
         | 'revision_conflict'
         | 'policy_unavailable';
       current?: FacebookOperationPolicyView;
+    };
+
+export type FacebookSlowStartProgressWriteResult =
+  | { ok: true; projection: FacebookSlowStartProgressProjection }
+  | {
+      ok: false;
+      reason:
+        | 'environment_not_found'
+        | 'environment_not_owned'
+        | 'binding_conflict'
+        | 'unsupported_platform'
+        | 'invalid_value'
+        | 'mode_conflict'
+        | 'revision_conflict'
+        | 'policy_unavailable';
+      current?: FacebookSlowStartProgressProjection;
     };
 
 export type FacebookPrimaryBrowseSurfaceWriteResult = FacebookOperationPolicyWriteResult;
@@ -789,6 +817,30 @@ function normalizedPrimarySurfaceWrite(input: {
   return { ok: true };
 }
 
+function normalizedSlowStartProgressWrite(
+  input: {
+    expectedRevision: number;
+    day: number;
+    completed: boolean;
+    requestId: string;
+    reason?: string | null;
+  },
+  totalDays: number,
+): { ok: true } | { ok: false; reason: 'invalid_value' } {
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  if (!Number.isSafeInteger(input.day) || input.day < 1 || input.day > totalDays) {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  if (typeof input.completed !== 'boolean') return { ok: false, reason: 'invalid_value' };
+  if (!String(input.requestId || '').trim()) return { ok: false, reason: 'invalid_value' };
+  if (input.reason !== undefined && input.reason !== null && typeof input.reason !== 'string') {
+    return { ok: false, reason: 'invalid_value' };
+  }
+  return { ok: true };
+}
+
 export class FacebookOperationPolicyStore {
   private readonly pool: pg.Pool;
   private readonly ownedPool?: pg.Pool;
@@ -1091,6 +1143,17 @@ export class FacebookOperationPolicyStore {
       environment.account_display_name,
       'bound',
     );
+  }
+
+  async getSlowStartProgressForEnv(
+    envKey: string,
+  ): Promise<FacebookSlowStartProgressProjection | null> {
+    const operationPolicy = await this.getForEnv(envKey);
+    if (!operationPolicy) return null;
+    return {
+      operationPolicy,
+      slowStartProgress: this.slowStartProgress(operationPolicy.slowStart),
+    };
   }
 
   /**
@@ -1558,6 +1621,231 @@ export class FacebookOperationPolicyStore {
       const view = await this.getForEnv(key);
       if (!view) return { ok: false, reason: 'policy_unavailable' };
       return { ok: true, view };
+    } catch (error) {
+      if (!committed) await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async writeSlowStartProgress(
+    envKey: string,
+    input: {
+      expectedRevision: number;
+      day: number;
+      completed: boolean;
+      requestId: string;
+      reason?: string | null;
+      requiredOwnerUserId?: string;
+    },
+    actor: string,
+  ): Promise<FacebookSlowStartProgressWriteResult> {
+    if (!this.ready || !this.executionTarget) {
+      return { ok: false, reason: 'policy_unavailable' };
+    }
+    const key = String(envKey || '').trim();
+    if (!key) return { ok: false, reason: 'environment_not_found' };
+    const validation = normalizedSlowStartProgressWrite(
+      input,
+      this.slowStartRuntimePolicy().totalDays,
+    );
+    if (!validation.ok) return validation;
+    const requiredOwnerUserId = input.requiredOwnerUserId?.trim();
+    if (input.requiredOwnerUserId !== undefined && !requiredOwnerUserId) {
+      return { ok: false, reason: 'invalid_value' };
+    }
+
+    const client = await this.pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
+      const environment = await this.lockEnvironmentForWrite(client, key);
+      if (!environment) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'environment_not_found' };
+      }
+      if (
+        requiredOwnerUserId
+        && !(await this.environmentOwnedBy(client, requiredOwnerUserId, key))
+      ) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'environment_not_owned' };
+      }
+      try {
+        if (normalizePlatformId(environment.platform) !== 'facebook') {
+          await client.query('ROLLBACK');
+          return { ok: false, reason: 'unsupported_platform' };
+        }
+      } catch {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'unsupported_platform' };
+      }
+      if (this.hasBindingConflict(environment)) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'binding_conflict' };
+      }
+
+      const currentResult = await client.query<OperationPolicyDbRow>(
+        `SELECT env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
+                consumption_views_per_like,consumption_confirmed_likes_per_join,
+                consumption_confirmed_joins_per_comment,policy_schema_version,
+                policy_revision,cadence_source,updated_at,updated_by
+           FROM facebook_operation_policy
+          WHERE env_key=$1
+          FOR UPDATE`,
+        [key],
+      );
+      const currentRow = currentResult.rows[0];
+      const current = currentRow
+        ? this.cachedFromRow(currentRow)
+        : await this.readLegacyFallback(client, key);
+      if (current.policyRevision !== input.expectedRevision) {
+        await client.query('ROLLBACK');
+        await this.refreshFromAuthority();
+        const projection = await this.getSlowStartProgressForEnv(key);
+        return {
+          ok: false,
+          reason: 'revision_conflict',
+          ...(projection ? { current: projection } : {}),
+        };
+      }
+
+      const currentSlowStart = await this.resolveEnvironmentSlowStart(
+        key,
+        environment.account_id?.trim() || null,
+        environment.slow_start_since,
+        environment.slow_start_completed_at,
+      );
+      if (currentSlowStart.state !== 'active' && currentSlowStart.state !== 'graduated') {
+        await client.query('ROLLBACK');
+        const projection = await this.getSlowStartProgressForEnv(key);
+        return {
+          ok: false,
+          reason: 'mode_conflict',
+          ...(projection ? { current: projection } : {}),
+        };
+      }
+
+      const now = Date.now();
+      const anchor = new Date(
+        shanghaiDayStartMs(now) - (input.day - 1) * 86_400_000,
+      );
+      const beforeProgress = this.slowStartProgress(currentSlowStart, now);
+      const revisionResult = await client.query<{ revision: number | string }>(
+        `SELECT nextval('facebook_operation_policy_revision_seq') AS revision`,
+      );
+      const nextRevision = Number(revisionResult.rows[0]?.revision);
+      if (!Number.isSafeInteger(nextRevision) || nextRevision < 1) {
+        throw new Error('facebook_operation_policy_revision_unavailable');
+      }
+
+      await client.query(
+        `UPDATE client_environments
+            SET slow_start_since=$2,
+                slow_start_initialized=true,
+                updated_at=now()
+          WHERE env_key=$1`,
+        [key, anchor],
+      );
+      if (input.completed) {
+        await client.query(
+          `INSERT INTO facebook_environment_slow_start_completion
+             (env_key,execution_target,completed_at)
+           VALUES ($1,$2,now())
+           ON CONFLICT (env_key,execution_target)
+           DO UPDATE SET completed_at=EXCLUDED.completed_at`,
+          [key, this.executionTarget],
+        );
+      } else {
+        await client.query(
+          `DELETE FROM facebook_environment_slow_start_completion
+            WHERE env_key=$1 AND execution_target=$2`,
+          [key, this.executionTarget],
+        );
+      }
+
+      const written = currentRow
+        ? await client.query<OperationPolicyDbRow>(
+            `UPDATE facebook_operation_policy
+                SET policy_revision=$2,
+                    updated_at=now(),
+                    updated_by=$3
+              WHERE env_key=$1
+              RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
+                        consumption_views_per_like,consumption_confirmed_likes_per_join,
+                        consumption_confirmed_joins_per_comment,policy_schema_version,
+                        policy_revision,cadence_source,updated_at,updated_by`,
+            [key, nextRevision, actor],
+          )
+        : await client.query<OperationPolicyDbRow>(
+            `INSERT INTO facebook_operation_policy
+               (env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
+                consumption_views_per_like,consumption_confirmed_likes_per_join,
+                consumption_confirmed_joins_per_comment,policy_schema_version,
+                policy_revision,cadence_source,updated_at,updated_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,now(),$10)
+             RETURNING env_key,base_mode,rule_views_per_like,rule_join_every_n_rounds,
+                       consumption_views_per_like,consumption_confirmed_likes_per_join,
+                       consumption_confirmed_joins_per_comment,policy_schema_version,
+                       policy_revision,cadence_source,updated_at,updated_by`,
+            [
+              key,
+              current.baseMode,
+              current.rule.viewsPerLike,
+              current.rule.joinEveryNRounds,
+              current.consumption.viewsPerLike,
+              current.consumption.confirmedLikesPerJoin,
+              current.consumption.confirmedJoinsPerComment,
+              nextRevision,
+              current.cadenceSource,
+              actor,
+            ],
+          );
+      const next = this.cachedFromRow(written.rows[0]);
+      const afterProgress: FacebookSlowStartProgressView = {
+        day: input.day,
+        totalDays: this.slowStartRuntimePolicy().totalDays,
+        completed: input.completed,
+      };
+      const actorInfo = actorParts(actor);
+      await client.query(
+        `INSERT INTO facebook_operation_policy_audit
+           (env_key,prior_revision,new_revision,before_policy,after_policy,
+            actor_class,actor_id,request_id,reason,created_at)
+         VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,now())`,
+        [
+          key,
+          current.policyRevision,
+          next.policyRevision,
+          JSON.stringify({
+            ...this.auditSnapshot(current),
+            slowStartProgress: beforeProgress,
+          }),
+          JSON.stringify({
+            ...this.auditSnapshot(next),
+            slowStartProgress: afterProgress,
+          }),
+          actorInfo.actorClass,
+          actorInfo.actorId,
+          input.requestId,
+          input.reason ?? 'slow_start_progress_updated',
+        ],
+      );
+      await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+      await this.mirrorVersionBumper?.bumpInTx(client, 'facebook_operation_policy');
+      await this.mirrorVersionBumper?.bumpInTx(client, 'client_environment_slow_start');
+      await client.query('COMMIT');
+      committed = true;
+      this.cache.set(key, next);
+      this.mirrorVersionBumper?.notifyAfterCommit?.('content_schedule');
+      this.mirrorVersionBumper?.notifyAfterCommit?.('facebook_operation_policy');
+      this.mirrorVersionBumper?.notifyAfterCommit?.('client_environment_slow_start');
+      await this.slowStartRefresh?.();
+      const projection = await this.getSlowStartProgressForEnv(key);
+      return projection
+        ? { ok: true, projection }
+        : { ok: false, reason: 'policy_unavailable' };
     } catch (error) {
       if (!committed) await client.query('ROLLBACK').catch(() => undefined);
       throw error;
@@ -2498,6 +2786,26 @@ export class FacebookOperationPolicyStore {
       effectiveMode: slowStart.state === 'active' ? 'slow_start' : policy.baseMode,
       blocker: null,
     });
+  }
+
+  private slowStartProgress(
+    slowStart: FacebookOperationPolicyView['slowStart'],
+    at = Date.now(),
+  ): FacebookSlowStartProgressView {
+    const totalDays = this.slowStartRuntimePolicy().totalDays;
+    if (slowStart.state === 'off' || slowStart.state === 'unknown') {
+      return { day: null, totalDays, completed: false };
+    }
+    const rawDay = Number.isFinite(slowStart.since)
+      ? Math.floor((at - Number(slowStart.since)) / 86_400_000) + 1
+      : slowStart.state === 'graduated'
+        ? totalDays
+        : 1;
+    return {
+      day: Math.min(totalDays, Math.max(1, rawDay)),
+      totalDays,
+      completed: slowStart.state === 'graduated',
+    };
   }
 
   private project(

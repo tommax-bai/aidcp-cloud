@@ -144,6 +144,7 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
     platform: string;
     accountId: string | null;
     slowStartSince: Date | null;
+    slowStartCompletedAt?: Date | null;
   }>([
     ['env-fb', { platform: 'facebook', accountId: 'fb-1', slowStartSince: null as Date | null }],
     ['env-fb-alias', { platform: 'fb', accountId: 'fb-alias', slowStartSince: null as Date | null }],
@@ -259,7 +260,12 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO facebook_environment_slow_start_completion')) {
-      graduationMarks.push(params);
+      if (sql.includes('VALUES')) {
+        const env = environments.get(String(params[0]));
+        if (env) env.slowStartCompletedAt = new Date();
+      } else {
+        graduationMarks.push(params);
+      }
       return { rows: [], rowCount: 0 };
     }
     if (sql.startsWith('SELECT env_key,base_mode') && !sql.includes('WHERE env_key=')) {
@@ -328,6 +334,7 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
           account_display_name: env.accountId ? `Display ${env.accountId}` : null,
           account_exists: env.accountId !== null,
           slow_start_since: env.slowStartSince,
+          slow_start_completed_at: env.slowStartCompletedAt ?? null,
           duplicate_count: duplicateCount,
           owner_count: ownerCounts.get(String(params[0])) ?? 1,
         }],
@@ -347,6 +354,7 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
               platform: env.platform,
               account_id: env.accountId,
               slow_start_since: env.slowStartSince,
+              slow_start_completed_at: env.slowStartCompletedAt ?? null,
               duplicate_count: duplicateCount,
               owner_count: ownerCounts.get(String(params[0])) ?? 1,
             }]
@@ -360,9 +368,13 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
     }
     if (sql.startsWith('UPDATE client_environments SET slow_start_since=')) {
       const env = environments.get(String(params[0]))!;
-      env.slowStartSince = params[1] === true
-        ? env.slowStartSince ?? (params[2] instanceof Date ? params[2] : null)
-        : null;
+      if (sql.includes('slow_start_since=$2')) {
+        env.slowStartSince = params[1] instanceof Date ? params[1] : null;
+      } else {
+        env.slowStartSince = params[1] === true
+          ? env.slowStartSince ?? (params[2] instanceof Date ? params[2] : null)
+          : null;
+      }
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO facebook_operation_policy_audit')) {
@@ -371,7 +383,23 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('DELETE FROM facebook_environment_slow_start_completion')) {
+      const env = environments.get(String(params[0]));
+      if (env) env.slowStartCompletedAt = null;
       return { rows: [], rowCount: 0 };
+    }
+    if (
+      sql.startsWith('UPDATE facebook_operation_policy')
+      && sql.includes('SET policy_revision=')
+    ) {
+      const prior = policies.get(String(params[0]))!;
+      const row: PolicyRow = {
+        ...prior,
+        policy_revision: Number(params[1]),
+        updated_at: new Date(),
+        updated_by: String(params[2]),
+      };
+      policies.set(row.env_key, row);
+      return { rows: [row], rowCount: 1 };
     }
     if (
       sql.startsWith('UPDATE facebook_operation_policy')
@@ -427,6 +455,7 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
             surfaces: Map<string, SurfaceRow>;
             surfaceAudits: unknown[][];
             slow: Map<string, Date | null>;
+            completed: Map<string, Date | null>;
             globalRow: GlobalPolicyRow;
             globalAudits: unknown[][];
             graduationMarks: unknown[][];
@@ -447,6 +476,9 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
               surfaces: new Map([...surfaces].map(([key, row]) => [key, { ...row }])),
               surfaceAudits: surfaceAudits.map((row) => [...row]),
               slow: new Map([...environments].map(([key, env]) => [key, env.slowStartSince])),
+              completed: new Map(
+                [...environments].map(([key, env]) => [key, env.slowStartCompletedAt ?? null]),
+              ),
               globalRow: { ...globalRow },
               globalAudits: globalAudits.map((row) => [...row]),
               graduationMarks: graduationMarks.map((row) => [...row]),
@@ -470,6 +502,9 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
               graduationMarks = snapshot.graduationMarks;
               for (const [key, since] of snapshot.slow) {
                 environments.get(key)!.slowStartSince = since;
+              }
+              for (const [key, completedAt] of snapshot.completed) {
+                environments.get(key)!.slowStartCompletedAt = completedAt;
               }
             }
             releaseLock?.();
@@ -515,7 +550,9 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
         ? { state: 'active' as const, since: since.getTime(), globallyDisabled: false }
         : { state: 'off' as const, since: null, globallyDisabled: false };
     },
-    environmentSlowStartResolver: async () => 'active',
+    environmentSlowStartResolver: async ({ completedAt }) => completedAt == null
+      ? 'active'
+      : 'graduated',
     slowStartRefresh: async () => {
       slowStartRefreshes += 1;
     },
@@ -916,6 +953,155 @@ describe('FacebookOperationPolicyStore', () => {
         db.environments.get('env-unbound')!.slowStartSince?.getTime(),
       );
     }
+  });
+
+  it('edits slow-start day and completion atomically without changing the base policy', async () => {
+    const db = database({ executionTarget: 'dev' });
+    await db.store.init();
+    const enabled = await db.store.writeEnvironment(
+      'env-unbound',
+      {
+        expectedRevision: 0,
+        mode: 'slow_start',
+        requestId: 'request-progress-enable',
+        requiredOwnerUserId: 'customer-a',
+      },
+      'client:customer-a',
+    );
+    assert.equal(enabled.ok, true);
+    assert.ok(enabled.ok);
+
+    const initial = await db.store.getSlowStartProgressForEnv('env-unbound');
+    assert.deepEqual(initial?.slowStartProgress, {
+      day: 1,
+      totalDays: 7,
+      completed: false,
+    });
+
+    const completed = await db.store.writeSlowStartProgress(
+      'env-unbound',
+      {
+        expectedRevision: enabled.view.policyRevision,
+        day: 4,
+        completed: true,
+        requestId: 'request-progress-complete',
+        requiredOwnerUserId: 'customer-a',
+      },
+      'client:customer-a',
+    );
+    assert.equal(completed.ok, true);
+    assert.ok(completed.ok);
+    assert.equal(completed.projection.operationPolicy.baseMode, 'persona');
+    assert.equal(completed.projection.operationPolicy.slowStart.state, 'graduated');
+    assert.deepEqual(completed.projection.slowStartProgress, {
+      day: 4,
+      totalDays: 7,
+      completed: true,
+    });
+    assert.ok(db.environments.get('env-unbound')!.slowStartCompletedAt);
+    const completedAudit = JSON.parse(String(db.audits.at(-1)?.[4])) as {
+      slowStartProgress: { day: number; completed: boolean };
+    };
+    assert.deepEqual(completedAudit.slowStartProgress, {
+      day: 4,
+      totalDays: 7,
+      completed: true,
+    });
+
+    const reopened = await db.store.writeSlowStartProgress(
+      'env-unbound',
+      {
+        expectedRevision: completed.projection.operationPolicy.policyRevision,
+        day: 2,
+        completed: false,
+        requestId: 'request-progress-reopen',
+        requiredOwnerUserId: 'customer-a',
+      },
+      'client:customer-a',
+    );
+    assert.equal(reopened.ok, true);
+    assert.ok(reopened.ok);
+    assert.equal(reopened.projection.operationPolicy.slowStart.state, 'active');
+    assert.deepEqual(reopened.projection.slowStartProgress, {
+      day: 2,
+      totalDays: 7,
+      completed: false,
+    });
+    assert.equal(db.environments.get('env-unbound')!.slowStartCompletedAt, null);
+    assert.equal(db.policies.get('env-unbound')?.base_mode, 'persona');
+    assert.equal(db.slowStartRefreshes, 3);
+    assert.deepEqual(db.bumps.slice(-3), [
+      'content_schedule',
+      'facebook_operation_policy',
+      'client_environment_slow_start',
+    ]);
+  });
+
+  it('rejects stale, out-of-range, and non-cold-start progress without mutation', async () => {
+    const db = database({ executionTarget: 'dev' });
+    await db.store.init();
+    const enabled = await db.store.writeEnvironment(
+      'env-fb',
+      {
+        expectedRevision: 0,
+        mode: 'slow_start',
+        requestId: 'request-progress-guard-enable',
+      },
+      'panel:alice',
+    );
+    assert.ok(enabled.ok);
+    const auditCount = db.audits.length;
+
+    const invalid = await db.store.writeSlowStartProgress(
+      'env-fb',
+      {
+        expectedRevision: enabled.view.policyRevision,
+        day: 8,
+        completed: false,
+        requestId: 'request-progress-invalid',
+      },
+      'panel:alice',
+    );
+    assert.deepEqual(invalid, { ok: false, reason: 'invalid_value' });
+    assert.equal(db.audits.length, auditCount);
+
+    const stale = await db.store.writeSlowStartProgress(
+      'env-fb',
+      {
+        expectedRevision: enabled.view.policyRevision + 1,
+        day: 2,
+        completed: false,
+        requestId: 'request-progress-stale',
+      },
+      'panel:alice',
+    );
+    assert.equal(stale.ok, false);
+    if (!stale.ok) assert.equal(stale.reason, 'revision_conflict');
+    assert.equal(db.audits.length, auditCount);
+
+    const persona = await db.store.writeEnvironment(
+      'env-fb',
+      {
+        expectedRevision: enabled.view.policyRevision,
+        mode: 'persona',
+        requestId: 'request-progress-persona',
+      },
+      'panel:alice',
+    );
+    assert.ok(persona.ok);
+    const conflict = await db.store.writeSlowStartProgress(
+      'env-fb',
+      {
+        expectedRevision: persona.view.policyRevision,
+        day: 2,
+        completed: false,
+        requestId: 'request-progress-mode-conflict',
+      },
+      'panel:alice',
+    );
+    assert.equal(conflict.ok, false);
+    if (!conflict.ok) assert.equal(conflict.reason, 'mode_conflict');
+    assert.equal(db.environments.get('env-fb')!.slowStartSince, null);
   });
 
   it('allocates policy revisions globally across environments', async () => {
