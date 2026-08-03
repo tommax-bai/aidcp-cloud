@@ -962,3 +962,193 @@ test('content-scheduler: 已开跑 / 抛异常都不归还名额（绝不重复�
   await settle();
   assert.deepEqual(threw.calls, [ACC], '异常不归还名额');
 });
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * 跨进程取用的失败方向（change wire-content-scheduler-into-api-process）。
+ *
+ * 每条方向都按「哪边更严」定，不按「哪边更像缺省」定。下面每个用例只钉一条方向，
+ * 因为变异实测要求逐条说出「是哪条用例抓住的」——一个用例盖多条方向时那句话就没法说。
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/** 收集 warn 行，用来区分「具名失败」与「静默跳过」。 */
+function withLog(deps: ContentSchedulerDeps): { deps: ContentSchedulerDeps; warns: string[]; infos: string[] } {
+  const warns: string[] = [];
+  const infos: string[] = [];
+  return {
+    deps: { ...deps, logger: { warn: (m) => warns.push(m), info: (m) => infos.push(m) } },
+    warns,
+    infos,
+  };
+}
+
+const UNAVAILABLE = () => {
+  throw new Error('automation_authority_unavailable');
+};
+
+test('失败方向: 在线清单问不到 → 整轮跳过，且 MUST NOT 记成「本轮无人在线」', async () => {
+  const calls: string[] = [];
+  const { deps, warns } = withLog({
+    onlineAccounts: UNAVAILABLE,
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: (id) => {
+      calls.push(id);
+      return Promise.resolve();
+    },
+    now: () => NOW_HIT.getTime(),
+  });
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(calls, [], '取不到在线清单时 MUST NOT 触发任何账号');
+  assert.equal(warns.length, 1, '整轮跳过 MUST 留一行具名痕迹，绝不静默');
+  assert.match(warns[0], /在线账号清单取用失败/);
+});
+
+test('失败方向: 风控状态问不到 → 只跳过该账号，其余账号照常，且 MUST NOT 按 normal 放行', async () => {
+  const calls: string[] = [];
+  const { deps, warns } = withLog({
+    onlineAccounts: () => onlineIdentities([ACC, ACC_2]),
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () => scheduleView(),
+    riskStatus: (accountId) => {
+      if (accountId === ACC) throw new Error('automation_authority_unavailable');
+      return 'normal';
+    },
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: (id) => {
+      calls.push(id);
+      return Promise.resolve();
+    },
+    now: () => NOW_HIT.getTime(),
+  });
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(calls, [ACC_2], '问不到风控的账号被跳过，另一个照常判定');
+  assert.match(warns.join('\n'), /风控状态取用失败/);
+});
+
+test('失败方向: 发布是否在跑问不到 → 判为在跑（失败开闸就是双发）', async () => {
+  const calls: string[] = [];
+  const { deps, warns } = withLog({
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: UNAVAILABLE,
+    triggerPost: (id) => {
+      calls.push(id);
+      return Promise.resolve();
+    },
+    now: () => NOW_HIT.getTime(),
+  });
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(calls, [], '问不到 MUST 按在跑处置');
+  assert.match(warns.join('\n'), /发布是否在跑取用失败/);
+});
+
+test('失败方向: 委托任务占用问不到 → 判为占用，且不冒充「让位给委托」', async () => {
+  const calls: string[] = [];
+  const { deps, warns, infos } = withLog({
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    delegatedOwnershipBusy: UNAVAILABLE,
+    triggerPost: (id) => {
+      calls.push(id);
+      return Promise.resolve();
+    },
+    now: () => NOW_HIT.getTime(),
+  });
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(calls, [], '问不到 MUST 按被占用处置');
+  assert.match(warns.join('\n'), /委托任务占用取用失败/);
+  assert.equal(
+    infos.some((line) => line.includes('委托任务持有 ownership')),
+    false,
+    '「问不到」MUST NOT 被写成「让位给了委托」——那是编出来的事实',
+  );
+});
+
+test('失败方向: 评论是否在跑问不到 → 判为在跑', async () => {
+  const fired: string[] = [];
+  const { deps, warns } = withLog({
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () =>
+      scheduleView({ postEnabled: false, postDailyCap: 0, commentEnabled: true, commentDailyCap: 2 }),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: () => Promise.resolve(),
+    triggerComment: (id: string) => {
+      fired.push(id);
+      return Promise.resolve();
+    },
+    isCommentBusy: UNAVAILABLE,
+    commentedTodayCount: () => Promise.resolve(0),
+    now: () => C_NOW_HIT.getTime(),
+  });
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(fired, [], '问不到 MUST 按在跑处置');
+  assert.match(warns.join('\n'), /评论是否在跑取用失败/);
+});
+
+test('失败方向: 发帖素材可用数问不到 → 判为 0 且不静默（与「确实没素材」处置不同）', async () => {
+  const calls: string[] = [];
+  const { deps, warns } = withLog({
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    getPlatform: () => 'facebook',
+    availablePublishMediaCount: () => Promise.reject(new Error('content_authority_unavailable')),
+    triggerPost: (id) => {
+      calls.push(id);
+      return Promise.resolve();
+    },
+    now: () => NOW_HIT.getTime(),
+  });
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(calls, [], '问不到 MUST 按 0 处置');
+  assert.match(warns.join('\n'), /发帖素材可用数取用失败/);
+});
+
+test('「未注入」与「问不到」分得开：未注入在启动时报一次，之后每 tick 静默', async () => {
+  const { deps, infos, warns } = withLog({
+    onlineAccounts: () => onlineIdentities([ACC]),
+    ...autoPostEnvironmentDeps,
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: () => Promise.resolve(),
+    now: () => NOW_HIT.getTime(),
+  });
+  const scheduler = new ContentScheduler(deps);
+  scheduler.start(60_000);
+  scheduler.stop();
+  const startup = infos.filter((line) => line.includes('已启动'));
+  assert.equal(startup.length, 1);
+  assert.match(startup[0], /依赖未注入.*comment.*contact_comment.*join/);
+  await scheduler.onTick();
+  assert.equal(
+    warns.some((line) => line.includes('未注入')),
+    false,
+    '未注入 MUST NOT 每 tick 刷一行——那样具名失败会被噪声淹掉',
+  );
+});

@@ -1205,6 +1205,11 @@
     "note": "change split-cloud-automation-production-runtime 批 E-2 步骤 1（用户 2026-08-01 拍板走「析出纯判定段进 kernel」，与配置副本停手闸那次同一条路）：从 src/config/content-schedule-store.ts（api）析出「给定快照 + 账号 → 生效排期」纯段（EffectiveContentSchedule 形状 + resolveEffectiveContentSchedule / resolveEffectiveActiveWeekMask / resolveEffectiveContentActiveMask）。存储残壳留 api 并等值再导出，既有消费方零改动。拆仓后 api 进程按内存镜像问、automation 进程按同步读快照问同一个问题，各写一份的现形方式不是报错而是两侧对同一账号算出不同生效时段。仅 import kernel（content-schedule-mode / week-active-mask），零 SQL / HTTP / LLM / 模块级 Set|Map / 活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-E2-1"
   },
   {
+    "path": "src/kernel/content-scheduling-port.ts",
+    "layer": "kernel",
+    "note": "change wire-content-scheduler-into-api-process 新写：内容排期调度器向 automation 取用的那一族窄口（在线账号清单 / 风控状态 / 三个『在不在跑』/ 委托任务占用 / 三类计数上限 / 三类扳机），方向为 api→automation——排期器类归 api（src/orchestrator/content-scheduler.ts），它每分钟要问的事实与真正的扳机住在 automation。形状逐字复用 4a 的信封（api-direct-port.ts 的 version + executionTarget + input），executionTarget 由客户端从本机部署事实注入、调用方无入口可选：DEV/OL 共库下这条是硬约束。本端口存在的首要理由是把『问不到时算什么』写进契约并按『哪边更严』定死：在线清单问不到 MUST 整轮跳过（回空数组与真的没人在线在外部完全同形，全员静默停摆且看着正常）、风控状态问不到 MUST 跳过该账号（回 normal 就是放行）、三个是否在跑与委托占用问不到 MUST 判为在跑/占用（回不忙是放行，失败开闸即双发）。故所有方法一律返回裸值、失败靠抛，MUST NOT 在契约里出现任何『问不到时的缺省值』形状——缺省值一进契约，判更严的那个决定就从调用方手里被悄悄拿走了。三条扳机的回执语义是受不受理（accepted + 具名 reason + retryable），MUST NOT 挂到生成结束：一次 HTTP 挂住整条生成链会把超时语义搅进业务结局；终态结果卡由持有结局的 automation 侧发，调度器只对未受理回卡。仅 import 同层 kernel 契约与 DeploymentTarget；零 SQL/HTTP/LLM/模块级活状态"
+  },
+  {
     "path": "src/kernel/content-visual-brief.ts",
     "layer": "kernel",
     "note": "【待定稿裁决】change decouple-behavior-class-ports 从 src/publish-agent/content-visual-brief.ts 整体 git mv：整文件为正文视觉 brief 的纯归一/兜底/格式化函数与纯数据（normalizeContentVisualBrief / ensureContentVisualCategory / createFallbackContentVisualBrief / formatContentVisualCategoryBrief / categorySafetyInstruction / inferContentVisualKind / CONTENT_VISUAL_CATEGORY_LABELS 等），唯一 import 为 kernel 的 visual-reference-types 类型。零 SQL / HTTP / LLM / 模块级 Set-Map（nonEmpty 内的 new Set 为函数体局部量、非模块级单例）。原路径 publish-agent/content-visual-brief.ts 保留为 re-export 桩，content 层内部消费方无感。为 visual-fidelity-audit-prompt 能进 kernel 而抬入（其构建依赖本文件两个格式化函数）。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-prompt-final"
@@ -2551,6 +2556,11 @@
   },
   {
     "path": "src/transport/content-media-usage-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的跨进程传输原语，整目录归 automation、无逐文件切分、新文件 inherit。MUST 回写 §4.7。【2026-07-29 校订，change split-cloud-automation-production-runtime】原文写的是「异步事件 outbox 传输原语（有 SQL、不进 kernel）」——那只是本目录的**第一批**成员（首个消费者为风控事件、与既有 risk_counter_outbox 同域）。此后目录已长出第二种形态：「服务端注册 + 类型化客户端 + 路径常量」三件套（3a/4a 那两批，以及本 change 的 operator-command-http.ts / content-authority-http.ts），它们**零 SQL**。归属判定不受影响（整目录归 automation 的理由是「跨进程运行时原语、有副作用故不进 kernel」，与是否含 SQL 无关），但生成物里那句 note 会照抄本 basis，不校订就会让后来人以为新文件必须有 SQL 才配进这个目录"
+  },
+  {
+    "path": "src/transport/content-scheduling-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的跨进程传输原语，整目录归 automation、无逐文件切分、新文件 inherit。MUST 回写 §4.7。【2026-07-29 校订，change split-cloud-automation-production-runtime】原文写的是「异步事件 outbox 传输原语（有 SQL、不进 kernel）」——那只是本目录的**第一批**成员（首个消费者为风控事件、与既有 risk_counter_outbox 同域）。此后目录已长出第二种形态：「服务端注册 + 类型化客户端 + 路径常量」三件套（3a/4a 那两批，以及本 change 的 operator-command-http.ts / content-authority-http.ts），它们**零 SQL**。归属判定不受影响（整目录归 automation 的理由是「跨进程运行时原语、有副作用故不进 kernel」，与是否含 SQL 无关），但生成物里那句 note 会照抄本 basis，不校订就会让后来人以为新文件必须有 SQL 才配进这个目录"
   },

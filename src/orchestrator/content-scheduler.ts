@@ -110,8 +110,17 @@ export interface ContentScheduleView {
 }
 
 export interface ContentSchedulerDeps {
-  /** 当前完成欢迎握手的在线账号；envKey 可空以保持非发帖动作兼容，自动发帖单独 fail closed。 */
-  onlineAccounts(): OnlineAccountIdentity[];
+  /**
+   * 当前完成欢迎握手的在线账号。
+   *
+   * **同步或异步**：单体里是进程内直读，接口进程里是向自动化服务的一跳（change
+   * wire-content-scheduler-into-api-process）。放宽签名而不是新造一个「远程版调度器」——
+   * 依赖接口本来就是为此存在的接缝。
+   *
+   * **问不到时 MUST 抛，MUST NOT 回空数组**：空数组＝「此刻没人在线」，与真的没人在线在外部
+   * 完全同形，全员静默停摆且看着一切正常。调度器接住这次抛出并**整轮跳过**（见 {@link ContentScheduler.onTick}）。
+   */
+  onlineAccounts(): OnlineAccountIdentity[] | Promise<readonly OnlineAccountIdentity[]>;
   /** Cloud 本地严格解析的部署目标；绝不接受 Edge 自报。 */
   executionTarget: DeploymentTarget;
   /** 自动发帖小时格的数据库原子占位；false 表示其它进程或重启前已触发该格。 */
@@ -132,8 +141,11 @@ export interface ContentSchedulerDeps {
   getPlatform?(accountId: string): PlatformId | Promise<PlatformId>;
   /** Facebook 发帖素材池可用 set 数；FB 排期发帖必须 >0。 */
   availablePublishMediaCount?(accountId: string): Promise<number>;
-  /** 该账号自主发帖轮是否在跑（change parallel-rewrite-drafts：账号粒度单飞；洗稿在途不让排期槽）。 */
-  isPublishBusy(accountId: string): boolean;
+  /**
+   * 该账号自主发帖轮是否在跑（change parallel-rewrite-drafts：账号粒度单飞；洗稿在途不让排期槽）。
+   * **同步或异步**；问不到 MUST 抛，调度器按「在跑」处置——回「不忙」是放行，而这道闸就是防重复触发的。
+   */
+  isPublishBusy(accountId: string): boolean | Promise<boolean>;
   /** Active delegated ownership wins over periodic work for the same account/action family. Busy skips do not consume a slot. */
   delegatedOwnershipBusy?(accountId: string, family: 'comment' | 'publish'): boolean | Promise<boolean>;
   /**
@@ -154,8 +166,8 @@ export interface ContentSchedulerDeps {
    * triggerComment 的实现负责 canDo('comment') 配额闸 + 调命令式评论入口 + 触发失败回黄卡（终态结果卡由评论链自补）。
    */
   triggerComment?(accountId: string, approvalMode: ContentScheduleApprovalMode): Promise<unknown>;
-  /** 该账号评论任务是否在跑（= commentScheduler.isRunning，单飞闸）。 */
-  isCommentBusy?(accountId: string): boolean;
+  /** 该账号评论任务是否在跑（= commentScheduler.isRunning，单飞闸）。同步或异步；问不到按「在跑」处置。 */
+  isCommentBusy?(accountId: string): boolean | Promise<boolean>;
   /** 该账号今日已发评论数（持久互动记录，Asia/Shanghai 自然日）。 */
   commentedTodayCount?(accountId: string): Promise<number>;
   /**
@@ -163,8 +175,8 @@ export interface ContentSchedulerDeps {
    * triggerJoin 内部负责 kill switch / shadow / canDo('join_group') / lazy-claim / judge / ledger。
    */
   triggerJoin?(accountId: string): Promise<unknown>;
-  /** 该账号加群任务是否在跑（= FacebookGroupJoinScheduler.isRunning，单飞闸）。 */
-  isJoinBusy?(accountId: string): boolean;
+  /** 该账号加群任务是否在跑（= FacebookGroupJoinScheduler.isRunning，单飞闸）。同步或异步；问不到按「在跑」处置。 */
+  isJoinBusy?(accountId: string): boolean | Promise<boolean>;
   /** 该账号今日已确认加入的群数（membership ledger joined_at，Asia/Shanghai 自然日）。 */
   joinedTodayCount?(accountId: string): Promise<number>;
   /** join_group 的日上限（通常来自 RiskController.effectiveQuotas().day.join_group）。 */
@@ -358,6 +370,62 @@ export class ContentScheduler {
     return true;
   }
 
+  /**
+   * 单飞类判定的统一取用口（change wire-content-scheduler-into-api-process）。
+   *
+   * 三个取值刻意分开，因为「在跑」与「问不到」的**处置相同但事实不同**：两者都跳过本槽，
+   * 但只有前者能说「这个账号正忙」。把它们压成一个布尔，日志里就再也分不出「让位给了谁」
+   * 与「压根没问到」—— 后者是配置 / 链路问题，必须有人去修。
+   *
+   * 失败一律按「在跑 / 被占用」处置：回「不忙」是放行，而这族闸的全部意义就是防重复触发，
+   * **失败开闸＝双发**。
+   */
+  private async askBusy(
+    label: string,
+    accountId: string,
+    ask: () => boolean | Promise<boolean>,
+  ): Promise<'busy' | 'idle' | 'unavailable'> {
+    try {
+      return (await ask()) ? 'busy' : 'idle';
+    } catch (e) {
+      this.deps.logger?.warn(
+        `[content-scheduler] ${label}取用失败，按「在跑」处置本槽 account=${accountId}：${(e as Error).message}`,
+      );
+      return 'unavailable';
+    }
+  }
+
+  /**
+   * 未注入的可选动作族（change wire-content-scheduler-into-api-process）。
+   *
+   * 「未注入」与「问不到」在外部一直同形——两者都表现为「这个动作从来不发生」。前者是既定的零回归
+   * 约定（依赖没建就整体跳过），后者是跨进程取用失败，必须有人去修。故未注入在**启动时报一次**，
+   * 之后永远沉默（每 tick 都报就是每分钟一行噪声）；问不到则每次都具名留痕。
+   */
+  private uninjectedActions(): string[] {
+    const missing: string[] = [];
+    if (!this.deps.triggerComment || !this.deps.isCommentBusy || !this.deps.commentedTodayCount) {
+      missing.push('comment');
+    }
+    if (
+      !this.deps.triggerContactComment
+      || !this.deps.isCommentBusy
+      || !this.deps.contactAttemptsTodayCount
+    ) {
+      missing.push('contact_comment');
+    }
+    if (
+      !this.deps.triggerJoin
+      || !this.deps.isJoinBusy
+      || !this.deps.joinedTodayCount
+      || !this.deps.joinDailyCap
+      || !this.deps.effectiveFacebookOperationMode
+    ) {
+      missing.push('join');
+    }
+    return missing;
+  }
+
   /** 本 tick 是否放行该动作：命中错峰分钟，或落在「未开始」后打开的小时内重试窗。 */
   private shouldFireNow(accountId: string, action: string, fireKey: string, cell: string, now: Date, minute: number): boolean {
     if (minute === offsetMinute(accountId, now, action)) return true;
@@ -370,7 +438,14 @@ export class ContentScheduler {
     this.timer = setInterval(() => {
       void this.onTick();
     }, intervalMs);
-    this.deps.logger?.info?.('[content-scheduler] 已启动（每分钟心跳）');
+    const uninjected = this.uninjectedActions();
+    this.deps.logger?.info?.(
+      `[content-scheduler] 已启动（每分钟心跳）${
+        uninjected.length === 0
+          ? ''
+          : `；以下动作依赖未注入、本进程整体不触发：${uninjected.join(' / ')}`
+      }`,
+    );
   }
 
   stop(): void {
@@ -392,7 +467,19 @@ export class ContentScheduler {
       const minute = now.getMinutes();
       const cell = hourCellKey(now);
 
-      for (const identity of this.deps.onlineAccounts()) {
+      // 在线清单是**整轮的前提**，所以它的失败方向是整轮跳过而不是「当作没人在线」。
+      // 回空数组与真的没人在线在外部完全同形：全员静默停摆，日志 / 面板 / 卡片全都正常。
+      let online: readonly OnlineAccountIdentity[];
+      try {
+        online = await this.deps.onlineAccounts();
+      } catch (e) {
+        this.deps.logger?.warn(
+          `[content-scheduler] 在线账号清单取用失败，本轮心跳整轮跳过（MUST NOT 记成「本轮无人在线」）：${(e as Error).message}`,
+        );
+        return;
+      }
+
+      for (const identity of online) {
         const { accountId } = identity;
         try {
           const s = this.deps.scheduleFor(accountId);
@@ -436,11 +523,18 @@ export class ContentScheduler {
               if (!this.deps.triggerContactComment || !this.deps.isCommentBusy || !this.deps.contactAttemptsTodayCount) continue;
             }
             const delegatedFamily = action === 'post' ? 'publish' : 'comment';
-            if (this.deps.delegatedOwnershipBusy && await this.deps.delegatedOwnershipBusy(accountId, delegatedFamily)) {
-              this.deps.logger?.info?.(
-                `[content-scheduler] 委托任务持有 ownership，排期诚实让位 account=${accountId} family=${delegatedFamily}`,
+            if (this.deps.delegatedOwnershipBusy) {
+              // 问不到 ⇒ 判为占用（委托是人主动发起的，优先级高于周期任务）。
+              // 「真的被占用」与「问不到」都跳过本槽，但只有前者能说是让位。
+              const delegated = await this.askBusy('委托任务占用', accountId, () =>
+                this.deps.delegatedOwnershipBusy!(accountId, delegatedFamily),
               );
-              continue;
+              if (delegated === 'busy') {
+                this.deps.logger?.info?.(
+                  `[content-scheduler] 委托任务持有 ownership，排期诚实让位 account=${accountId} family=${delegatedFamily}`,
+                );
+              }
+              if (delegated !== 'idle') continue;
             }
             // 幂等：每动作独立小时格键（发帖触发绝不吞同小时评论槽）。
             const fireKey = `${accountId}|${action}`;
@@ -448,7 +542,18 @@ export class ContentScheduler {
             if (!this.shouldFireNow(accountId, action, fireKey, cell, now, minute)) continue;
             if (this.lastFired.get(fireKey) === cell) continue;
             // 风控 normal 闸（账号级，靠后放：仅命中分钟才付 async 成本）。
-            if ((await this.deps.riskStatus(accountId)) !== 'normal') break;
+            // 问不到 ⇒ 跳过该账号。**MUST NOT 落成 `'normal'`**：那就是放行，而这道闸的全部意义
+            // 就是拦住非 normal。其余账号照常判定。
+            let riskStatus: string;
+            try {
+              riskStatus = await this.deps.riskStatus(accountId);
+            } catch (e) {
+              this.deps.logger?.warn(
+                `[content-scheduler] 风控状态取用失败，跳过该账号（MUST NOT 按「状态正常」放行）account=${accountId}：${(e as Error).message}`,
+              );
+              break;
+            }
+            if (riskStatus !== 'normal') break;
 
             if (action === 'post') {
               // An unresolvable browser environment used to silently disable automatic posting here.
@@ -458,7 +563,14 @@ export class ContentScheduler {
               // 账号粒度自主单飞（change parallel-rewrite-drafts）：该账号已有自主轮在跑 → 本槽顺延；
               // 洗稿在途不让槽（全局并发帽由 claim 层兜底，帽满触发同样诚实 skipped）。postFiring 保留：
               // 防同一 tick 内多账号齐发的错峰意义独立于旧槽污染理由。
-              if (this.postFiring || this.deps.isPublishBusy(accountId)) continue;
+              if (this.postFiring) continue;
+              if (
+                (await this.askBusy('发布是否在跑', accountId, () =>
+                  this.deps.isPublishBusy(accountId),
+                )) !== 'idle'
+              ) {
+                continue;
+              }
               // 日上限原子：已发历史 + 在途自主草稿真实条数（洗稿候选不计入）。
               const [posted, pendingAuto] = await Promise.all([
                 this.deps.postedTodayCount(accountId),
@@ -474,8 +586,15 @@ export class ContentScheduler {
                   this.deps.logger?.warn(`[content-scheduler] Facebook 发帖 MVP 不支持 auto_approve account=${accountId}，本槽跳过`);
                   continue;
                 }
+                // 问不到 ⇒ 判为 0（与既有实现同向：保守侧＝不发）。**但不静默**：
+                // 「素材库答不上来」与「确实没素材」的处置完全不同，前者要有人去修。
                 const available = this.deps.availablePublishMediaCount
-                  ? await this.deps.availablePublishMediaCount(accountId).catch(() => 0)
+                  ? await this.deps.availablePublishMediaCount(accountId).catch((e: unknown) => {
+                      this.deps.logger?.warn(
+                        `[content-scheduler] 发帖素材可用数取用失败，按 0 处置本槽 account=${accountId}：${(e as Error).message}`,
+                      );
+                      return 0;
+                    })
                   : 0;
                 if (available <= 0) {
                   this.deps.logger?.warn(`[content-scheduler] Facebook 发帖素材不足 account=${accountId}，本槽跳过`);
@@ -507,10 +626,23 @@ export class ContentScheduler {
               );
             } else if (action === 'comment') {
               // 评论单飞：任务在跑不重触发（cap 的「在跑?1:0」项在此恒 0——在跑早被拦下）。
-              if (this.deps.isCommentBusy!(accountId)) continue;
+              if (
+                (await this.askBusy('评论是否在跑', accountId, () =>
+                  this.deps.isCommentBusy!(accountId),
+                )) !== 'idle'
+              ) {
+                continue;
+              }
               // 跨调度器互斥（change facebook-manual-join-comment）：该账号正在加群（含手动 /comment --join 的加群阶段）→ 本 tick 不再起评论，
               // 让同一物理边端不被 join↔comment 交错驱动（isJoinBusy 未注入则不闸、零回归）。
-              if (this.deps.isJoinBusy?.(accountId)) continue;
+              if (
+                this.deps.isJoinBusy
+                && (await this.askBusy('加群是否在跑', accountId, () =>
+                  this.deps.isJoinBusy!(accountId),
+                )) !== 'idle'
+              ) {
+                continue;
+              }
               // 日上限原子：持久已发计数（评论管线任务内联等审 + 单飞，无排队草稿窗口，无需在途台账）。
               const sent = await this.deps.commentedTodayCount!(accountId);
               if (sent >= s.commentDailyCap) continue;
@@ -519,10 +651,23 @@ export class ContentScheduler {
               if (!actionModeEnabled(commentMode)) continue;
               this.fire(accountId, action, fireKey, cell, () => this.deps.triggerComment!(accountId, commentMode));
             } else if (action === 'join') {
-              if (this.deps.isJoinBusy!(accountId)) continue;
+              if (
+                (await this.askBusy('加群是否在跑', accountId, () =>
+                  this.deps.isJoinBusy!(accountId),
+                )) !== 'idle'
+              ) {
+                continue;
+              }
               // 跨调度器互斥（change facebook-manual-join-comment）：该账号正在评论（含手动 /comment [--join] 的评论阶段）→ 本 tick 不起加群，
               // 后台自动加群绝不闯入正在进行的评论、抢同一物理边端（isCommentBusy 未注入则不闸、零回归）。
-              if (this.deps.isCommentBusy?.(accountId)) continue;
+              if (
+                this.deps.isCommentBusy
+                && (await this.askBusy('评论是否在跑', accountId, () =>
+                  this.deps.isCommentBusy!(accountId),
+                )) !== 'idle'
+              ) {
+                continue;
+              }
               const [joined, riskCap] = await Promise.all([
                 this.deps.joinedTodayCount!(accountId),
                 this.deps.joinDailyCap!(accountId),
@@ -538,9 +683,22 @@ export class ContentScheduler {
               this.fire(accountId, action, fireKey, cell, () => this.deps.triggerJoin!(accountId));
             } else {
               // 联系评论：单飞复用评论机器（同一 isRunning，评论/联系评论互斥天然成立）。
-              if (this.deps.isCommentBusy!(accountId)) continue;
+              if (
+                (await this.askBusy('评论是否在跑', accountId, () =>
+                  this.deps.isCommentBusy!(accountId),
+                )) !== 'idle'
+              ) {
+                continue;
+              }
               // 跨调度器互斥（change facebook-manual-join-comment）：正在加群 → 本 tick 不起联系评论（同一物理边端，isJoinBusy 未注入则不闸）。
-              if (this.deps.isJoinBusy?.(accountId)) continue;
+              if (
+                this.deps.isJoinBusy
+                && (await this.askBusy('加群是否在跑', accountId, () =>
+                  this.deps.isJoinBusy!(accountId),
+                )) !== 'idle'
+              ) {
+                continue;
+              }
               // 尝试型日上限：持久 attempts 台账（被拒/无目标也占额度，保守方向；重启不清零）。
               const attempts = await this.deps.contactAttemptsTodayCount!(accountId);
               if (attempts >= s.contactCommentDailyCap) continue;
@@ -552,7 +710,11 @@ export class ContentScheduler {
             break; // 每账号每 tick 至多一动作（防同分钟双动作抢边端）。
           }
         } catch (e) {
-          this.deps.logger?.warn(`[content-scheduler] tick 账号处理异常 account=${accountId}：${(e as Error).message}`);
+          // 兜底：上面逐条定过方向的取用各自处置；落到这里的是**其余**取用（各类计数、日上限、
+          // 运营模式）问不到。方向同样是保守侧——跳过该账号本轮，绝不按缺省值放行。
+          this.deps.logger?.warn(
+            `[content-scheduler] tick 账号处理异常，跳过该账号本轮（绝不按缺省值放行）account=${accountId}：${(e as Error).message}`,
+          );
         }
       }
     } finally {
