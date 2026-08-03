@@ -95,7 +95,7 @@ test('hello → welcome，并记录/协商旧 core-executor 与新 data-plane/au
   const s: EdgeSession = { sessionId: 'sX' };
   const res = await h.handle(
     makeEnvelope('hello', 'h1', 1, {
-      edgeId: 'edge-1', app: 'xhs', accountNickname: '  Test User  ',
+      edgeId: 'edge-1', app: 'xhs', accountNickname: '  Test User  ', browserState: 'absent',
       capabilities: ['browser_absent_v1', 'client_core_browser_executor_v1', 'client_data_plane_automation_engine_v1', 'search_activity_receipt_v1'],
     }),
     s,
@@ -104,9 +104,36 @@ test('hello → welcome，并记录/协商旧 core-executor 与新 data-plane/au
   assert.equal(s.edgeId, 'edge-1');
   assert.equal(s.app, 'xhs');
   assert.equal(s.accountNickname, 'Test User');
+  assert.equal(s.browserState, 'absent');
   assert.deepEqual(s.capabilities, ['browser_absent_v1', 'client_core_browser_executor_v1', 'client_data_plane_automation_engine_v1', 'search_activity_receipt_v1']);
   assert.deepEqual((res?.payload as { capabilities?: string[] }).capabilities,
     ['client_core_browser_executor_v1', 'client_data_plane_automation_engine_v1', 'search_activity_receipt_v1']);
+});
+
+test('browser.status updates readiness on the same transport and emits no page intent', async () => {
+  const bus = new EventBus();
+  const states: unknown[] = [];
+  bus.on('edge.browser_status', (event) => { states.push(event); });
+  const h = makeHandler(dummyLlm, memStore(), bus);
+  const s: EdgeSession = { sessionId: 'browser-state', accountId: 'acc-test', browserState: 'absent' };
+
+  const response = await h.handle(makeEnvelope('browser.status', 'browser-ready', 1, {
+    state: 'ready',
+    reason: 'wake_completed',
+  }), s);
+
+  assert.equal(response, null);
+  assert.equal(s.browserState, 'ready');
+  assert.deepEqual(states, [{ state: 'ready', reason: 'wake_completed', ts: fixedClock() }]);
+});
+
+test('browser.status rejects malformed state without changing the last truth', async () => {
+  const h = makeHandler(dummyLlm, memStore());
+  const s: EdgeSession = { sessionId: 'browser-state-invalid', accountId: 'acc-test', browserState: 'absent' };
+  const response = await h.handle(makeEnvelope('browser.status', 'bad-state', 1, { state: 'starting' } as never), s);
+  assert.equal(response?.type, 'error');
+  assert.equal((response?.payload as { code?: string }).code, 'invalid_browser_state');
+  assert.equal(s.browserState, 'absent');
 });
 
 test('ping → pong', async () => {

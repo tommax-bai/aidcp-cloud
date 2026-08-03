@@ -7,6 +7,7 @@ import type {
   Envelope,
   IdentityObservedPayload,
   NotificationItem,
+  BrowserState,
 } from '../comm/protocol.js';
 import type { MandatoryCommentApproval, MandatoryInteractionAction } from '../kernel/soul-types.js';
 // NoteDetailData / ConceptPool 已抬入 kernel（change cloud-coupling-phase5）：两者都是 content 侧角色
@@ -157,7 +158,8 @@ export interface EventMap {
   'concept.discovered': { concepts: string[]; source: string };
   // Edge 上报事件（handler → RoleDispatcher）
   // accountId 穿透握手事件（multi-account-node-support D4）：决策层据此设该连接当前账号，不再钉死 default。
-  'edge.hello': { edgeId: string; accountId?: string; ts: number };
+  'edge.hello': { edgeId: string; accountId?: string; browserState?: BrowserState; ts: number };
+  'edge.browser_status': { state: BrowserState; reason?: string; ts: number };
   'page.cards.arrived': { cards: PageCardsData[]; startupId?: string; listKind?: 'feed' | 'reels'; ts: number };
   /** Edge 对 Facebook 首页显式空态完成加载感知确认；Cloud 才能据此授权切 Reels。 */
   'feed.empty.confirmed': { startupId?: string; documentGeneration?: string; ts: number };

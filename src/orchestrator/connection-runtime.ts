@@ -353,6 +353,7 @@ export class ConnectionRuntimeRegistry {
       runtime.bus.emit('edge.hello', {
         edgeId: runtime.edgeId!,
         accountId: runtime.accountId,
+        browserState: session.browserState,
         ts: Date.now(),
       });
       this.deps.logger?.log?.(

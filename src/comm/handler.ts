@@ -22,6 +22,7 @@ import {
   type AnchorGetPayload,
   type AnchorReportPayload,
   type HelloPayload,
+  type BrowserStatusPayload,
   type RemoteElement,
   type PublishApprovalRequestPayload,
   type PublishApprovalActionPayload,
@@ -512,6 +513,22 @@ export class DefaultMessageHandler implements MessageHandler {
     switch (env.type) {
       case 'hello':
         return this.onHello(env, session);
+      case 'browser.status': {
+        const payload = env.payload as Partial<BrowserStatusPayload> | null;
+        if (payload?.state !== 'absent' && payload?.state !== 'ready') {
+          return makeEnvelope('error', env.id, this.clock(), {
+            code: 'invalid_browser_state',
+            message: 'browser.status.state 必须为 absent 或 ready',
+          });
+        }
+        session.browserState = payload.state;
+        this.bus(session).emit('edge.browser_status', {
+          state: payload.state,
+          reason: typeof payload.reason === 'string' ? payload.reason : undefined,
+          ts: this.clock(),
+        });
+        return null;
+      }
       case 'ping':
         return makeEnvelope('pong', env.id, this.clock(), {});
       case 'interaction.auth.status':
@@ -1010,6 +1027,9 @@ export class DefaultMessageHandler implements MessageHandler {
     session.accountId = p.accountId;
     session.accountNickname = typeof p.accountNickname === 'string' ? p.accountNickname.trim() || undefined : undefined;
     session.machineLabel = p.machineLabel;
+    session.browserState = p.browserState === 'absent' || p.browserState === 'ready'
+      ? p.browserState
+      : undefined;
     // 多租户握手（multi-account-node-support）：校验账号身份、登记新账号、建该连接运行时（私有总线 + RoleDispatcher）。
     // 缺/空 accountId → 配置错误拒绝握手（不回 welcome、不建会话、绝不偷映射成 default 开跑，D4）。
     const outcome = (await this.deps.onHandshake?.(session)) ?? ({ ok: true } as const);

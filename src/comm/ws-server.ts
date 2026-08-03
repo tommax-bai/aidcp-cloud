@@ -21,6 +21,7 @@ import {
   type Envelope,
   type MessageType,
   type PageCardsPayload,
+  type BrowserState,
 } from './protocol.js';
 import { automationOperationDescriptorFor } from './operation-registry.js';
 
@@ -37,6 +38,8 @@ export interface EdgeSession {
   accountNickname?: string;
   /** 人类可读机器标签（hello 上报，验证码卡片告诉运维去哪台机器） */
   machineLabel?: string;
+  /** 浏览器执行层真态；缺省表示旧 Edge，Cloud 沿用兼容开场行为。 */
+  browserState?: BrowserState;
   /**
    * 当前会话正在浏览的笔记 id（随 note.detail / note.content 戳；V1 task 9.2）。
    * 用于在 action.completed 发射 interaction.occurred 时补 noteId（编排已知当前笔记），

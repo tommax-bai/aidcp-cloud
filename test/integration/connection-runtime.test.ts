@@ -152,6 +152,29 @@ test('合法账号握手先建传输运行时，welcome 后才 setup dispatcher 
   assert.equal((h.registry.controllerForSession(session) as unknown as { accountId: string }).accountId, 'acctA');
 });
 
+test('welcome keeps browser readiness separate in the edge.hello activation fact', async () => {
+  const h = makeHarness();
+  const session: EdgeSession = {
+    sessionId: 's-browser-absent',
+    edgeId: 'e-browser-absent',
+    accountId: 'acct-browser-absent',
+    browserState: 'absent',
+  };
+  await h.registry.onHandshake(session);
+  const helloFacts: unknown[] = [];
+  h.registry.busFor(session).on('edge.hello', (payload) => { helloFacts.push(payload); });
+
+  h.registry.onWelcomed(session);
+
+  assert.deepEqual(helloFacts, [{
+    edgeId: 'e-browser-absent',
+    accountId: 'acct-browser-absent',
+    browserState: 'absent',
+    ts: (helloFacts[0] as { ts: number }).ts,
+  }]);
+  assert.deepEqual(h.registry.onlineAccountIds(), ['acct-browser-absent'], 'browser absent 不得被误判为 Edge 离线');
+});
+
 test('自动排期在线身份只从 welcomed 的 ads-<envKey> 解析环境，旧式连接保留账号但 envKey=null', async () => {
   const h = makeHarness();
   const managed: EdgeSession = { sessionId: 's-managed', edgeId: 'ads-env-42', accountId: 'acctA' };

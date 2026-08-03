@@ -33,6 +33,7 @@ export type MessageType =
   // —— 连接握手 ——
   | 'hello' // edge → cloud：边缘上线，声明能力/会话
   | 'welcome' // cloud → edge：握手确认
+  | 'browser.status' // edge → cloud：同一连接内浏览器 absent/ready 真态变化
   // —— 自动化运行投影（cloud → edge）；客户数据字段仅供旧客户端兼容 ——
   | 'ui.snapshot' // 新客户端仅接收浏览器待机等自动化控制投影；今日用量、人物、草稿、审批、发布等客户数据经 customer-auth HTTP 拉取
   // —— 任务规划 ——
@@ -170,6 +171,18 @@ export interface HelloPayload {
   accountNickname?: string;
   /** 人类可读的机器标签（如 "win-aliyun-3"），验证码卡片据此告诉运维去哪台机器处置 */
   machineLabel?: string;
+  /** 当前浏览器是否已通过启动、登录态与账号身份核验；缺省表示旧 Edge，Cloud 沿用兼容开场行为。 */
+  browserState?: BrowserState;
+}
+
+/** 控制面连接存活时，浏览器执行层的独立真态。 */
+export type BrowserState = 'absent' | 'ready';
+
+/** 同一 Cloud 连接内浏览器执行层状态变化；只陈述事实，不请求页面动作。 */
+export interface BrowserStatusPayload {
+  state: BrowserState;
+  /** 诊断来源，不参与 Cloud 会话状态判定。 */
+  reason?: string;
 }
 
 /**
@@ -1903,6 +1916,7 @@ export interface EdgeTaskReleasedPayload {
 export interface PayloadMap {
   hello: HelloPayload;
   welcome: WelcomePayload;
+  'browser.status': BrowserStatusPayload;
   'ui.snapshot': UiSnapshotPayload;
   'plan.request': PlanRequestPayload;
   'plan.response': PlanResponsePayload;

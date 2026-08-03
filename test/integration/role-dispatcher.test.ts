@@ -130,6 +130,49 @@ describe('RoleDispatcher Integration', () => {
     dispatcher.endSession();
   });
 
+  it('排队态: transport 在线但 browser absent 时不激活看门狗，ready 后才开场，standby 后再拆除', async () => {
+    const commands: EdgeCommand[] = [];
+    const dispatcher = new RoleDispatcher({
+      soul: mockSoul,
+      llm: createMockLlm([]),
+      sendCommand: (cmd) => commands.push(cmd),
+    });
+    dispatcher.setup();
+
+    dispatcher.bus.emit('edge.hello', {
+      edgeId: 'edge-queued',
+      accountId: 'acct-queued',
+      browserState: 'absent',
+      ts: 1,
+    });
+    assert.equal(dispatcher.active, false, 'hello 只证明控制面在线，browser absent 时不得开浏览会话');
+
+    dispatcher.bus.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: 240_001 });
+    assert.equal(
+      commands.filter((cmd) => cmd.action === 'scroll' && cmd.reason === 'idle_recover_nudge').length,
+      0,
+      '排队超过看门狗阈值也没有页面恢复命令',
+    );
+
+    dispatcher.bus.emit('edge.browser_status', { state: 'ready', reason: 'wake_completed', ts: 250_000 });
+    assert.equal(dispatcher.active, true, '只有 browser ready 才激活浏览会话');
+    dispatcher.bus.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: 490_001 });
+    assert.equal(
+      commands.filter((cmd) => cmd.action === 'scroll' && cmd.reason === 'idle_recover_nudge').length,
+      1,
+      'ready 后页面看门狗恢复正常翻译',
+    );
+
+    dispatcher.bus.emit('edge.browser_status', { state: 'absent', reason: 'cold_standby', ts: 500_000 });
+    assert.equal(dispatcher.active, false, '浏览器进入待机后立即拆除浏览会话/看门狗');
+    dispatcher.bus.emit('session.idle_nudge', { reason: 'idle_recover_nudge', ts: 740_001 });
+    assert.equal(
+      commands.filter((cmd) => cmd.action === 'scroll' && cmd.reason === 'idle_recover_nudge').length,
+      1,
+      'standby 后不得残留页面恢复翻译',
+    );
+  });
+
   it('facebook: Feed scroll 出口在 normal 档携带 11s dwellMs 中心', async () => {
     const commands: EdgeCommand[] = [];
     const llm = createMockLlm([]);

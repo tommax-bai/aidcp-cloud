@@ -35,6 +35,8 @@ import {
   type CaptchaAssistClickResultPayload,
   type CaptchaAssistTypeReportPayload,
   type PageCardsPayload,
+  type HelloPayload,
+  type BrowserStatusPayload,
 } from '../../src/comm/protocol.js';
 
 /**
@@ -42,7 +44,7 @@ import {
  * 增删消息类型时：① 改 protocol.ts ② 同步本对象 ③ 同步边缘对照测试。
  */
 const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
-  hello: true, welcome: true,
+  hello: true, welcome: true, 'browser.status': true,
   'ui.snapshot': true,
   'plan.request': true, 'plan.response': true,
   'select.request': true, 'select.response': true,
@@ -90,8 +92,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 94（增删消息须同步冻结契约 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 94);
+  it('AC-PROTO-02 消息类型总数为 95（增删消息须同步冻结契约 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 95);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {
@@ -506,5 +508,12 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(cards[0]!.noteIdKind, 'content_ref');
     assert.equal(cards[1]!.noteIdKind, 'permalink');
     assert.equal(cards[2]!.noteIdKind, undefined);
+  });
+
+  it('AC-PROTO-21 browser readiness 初始快照与同连接变化逐字段往返存活', () => {
+    const hello: HelloPayload = { edgeId: 'edge-queued', accountId: 'acct-queued', browserState: 'absent' };
+    const status: BrowserStatusPayload = { state: 'ready', reason: 'wake_completed' };
+    assert.deepEqual(parseEnvelope(JSON.stringify(makeEnvelope('hello', 'hello-browser', 1, hello)))?.payload, hello);
+    assert.deepEqual(parseEnvelope(JSON.stringify(makeEnvelope('browser.status', 'status-browser', 2, status)))?.payload, status);
   });
 });

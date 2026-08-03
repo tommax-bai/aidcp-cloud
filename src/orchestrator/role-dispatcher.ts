@@ -107,7 +107,7 @@ import type { ConceptPool } from '../kernel/concept-pool.js';
 import type { ConceptPoolPort } from '../kernel/concept-pool-port.js';
 // 跨属主端口失败的结构化守卫（§8.5：跨进程后 instanceof 恒 false）。
 import { isContentPortError } from '../kernel/content-port-error.js';
-import type { NotificationItem } from '../comm/protocol.js';
+import type { BrowserState, NotificationItem } from '../comm/protocol.js';
 import {
   FACEBOOK_PRESENTED_VIDEO_LIKE_PROBABILITY,
   facebookPostKey,
@@ -903,6 +903,8 @@ export class RoleDispatcher {
   private budgetInit!: SessionInteractionBudget;
   private searchedKeywords: string[] = [];
   private sessionActive = false;
+  /** 与 Cloud transport 独立的浏览器执行层真态；undefined 表示旧 Edge，沿用兼容开场行为。 */
+  private browserState?: BrowserState;
 
   constructor(options: RoleDispatcherOptions) {
     this.soulSnapshot = options.soul;
@@ -2721,21 +2723,38 @@ export class RoleDispatcher {
     // 故即使会话因超时/动作数 endSession 拆除其余订阅，此监听仍在，重连/恢复后可重新驱动。
     // 多租户（multi-account-node-support）：每连接私有总线上恰好一条 edge.hello（handler 携 accountId 发），此监听即该连接的启动入口。
     this.eventBus.on('edge.hello', (payload) =>
-      this.onHelloEvent(payload as { edgeId: string; accountId?: string; ts: number }),
+      this.onHelloEvent(payload as { edgeId: string; accountId?: string; browserState?: BrowserState; ts: number }),
     );
+    this.eventBus.on('edge.browser_status', (payload) => this.onBrowserStatus(payload));
   }
 
   /**
    * 边缘 hello 事件入口：把连接账号设入当前账号，过启动闸后启动/重启会话。
    * 启动闸在角色重订阅 / 指令翻译重连**之前**短路——未绑人设的账号不开浏览循环、不发巡刷信号（D3）。
    */
-  private onHelloEvent(payload: { edgeId: string; accountId?: string; ts: number }): void {
+  private onHelloEvent(payload: { edgeId: string; accountId?: string; browserState?: BrowserState; ts: number }): void {
     this.currentEdgeId = payload.edgeId;
     if (payload.accountId) this.currentAccountId = payload.accountId;
+    this.browserState = payload.browserState;
+    if (this.browserState === 'absent') {
+      console.log('[RoleDispatcher] Edge 控制面在线但浏览器缺席 → 暂不启动浏览会话/页面看门狗');
+      return;
+    }
     if (this.canStartSession()) {
       this.restartSession();
       return;
     }
+  }
+
+  /** 浏览器状态变化只控制浏览会话，不影响 transport 在线与任务路由。 */
+  private onBrowserStatus(payload: { state: BrowserState; reason?: string; ts: number }): void {
+    if (this.browserState === payload.state) return;
+    this.browserState = payload.state;
+    if (payload.state === 'absent') {
+      this.endSession(`browser_absent:${payload.reason ?? 'unspecified'}`);
+      return;
+    }
+    if (!this.sessionActive && this.canStartSession()) this.restartSession();
   }
 
   /**
@@ -3001,6 +3020,10 @@ export class RoleDispatcher {
    * 连接时刻起算，超时结束后下次连接也能重新驱动。
    */
   restartSession(): void {
+    if (this.browserState === 'absent') {
+      console.log('[RoleDispatcher] 浏览器仍缺席 → 拒绝激活浏览会话/页面看门狗');
+      return;
+    }
     this.reconcileFacebookRuleBatchOnSessionBoundary('edge_reconnected');
     this.detachFacebookConsumptionLikeOnSessionBoundary('edge_reconnected');
     // 「可活跃时间」闸（change weekly-active-window）：当前本地时刻不在后台配置的可活跃时段内 → 不开会话、保持休眠。
