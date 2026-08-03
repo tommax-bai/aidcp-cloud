@@ -127,8 +127,18 @@ export interface PublishRecord {
 
 /** 触发器输入度量 */
 export interface ScheduledExecutionAttribution {
+  /**
+   * Binds the draft to a machine. dev and ol share one database, so this one decides whether a
+   * cloud may dispatch the draft at all — MUST stay required.
+   */
   executionTarget: DeploymentTarget;
-  envKey: string;
+  /**
+   * The browser environment the account was online in when the cell fired. Diagnostics only since
+   * 2026-08-03 (change wire-content-scheduler-into-api-process): dispatch no longer requires the
+   * account to still be in that environment. Null when the edge id carried no resolvable
+   * environment. Historical drafts keep whatever they froze.
+   */
+  envKey: string | null;
   hourCell: string;
 }
 

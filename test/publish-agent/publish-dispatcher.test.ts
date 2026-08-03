@@ -251,7 +251,10 @@ describe('PublishDispatcher', () => {
     assert.equal(h.events.includes('seq'), true);
   });
 
-  test('相同 target 但在线浏览器 envKey 已变化时不改投其它环境', async () => {
+  test('相同 target 但在线浏览器 envKey 已变化时，按当前在线环境照常下发', async () => {
+    // 裁定 2026-08-03（change wire-content-scheduler-into-api-process）：账号连着引擎才执行排期，
+    // 但**不再管是哪个浏览器环境**。此前这里会保留授权、绝不改投，结果是账号换了环境之后
+    // 稿件永远投不出去。target 那道闸不受影响，另有用例钉着。
     const draft = makeDraft({
       metadata: {
         ...makeDraft().metadata!,
@@ -260,10 +263,20 @@ describe('PublishDispatcher', () => {
     });
     const h = harness({ draft, executionTarget: 'dev', edgeId: 'ads-env-b' });
     await h.dispatcher.dispatch(draft.recordId);
-    assert.equal(h.events.includes('seq'), false);
-    assert.equal(h.events.includes('lease:acquired'), false);
-    assert.deepEqual(h.statusUpdates, []);
-    assert.deepEqual(h.voided, []);
+    assert.equal(h.events.includes('seq'), true, '换了浏览器环境不再是跳过的理由');
+  });
+
+  test('触发时解析不出浏览器环境的自动稿件照常下发', async () => {
+    // 归属里 envKey=null 是「没记录」，不是「非法归属」——它不该让稿件卡住。
+    const draft = makeDraft({
+      metadata: {
+        ...makeDraft().metadata!,
+        scheduleExecution: { executionTarget: 'dev', envKey: null, hourCell: '2026-01-05-10' },
+      },
+    });
+    const h = harness({ draft, executionTarget: 'dev', edgeId: 'ads-env-b' });
+    await h.dispatcher.dispatch(draft.recordId);
+    assert.equal(h.events.includes('seq'), true);
   });
 
   test('精确手工 /publish 冻结的 human 档位跨审批等待与下发保持不变', async () => {

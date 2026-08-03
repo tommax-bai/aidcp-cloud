@@ -142,10 +142,15 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(
     !automation.includes('0108_facebook_operation_policy_snapshot_revision'),
   );
+  // 排期小时格台账是 API 属主表，故放宽其 env_key 的迁移只进 api 组。
+  assert.ok(api.includes('0109_content_schedule_hour_claim_env_key_optional'));
+  assert.ok(
+    !automation.includes('0109_content_schedule_hour_claim_env_key_optional'),
+  );
   // 每加一条迁移都要在这里同步抬。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0108_facebook_operation_policy_snapshot_revision',
+    '0109_content_schedule_hour_claim_env_key_optional',
   );
 });
 

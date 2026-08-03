@@ -138,7 +138,7 @@ test('content-scheduler: happy path — 命中偏移分钟 + 各闸通过 → �
 });
 
 test('content-scheduler: 自动发帖先持久占位，并把 envKey/target/hourCell 冻结给触发器', async () => {
-  const claimed: Array<{ accountId: string; envKey: string; cell: string }> = [];
+  const claimed: Array<{ accountId: string; envKey: string | null; cell: string }> = [];
   let execution: unknown;
   const deps: ContentSchedulerDeps = {
     ...autoPostEnvironmentDeps,
@@ -162,6 +162,37 @@ test('content-scheduler: 自动发帖先持久占位，并把 envKey/target/hour
   await new ContentScheduler(deps).onTick();
   assert.deepEqual(claimed, [{ accountId: ACC, envKey: 'env-real', cell: '2026-01-05-10' }]);
   assert.deepEqual(execution, { executionTarget: 'dev', envKey: 'env-real', hourCell: '2026-01-05-10' });
+});
+
+test('content-scheduler: 解析不出 envKey 的在线账号照常自动发帖，占位与归属都记 null', async () => {
+  // 裁定 2026-08-03（change wire-content-scheduler-into-api-process）：连着引擎才执行排期这条闸保留，
+  // 但**不再管是哪个浏览器环境**。此前这里会 `continue` 掉整个发帖动作，且不留任何一行日志
+  // ——「这个账号今天没到点」与「这个账号被环境闸永久排除」在外部完全同形。
+  // null 是「没记录」，MUST NOT 写成空串占位（那是个看着像数据的假值）。
+  const claimed: Array<{ accountId: string; envKey: string | null; cell: string }> = [];
+  let execution: unknown;
+  const deps: ContentSchedulerDeps = {
+    ...autoPostEnvironmentDeps,
+    onlineAccounts: () => [{ accountId: ACC, envKey: null }],
+    claimPostHourCell: async (identity, cell) => {
+      claimed.push({ ...identity, cell });
+      return true;
+    },
+    scheduleFor: () => scheduleView(),
+    riskStatus: () => 'normal',
+    postedTodayCount: () => Promise.resolve(0),
+    pendingAutonomousCount: () => Promise.resolve(0),
+    isPublishBusy: () => false,
+    triggerPost: (_id, _mode, frozen) => {
+      execution = frozen;
+      return Promise.resolve();
+    },
+    now: () => NOW_HIT.getTime(),
+    logger: { warn: () => {} },
+  };
+  await new ContentScheduler(deps).onTick();
+  assert.deepEqual(claimed, [{ accountId: ACC, envKey: null, cell: '2026-01-05-10' }]);
+  assert.deepEqual(execution, { executionTarget: 'dev', envKey: null, hourCell: '2026-01-05-10' });
 });
 
 test('content-scheduler: 小时格已被其它进程占位时不启动生成', async () => {
@@ -415,7 +446,7 @@ test('content-scheduler/comment: happy path — 命中评论偏移分钟 → tri
   assert.deepEqual(fired, [`comment:${ACC}`]);
 });
 
-test('content-scheduler/comment: 旧式连接 envKey=null 只阻断自动发帖，不误伤既有评论排期', async () => {
+test('content-scheduler/comment: 旧式连接 envKey=null 不影响评论排期', async () => {
   const fired: string[] = [];
   const deps: ContentSchedulerDeps = {
     ...autoPostEnvironmentDeps,

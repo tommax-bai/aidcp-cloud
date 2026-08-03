@@ -26,11 +26,14 @@ import type { DeploymentTarget } from '../deployment-target.js';
 
 export interface OnlineAccountIdentity {
   accountId: string;
-  /** null keeps legacy scheduled comment/join behavior; automatic posting requires a non-null verified envKey. */
+  /**
+   * Informational only. Being connected to the engine still gates scheduling; *which* browser
+   * environment that connection belongs to no longer does (ruling 2026-08-03, change
+   * wire-content-scheduler-into-api-process). Null means the edge id carried no resolvable
+   * environment, not that the account is unusable.
+   */
   envKey: string | null;
 }
-
-export type VerifiedOnlineAccountIdentity = OnlineAccountIdentity & { envKey: string };
 
 /**
  * 排期联系评论的动作名。
@@ -81,7 +84,11 @@ export function scheduledContactCommentOptions(
 
 export interface ScheduledPostExecution {
   executionTarget: DeploymentTarget;
-  envKey: string;
+  /**
+   * Recorded for diagnostics, never compared at dispatch. The target below is what binds a draft
+   * to a machine — dev and ol share one database, so dropping *that* would cross the streams.
+   */
+  envKey: string | null;
   hourCell: string;
 }
 
@@ -108,7 +115,7 @@ export interface ContentSchedulerDeps {
   /** Cloud 本地严格解析的部署目标；绝不接受 Edge 自报。 */
   executionTarget: DeploymentTarget;
   /** 自动发帖小时格的数据库原子占位；false 表示其它进程或重启前已触发该格。 */
-  claimPostHourCell(identity: VerifiedOnlineAccountIdentity, hourCell: string): Promise<boolean>;
+  claimPostHourCell(identity: OnlineAccountIdentity, hourCell: string): Promise<boolean>;
   /** 单账号生效排期（store.effectiveScheduleFor，内存现读）。 */
   scheduleFor(accountId: string): ContentScheduleView;
   /** 风控状态（只 'normal' 才自动）。可同步或异步（server 侧按账号 registry 解析是 async）。 */
@@ -444,10 +451,10 @@ export class ContentScheduler {
             if ((await this.deps.riskStatus(accountId)) !== 'normal') break;
 
             if (action === 'post') {
-              // Only automatic posting needs a frozen browser environment. Other scheduled actions retain the
-              // established online-account behavior and are not silently disabled for legacy edge identities.
-              if (!identity.envKey) continue;
-              const postIdentity: VerifiedOnlineAccountIdentity = { accountId, envKey: identity.envKey };
+              // An unresolvable browser environment used to silently disable automatic posting here.
+              // Ruling 2026-08-03: being connected to the engine is the gate; which environment that
+              // connection belongs to is not. The env key rides along for diagnostics only.
+              const postIdentity: OnlineAccountIdentity = { accountId, envKey: identity.envKey };
               // 账号粒度自主单飞（change parallel-rewrite-drafts）：该账号已有自主轮在跑 → 本槽顺延；
               // 洗稿在途不让槽（全局并发帽由 claim 层兜底，帽满触发同样诚实 skipped）。postFiring 保留：
               // 防同一 tick 内多账号齐发的错峰意义独立于旧槽污染理由。
@@ -478,7 +485,7 @@ export class ContentScheduler {
               const claimed = await this.deps.claimPostHourCell(postIdentity, cell);
               if (!claimed) {
                 this.deps.logger?.info?.(
-                  `[content-scheduler] 自动发帖小时格已被占用 account=${accountId} env=${postIdentity.envKey} target=${this.deps.executionTarget} cell=${cell}`,
+                  `[content-scheduler] 自动发帖小时格已被占用 account=${accountId} env=${postIdentity.envKey ?? '(未解析)'} target=${this.deps.executionTarget} cell=${cell}`,
                 );
                 continue;
               }

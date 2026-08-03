@@ -343,12 +343,13 @@ ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS source TEXT;
 ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS velocity DOUBLE PRECISION;
 ALTER TABLE contact_comment_attempts ADD COLUMN IF NOT EXISTS age_hours DOUBLE PRECISION;
 -- 自动发帖小时格幂等台账：每账号只保留最新格；不是待消费队列，也不积累历史。
+-- env_key 可空且不参与主键：它只是诊断记录，触发环境不再绑定稿件（迁移 0109）。
 CREATE TABLE IF NOT EXISTS content_schedule_hour_claims (
   account_id       TEXT NOT NULL,
   action           TEXT NOT NULL CHECK (action = 'post'),
   hour_cell        TEXT NOT NULL,
   execution_target TEXT NOT NULL CHECK (execution_target IN ('dev', 'ol')),
-  env_key          TEXT NOT NULL,
+  env_key          TEXT,
   claimed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (account_id, action)
 );
@@ -533,12 +534,18 @@ export class ContentScheduleStore {
     accountId: string;
     hourCell: string;
     executionTarget: DeploymentTarget;
-    envKey: string;
+    /**
+     * Diagnostics only — the claim is keyed by (account, action), so this never affects idempotency.
+     * Null when the edge id carried no resolvable environment; stored as NULL rather than an empty
+     * string so "not recorded" stays distinguishable from "recorded as blank" (migration 0109
+     * relaxed the NOT NULL for exactly this).
+     */
+    envKey: string | null;
   }): Promise<boolean> {
     const accountId = input.accountId.trim();
     const hourCell = input.hourCell.trim();
-    const envKey = input.envKey.trim();
-    if (!accountId || !hourCell || !envKey) throw new Error('invalid_content_schedule_hour_claim');
+    const envKey = input.envKey?.trim() || null;
+    if (!accountId || !hourCell) throw new Error('invalid_content_schedule_hour_claim');
 
     const { rows } = await this.pool.query<{ account_id: string }>(
       `INSERT INTO content_schedule_hour_claims

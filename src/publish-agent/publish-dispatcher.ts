@@ -336,7 +336,17 @@ export class PublishDispatcher {
     this.browserSlotWaitingNotified.delete(recordId);
   }
 
-  /** Legacy/manual drafts have no binding. Target-bound automatic drafts fail closed on malformed or mismatched metadata. */
+  /**
+   * Legacy/manual drafts have no binding. Target-bound automatic drafts fail closed on malformed or
+   * mismatched metadata.
+   *
+   * The deployment target is the whole of this check and MUST stay: dev and ol share one database,
+   * so a draft that loses its machine binding can be dispatched by the wrong cloud. The browser
+   * environment used to be validated here too; it was dropped on 2026-08-03 (change
+   * wire-content-scheduler-into-api-process) because which environment an account happens to be
+   * online in is no longer part of a draft's identity. Historical drafts still carry the field —
+   * it is read for diagnostics and MUST NOT be resurrected as a gate.
+   */
   private scheduleTargetAllows(draft: DispatchDraft): boolean {
     const scheduleExecution = draft.metadata?.scheduleExecution;
     if (scheduleExecution === undefined) return true;
@@ -344,8 +354,6 @@ export class PublishDispatcher {
       scheduleExecution !== null &&
       typeof scheduleExecution === 'object' &&
       (scheduleExecution.executionTarget === 'dev' || scheduleExecution.executionTarget === 'ol') &&
-      typeof scheduleExecution.envKey === 'string' &&
-      scheduleExecution.envKey.trim().length > 0 &&
       typeof scheduleExecution.hourCell === 'string' &&
       scheduleExecution.hourCell.trim().length > 0;
     if (valid && scheduleExecution.executionTarget === this.executionTarget) return true;
@@ -701,14 +709,16 @@ export class PublishDispatcher {
       await this.setApprovalBlocked(requestId, approvalRevision, 'edge_offline_waiting');
       return;
     }
-    const scheduledEnvKey = draft.metadata?.scheduleExecution?.envKey.trim();
+    // A draft used to be held back here whenever the account had come online in a different browser
+    // environment than the one that triggered it — which meant a perfectly good draft could sit
+    // forever because the account moved. Ruling 2026-08-03: dispatch from wherever the account is
+    // online. The triggering environment is logged when it differs so after-the-fact reconciliation
+    // can still see the move; it no longer decides anything.
+    const scheduledEnvKey = draft.metadata?.scheduleExecution?.envKey?.trim();
     if (scheduledEnvKey && edgeId !== `ads-${scheduledEnvKey}`) {
-      this.clearBrowserSlotWaiting(recordId);
-      this.logger.warn(
-        `[PublishDispatcher] recordId=${recordId} 自动排期浏览器环境已变化 expected=ads-${scheduledEnvKey} actual=${edgeId}，` +
-          '保留授权和稿件状态，绝不改投其它环境',
+      this.logger.log(
+        `[PublishDispatcher] recordId=${recordId} 触发环境与当前在线环境不同 triggered=ads-${scheduledEnvKey} actual=${edgeId}，按当前在线环境下发`,
       );
-      return;
     }
     this.edgeOfflineWaitingNotified.delete(recordId);
 

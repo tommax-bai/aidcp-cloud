@@ -1,0 +1,34 @@
+-- aidcp:kind=expand
+-- aidcp:objects=column:content_schedule_hour_claims.env_key
+--
+-- change wire-content-scheduler-into-api-process
+--
+-- Automatic posting used to be bound to the browser environment the account
+-- happened to be online in when the hour cell fired: the env key was frozen
+-- into the draft and dispatch refused any other environment. Ruling
+-- 2026-08-03 dropped that binding — being connected to the engine still gates
+-- scheduling, but *which* environment that connection belongs to does not.
+--
+-- So the scheduler now fires for accounts whose edge id carries no resolvable
+-- environment, and the claim has nothing to record. NULL is the honest value
+-- for that; an empty string would be a placeholder that reads as data, and
+-- "not recorded" would stop being distinguishable from "recorded as blank".
+--
+-- Idempotency is untouched: the claim is keyed by PRIMARY KEY
+-- (account_id, action) and env_key has never been part of it.
+--
+-- Existing rows keep their env key. It stays readable for reconciliation and
+-- MUST NOT be resurrected as a dispatch gate.
+--
+-- REQUIRED_SCHEMA_VERSION is raised with this one, because the dependency is
+-- real: once the scheduler fires for an account whose edge id carries no
+-- environment, the claim writes NULL and an unrelaxed column rejects it. The
+-- dependency is *conditional* — accounts that do resolve an environment keep
+-- writing a string either way — and conditional is the worst kind. It stays
+-- quiet until it hits the exact accounts this change exists to let through.
+--
+-- Deploy order is therefore hard: migrate, then restart. Restarting first puts
+-- the process in a five-second crash loop with no alert, and the `behind`
+-- verdict has no waiver channel.
+
+ALTER TABLE content_schedule_hour_claims ALTER COLUMN env_key DROP NOT NULL;
