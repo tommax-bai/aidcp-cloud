@@ -72,6 +72,18 @@ export interface FacebookPublishMediaPort {
    * 回 `false` 的两种现实情形——这组素材已经不是 `reserved` 了，或者它属于另一次保留——
    * 都是**真实答案**，MUST NOT 与「没问到对面」混为一谈（后者 MUST 抛）。
    */
+  /**
+   * 某账号当前可用的素材 set 数（change wire-content-scheduler-into-api-process）。
+   *
+   * **为什么它现在必须跨得过这条边**：Facebook 排期发帖以「可用 > 0」为前置，而排期器住在接口进程、
+   * 素材库属主在内容进程。不开这条口，接口进程只能不注入它——那会让每一格都按 0 处置，
+   * 日志说的是「素材不足」，事实却是**根本没问**。两件事的处置完全相反。
+   *
+   * 读不到 MUST 抛，MUST NOT 落成 0：0 是「确实没素材」这个**真实答案**的取值。
+   * 调用方各自决定问不到时算什么（排期器按 0 处置并具名留痕）。
+   */
+  availableCount(accountId: string): Promise<number>;
+
   releaseReservation(setId: number, reservationId?: string): Promise<boolean>;
 
   /**

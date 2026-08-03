@@ -72,6 +72,7 @@ import {
 /* ───────────────────────────────────────────────────────── 路由表 */
 
 export const FACEBOOK_PUBLISH_MEDIA_AUTHORITY_ROUTES = {
+  availableCount: 'content-authority/facebook-publish-media/v1/available-count',
   releaseReservation: 'content-authority/facebook-publish-media/v1/release-reservation',
   markUsed: 'content-authority/facebook-publish-media/v1/mark-used',
   quarantine: 'content-authority/facebook-publish-media/v1/quarantine',
@@ -105,6 +106,11 @@ interface QuarantineInput {
  */
 function requireRowId(value: unknown, label: string): number {
   return requireInteger(value, label, 1);
+}
+
+function accountIdInput(value: unknown): { accountId: string } {
+  const input = requireRecord(value, 'facebook publish media account');
+  return { accountId: requireString(input.accountId, 'accountId') };
 }
 
 function releaseReservationInput(value: unknown): ReleaseReservationInput {
@@ -227,6 +233,11 @@ export function registerFacebookPublishMediaAuthorityRoutes(
   };
 
   server.registerBearer(
+    FACEBOOK_PUBLISH_MEDIA_AUTHORITY_ROUTES.availableCount,
+    callerToken,
+    route('availableCount', accountIdInput, (input) => local.availableCount(input.accountId)),
+  );
+  server.registerBearer(
     FACEBOOK_PUBLISH_MEDIA_AUTHORITY_ROUTES.releaseReservation,
     callerToken,
     route('releaseReservation', releaseReservationInput, (input) =>
@@ -289,6 +300,18 @@ export class FacebookPublishMediaAuthorityHttpClient implements FacebookPublishM
     executionTarget: DeploymentTarget,
   ) {
     this.channel = { http, callerToken, executionTarget };
+  }
+
+  availableCount(accountId: string): Promise<number> {
+    return callContentAuthority(
+      this.channel,
+      FACEBOOK_PUBLISH_MEDIA_AUTHORITY_ROUTES.availableCount,
+      'facebook-publish-media.availableCount',
+      { accountId },
+      // 非整数 MUST 判形状不符。取 0 会把一次契约漂移说成「这个账号没素材了」，
+      // 而排期发帖正是以「可用 > 0」为前置——那条链会安静地永远不触发。
+      isNonNegativeInteger,
+    );
   }
 
   releaseReservation(setId: number, reservationId?: string): Promise<boolean> {

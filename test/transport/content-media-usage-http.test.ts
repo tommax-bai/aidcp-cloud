@@ -89,11 +89,15 @@ function increment(overrides: Partial<LlmUsageIncrement> = {}): LlmUsageIncremen
   };
 }
 
-test('四条路由：服务端注册的路径就是客户端请求的路径，入参原样送达', async () => {
+test('五条路由：服务端注册的路径就是客户端请求的路径，入参原样送达', async () => {
   const seen: unknown[] = [];
   await withChannel(
     {
       media: {
+        availableCount: async (accountId) => {
+          seen.push({ m: 'availableCount', accountId });
+          return 3;
+        },
         releaseReservation: async (setId, reservationId) => {
           seen.push({ m: 'releaseReservation', setId, reservationId });
           // 属主答「没改到行」：这组素材已经不是保留态，或它属于另一次保留。
@@ -117,6 +121,7 @@ test('四条路由：服务端注册的路径就是客户端请求的路径，�
       },
     },
     async ({ media, usage }) => {
+      assert.equal(await media.availableCount('acct-1'), 3, '0 是「确实没素材」这个真实答案的取值，不是失败的兜底');
       assert.equal(await media.releaseReservation(7, 'res-1'), false, '没改到行 MUST 是 false，不是抛');
       assert.equal(await media.markUsed(7, 991), true);
       assert.equal(await media.quarantine(7, 'submitted_unconfirmed'), true);
@@ -125,6 +130,7 @@ test('四条路由：服务端注册的路径就是客户端请求的路径，�
       assert.equal(await usage.recordUsage([]), 0);
 
       assert.deepEqual(seen, [
+        { m: 'availableCount', accountId: 'acct-1' },
         { m: 'releaseReservation', setId: 7, reservationId: 'res-1' },
         { m: 'markUsed', setId: 7, publishLogId: 991 },
         { m: 'quarantine', setId: 7, reason: 'submitted_unconfirmed' },
@@ -136,7 +142,7 @@ test('四条路由：服务端注册的路径就是客户端请求的路径，�
   assert.equal(
     Object.keys(FACEBOOK_PUBLISH_MEDIA_AUTHORITY_ROUTES).length +
       Object.keys(LLM_USAGE_RECORDING_AUTHORITY_ROUTES).length,
-    4,
+    5,
     '端口新增方法时这里要一起补一趟往返，别让新路由没人走过就上线',
   );
 });
@@ -148,6 +154,9 @@ test('属主失败：客户端侧仍是具名失败，属主那族具名原因�
         // 属主真实抛出物。它自带 name / reason / code，但 automation 方向的失败信号只有
         // ContentPortError 一个 name（刻意不在这条边上立第二个），所以判定落 remote_error、
         // 具名原因进 detail 供定位。要按 status_locked 分支就得改端口，不是去 parse 文案。
+        // 本组不覆盖 availableCount；桩**抛而不回 0**：回 0 会让「桩没实现」
+        // 与「这个账号确实没素材」一模一样。
+        availableCount: () => Promise.reject(new Error('stub_available_count_not_used')),
         releaseReservation: async () => {
           throw new FacebookPublishMediaError('status_locked');
         },
@@ -197,6 +206,9 @@ test('unsupported_method 两条路径都还原得出来', async () => {
   await withChannel(
     {
       media: {
+        // 本组不覆盖 availableCount；桩**抛而不回 0**：回 0 会让「桩没实现」
+        // 与「这个账号确实没素材」一模一样。
+        availableCount: () => Promise.reject(new Error('stub_available_count_not_used')),
         releaseReservation: async () => true,
         markUsed: async () => true,
         quarantine: async () => true,
@@ -222,6 +234,9 @@ test('target 漂移：当场被拒，且属主一次都没被调用', async () =
       serverTarget: 'ol',
       clientTarget: 'dev',
       media: {
+        // 本组不覆盖 availableCount；桩**抛而不回 0**：回 0 会让「桩没实现」
+        // 与「这个账号确实没素材」一模一样。
+        availableCount: () => Promise.reject(new Error('stub_available_count_not_used')),
         releaseReservation: async () => {
           calls += 1;
           return true;
@@ -289,6 +304,9 @@ test('形状不符 MUST 抛，MUST NOT 兜底成 false / 0', async () => {
       media: {
         // 契约漂移的典型形态：回执从布尔漂成了别的东西。取假会把它说成
         // 「这组素材已经不是保留态了」，而那条素材其实还卡在保留态上等着被放回来。
+        // 本组不覆盖 availableCount；桩**抛而不回 0**：回 0 会让「桩没实现」
+        // 与「这个账号确实没素材」一模一样。
+        availableCount: () => Promise.reject(new Error('stub_available_count_not_used')),
         releaseReservation: async () => 'ok' as unknown as boolean,
         markUsed: async () => true,
         quarantine: async () => true,

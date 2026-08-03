@@ -35,52 +35,14 @@ export interface OnlineAccountIdentity {
   envKey: string | null;
 }
 
-/**
- * 排期联系评论的动作名。
- *
- * change decouple-scheduled-contact-comment-from-group-join：Facebook 侧从「加群评论（联系）」改回
- * 「联系评论」——拆分后它不再加群，旧名会让运营以为开了它就会加群，进而在自动加群开关关着时误判成故障。
- * 固定规则模式面板里描述其轮次的文案不受此影响：规则模式仍然先加群，那里的措辞依然准确。
- */
-export function scheduledContactCommentLabel(_platform: PlatformId): string {
-  return '联系评论';
-}
-
-/**
- * 排期联系评论的触发选项。**本函数只有排期触发口一个调用方**，这正是拆分能精确落在排期这一条路径、
- * 不外溢到其余三个入口的原因。
- *
- * change decouple-scheduled-contact-comment-from-group-join：**刻意不再携带「先加群」标记**。
- *
- * 原因是机制性的，改动前请先读懂：评论路径取容器有两种方式——外部传入的固定容器，或调用已加入群账本的
- * 选群口。**选群口是预热期与单群冷却唯一被检查的地方**。带上「先加群」标记时，刚加入的那个群会被设成
- * 固定容器，选群口根本不会被调用——那两道闸不是被绕过一次，而是永远不参与判定。运营反馈的「群刚加完
- * 就在里面评论、容易被警告」正是这个形态。
- *
- * 另有一条今天不显眼的耦合：带该标记的加群调用直连加群调度器的排期入口，**完全不读每账号的加群配置**
- * （开关 / 日上限 / 动作时段三道闸只写在排期器自己的独立加群分支里）。所以拆分前只要联系评论开着，
- * 账号就会加新群，哪怕自动加群开关是关的。拆分后加群只由独立自动加群动作驱动，回到它自己的闸下。
- *
- * **MUST NOT 为本路径补「账本没有合规群就去加一个新群」的兜底**——那等于把刚拆掉的耦合原样装回来。
- * 无合规群时诚实空转，正确处置是开自动加群去补充群源。
- *
- * 其余三个入口继续携带该标记、继续走复合动作，本函数的改动与它们无关：
- * 飞书手动命令（按 `--join` 参数条件传入）、委托任务、固定规则模式的轮次。
- */
-export function scheduledContactCommentOptions(
-  _platform: PlatformId,
-  approvalMode: ContentScheduleApprovalMode,
-): {
-  injectContact: true;
-  priority: 'automatic';
-  approvalMode: ContentScheduleApprovalMode;
-} {
-  return {
-    injectContact: true,
-    priority: 'automatic',
-    approvalMode,
-  };
-}
+// 联系评论的动作名与触发选项**住在 kernel 契约里**（两个进程都要构造同一组选项：
+// 接口进程发扳机、自动化进程执行）。这里等值再导出，既有调用方零改动。
+// **MUST NOT 在任何一侧另抄一份**——那两句 MUST NOT（不补「没群就去加一个」的兜底、
+// 不带 joinFirst）正是这条链路已经付过代价的地方，抄第二份就等于给它们准备一次漂移。
+export {
+  scheduledContactCommentLabel,
+  scheduledContactCommentOptions,
+} from '../kernel/content-scheduling-port.js';
 
 export interface ScheduledPostExecution {
   executionTarget: DeploymentTarget;

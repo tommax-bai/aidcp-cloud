@@ -98,12 +98,12 @@ test('往返：在线清单 / 触发回执逐字段带回来，envKey 的 null �
       assert.deepEqual(
         await client.triggerScheduledPost({
           accountId: 'acc-2',
-          approvalMode: 'manual_review',
+          approvalMode: 'review',
           execution: { executionTarget: 'dev', envKey: null, hourCell: '2026-08-03-10' },
         }),
         { accepted: false, reason: 'edge_offline', retryable: true },
       );
-      assert.deepEqual(asked, ['acc-2|manual_review|null']);
+      assert.deepEqual(asked, ['acc-2|review|null']);
     },
   );
 });
