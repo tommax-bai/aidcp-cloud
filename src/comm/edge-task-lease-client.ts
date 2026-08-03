@@ -30,6 +30,14 @@ export interface EdgeTaskLeaseRequest {
   acquireTimeoutMs?: number;
 }
 
+export interface EdgeTaskLeaseRunObserver {
+  /** Fires after the release attempt; `acknowledged` means the matching Edge receipt arrived. */
+  onReleaseSettled?: (result: {
+    lease: EdgeTaskLease;
+    acknowledged: boolean;
+  }) => void;
+}
+
 export class EdgeTaskLeaseError extends Error {
   constructor(
     public readonly code:
@@ -189,9 +197,14 @@ export class EdgeTaskLeaseClient {
     });
   }
 
-  async withLease<T>(request: EdgeTaskLeaseRequest, work: (lease: EdgeTaskLease) => Promise<T>): Promise<T> {
+  async withLease<T>(
+    request: EdgeTaskLeaseRequest,
+    work: (lease: EdgeTaskLease) => Promise<T>,
+    observer?: EdgeTaskLeaseRunObserver,
+  ): Promise<T> {
     const lease = await this.acquire(request);
     let outcome: EdgeTaskReleasePayload['outcome'] = 'completed';
+    let releaseAcknowledged = false;
     try {
       return await work(lease);
     } catch (err) {
@@ -200,9 +213,18 @@ export class EdgeTaskLeaseClient {
     } finally {
       try {
         await this.release(lease, outcome);
+        releaseAcknowledged = true;
       } catch (err) {
         // 释放异常可观测，但不得把已成功提交的平台动作翻成业务失败；edge 有租约时限自愈。
         this.logger.warn(`[edge-task] release did not confirm taskId=${lease.taskId}: ${(err as Error).message}`);
+      } finally {
+        try {
+          observer?.onReleaseSettled?.({ lease, acknowledged: releaseAcknowledged });
+        } catch (err) {
+          this.logger.warn(
+            `[edge-task] release observer failed taskId=${lease.taskId}: ${(err as Error).message}`,
+          );
+        }
       }
     }
   }

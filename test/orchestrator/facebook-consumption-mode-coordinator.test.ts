@@ -463,6 +463,7 @@ describe('FacebookConsumptionModeCoordinator', () => {
     const runtime = makeRuntime([join, comment], new Map([[join.actionId, comment]]));
     const membershipRuntime = makeCommentMembershipRuntime();
     let commentCalls = 0;
+    const redrives: Array<[string, string]> = [];
     const coordinator = new FacebookConsumptionModeCoordinator({
       runtimeStore: runtime.port,
       ...membershipRuntime,
@@ -498,6 +499,7 @@ describe('FacebookConsumptionModeCoordinator', () => {
             groupUrl: GROUP_NEW,
             source: 'consumption',
           }), true);
+          options.onPageLeaseSettled?.(true, 'edge-test');
           return {
             triggered: true,
             groupUrl: GROUP_NEW,
@@ -523,6 +525,7 @@ describe('FacebookConsumptionModeCoordinator', () => {
           };
           assert.equal(await options.onTargetSelected(exact), true);
           assert.equal(await options.onBeforeSubmit(exact), true);
+          options.onPageLeaseSettled?.(true, 'edge-test');
           return {
             triggered: true,
             result: { outcome: 'commented', container: GROUP_OLD },
@@ -531,12 +534,18 @@ describe('FacebookConsumptionModeCoordinator', () => {
       },
       ownerId: 'coordinator-test',
       clock: () => NOW,
+      redriveBrowse: (accountId, edgeId) => { redrives.push([accountId, edgeId]); },
     });
 
     const result = await coordinator.trigger(join);
     assert.equal(result.kind, 'settled');
     assert.equal(result.kind === 'settled' ? result.action.actionId : '', comment.actionId);
     assert.equal(commentCalls, 1);
+    assert.deepEqual(
+      redrives,
+      [['account-chain', 'edge-test']],
+      '两段 release ACK 只在根 action chain 收敛后精确定向重驱一次',
+    );
     assert.deepEqual(
       runtime.receipts.map((receipt) => receipt.outcome),
       ['confirmed_new_join', 'confirmed_comment'],
@@ -783,7 +792,8 @@ describe('FacebookConsumptionModeCoordinator', () => {
           observationCalls += 1;
           assert.equal(accountId, dispatched.accountId);
           assert.equal(groupUrl, GROUP_NEW);
-          assert.deepEqual(options, { source: 'consumption' });
+          assert.equal(options.source, 'consumption');
+          options.onPageLeaseSettled?.(true, 'edge-test');
           return {
             reconciled: true,
             groupUrl: GROUP_NEW,
@@ -1473,6 +1483,86 @@ describe('FacebookConsumptionModeCoordinator', () => {
     assert.deepEqual(runtime.receipts.map((receipt) => receipt.outcome), [
       'policy_superseded',
     ]);
+  });
+
+  it('preserves terminal accounting and redrives failures or submitted-unknown only after an acknowledged final release', async () => {
+    const cases = [
+      {
+        name: 'submitted-unknown',
+        result: { outcome: 'verification_ambiguous' as const },
+        expectedOutcome: 'ambiguous',
+      },
+      {
+        name: 'submit-failed',
+        result: { outcome: 'submit_failed' as const, reason: 'platform_submit_failed' },
+        expectedOutcome: 'failed',
+      },
+    ];
+    for (const terminalCase of cases) {
+      for (const acknowledged of [true, false]) {
+        const accountId = `account-${terminalCase.name}-${acknowledged}`;
+        const comment = makeAction(`comment-${terminalCase.name}-${acknowledged}`, 'comment', { accountId });
+        const runtime = makeRuntime([comment]);
+        const redrives: Array<[string, string]> = [];
+        const coordinator = new FacebookConsumptionModeCoordinator({
+          runtimeStore: runtime.port,
+          ...makeCommentMembershipRuntime(),
+          resolveOperationPolicy: activePolicy,
+          commentActionGate: () => ({ allowed: true }),
+          selectHistoricalGroup: async () => ({
+            kind: 'selected',
+            target: {
+              groupKey: GROUP_OLD,
+              groupUrl: GROUP_OLD,
+              evidence: {
+                selectedAt: new Date(NOW).toISOString(),
+                joinedAt: '2026-07-20T00:00:00.000Z',
+                joinToFirstCommentHours: 24,
+                recommentCooldownHours: 72,
+              },
+            },
+          }),
+          joinExecutor: {
+            reconcileForMode: noJoinReconciliation,
+            triggerForMode: async () => {
+              throw new Error('join must not run');
+            },
+          },
+          commentExecutor: {
+            triggerForMode: async (executorAccountId, options) => {
+              const exact = {
+                accountId: executorAccountId,
+                groupUrl: GROUP_OLD,
+                contentKey: '42',
+                contentUrl: POST,
+                selection: 'first_commentable_group_post' as const,
+              };
+              assert.equal(await options.onTargetSelected(exact), true);
+              assert.equal(await options.onBeforeSubmit(exact), true);
+              options.onPageLeaseSettled?.(acknowledged, 'edge-test');
+              return {
+                triggered: true,
+                // verification_ambiguous is the scheduler name for product submitted_unknown.
+                result: terminalCase.result,
+              };
+            },
+          },
+          redriveBrowse: (redriveAccountId, edgeId) => {
+            redrives.push([redriveAccountId, edgeId]);
+          },
+          ownerId: `coordinator-${terminalCase.name}-${acknowledged}`,
+          clock: () => NOW,
+        });
+
+        const result = await coordinator.trigger(comment);
+        assert.equal(result.kind, 'settled');
+        assert.deepEqual(
+          runtime.receipts.map((receipt) => receipt.outcome),
+          [terminalCase.expectedOutcome],
+        );
+        assert.deepEqual(redrives, acknowledged ? [[accountId, 'edge-test']] : []);
+      }
+    }
   });
 });
 

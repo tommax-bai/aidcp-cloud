@@ -10,6 +10,11 @@ const soul: Soul = {
 
 const llm = { complete: async () => '{"verdict":"skip","reason":"test"}' };
 
+const isReelsRedrive = (command: EdgeCommand): boolean =>
+  command.action === 'scroll'
+  && command.reason === 'resume_redrive'
+  && command.params?.targetSurface === 'reels';
+
 test('Facebook Reels 主入口在四种运行方式下都先丢弃首批 Feed 并只发配置入口命令', () => {
   const modes = ['persona', 'slow_start', 'facebook_rule', 'consumption'] as const;
   for (const mode of modes) {
@@ -45,9 +50,7 @@ test('Facebook Reels 主入口在四种运行方式下都先丢弃首批 Feed �
     dispatcher.bus.emit('feed.empty.confirmed', { ts: 2 });
 
     assert.equal(
-      commands.filter(
-        (command) => command.action === 'scroll' && command.reason === 'facebook_reels_primary',
-      ).length,
+      commands.filter(isReelsRedrive).length,
       1,
       `${mode} must authorize configured Reels exactly once`,
     );
@@ -57,7 +60,10 @@ test('Facebook Reels 主入口在四种运行方式下都先丢弃首批 Feed �
       `${mode} must not evaluate or open the Feed bootstrap card`,
     );
     assert.equal(
-      commands.some((command) => command.reason === 'empty_feed_reels_fallback'),
+      commands.some(
+        (command) => command.reason === 'facebook_reels_primary'
+          || command.reason === 'empty_feed_reels_fallback',
+      ),
       false,
       `${mode} must not relabel configured entry as evidence fallback`,
     );
@@ -84,12 +90,44 @@ test('Facebook 主浏览入口按会话固定，配置变化从下一场生效',
   dispatcher.startSession();
   primarySurface = 'reels';
   dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'feed', ts: 1 });
-  assert.equal(commands.some((command) => command.reason === 'facebook_reels_primary'), false);
+  assert.equal(commands.some(isReelsRedrive), false);
 
   dispatcher.restartSession();
   dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'feed', ts: 2 });
-  assert.equal(commands.some((command) => command.reason === 'facebook_reels_primary'), true);
+  assert.equal(commands.some(isReelsRedrive), true);
   dispatcher.endSession('test');
+});
+
+test('任务结束统一重驱复用本场钉住的 Feed/Reels 目标，不读取历史 confirmed', () => {
+  for (const primarySurface of ['feed', 'reels'] as const) {
+    const commands: EdgeCommand[] = [];
+    const dispatcher = new RoleDispatcher({
+      soul,
+      llm,
+      accountPlatform: 'facebook',
+      facebookRuleModeDecision: () => ({
+        mode: 'persona',
+        blocker: null,
+        primarySurface,
+        surfaceRevision: 1,
+      }),
+      sendCommand: (command) => commands.push(command),
+    });
+    dispatcher.setup();
+    dispatcher.startSession();
+    if (primarySurface === 'reels') {
+      dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'feed', ts: 1 });
+    }
+    const base = commands.length;
+
+    assert.equal(dispatcher.redriveBrowse(), true);
+    assert.deepEqual(commands.slice(base), [{
+      action: 'scroll',
+      reason: 'resume_redrive',
+      params: { targetSurface: primarySurface },
+    }]);
+    dispatcher.endSession('test');
+  }
 });
 
 test('Facebook 明确空 Feed：Cloud 每场只用现有 scroll 命令授权一次 Reels fallback', () => {
@@ -101,7 +139,7 @@ test('Facebook 明确空 Feed：Cloud 每场只用现有 scroll 命令授权一�
   dispatcher.bus.emit('feed.empty.confirmed', { startupId: 'start-1', ts: 1 });
   dispatcher.bus.emit('feed.empty.confirmed', { startupId: 'start-1', ts: 2 });
 
-  const fallback = commands.filter((command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback');
+  const fallback = commands.filter(isReelsRedrive);
   assert.equal(fallback.length, 1, '重复空态报告不得多次导航 Reels');
   dispatcher.endSession('test');
 });
@@ -116,7 +154,7 @@ test('Facebook 非空 Feed 确认到底：切 Reels、不 refresh，重复回执
   dispatcher.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'feed_exhausted', ts: 2 });
   dispatcher.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'feed_exhausted', ts: 3 });
 
-  const fallback = commands.filter((command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback');
+  const fallback = commands.filter(isReelsRedrive);
   assert.equal(fallback.length, 1, '重复到底回执每场只能授权一次 Reels fallback');
   assert.equal(commands.some((command) => command.action === 'refresh' && command.reason === 'feed_exhausted_refresh'), false);
   dispatcher.endSession('test');
@@ -132,7 +170,7 @@ test('Facebook 首页物理卡连续不可上报：Cloud 每场只授权一次 R
   dispatcher.bus.emit('feed.present_unreportable.confirmed', { startupId: 'start-1', documentGeneration: 'doc-1', ts: 2 });
   dispatcher.bus.emit('feed.empty.confirmed', { startupId: 'start-1', documentGeneration: 'doc-1', ts: 3 });
 
-  const fallback = commands.filter((command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback');
+  const fallback = commands.filter(isReelsRedrive);
   assert.equal(fallback.length, 1, '同场重复结构态及其后空态都不得再次导航 Reels');
   dispatcher.endSession('test');
 });
@@ -148,16 +186,16 @@ test('Facebook Reels pending/no_target 只做两次兼容握手恢复，耗尽�
   dispatcher.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'no_target', ts: 3 });
   dispatcher.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'reels_pending', ts: 4 });
 
-  let fallback = commands.filter((command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback');
+  let fallback = commands.filter(isReelsRedrive);
   assert.equal(fallback.length, 3, '首次授权后最多再真正下发两次恢复');
 
   dispatcher.bus.emit('feed.empty.confirmed', { ts: 5 });
-  fallback = commands.filter((command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback');
+  fallback = commands.filter(isReelsRedrive);
   assert.equal(fallback.length, 4, '恢复耗尽后回 idle，新一轮页面证据可重新授权');
   dispatcher.endSession('test');
 });
 
-test('Facebook Reels 卡片到达才把 fallback 确认为完成，之后迟到失败不再重驱', () => {
+test('Facebook Reels 卡片到达清除在途态，后续页面证据可重新统一重驱', () => {
   const commands: EdgeCommand[] = [];
   const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
   dispatcher.setup();
@@ -172,12 +210,12 @@ test('Facebook Reels 卡片到达才把 fallback 确认为完成，之后迟到�
   dispatcher.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'reels_pending', ts: 3 });
   dispatcher.bus.emit('feed.empty.confirmed', { ts: 4 });
 
-  const fallback = commands.filter((command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback');
-  assert.equal(fallback.length, 1, '可读 Reels 卡确认后，迟到失败和旧空态均不得重导航');
+  const fallback = commands.filter(isReelsRedrive);
+  assert.equal(fallback.length, 2, '可读 Reels 卡只清除在途闸，不留下 sticky confirmed 阻断后续恢复');
   dispatcher.endSession('test');
 });
 
-test('Facebook confirmed Reels 的 terminal scroll 立即经正常 dwell 闸继续，不等 idle watchdog', () => {
+test('Facebook Reels terminal scroll 不依赖 sticky confirmed，立即经正常 dwell 闸继续', () => {
   const commands: EdgeCommand[] = [];
   const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
   dispatcher.setup();
@@ -223,14 +261,14 @@ test('Facebook 未确认到底：继续普通 Feed 滚动，不授权 Reels', ()
   );
   assert.equal(continuation.length, 1, '未形成终止证据时立即走现有普通滚动闸继续');
   assert.equal(
-    commands.some((command) => command.reason === 'empty_feed_reels_fallback'),
+    commands.some(isReelsRedrive),
     false,
     '非终态续滚绝不授权 Reels',
   );
   dispatcher.endSession('test');
 });
 
-test('Facebook confirmed Reels 后非空普通 Feed 回归：开启新的 fallback epoch', () => {
+test('Facebook 可读 Reels 后非空普通 Feed 回归：新终止证据可再次统一重驱', () => {
   const commands: EdgeCommand[] = [];
   const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
   dispatcher.setup();
@@ -255,14 +293,12 @@ test('Facebook confirmed Reels 后非空普通 Feed 回归：开启新的 fallba
     ts: 5,
   });
 
-  const fallback = commands.filter(
-    (command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback',
-  );
+  const fallback = commands.filter(isReelsRedrive);
   assert.equal(fallback.length, 2, '回到可读普通 Feed 后，新的真实到底可再授权一次');
   dispatcher.endSession('test');
 });
 
-test('Facebook pending 握手或 confirmed 后空 Feed 批次不会重开 fallback epoch', () => {
+test('Facebook pending 期间去重，Reels 卡清闸后新空 Feed 可重新重驱', () => {
   const commands: EdgeCommand[] = [];
   const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
   dispatcher.setup();
@@ -279,10 +315,8 @@ test('Facebook pending 握手或 confirmed 后空 Feed 批次不会重开 fallba
   dispatcher.bus.emit('page.cards.arrived', { cards: [], listKind: 'feed', ts: 5 });
   dispatcher.bus.emit('feed.empty.confirmed', { ts: 6 });
 
-  const fallback = commands.filter(
-    (command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback',
-  );
-  assert.equal(fallback.length, 1, 'pending/空批次不构成权威 Feed 回归');
+  const fallback = commands.filter(isReelsRedrive);
+  assert.equal(fallback.length, 2, 'pending 内重复证据被吞；可读 Reel 清闸后不保留历史 confirmed');
   dispatcher.endSession('test');
 });
 
@@ -323,13 +357,11 @@ test('Facebook 搜索批次不重开 fallback epoch，也不消费普通 Feed �
     ts: 6,
   });
 
-  const fallback = commands.filter(
-    (command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback',
-  );
+  const fallback = commands.filter(isReelsRedrive);
   const continuation = commands.filter(
     (command) => command.action === 'scroll' && command.reason === 'feed_continuation_unconfirmed',
   );
-  assert.equal(fallback.length, 1, '搜索卡不得把 confirmed epoch 重置为 idle');
+  assert.equal(fallback.length, 2, '搜索卡本身不授权；后续具名 feed_exhausted 可开启新重驱');
   assert.equal(continuation.length, 0, '搜索态的同名失败不得进入普通 Feed 续滚');
   dispatcher.endSession('test');
 });
@@ -348,7 +380,7 @@ test('Facebook fallback 被浏览配额或软暂停抑制时不进入 pending，
   quota.setup();
   quota.startSession();
   quota.bus.emit('feed.empty.confirmed', { ts: 1 });
-  assert.equal(quotaCommands.some((command) => command.reason === 'empty_feed_reels_fallback'), false);
+  assert.equal(quotaCommands.some(isReelsRedrive), false);
   quota.endSession('test');
 
   const pausedCommands: EdgeCommand[] = [];
@@ -359,7 +391,7 @@ test('Facebook fallback 被浏览配额或软暂停抑制时不进入 pending，
   paused.bus.emit('feed.empty.confirmed', { ts: 2 });
   paused.context.setBrowseSuspended(false);
   paused.bus.emit('feed.empty.confirmed', { ts: 3 });
-  const fallback = pausedCommands.filter((command) => command.reason === 'empty_feed_reels_fallback');
+  const fallback = pausedCommands.filter(isReelsRedrive);
   assert.equal(fallback.length, 1, '准入恢复后同一证据仍可授权');
   paused.endSession('test');
 });
@@ -370,7 +402,7 @@ test('非 Facebook 或非活跃会话不授权 Reels fallback', () => {
   xhs.setup();
   xhs.startSession();
   xhs.bus.emit('feed.empty.confirmed', { ts: 1 });
-  assert.equal(commands.some((command) => command.reason === 'empty_feed_reels_fallback'), false);
+  assert.equal(commands.some(isReelsRedrive), false);
   xhs.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'feed_exhausted', ts: 2 });
   assert.equal(commands.some((command) => command.action === 'refresh' && command.reason === 'feed_exhausted_refresh'), true);
   xhs.endSession('test');
@@ -380,7 +412,7 @@ test('非 Facebook 或非活跃会话不授权 Reels fallback', () => {
   inactive.bus.emit('feed.empty.confirmed', { ts: 3 });
   inactive.bus.emit('feed.present_unreportable.confirmed', { ts: 3 });
   inactive.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'feed_exhausted', ts: 4 });
-  assert.equal(commands.some((command) => command.reason === 'empty_feed_reels_fallback'), false);
+  assert.equal(commands.some(isReelsRedrive), false);
 });
 
 
@@ -392,7 +424,7 @@ test('非 Facebook 或非活跃会话不授权 Reels fallback', () => {
 // 解锁证据只用滚动无目标回执，不用 feed.empty.confirmed —— 后者在 Reels 期间到达多半是切面前的迟到
 // 旧报告（上面几条用例正是为此立的）。
 
-test('Facebook 已在 Reels epoch 却在普通 Feed 滚不出目标 → 解回可授权态并重开', () => {
+test('Facebook 无 sticky Reels 状态时普通 Feed 滚不出目标 → 直接统一重驱', () => {
   const commands: EdgeCommand[] = [];
   const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
   dispatcher.setup();
@@ -406,9 +438,7 @@ test('Facebook 已在 Reels epoch 却在普通 Feed 滚不出目标 → 解回�
   });
   dispatcher.bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'no_target', ts: 3 });
 
-  const fallback = commands.filter(
-    (command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback',
-  );
+  const fallback = commands.filter(isReelsRedrive);
   assert.equal(fallback.length, 2, '被送回空首页后必须还能再切一次 Reels，绝不钉死');
   dispatcher.endSession('test');
 });
@@ -449,9 +479,7 @@ test('Facebook Reels epoch 重开按场有界：用尽后不再重开，绝不�
   reelsCards(6);
   scrollNoTarget(7);                                      // 已用尽 → 不再重开
 
-  const fallback = commands.filter(
-    (command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback',
-  );
+  const fallback = commands.filter(isReelsRedrive);
   assert.equal(fallback.length, 3, '首次授权 + 至多两次重开');
   dispatcher.endSession('test');
 });

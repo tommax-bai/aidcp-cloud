@@ -7979,6 +7979,8 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
           groupUrl,
           options,
         ),
+      redriveBrowse: (accountId, edgeId) =>
+        ctx.runtimes?.redriveBrowseForAccount(accountId, edgeId) ?? 0,
       logger: console,
     });
 

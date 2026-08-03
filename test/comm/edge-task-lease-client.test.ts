@@ -16,9 +16,11 @@ describe('EdgeTaskLeaseClient', () => {
       logger: { log() {}, warn() {} },
     });
     let ran = false;
+    const releases: boolean[] = [];
     const done = client.withLease(
       { edgeId: 'edge-1', kind: 'publish', priority: 'human', leaseMs: 60_000 },
       async (lease) => { ran = true; return lease.taskId; },
+      { onReleaseSettled: ({ acknowledged }) => releases.push(acknowledged) },
     );
     assert.equal(ran, false);
     assert.equal(pushed[0]?.type, 'edge.task.acquire');
@@ -33,6 +35,29 @@ describe('EdgeTaskLeaseClient', () => {
     assert.equal((pushed[1]?.payload as EdgeTaskReleasePayload).taskId, 'task-1');
     client.onReleased({ taskId: 'task-1', reason: 'released' }, 'edge-1');
     assert.equal(await done, 'task-1');
+    assert.deepEqual(releases, [true]);
+  });
+
+  it('release 回执超时保留业务结果，但向工作流报告未确认', async () => {
+    const client = new EdgeTaskLeaseClient({
+      pusher: { pushToEdges: () => 1 },
+      idGen: () => 'release-timeout-task',
+      releaseTimeoutMs: 5,
+      logger: { log() {}, warn() {} },
+    });
+    const releases: boolean[] = [];
+    const done = client.withLease(
+      { edgeId: 'edge-1', kind: 'comment_prepare', priority: 'automatic' },
+      async () => 'submitted_unknown',
+      { onReleaseSettled: ({ acknowledged }) => releases.push(acknowledged) },
+    );
+    client.onAcquired({
+      taskId: 'release-timeout-task',
+      kind: 'comment_prepare',
+      cancelledBrowseCommands: 0,
+    }, 'edge-1');
+    assert.equal(await done, 'submitted_unknown');
+    assert.deepEqual(releases, [false]);
   });
 
   it('送达 0 时 acquire 诚实 edge_offline，业务回调不运行', async () => {

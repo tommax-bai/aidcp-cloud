@@ -253,7 +253,7 @@ const FACEBOOK_REELS_TERMINAL_SCROLL_REASONS = new Set([
   'reels_identity_unresolved',
 ]);
 /**
- * 一场之内允许「已在 Reels epoch 却又收到普通 Feed 决定性空/到底证据」而重开 epoch 的次数上限
+ * 一场之内允许「重驱到 Reels 后又收到普通 Feed 决定性空/到底证据」而重开 Reels 的次数上限
  *（change restore-facebook-post-join-comment-continuity）。
  *
  * 原先这个次数是 0——解回可授权态的唯一路径是「非空普通 Feed 权威回归」，而首页恒空的账号
@@ -756,13 +756,12 @@ export class RoleDispatcher {
   private readonly expiredCommentSublineNoteIds = new Set<string>();
   /** feed 翻页按新卡数算的待发停留兜底（feed-scroll-card-floor）：page.cards.arrived 覆盖写、feed.scrolled 消费后归零。 */
   private pendingFeedFloorMs = 0;
-  /** Facebook Feed→Reels 握手状态；pending 只在可读 Reel 卡到达后才升级 confirmed。 */
-  private reelsFallbackState: 'idle' | 'pending' | 'confirmed' = 'idle';
-  private reelsEntryReason: 'facebook_reels_primary' | 'empty_feed_reels_fallback' | null = null;
+  /** Facebook Reels 重驱只保留在途闸；可读 Reel 到达即清，不把历史成功冒充当前页面。 */
+  private reelsRedrivePending = false;
   private sessionFacebookPrimarySurface: 'feed' | 'reels' = 'feed';
   /** pending 期间已真正下发的有界恢复次数；被调度/配额闸抑制不消耗次数。 */
-  private reelsFallbackRecoveryAttempts = 0;
-  /** 本场已用掉的 Reels epoch 重开次数（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。 */
+  private reelsRedriveRecoveryAttempts = 0;
+  /** 本场已用掉的 Reels 重开次数（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。 */
   private reelsReentryCount = 0;
   private readonly isHardPaused: (edgeId?: string) => boolean;
   private readonly edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'acquire' | 'release'>;
@@ -2260,33 +2259,57 @@ export class RoleDispatcher {
     return dwellMs > 0 ? { dwellMs } : undefined;
   }
 
+  private allowScrollForViewQuota(): boolean {
+    if (this.viewQuotaSleeping) return true;
+    const decision = this.explainView();
+    if (decision.allowed) return true;
+    this.sleepForViewQuota(decision);
+    return false;
+  }
+
   private sendScrollCommand(reason: string, floorMs = 0): boolean {
     // 翻页也是一次「准备消费下一条内容」：统一在 scroll 出口现问 view 配额。旧路径只在
     // content.valuable/open_note 前检查，导致连续 content.no_valuable（Reels 外语/不匹配最常见）可以绕过
     // view 上限无限滚。已经处于休眠时仍让命令进入 sendCommand，由既有节流日志记录 suppressed 事实。
-    if (!this.viewQuotaSleeping) {
-      const decision = this.explainView();
-      if (!decision.allowed) {
-        this.sleepForViewQuota(decision);
-        return false;
-      }
-    }
+    if (!this.allowScrollForViewQuota()) return false;
     const params = this.scrollDwellParams(floorMs);
-    return this.sendCommand(params ? { action: 'scroll', reason, params } : { action: 'scroll', reason });
+    return this.sendCommand(
+      params
+        ? { action: 'scroll', reason, params }
+        : { action: 'scroll', reason },
+    );
   }
 
-  /** Reels fallback 保留兼容握手 reason，同时复用浏览配额与统一命令准入闸。 */
-  private sendFacebookReelsEntryCommand(
-    reason: 'facebook_reels_primary' | 'empty_feed_reels_fallback',
-  ): boolean {
-    if (!this.viewQuotaSleeping) {
-      const decision = this.explainView();
-      if (!decision.allowed) {
-        this.sleepForViewQuota(decision);
-        return false;
-      }
+  /** 所有主动恢复只走一个命令；目标来自本场钉住面或 Cloud 明确的 Feed→Reels 降级。 */
+  private sendBrowseRedrive(targetSurface: 'feed' | 'reels'): boolean {
+    if (!this.allowScrollForViewQuota()) return false;
+    return this.sendCommand({
+      action: 'scroll',
+      reason: 'resume_redrive',
+      params: { targetSurface },
+    });
+  }
+
+  private beginFacebookReelsRedrive(): boolean {
+    if (this.reelsRedrivePending) return false;
+    const sent = this.sendBrowseRedrive('reels');
+    if (!sent) return false;
+    this.reelsRedrivePending = true;
+    this.reelsRedriveRecoveryAttempts = 0;
+    return true;
+  }
+
+  /** 独占页面工作流收敛后，由连接注册表按账号调用。所有既有浏览准入闸仍由统一出口执行。 */
+  redriveBrowse(): boolean {
+    if (!this.sessionActive) return false;
+    if (this.accountPlatform !== 'facebook') return this.sendScrollCommand('resume_redrive');
+    if (this.sessionFacebookPrimarySurface === 'reels') {
+      // Task takeover cancelled/quiesced any older browse command and may have navigated away.
+      // Its terminal release is a new causal boundary, so an older in-flight entry cannot suppress it.
+      this.resetFacebookReelsRedrive();
+      return this.beginFacebookReelsRedrive();
     }
-    return this.sendCommand({ action: 'scroll', reason });
+    return this.sendBrowseRedrive('feed');
   }
 
   private authorizeFacebookPrimaryReels(): boolean {
@@ -2294,14 +2317,10 @@ export class RoleDispatcher {
       this.accountPlatform !== 'facebook'
       || !this.sessionActive
       || this.sessionFacebookPrimarySurface !== 'reels'
-      || this.reelsFallbackState !== 'idle'
     ) return false;
-    const sent = this.sendFacebookReelsEntryCommand('facebook_reels_primary');
+    const sent = this.beginFacebookReelsRedrive();
     if (!sent) return false;
-    this.reelsEntryReason = 'facebook_reels_primary';
-    this.reelsFallbackState = 'pending';
-    this.reelsFallbackRecoveryAttempts = 0;
-    console.log('[RoleDispatcher] Facebook 主浏览入口为 Reels → 授权进入 Reels 列表');
+    console.log('[RoleDispatcher] Facebook 主浏览入口为 Reels → 统一重驱到 Reels');
     return true;
   }
 
@@ -2316,24 +2335,20 @@ export class RoleDispatcher {
   /**
    * Facebook Feed 已无可继续浏览内容时，由 Cloud 单点授权切到 Reels。
    *
-   * `empty_feed_reels_fallback` 是已部署 Edge 认识的兼容握手名：既承载首页明确空态，也承载非空 Feed
-   * 确认到底。只有命令真正下发后才置幂等闸；若被软暂停/评论支线等抑制，后续诚实重报仍可重试。
+   * 主入口与 Feed 降级都复用 `resume_redrive + targetSurface=reels`。只有命令真正下发后才置
+   * 在途闸；若被软暂停/评论支线等抑制，后续诚实重报仍可重试。
    */
   private authorizeFacebookReelsFallback(source: 'empty_feed' | 'feed_exhausted' | 'present_unreportable'): boolean {
     if (
       this.accountPlatform !== 'facebook'
       || !this.sessionActive
       || this.sessionFacebookPrimarySurface !== 'feed'
-      || this.reelsFallbackState !== 'idle'
     ) return false;
-    const sent = this.sendFacebookReelsEntryCommand('empty_feed_reels_fallback');
+    const sent = this.beginFacebookReelsRedrive();
     if (!sent) {
       console.log(`[RoleDispatcher] Facebook ${source} → Reels fallback 命令被当前调度闸抑制，保留后续重试资格`);
       return false;
     }
-    this.reelsFallbackState = 'pending';
-    this.reelsEntryReason = 'empty_feed_reels_fallback';
-    this.reelsFallbackRecoveryAttempts = 0;
     const message = source === 'empty_feed'
       ? '[RoleDispatcher] Facebook 首页明确空 Feed → 授权切换 Reels 列表'
       : source === 'present_unreportable'
@@ -2343,39 +2358,36 @@ export class RoleDispatcher {
     return true;
   }
 
-  /** route_ready/no_target 均表示首卡尚未形成 Cloud 证据；保持握手 reason 做有界重驱，兼容新旧 Edge。 */
-  private recoverFacebookReelsFallback(reason: string): boolean {
+  /** 首卡或后续规范 Reel 尚未形成 Cloud 证据；统一做有界重驱，兼容新旧 Edge reason。 */
+  private recoverFacebookReelsRedrive(reason: string): boolean {
     if (
       this.accountPlatform !== 'facebook'
       || !this.sessionActive
-      || this.reelsFallbackState !== 'pending'
+      || !this.reelsRedrivePending
     ) return false;
-    if (this.reelsFallbackRecoveryAttempts >= FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS) {
+    if (this.reelsRedriveRecoveryAttempts >= FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS) {
       console.warn(
-        `[RoleDispatcher] Facebook Reels fallback 连续 ${this.reelsFallbackRecoveryAttempts} 次恢复仍无可读卡（${reason}）→ 释放为 idle，等待新证据`,
+        `[RoleDispatcher] Facebook Reels 重驱连续 ${this.reelsRedriveRecoveryAttempts} 次恢复仍无可读卡（${reason}）→ 释放为 idle，等待新证据`,
       );
-      this.reelsFallbackState = 'idle';
-      this.reelsFallbackRecoveryAttempts = 0;
+      this.reelsRedrivePending = false;
+      this.reelsRedriveRecoveryAttempts = 0;
       return false;
     }
-    const sent = this.sendFacebookReelsEntryCommand(
-      this.reelsEntryReason ?? 'empty_feed_reels_fallback',
-    );
+    const sent = this.sendBrowseRedrive('reels');
     if (!sent) {
       console.log(`[RoleDispatcher] Facebook Reels pending 恢复被当前调度/配额闸抑制，不消耗恢复次数`);
       return false;
     }
-    this.reelsFallbackRecoveryAttempts += 1;
+    this.reelsRedriveRecoveryAttempts += 1;
     console.log(
-      `[RoleDispatcher] Facebook Reels ${reason} → 重发 fallback 握手 (${this.reelsFallbackRecoveryAttempts}/${FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS})`,
+      `[RoleDispatcher] Facebook Reels ${reason} → 重发统一重驱命令 (${this.reelsRedriveRecoveryAttempts}/${FACEBOOK_REELS_FALLBACK_MAX_RECOVERY_ATTEMPTS})`,
     );
     return true;
   }
 
-  private resetFacebookReelsFallback(): void {
-    this.reelsFallbackState = 'idle';
-    this.reelsEntryReason = null;
-    this.reelsFallbackRecoveryAttempts = 0;
+  private resetFacebookReelsRedrive(): void {
+    this.reelsRedrivePending = false;
+    this.reelsRedriveRecoveryAttempts = 0;
   }
 
   private emitSearchSkippedAfterIntercept(currentPageType: 'feed' | 'search', reason: string): void {
@@ -2887,7 +2899,7 @@ export class RoleDispatcher {
   startOnPersonaBound(): void {
     if (this.sessionActive) return; // 已在跑 → 不打断、不重驱
     this.tryStartSession(); // 过启动闸（人设此刻已绑 → 放行）
-    if (this.sessionActive) this.sendScrollCommand('resume_redrive');
+    if (this.sessionActive) this.redriveBrowse();
   }
 
   /**
@@ -2938,7 +2950,7 @@ export class RoleDispatcher {
     this.searchLimiter.resetSession();
     this.pendingSearchKeywords.clear();
     this.clearFacebookNaturalInteractionEvidence();
-    this.resetFacebookReelsFallback();
+    this.resetFacebookReelsRedrive();
     // 跨会话残留清理（change platform-browse-protocol）：迁移在途 / 审批在途标志不得跨会话粘连。
     this.clearCommentSublineHold(false);
     // 跨会话概念记忆：异步刷新，不阻塞 feed.entered（首次搜索发生在连刷阈值之后，届时池已就绪）。
@@ -3068,7 +3080,7 @@ export class RoleDispatcher {
     // 故此处的清理才是生产实际生效的那一份（红线修复：防审批标志卡死跨会话粘连、迁移在途被后续 open_note 误消费）。
     this.clearCommentSublineHold(false);
     this.clearFacebookNaturalInteractionEvidence();
-    this.resetFacebookReelsFallback();
+    this.resetFacebookReelsRedrive();
     // 重新订阅角色与接线（SessionMonitor.subscribe 重置 startedAt/actionCount）
     this.roles.forEach((r) => r.subscribe());
     this.setupCommandTranslation();
@@ -3126,7 +3138,7 @@ export class RoleDispatcher {
     this.interactionRetry.clear();
     this.pendingInteractionKeys.clear();
     this.clearFacebookNaturalInteractionEvidence();
-    this.resetFacebookReelsFallback();
+    this.resetFacebookReelsRedrive();
     console.log(`[RoleDispatcher] 会话结束: ${reason ?? 'manual'}`);
     // 仅「正常结束」且续场特性已开（注入提供者）才安排休息+续场。
     if (opts?.autoResumeEligible) this.armRestTimer(account, this.takePendingAutoResumeInMs());
@@ -3288,7 +3300,7 @@ export class RoleDispatcher {
     // 不会自发重报 page.cards，故下发一次滚动唤醒（复用既有 scroll→page.scroll 通道，不新增协议；
     // 边端循环已停时据此重启）。仅续场路径发：fresh start 边端自驱、且本人昵称采集期 browseSuspended
     // 会经 sendCommand 软暂停闸自动扣住此滚动，二者不相扰。idle 看门狗的 nudge 仍作 ~2min 兜底。
-    if (this.sessionActive) this.sendScrollCommand('resume_redrive');
+    if (this.sessionActive) this.redriveBrowse();
   }
 
   /** 续场闸：调度开关 + 人设（canStartSession）+ 风控状态 + 活跃时段窗口 + 每日上限。 */
@@ -4163,23 +4175,12 @@ export class RoleDispatcher {
         }
         if (
           this.accountPlatform === 'facebook'
-          && payload.listKind === 'feed'
-          && payload.cards.length > 0
-          && this.sessionContext.sourcePageType === 'feed'
-          && this.reelsFallbackState === 'confirmed'
-        ) {
-          this.resetFacebookReelsFallback();
-          console.log('[RoleDispatcher] Facebook 非空普通 Feed 已回归 → 开启新的 Reels fallback epoch');
-        }
-        if (
-          this.accountPlatform === 'facebook'
           && payload.listKind === 'reels'
           && payload.cards.length > 0
-          && this.reelsFallbackState !== 'confirmed'
+          && this.reelsRedrivePending
         ) {
-          this.reelsFallbackState = 'confirmed';
-          this.reelsFallbackRecoveryAttempts = 0;
-          console.log('[RoleDispatcher] Facebook Reels 可读卡已到达 → entry confirmed');
+          this.resetFacebookReelsRedrive();
+          console.log('[RoleDispatcher] Facebook Reels 可读卡已到达 → 清除在途重驱，不保存历史页面态');
         }
         this.updateVisibleCards(payload.cards);
         this.maybeDispatchFacebookPresentedVideoLike(payload.cards, payload.listKind);
@@ -4336,7 +4337,7 @@ export class RoleDispatcher {
           payload.action === 'scroll'
           && payload.ok === false
           && this.accountPlatform === 'facebook'
-          && this.reelsFallbackState === 'pending'
+          && this.reelsRedrivePending
         ) {
           if (
             payload.reason === 'reels_pending'
@@ -4344,14 +4345,14 @@ export class RoleDispatcher {
             || (typeof payload.reason === 'string'
               && FACEBOOK_REELS_TERMINAL_SCROLL_REASONS.has(payload.reason))
           ) {
-            this.recoverFacebookReelsFallback(payload.reason);
+            this.recoverFacebookReelsRedrive(payload.reason);
           } else if (payload.reason === 'feed_exhausted') {
-            console.log('[RoleDispatcher] Facebook Reels fallback pending 时收到重复 feed_exhausted → 保持 pending，不重复授权');
+            console.log('[RoleDispatcher] Facebook Reels 重驱在途时收到重复 feed_exhausted → 保持 pending，不重复授权');
           } else {
             console.warn(
               `[RoleDispatcher] Facebook Reels fallback 收到终止失败 ${payload.reason ?? 'unknown'} → 释放为 idle`,
             );
-            this.resetFacebookReelsFallback();
+            this.resetFacebookReelsRedrive();
           }
           return;
         }
@@ -4361,7 +4362,6 @@ export class RoleDispatcher {
           && typeof payload.reason === 'string'
           && FACEBOOK_REELS_TERMINAL_SCROLL_REASONS.has(payload.reason)
           && this.accountPlatform === 'facebook'
-          && this.reelsFallbackState === 'confirmed'
           && this.sessionActive
         ) {
           console.log(
@@ -4470,8 +4470,8 @@ export class RoleDispatcher {
           this.sendScrollCommand('feed_continuation_unconfirmed');
           return;
         }
-        // Facebook 普通 Feed 确认到底：复用已部署 Reels fallback 握手；同一 fallback epoch 内重复到底回执吞掉，
-        // 可读 Reels 后若非空普通 Feed 已权威回归，则下一次真实到底可开启新 epoch。其他平台保持既有 refresh 自愈。
+        // Facebook 普通 Feed 确认到底：复用统一 Reels 重驱；同一次在途重驱内重复到底回执吞掉，
+        // 可读 Reels 后若非空普通 Feed 已权威回归，则下一次真实到底可开启新尝试。其他平台保持既有 refresh 自愈。
         if (
           payload.action === 'scroll' &&
           payload.reason === 'feed_exhausted' &&
@@ -4489,9 +4489,10 @@ export class RoleDispatcher {
         }
         // 滚动「无目标」必须有处置（change restore-facebook-post-join-comment-continuity）：
         // 此前 Reels 恢复分支只认 pending 态、feed_continuation_unconfirmed / feed_exhausted 各有自己的分支、
-        // 而下方的通用兜底把 scroll 明确排除在外——于是 confirmed 态账号收到 scroll:no_target 时**一条分支都不命中**：
+        // 而下方的通用兜底把 scroll 明确排除在外——于是历史实现中已进过 Reels 的账号收到
+        // scroll:no_target 时**一条分支都不命中**：
         // 既不发命令也不判终态。真机实测由此零命令悬停 60s，直到冷待机重启才终结。
-        // 处置口径：普通 Feed 滚不出任何目标 = 与「确认到底」同等决定性 ⇒ 开启新的 Reels epoch；
+        // 处置口径：普通 Feed 滚不出任何目标 = 与「确认到底」同等决定性 ⇒ 开启新的 Reels 重驱；
         // 授权确实发不出去（非 Facebook / 已在 pending / 被闸抑制）则诚实结束本场，绝不留悬停。
         // 只收窄到 Facebook：证据全部来自 Facebook 会话，且小红书侧另有在途 change 正在重整其滚动语义，
         // 不在本次顺手改它的行为。
@@ -4503,27 +4504,22 @@ export class RoleDispatcher {
           && this.accountPlatform === 'facebook'
           && this.sessionActive
         ) {
-          // 死锁出口（change restore-facebook-post-join-comment-continuity）：把「已确认」解回可授权态
-          // 的唯一路径原本是「非空普通 Feed 权威回归」。首页恒空的账号正是因为首页出不来内容才被切到
-          // Reels，一旦被任何命令送回首页（例如批次收尾那条不带任务标识的滚动），这个条件永远不成立。
-          //
-          // 解锁证据只用**这一条**滚动无目标回执，不用 feed.empty.confirmed：后者在 Reels 期间到达时
-          // 多半是切面之前的迟到旧报告，拿它解锁会把「陈旧空态」误当成「回到空首页」（既有用例正是
-          // 为此立的）。滚动回执是当下这一跳的结果，才是真证据。重开按场有界，防两个空面之间来回弹。
-          if (this.reelsFallbackState === 'confirmed') {
-            if (this.reelsReentryCount < FACEBOOK_REELS_REENTRY_MAX_PER_SESSION) {
-              this.reelsReentryCount += 1;
-              console.log(
-                `[RoleDispatcher] Facebook 已在 Reels epoch 却在普通 Feed 滚不出目标 → 解回可授权态重开`
-                + `（${this.reelsReentryCount}/${FACEBOOK_REELS_REENTRY_MAX_PER_SESSION}）`,
-              );
-              this.resetFacebookReelsFallback();
-            } else {
-              console.warn(
-                `[RoleDispatcher] Facebook 重开 Reels epoch 次数已用尽`
-                + `（${this.reelsReentryCount}/${FACEBOOK_REELS_REENTRY_MAX_PER_SESSION}）→ 不再重开`,
-              );
-            }
+          // 不保存「曾经 confirmed」这种历史页面态；当前滚动的具名 no_target 就是新鲜执行证据。
+          // 用按场次数直接约束下一次统一 Reels 重驱，防两个空面无限往返。
+          if (this.reelsReentryCount < FACEBOOK_REELS_REENTRY_MAX_PER_SESSION) {
+            this.reelsReentryCount += 1;
+            console.log(
+              `[RoleDispatcher] Facebook 当前滚动无目标 → 统一重驱 Reels`
+              + `（${this.reelsReentryCount}/${FACEBOOK_REELS_REENTRY_MAX_PER_SESSION}）`,
+            );
+            this.resetFacebookReelsRedrive();
+          } else {
+            console.warn(
+              `[RoleDispatcher] Facebook 重驱 Reels 次数已用尽`
+              + `（${this.reelsReentryCount}/${FACEBOOK_REELS_REENTRY_MAX_PER_SESSION}）→ 不再重开`,
+            );
+            this.endSession('scroll_no_target_reentry_exhausted');
+            return;
           }
           if (this.authorizeFacebookReelsFromFeedObservation('feed_exhausted')) return;
           console.warn(

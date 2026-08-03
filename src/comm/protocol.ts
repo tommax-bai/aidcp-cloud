@@ -1491,6 +1491,8 @@ export interface NoteAckPayload {
 
 export interface PageScrollPayload {
   reason?: string;  // feed_scroll | search_scroll
+  /** Unified Facebook browse reconciliation target; used with reason='resume_redrive'. */
+  targetSurface?: 'feed' | 'reels';
   /** feed 翻页停留时长中心值（毫秒，可选）：按本次新卡数算，返回未刷新时省略（feed-scroll-card-floor）。 */
   dwellMs?: number;
 }

@@ -424,6 +424,22 @@ export class ConnectionRuntimeRegistry {
   }
 
   /**
+   * Final page-task release → continue the already-active browse session on its pinned surface.
+   * This does not open a new session and counts only commands accepted by the dispatcher gates.
+   */
+  redriveBrowseForAccount(accountId: string, edgeId: string): number {
+    let n = 0;
+    for (const rt of this.bySession.values()) {
+      if (
+        rt.accountId === accountId
+        && rt.edgeId === edgeId
+        && rt.dispatcher?.redriveBrowse()
+      ) n++;
+    }
+    return n;
+  }
+
+  /**
    * 后台为该账号绑定人设后（change auto-start-on-persona-bind）：唤醒该账号所有「已连接但因未绑人设被
    * 启动闸短路、未在跑」的连接就地开会话（含 scroll 重驱唤醒干等的边端）。覆盖同账号 N 连接；
    * 对已在跑的连接是 no-op（不打断）。返回匹配的连接数。

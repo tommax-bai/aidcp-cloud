@@ -56,6 +56,8 @@ export interface FacebookGroupJoinModeAssignment {
 
 export interface FacebookGroupJoinModeTriggerOptions {
   source: 'consumption';
+  /** Reports every mode-owned page lease release; the coordinator uses the last value at root settlement. */
+  onPageLeaseSettled?: (acknowledged: boolean, edgeId: string) => void;
   /**
    * Called after the scheduler has selected and scope-revalidated the exact
    * membership row, but before it advances that row to joining.
@@ -75,6 +77,7 @@ export interface FacebookGroupJoinModeTriggerOptions {
 
 export interface FacebookGroupJoinModeReconcileOptions {
   source: 'consumption';
+  onPageLeaseSettled?: (acknowledged: boolean, edgeId: string) => void;
 }
 
 export type FacebookGroupJoinModeReconcileResult =
@@ -374,6 +377,10 @@ export class FacebookGroupJoinScheduler {
             conn.edgeId!,
             lease.taskId,
           ).observeGroup(groupUrl),
+          {
+            onReleaseSettled: ({ acknowledged, lease }) =>
+              options.onPageLeaseSettled?.(acknowledged, lease.edgeId),
+          },
         );
       } catch (error) {
         const reason = leaseFailureReason(error);
@@ -682,6 +689,10 @@ export class FacebookGroupJoinScheduler {
       const observeOnce = (): Promise<FacebookGroupJoinStepResult> => this.deps.edgeTaskLeases.withLease(
         { edgeId, kind: 'group_join', priority: gear, leaseMs: 270_000 },
         (lease) => this.steps(bus, edgeId, lease.taskId).observeGroup(assigned.groupUrl),
+        {
+          onReleaseSettled: ({ acknowledged, lease }) =>
+            modeHooks?.onPageLeaseSettled?.(acknowledged, lease.edgeId),
+        },
       );
       observed = await observeOnce();
       if (isNoClickReadinessFailure(observed)) {
@@ -721,6 +732,10 @@ export class FacebookGroupJoinScheduler {
       clicked = await this.deps.edgeTaskLeases.withLease(
         { edgeId, kind: 'group_join', priority: gear, leaseMs: 270_000 },
         (lease) => this.steps(bus, edgeId, lease.taskId).clickJoin(assigned.groupUrl),
+        {
+          onReleaseSettled: ({ acknowledged, lease }) =>
+            modeHooks?.onPageLeaseSettled?.(acknowledged, lease.edgeId),
+        },
       );
     } catch (err) {
       const reason = leaseFailureReason(err);

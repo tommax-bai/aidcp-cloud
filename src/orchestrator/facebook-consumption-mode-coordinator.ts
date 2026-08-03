@@ -93,7 +93,10 @@ export interface FacebookConsumptionJoinExecutorPort {
   reconcileForMode(
     accountId: string,
     groupUrl: string,
-    options: { source: 'consumption' },
+    options: {
+      source: 'consumption';
+      onPageLeaseSettled?: (acknowledged: boolean, edgeId: string) => void;
+    },
   ): Promise<FacebookGroupJoinModeReconcileResult>;
 }
 
@@ -155,6 +158,11 @@ export interface FacebookConsumptionCoordinatorDeps {
     groupUrl: string,
     options: { cooldownMs: number; reason: string },
   ) => Promise<FacebookGroupMembershipRow | null>;
+  /** Sends the unified browse redrive through the live account runtime. */
+  redriveBrowse?: (
+    accountId: string,
+    edgeId: string,
+  ) => number | void | Promise<number | void>;
   ownerId?: string;
   actionLeaseMs?: number;
   clock?: () => number;
@@ -350,6 +358,10 @@ export class FacebookConsumptionModeCoordinator {
     string,
     Promise<FacebookConsumptionCoordinatorResult>
   >();
+  private readonly browseResumeContexts = new Map<
+    string,
+    { lastPageLeaseAcknowledged: boolean | null; edgeId: string | null }
+  >();
 
   constructor(private readonly deps: FacebookConsumptionCoordinatorDeps) {
     this.ownerId = deps.ownerId?.trim()
@@ -363,9 +375,33 @@ export class FacebookConsumptionModeCoordinator {
   ): Promise<FacebookConsumptionCoordinatorResult> {
     const active = this.inFlight.get(action.accountId);
     if (active) return active;
-    const run = this.drive(action).finally(() => {
+    const resumeContext = {
+      lastPageLeaseAcknowledged: null as boolean | null,
+      edgeId: null as string | null,
+    };
+    this.browseResumeContexts.set(action.accountId, resumeContext);
+    const run = this.drive(action).then(async (result) => {
+      if (
+        resumeContext.lastPageLeaseAcknowledged === true
+        && resumeContext.edgeId
+      ) {
+        try {
+          await this.deps.redriveBrowse?.(action.accountId, resumeContext.edgeId);
+        } catch (error) {
+          this.deps.logger?.warn?.(
+            `[facebook-consumption] post-task browse redrive failed account=${action.accountId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      return result;
+    }).finally(() => {
       if (this.inFlight.get(action.accountId) === run) {
         this.inFlight.delete(action.accountId);
+      }
+      if (this.browseResumeContexts.get(action.accountId) === resumeContext) {
+        this.browseResumeContexts.delete(action.accountId);
       }
     });
     this.inFlight.set(action.accountId, run);
@@ -374,6 +410,18 @@ export class FacebookConsumptionModeCoordinator {
 
   isRunning(accountId: string): boolean {
     return this.inFlight.has(accountId);
+  }
+
+  private notePageLeaseSettlement(
+    accountId: string,
+    acknowledged: boolean,
+    edgeId: string,
+  ): void {
+    const context = this.browseResumeContexts.get(accountId);
+    if (context) {
+      context.lastPageLeaseAcknowledged = acknowledged;
+      context.edgeId = edgeId;
+    }
   }
 
   /**
@@ -548,7 +596,11 @@ export class FacebookConsumptionModeCoordinator {
       result = await this.deps.joinExecutor.reconcileForMode(
         action.accountId,
         groupUrl,
-        { source: 'consumption' },
+        {
+          source: 'consumption',
+          onPageLeaseSettled: (acknowledged, edgeId) =>
+            this.notePageLeaseSettlement(action.accountId, acknowledged, edgeId),
+        },
       );
     } catch (error) {
       return this.awaitingReconciliation(
@@ -689,6 +741,8 @@ export class FacebookConsumptionModeCoordinator {
 
     const result = await this.deps.joinExecutor.triggerForMode(action.accountId, {
       source: 'consumption',
+      onPageLeaseSettled: (acknowledged, edgeId) =>
+        this.notePageLeaseSettlement(action.accountId, acknowledged, edgeId),
       onAssigned: async (assignment) => {
         const policy = await this.operationPolicyCheck(action);
         if (policy.kind !== 'active') {
@@ -884,6 +938,8 @@ export class FacebookConsumptionModeCoordinator {
       | null = null;
     const result = await this.deps.commentExecutor.triggerForMode(action.accountId, {
       source: 'consumption',
+      onPageLeaseSettled: (acknowledged, edgeId) =>
+        this.notePageLeaseSettlement(action.accountId, acknowledged, edgeId),
       groupUrl: selected.groupUrl,
       selection: FIRST_COMMENTABLE_GROUP_POST,
       actionGate: () => this.deps.commentActionGate(action.accountId),

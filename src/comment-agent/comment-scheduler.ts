@@ -98,6 +98,8 @@ export interface FacebookCommentModeExactTarget {
 
 export interface FacebookCommentModeTriggerOptions {
   source: 'consumption';
+  /** Reports each mode-owned page lease release; the coordinator reads the last value at root settlement. */
+  onPageLeaseSettled?: (acknowledged: boolean, edgeId: string) => void;
   groupUrl: string;
   selection: 'first_commentable_group_post';
   approvalMode?: ContentScheduleApprovalMode;
@@ -577,6 +579,7 @@ export class CommentScheduler {
           onTargetSelected: options.onTargetSelected,
           onBeforeSubmit: options.onBeforeSubmit,
         },
+        onPageLeaseSettled: options.onPageLeaseSettled,
       });
       return { triggered: true, result };
     } catch (error) {
@@ -1024,6 +1027,7 @@ export class CommentScheduler {
         FacebookCommentModeTriggerOptions,
         'onTargetSelected' | 'onBeforeSubmit'
       >;
+      onPageLeaseSettled?: (acknowledged: boolean, edgeId: string) => void;
     } = {},
   ): Promise<FacebookCommentRunResult> {
     // 终态捕获（change facebook-manual-join-comment）：包一层把「最后一次审计」升级为返回值，供「加群 + 评论」
@@ -1085,6 +1089,7 @@ export class CommentScheduler {
         FacebookCommentModeTriggerOptions,
         'onTargetSelected' | 'onBeforeSubmit'
       >;
+      onPageLeaseSettled?: (acknowledged: boolean, edgeId: string) => void;
     },
     audit: (row: FacebookCommentAuditRow) => void,
   ): Promise<void> {
@@ -1419,6 +1424,10 @@ export class CommentScheduler {
             });
             if (usingCoverage && submit.reason) void d.facebookCoverageOnFailure?.(accountId, containerUrl, submit.reason);
           }
+        },
+        {
+          onReleaseSettled: ({ acknowledged, lease }) =>
+            options.onPageLeaseSettled?.(acknowledged, lease.edgeId),
         },
       );
     } catch (err) {

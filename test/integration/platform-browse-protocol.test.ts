@@ -163,12 +163,16 @@ describe('C1b 迁移阶段 0 零行为（真实平台 surface 相等 ⇒ 不迁�
 });
 
 describe('C1b feed 自愈：Facebook 到底切 Reels，其他平台保持 refresh', () => {
-  it('facebook：scroll 回执 reason=feed_exhausted ⇒ 复用现有握手切 Reels', () => {
+  it('facebook：scroll 回执 reason=feed_exhausted ⇒ 统一重驱到 Reels', () => {
     const { bus, commands } = setup('facebook');
     const base = commands.length;
     bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'feed_exhausted', ts: 0 });
     const after = commands.slice(base);
-    assert.equal(after.filter((command) => command.action === 'scroll' && command.reason === 'empty_feed_reels_fallback').length, 1);
+    assert.equal(after.filter(
+      (command) => command.action === 'scroll'
+        && command.reason === 'resume_redrive'
+        && command.params?.targetSurface === 'reels',
+    ).length, 1);
     assert.ok(!actionsOf(after).includes('refresh'), 'Facebook feed_exhausted 不再刷新同一普通 Feed');
   });
 
@@ -178,7 +182,10 @@ describe('C1b feed 自愈：Facebook 到底切 Reels，其他平台保持 refres
     bus.emit('action.completed', { action: 'scroll', ok: false, reason: 'feed_exhausted', ts: 0 });
     const after = commands.slice(base);
     assert.ok(actionsOf(after).includes('refresh'), '非 Facebook 保持立即 refresh 换新批');
-    assert.equal(after.some((command) => command.reason === 'empty_feed_reels_fallback'), false);
+    assert.equal(after.some(
+      (command) => command.reason === 'resume_redrive'
+        && command.params?.targetSurface === 'reels',
+    ), false);
   });
 });
 
