@@ -215,33 +215,39 @@ test('Facebook Reels 卡片到达清除在途态，后续页面证据可重新�
   dispatcher.endSession('test');
 });
 
-test('Facebook Reels terminal scroll 不依赖 sticky confirmed，立即经正常 dwell 闸继续', () => {
-  const commands: EdgeCommand[] = [];
-  const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
-  dispatcher.setup();
-  dispatcher.startSession();
+for (const reason of [
+  'reels_target_unavailable',
+  'reels_identity_unresolved',
+  'reels_navigation_unconfirmed',
+] as const) {
+  test(`Facebook Reels terminal scroll (${reason}) 不依赖 sticky confirmed，立即经正常 dwell 闸继续`, () => {
+    const commands: EdgeCommand[] = [];
+    const dispatcher = new RoleDispatcher({ soul, llm, accountPlatform: 'facebook', sendCommand: (command) => commands.push(command) });
+    dispatcher.setup();
+    dispatcher.startSession();
 
-  dispatcher.bus.emit('feed.empty.confirmed', { ts: 1 });
-  dispatcher.bus.emit('page.cards.arrived', {
-    cards: [{ index: 0, title: 'reel', likeCount: 0, collectCount: 0, noteId: 'https://www.facebook.com/reel/1' }],
-    listKind: 'reels',
-    ts: 2,
-  });
-  dispatcher.bus.emit('action.completed', {
-    action: 'scroll',
-    ok: false,
-    reason: 'reels_navigation_unconfirmed',
-    ts: 3,
-  });
+    dispatcher.bus.emit('feed.empty.confirmed', { ts: 1 });
+    dispatcher.bus.emit('page.cards.arrived', {
+      cards: [{ index: 0, title: 'reel', likeCount: 0, collectCount: 0, noteId: 'https://www.facebook.com/reel/1' }],
+      listKind: 'reels',
+      ts: 2,
+    });
+    dispatcher.bus.emit('action.completed', {
+      action: 'scroll',
+      ok: false,
+      reason,
+      ts: 3,
+    });
 
-  const continuation = commands.filter(
-    (command) => command.action === 'scroll'
-      && command.reason === 'continue_after_reels_navigation_unconfirmed',
-  );
-  assert.equal(continuation.length, 1);
-  assert.equal(continuation[0]?.params?.dwellMs, 11_000);
-  dispatcher.endSession('test');
-});
+    const continuation = commands.filter(
+      (command) => command.action === 'scroll'
+        && command.reason === `continue_after_${reason}`,
+    );
+    assert.equal(continuation.length, 1);
+    assert.equal(continuation[0]?.params?.dwellMs, 11_000);
+    dispatcher.endSession('test');
+  });
+}
 
 test('Facebook 未确认到底：继续普通 Feed 滚动，不授权 Reels', () => {
   const commands: EdgeCommand[] = [];
