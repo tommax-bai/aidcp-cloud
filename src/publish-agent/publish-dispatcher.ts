@@ -16,7 +16,7 @@
  */
 
 import type { DispatchDraft } from '../kernel/publish-draft-contract.js';
-import type { CommandSequencer } from './command-sequencer.js';
+import type { CommandSequencer, PublishSequenceResult } from './command-sequencer.js';
 import { DEFAULT_PUBLISH_LEASE_MS } from './fill-budget.js';
 import { ApprovalUnreadableError, type ApprovalBlockedReason, type ApprovalVoidReason } from '../kernel/publish-approval-contract.js';
 import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-lease-client.js';
@@ -64,10 +64,17 @@ export interface DispatchNotice {
     /** 7.3：验证码硬暂停期该 edge 收不到发布命令 → 零副作用回待审（不烧稿、保留授权）。 */
     | 'edge_paused_requeued'
     /** 7.2：同一稿连续被抢占达阈值 → 停自动重投、待运营处理（仍保持待审、绝不烧稿）。 */
-    | 'preempted_exhausted';
+    | 'preempted_exhausted'
+    /**
+     * 提交前零副作用失败的有界重投已耗尽 → 落 failed 终态。文案 MUST 说「重试 N 次未成」，
+     * MUST NOT 说「做不到」——这一档的每一次失败都可能只是一次抖动，重批仍有机会。
+     */
+    | 'predispatch_retry_exhausted';
   accountId: string;
   recordId?: number;
   title?: string | null;
+  /** `predispatch_retry_exhausted` 专用：已经试过几次（供文案如实写出 N，不得凭空编）。 */
+  attempts?: number;
 }
 
 export interface PublishDispatcherDeps {
@@ -156,6 +163,15 @@ export interface PublishDispatcherDeps {
   /** 7.2：同一稿连续被抢占多少次后停自动重投 + 通知运营（默认 3）。 */
   preemptRedispatchMax?: number;
   /**
+   * 同一稿「零副作用 · 可恢复」提交前失败的**最大自动重投次数**（默认 2，env `AIDCP_PUBLISH_DEFER_REDISPATCH_MAX`）。
+   * 耗尽后落 `failed` 终态，且文案 MUST 是「重试 N 次未成」而不是「做不到」（`docs/stop-or-continue.md` Q2）。
+   *
+   * 这个预算 MUST 只由本档失败消费：被抢占重投（`preemptRedispatchMax`）与浏览器槽位等待各有自己的计数，
+   * 它们递减这一个的话，会出现「明明一次都没抖动过、却已经没有恢复余额」（Q2 的两条推论之一）。
+   * 设为 1 ⇒ 首次即耗尽 ⇒ 行为回到本 change 之前的「一次抖动即落 failed」，是秒级回滚旋钮。
+   */
+  deferredRedispatchMax?: number;
+  /**
    * 7.1 事件驱动重投调度器（可注入，缺省 setTimeout）。被抢占的稿在当前下发收尾后重触发一次
    * `dispatch(recordId)`，其 withLease 会在租约队列上等抢占方释放（事件驱动、非 60s 盲投）。
    * 延迟仅用于让当前 dispatch 的 inFlight 清理先跑完；测试可注入同步桩。
@@ -188,6 +204,7 @@ export class PublishDispatcher {
   private readonly recordPublish?: (accountId: string) => Promise<void>;
   private readonly breakerThreshold: number;
   private readonly preemptRedispatchMax: number;
+  private readonly deferredRedispatchMax: number;
   private readonly scheduleRedispatch: (fn: () => void) => void;
   private readonly logger: Pick<Console, 'log' | 'warn' | 'error'>;
 
@@ -204,6 +221,12 @@ export class PublishDispatcher {
    * 同一稿连续被抢占达阈值 → 停自动重投 + 通知运营（仍保持待审、绝不烧稿）。成功/真失败终态即清零。
    */
   private readonly consecutivePreemptions = new Map<number, number>();
+  /**
+   * 「零副作用 · 可恢复」提交前失败的重投计数（按 recordId），与 `consecutivePreemptions` **分开计**。
+   * 合成一个计数就等于让抢占去消费恢复预算：一稿被抢两次后再遇一次网络抖动就直接判死，
+   * 而它连一次自愈都还没用过。成功 / 任一终态即清零。
+   */
+  private readonly deferredRedispatches = new Map<number, number>();
   /** 7.3：已就「验证码硬暂停」通知过运维的 recordId——防 60s 兜底扫描每轮对同一暂停重复 ping 运维（只在进入暂停态时发一次）。 */
   private readonly pausedNotified = new Set<number>();
   /** 浏览器槽位等待通知去重：同一进程内只在首次进入等待时通知；取得租约/离开可下发态后清除。 */
@@ -245,6 +268,12 @@ export class PublishDispatcher {
     this.facebookPublishMedia = deps.facebookPublishMedia;
     this.breakerThreshold = Math.max(1, deps.breakerThreshold ?? 2);
     this.preemptRedispatchMax = Math.max(1, deps.preemptRedispatchMax ?? 3);
+    // NaN 会让所有比较恒假 ⇒ 上限失效 ⇒ 无限重投。env 一手抄错（`Number('')`/`Number('two')`）就够了，
+    // 所以这里显式回落到默认值，而不是 `Math.max(1, NaN)`（那还是 NaN）。
+    this.deferredRedispatchMax =
+      Number.isFinite(deps.deferredRedispatchMax) && (deps.deferredRedispatchMax as number) >= 1
+        ? Math.floor(deps.deferredRedispatchMax as number)
+        : 2;
     this.scheduleRedispatch = deps.scheduleRedispatch ?? ((fn) => { const t = setTimeout(fn, 0); (t as { unref?: () => void }).unref?.(); });
     this.logger = deps.logger ?? console;
   }
@@ -412,6 +441,54 @@ export class PublishDispatcher {
     });
   }
 
+  /**
+   * 「零副作用 · 可恢复」提交前失败的处置（change defer-transient-publish-predispatch-failures）。
+   *
+   * 未耗尽 → 保持待审、保留授权签名、退回待下发、事件驱动重投（与被抢占同一条已验证的零副作用路径）。
+   * 耗尽 → 落 `failed` 终态，并把话说成「重试 N 次未成」而不是「做不到」——两者的差别不是措辞：
+   * 前者告诉运营「重批可能就好了」，后者告诉运营「别再试了」。
+   *
+   * **MUST NOT `recordSeqFailure`**：这一档零平台副作用、不烧稿，熔断守的不是它；
+   * 让它计熔断，一次网络抖动就会停掉整个账号的已批队列、要求运营重新逐条批准。
+   */
+  private async handleDeferredBeforeSubmit(
+    recordId: number,
+    accountId: string,
+    requestId: string,
+    approvalRevision: number,
+    title: string | null | undefined,
+    reason: string | undefined,
+  ): Promise<void> {
+    const attempt = (this.deferredRedispatches.get(recordId) ?? 0) + 1;
+    if (attempt > this.deferredRedispatchMax) {
+      this.deferredRedispatches.delete(recordId);
+      this.consecutivePreemptions.delete(recordId);
+      await this.store.updateStatus(recordId, 'failed').catch(() => {});
+      await this.markApprovalProgress('consumed', requestId, approvalRevision);
+      this.logger.warn(
+        `[PublishDispatcher] recordId=${recordId} 提交前可恢复失败重试 ${this.deferredRedispatchMax} 次未成`
+          + `（末次原因 ${reason ?? '-'}）→ 落 failed 终态；全程零平台副作用、不计熔断`,
+      );
+      this.notifyUi(accountId, recordId, 'failed', title);
+      this.notifyOps({ kind: 'predispatch_retry_exhausted', accountId, recordId, title, attempts: this.deferredRedispatchMax });
+      return;
+    }
+    this.deferredRedispatches.set(recordId, attempt);
+    // 授权**保留**：退回待下发、不写任何终态、不作废签名（重投即可再过 AC-PUB 复核）。
+    await this.releaseApprovalToPending(requestId, approvalRevision, null);
+    this.logger.warn(
+      `[PublishDispatcher] recordId=${recordId} 提交前零副作用失败（${reason ?? '-'}）第 ${attempt} 次`
+        + `/上限 ${this.deferredRedispatchMax} → 保持待审、保留授权、素材归还、事件驱动重投（不烧稿、不计熔断）`,
+    );
+    this.scheduleRedispatch(() => {
+      void this.dispatch(recordId).catch((e) =>
+        this.logger.warn(
+          `[PublishDispatcher] 提交前失败重投 recordId=${recordId} 失败: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      );
+    });
+  }
+
   /** 人工批准确认（含 already-decided 重复批准）：熔断中即视为人工确认清除，并踢一次兜底扫描恢复 drain。 */
   private confirmHumanApproval(accountId: string): boolean {
     if (!this.openBreakers.has(accountId)) return false;
@@ -542,9 +619,19 @@ export class PublishDispatcher {
     }
   }
 
+  /**
+   * Facebook 素材状态回写的**档位映射**（change defer-transient-publish-predispatch-failures 起逐档具名）：
+   * - `published_confirmed` → `markUsed`（这组图真上墙了）
+   * - `submitted_unconfirmed` → `quarantine`（可能已上墙，不能再给别的稿用）
+   * - 其余（`preempted` / `deferred_before_submit` / `structural_before_submit` /
+   *   `failed_page_state_unknown` / `scheduled_pending`）→ `releaseReservation` 归还
+   *
+   * `failed_page_state_unknown` 归还而非隔离是**沿用既有行为**（原 `else` 分支就是 release），本 change
+   * 不改它；序列驱动抛异常那一支仍显式传 `submitted_unconfirmed` 走隔离。
+   */
   private async settleFacebookMedia(
     draft: DispatchDraft,
-    outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'failed_before_submit' | 'preempted',
+    outcome: PublishSequenceResult['outcome'],
     recordId: number,
     reason?: string,
   ): Promise<void> {
@@ -688,7 +775,8 @@ export class PublishDispatcher {
     if (draft.imageUrls.length === 0) {
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       this.clearBrowserSlotWaiting(recordId);
-      await this.settleFacebookMedia(draft, 'failed_before_submit', recordId, 'draft_missing_images');
+      // 冻结草稿里就没有图 ⇒ 重来必然同样结果，是结构性档（素材归还）。
+      await this.settleFacebookMedia(draft, 'structural_before_submit', recordId, 'draft_missing_images');
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 无配图，诚实 failed（不下发）`);
       this.notifyUi(accountId, recordId, 'failed', draft.title);
       return;
@@ -791,6 +879,7 @@ export class PublishDispatcher {
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         this.consecutiveSeqFails.delete(accountId);
         this.consecutivePreemptions.delete(recordId);
+        this.deferredRedispatches.delete(recordId);
         await this.store.updatePostId(recordId, result.postId!, result.postUrl).catch(() => {});
         // 发布记账（change risk-record-actuated-facts）：发出去了 ⇒ 平台看见了 ⇒ 记。与 publish_log 的
         // 权威口径同轴（published）。best-effort：记账失败绝不影响已成功的发布终态。
@@ -801,6 +890,7 @@ export class PublishDispatcher {
         // 原生定时任务已被平台接受（或提交按下已派发但回执不确定）：不重投、不当场抓公开 postId、也不记发布次数。
         // 内部定时 id 只作后续对账句柄，绝不写 platform_post_id。
         this.consecutivePreemptions.delete(recordId);
+        this.deferredRedispatches.delete(recordId);
         // 授权已被用掉（提交动作已派发），MUST NOT 留在待下发让兜底扫描重投。
         await this.markApprovalProgress('consumed', requestId, approvalRevision);
         const scheduledAt = result.scheduledAt ?? draft.metadata?.publishTime;
@@ -827,6 +917,7 @@ export class PublishDispatcher {
         // 对用户是“已提交，待链接确认”，不是失败；仍不重试，素材隔离。
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         this.consecutivePreemptions.delete(recordId);
+        this.deferredRedispatches.delete(recordId);
         await this.store.updateStatus(recordId, 'submitted').catch(() => {});
         // 与上面 published 同理：页面已确认提交 ⇒ 平台收到了这条帖 ⇒ 记。拿没拿到链接是「平台对我们已做
         // 之事的回答」，MUST NOT 决定这次动作算不算数——与 publish_log 把 submitted 计入日上限同轴。
@@ -846,10 +937,47 @@ export class PublishDispatcher {
           `[PublishDispatcher] recordId=${recordId} 被抢占（${result.failedAt?.error ?? 'preempted'}）→ 保持待审、保留授权、事件驱动重投（不烧稿、不计熔断）`,
         );
         this.schedulePreemptedRedispatch(recordId, accountId, approvalRevision, draft.title);
-      } else {
-        // 序列中途失败（页面状态未知）→ failed 终态、绝不自动重跑；计入熔断（连续 N 次停 drain 防连环烧稿）。
+      } else if (result.outcome === 'deferred_before_submit') {
+        // 零副作用 · 可恢复（change defer-transient-publish-predispatch-failures）：序列器已证明提交指令
+        // **从未推送**，且证明不了「重来必然同样结果」。处置与被抢占同轴（那条路径已在生产验证过）：
+        // 保持待审、保留授权签名、素材归还而非隔离、**不计熔断**、事件驱动重投——但走**自己**的预算。
+        await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
+        await this.handleDeferredBeforeSubmit(
+          recordId,
+          accountId,
+          requestId,
+          approvalRevision,
+          draft.title,
+          result.failedAt?.error,
+        );
+      } else if (result.outcome === 'structural_before_submit') {
+        // 零副作用 · 结构性：提交指令从未推送，且重来必然同样结果（正文超长 / 配图全败 / 未授权 / 排期非法）。
+        // failed 终态 + 绝不自动重投；**不计熔断**——熔断守的是「一次系统性边缘故障连环烧掉整批获批草稿」，
+        // 而这一档每一稿都是自身内容不可发，停整批 drain 救不了任何一稿，只会要求运营重批一批好稿。
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);
         this.consecutivePreemptions.delete(recordId);
+        this.deferredRedispatches.delete(recordId);
+        await this.store.updateStatus(recordId, 'failed').catch(() => {});
+        await this.markApprovalProgress('consumed', requestId, approvalRevision);
+        this.logger.warn(
+          `[PublishDispatcher] recordId=${recordId} 提交前结构性失败（重来也不会变）failedAt=${JSON.stringify(result.failedAt)}`,
+        );
+        this.notifyUi(accountId, recordId, 'failed', draft.title);
+      } else {
+        // 页面状态未知（`failed_page_state_unknown`，以及任何**未被上面任一分支认领**的 outcome）→
+        // failed 终态、绝不自动重跑；计入熔断（连续 N 次停 drain 防连环烧稿）。
+        //
+        // 这条 `else` 是**保守默认**、不是兜底桶：新增 outcome 若忘了接线，落到「不重投」这一侧只会更保守，
+        // 落到重投侧才会双发。但沉默地更保守也是一种漂移，所以未识别的 outcome MUST 当场喊出来。
+        if (result.outcome !== 'failed_page_state_unknown') {
+          this.logger.error(
+            `[PublishDispatcher] recordId=${recordId} 未识别的序列终局 outcome=${JSON.stringify(result.outcome)}`
+              + ' → 按「页面状态未知」保守处置（failed、不重投、计熔断）；这说明分档新增后下发段没跟上，须补分支',
+          );
+        }
+        await this.settleFacebookMedia(draft, 'failed_page_state_unknown', recordId, result.failedAt?.error);
+        this.consecutivePreemptions.delete(recordId);
+        this.deferredRedispatches.delete(recordId);
         await this.store.updateStatus(recordId, 'failed').catch(() => {});
         // 序列已产生副作用后失败：授权已被用掉，MUST NOT 留在待下发（否则兜底扫描会重投可能已提交的页面写）。
         await this.markApprovalProgress('consumed', requestId, approvalRevision);
@@ -898,6 +1026,7 @@ export class PublishDispatcher {
       // 注：抢占以 preempted **结果**回来（在 command-sequencer 的 catch 内收敛为结果、绝不 unwind），故此处不会是抢占。
       await this.settleFacebookMedia(draft, 'submitted_unconfirmed', recordId, err instanceof Error ? err.message : String(err));
       this.consecutivePreemptions.delete(recordId);
+      this.deferredRedispatches.delete(recordId);
       await this.store.updateStatus(recordId, 'failed').catch(() => {});
       await this.markApprovalProgress('consumed', requestId, approvalRevision);
       this.logger.warn(`[PublishDispatcher] recordId=${recordId} 下发异常: ${err instanceof Error ? err.message : String(err)}`);
