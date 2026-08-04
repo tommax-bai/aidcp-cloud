@@ -47,6 +47,8 @@ function harness(opts: {
   preemptRedispatchMax?: number;
   /** change defer-transient-publish-predispatch-failures：提交前零副作用失败的重投上限（缺省 2）。 */
   deferredRedispatchMax?: number;
+  /** 熔断阈值（缺省 2）；用于验证 env 畸形时这道闸不会静默失效。 */
+  breakerThreshold?: number;
   executionTarget?: 'dev' | 'ol' | null;
   /** change publish-approval-signal-to-database：授权查询不可读（超时 / 接口不可达）。 */
   approvalUnreadable?: boolean;
@@ -125,6 +127,7 @@ function harness(opts: {
     isEdgePaused: opts.isEdgePaused,
     preemptRedispatchMax: opts.preemptRedispatchMax,
     deferredRedispatchMax: opts.deferredRedispatchMax,
+    ...(opts.breakerThreshold !== undefined ? { breakerThreshold: opts.breakerThreshold } : {}),
     scheduleRedispatch: (fn) => { redispatched.push(fn); },
     readApproval: async () => {
       if (opts.approvalUnreadable) throw new Error('approval_lookup_503');
@@ -998,5 +1001,74 @@ describe('PublishDispatcher · 提交前失败分档', () => {
     assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' }, '不认识就按不重投处置（落错这一侧只会更保守）');
     assert.equal(h.redispatched.length, 0);
     assert.ok(logs.some((l) => l.includes('未识别的序列终局')), '沉默地更保守也是漂移，MUST 喊出来');
+  });
+});
+
+/**
+ * 阈值旋钮畸形时，闸不许静默变成空操作。
+ *
+ * `Math.max(1, NaN)` 仍是 `NaN`，而 `NaN` 的比较恒假 —— 熔断的 `n >= threshold` 于是永不成立。
+ * 一道能在无人察觉时消失的闸不算闸：熔断没了，一次系统性边缘故障就能连环烧光整批已批准草稿。
+ * 触发只需 env 抄错一手（空串 → 0，写成 `two` → NaN）。
+ */
+describe('PublishDispatcher · 阈值旋钮畸形时不静默失效', () => {
+  const seqFails = {
+    ok: false,
+    outcome: 'failed_page_state_unknown',
+    attachedCount: 0,
+    failedAt: { seq: 6, kind: 'submit_publish', error: 'publish.command timeout' },
+  };
+
+  test('熔断阈值配成 NaN → 仍按默认阈值开火（MUST NOT 变成永不熔断）+ 告警', async () => {
+    const logs: string[] = [];
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      breakerThreshold: Number('two'), // env 抄错的真实形态
+      captureLogs: logs,
+      seqResult: seqFails,
+    });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), false, '一次失败还不到默认阈值 2');
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), true, 'NaN 阈值 MUST NOT 让熔断永不开火');
+    assert.ok(
+      logs.some((l) => l.includes('breakerThreshold') && l.includes('回落默认 2')),
+      '回落 MUST 告警：静默用默认值会让运维一直以为自己配的值生效了',
+    );
+  });
+
+  test('阈值配成空串/0/负数 → 同样回落 + 告警（不是只有 NaN 才算畸形）', async () => {
+    for (const bad of [Number(''), -1]) {
+      const logs: string[] = [];
+      const h = harness({ approved: true, edgeId: 'edge-A', breakerThreshold: bad, captureLogs: logs, seqResult: seqFails });
+      await h.dispatcher.dispatch(7);
+      assert.equal(h.dispatcher.isBreakerOpen('acct-A'), false, `阈值 ${bad} 回落 2 后，一次失败不该开火`);
+      await h.dispatcher.dispatch(7);
+      assert.equal(h.dispatcher.isBreakerOpen('acct-A'), true);
+      assert.ok(logs.some((l) => l.includes('回落默认 2')), `阈值 ${bad} MUST 告警`);
+    }
+  });
+
+  test('合法阈值照旧生效，且不产生告警噪声', async () => {
+    const logs: string[] = [];
+    const h = harness({ approved: true, edgeId: 'edge-A', breakerThreshold: 1, captureLogs: logs, seqResult: seqFails });
+    await h.dispatcher.dispatch(7);
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), true, '阈值 1 ⇒ 一次失败即开火');
+    assert.equal(logs.filter((l) => l.includes('取值非法')).length, 0, '合法值 MUST NOT 报警（否则告警会被无视）');
+  });
+
+  test('重投上限配成 NaN → 回落默认 2，MUST NOT 变成无限重投', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      deferredRedispatchMax: Number('nope'),
+      seqResult: { ok: false, outcome: 'deferred_before_submit', attachedCount: 0, failedAt: { seq: 1, kind: 'select_mode', error: 'no_target' } },
+    });
+    await h.dispatcher.dispatch(7);
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates, [], '默认 2 次预算内不落终态');
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' }, 'NaN 上限 MUST NOT 让重投永不停');
   });
 });
