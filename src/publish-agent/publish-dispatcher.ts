@@ -23,6 +23,35 @@ import { EdgeTaskLeaseError, type EdgeTaskLeaseClient } from '../comm/edge-task-
 import type { EdgeTaskPriority } from '../comm/protocol.js';
 import type { DeploymentTarget } from '../deployment-target.js';
 
+/**
+ * 阈值旋钮的显式回落。**这不是防御性编程的装饰，它守的是一道能静默消失的安全闸。**
+ *
+ * `Math.max(1, NaN)` 的结果**仍是 `NaN`**，而 `NaN` 让所有比较恒假：`n >= NaN` 永远为假 ⇒
+ * **熔断永不开火** ⇒ 一次系统性边缘故障就能连环烧光整批已批准草稿，稿子和授权都收不回来。
+ * 触发条件低到只需 env 抄错一手：`AIDCP_PUBLISH_BREAKER_THRESHOLD=`（空串 → `Number('')` = 0）
+ * 或写成 `two`（→ `NaN`）。概率低 × 后果不可逆且对外可见，正是「可以用低概率当理由加这道闸」的那一格。
+ *
+ * 回落时 **MUST 告警**：静默改用默认值只是把一次静默降级换成另一次——运维会一直以为自己配的值生效了。
+ *
+ * 保留旧的下取整钳位（`0.5` 仍得 1），只把「非有限数 / ≤0」这一格从「静默变成 NaN 或 1」改成「回落 + 告警」。
+ */
+function sanitizeThreshold(
+  raw: number | undefined,
+  fallback: number,
+  name: string,
+  logger: Pick<Console, 'warn'>,
+): number {
+  if (raw === undefined) return fallback;
+  if (!Number.isFinite(raw) || raw <= 0) {
+    logger.warn(
+      `[PublishDispatcher] 阈值 ${name} 取值非法（${JSON.stringify(raw)}）→ 回落默认 ${fallback}。`
+        + '非有限数会让依赖它的闸静默变成空操作（NaN 的比较恒假），请修正配置。',
+    );
+    return fallback;
+  }
+  return Math.max(1, Math.floor(raw));
+}
+
 class ApprovalDispatchProgressError extends Error {
   constructor(readonly revision: number) {
     super(`approval_dispatch_progress_unconfirmed(revision=${revision})`);
@@ -266,16 +295,17 @@ export class PublishDispatcher {
     this.notifyDispatchEvent = deps.notifyDispatchEvent;
     this.recordPublish = deps.recordPublish;
     this.facebookPublishMedia = deps.facebookPublishMedia;
-    this.breakerThreshold = Math.max(1, deps.breakerThreshold ?? 2);
-    this.preemptRedispatchMax = Math.max(1, deps.preemptRedispatchMax ?? 3);
-    // NaN 会让所有比较恒假 ⇒ 上限失效 ⇒ 无限重投。env 一手抄错（`Number('')`/`Number('two')`）就够了，
-    // 所以这里显式回落到默认值，而不是 `Math.max(1, NaN)`（那还是 NaN）。
-    this.deferredRedispatchMax =
-      Number.isFinite(deps.deferredRedispatchMax) && (deps.deferredRedispatchMax as number) >= 1
-        ? Math.floor(deps.deferredRedispatchMax as number)
-        : 2;
-    this.scheduleRedispatch = deps.scheduleRedispatch ?? ((fn) => { const t = setTimeout(fn, 0); (t as { unref?: () => void }).unref?.(); });
+    // 三个阈值旋钮都必须先过一道显式回落（见 sanitizeThreshold）；logger 先装好，回落才喊得出声。
     this.logger = deps.logger ?? console;
+    this.breakerThreshold = sanitizeThreshold(deps.breakerThreshold, 2, 'breakerThreshold（AIDCP_PUBLISH_BREAKER_THRESHOLD）', this.logger);
+    this.preemptRedispatchMax = sanitizeThreshold(deps.preemptRedispatchMax, 3, 'preemptRedispatchMax', this.logger);
+    this.deferredRedispatchMax = sanitizeThreshold(
+      deps.deferredRedispatchMax,
+      2,
+      'deferredRedispatchMax（AIDCP_PUBLISH_DEFER_REDISPATCH_MAX）',
+      this.logger,
+    );
+    this.scheduleRedispatch = deps.scheduleRedispatch ?? ((fn) => { const t = setTimeout(fn, 0); (t as { unref?: () => void }).unref?.(); });
   }
 
   /** 该账号是否处于下发熔断（观测/预检提示用）。 */
@@ -951,7 +981,9 @@ export class PublishDispatcher {
           result.failedAt?.error,
         );
       } else if (result.outcome === 'structural_before_submit') {
-        // 零副作用 · 结构性：提交指令从未推送，且重来必然同样结果（正文超长 / 配图全败 / 未授权 / 排期非法）。
+        // 零副作用 · 结构性：提交指令从未推送，且重来必然同样结果。这一档只收**单稿自身属性**
+        // （正文超长 / 未授权 / 排期非法）——凡成因可能落在图源 / 网络 / 页面侧的（含配图全失败），
+        // 一律不进这里、走可恢复档。
         // failed 终态 + 绝不自动重投；**不计熔断**——熔断守的是「一次系统性边缘故障连环烧掉整批获批草稿」，
         // 而这一档每一稿都是自身内容不可发，停整批 drain 救不了任何一稿，只会要求运营重批一批好稿。
         await this.settleFacebookMedia(draft, result.outcome, recordId, result.failedAt?.error);

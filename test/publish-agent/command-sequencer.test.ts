@@ -82,6 +82,9 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
     assert.equal(r.attachedCount, 0, '配图全失败 K=0');
     assert.equal(r.failedAt?.kind, 'upload_image');
     assert.equal(r.failedAt?.error, 'all_images_failed');
+    // K=0 是逐张失败累计出来的，成因多在图源/上传通道侧（系统性瞬态）⇒ 可恢复档、有界重投，
+    // MUST NOT 判结构性把稿烧死（一次图床抖动不该让这份稿再也发不出去）。
+    assert.equal(r.outcome, 'deferred_before_submit');
     assert.equal(r.failedAt?.seq, 2, 'failedAt.seq 归因真实 upload seq（=2），非触发早停的 fill_field seq');
     assert.ok(pushed.some((c) => c.kind === 'upload_image'), 'upload_image 已尝试');
     assert.ok(!pushed.some((c) => c.kind === 'fill_field'), '全图失败后绝不进 fill_field（不假装纯文字）');
@@ -579,20 +582,32 @@ describe('AC-PREDISPATCH 提交前失败分档（零副作用可恢复 / 零副�
     }
   });
 
-  it('AC-PREDISPATCH-8 结构性档的四个入口都落 structural_before_submit（与判据表逐条对齐）', async () => {
-    // 未授权：序列截止于提交前，重来仍生成不出提交指令。
+  it('AC-PREDISPATCH-8 每个入口落的档 MUST 与判据表一致（入口与表各说各话就等于表是装饰）', async () => {
+    // 未授权：序列截止于提交前，重来仍生成不出提交指令 —— 单稿自身属性 ⇒ 结构性。
     const notApproved = makeSequencer(okFor);
     const a = await notApproved.seq.executePublishSequence(input({ tags: [], approvedByUser: false }));
     assert.equal(a.outcome, 'structural_before_submit');
     assert.equal(a.failedAt?.error, 'not_approved');
     assert.equal(classifyPreSubmitReason(a.failedAt!.error).disposition, 'structural', '入口用的原因串 MUST 在结构性表内');
 
-    // 配图全失败：K=0 无有效图文帖，重来面对同一批 URL。
+    // 配图全失败：**逐张累计**而成，成因多在图源/上传通道侧（OSS 403 那一类）⇒ 可恢复，绝非结构性。
     const noImages = makeSequencer((cmd) =>
       cmd.kind === 'upload_image' ? fail(cmd, { error: 'image_not_attached' }) : okFor(cmd),
     );
     const b = await noImages.seq.executePublishSequence(input({ tags: [], images: ['x'] }));
-    assert.equal(b.outcome, 'structural_before_submit');
-    assert.equal(classifyPreSubmitReason(b.failedAt!.error).disposition, 'structural');
+    assert.equal(b.outcome, 'deferred_before_submit');
+    assert.equal(b.failedAt?.error, 'all_images_failed');
+    assert.equal(
+      classifyPreSubmitReason(b.failedAt!.error).disposition,
+      'recoverable',
+      '入口判可恢复、表却判结构性的话，任何走 classify 的第二条路径都会把稿烧死',
+    );
+
+    // 结构性表 MUST NOT 混进任何累计型原因（这条守的是「下次别再把它挪回去」）。
+    assert.equal(
+      (STRUCTURAL_PRE_SUBMIT_REASONS as readonly string[]).includes('all_images_failed'),
+      false,
+      'all_images_failed 是多次尝试累计的结果，MUST NOT 进结构性表',
+    );
   });
 });

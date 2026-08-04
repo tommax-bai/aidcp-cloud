@@ -81,11 +81,12 @@ export interface PublishSequenceResult {
    * - `scheduled_pending`：平台已接受 XHS 原生定时任务，等待目标时刻后对账；不计发布次数。
    * - `preempted`：提交前被严格高档位抢占（零平台副作用）——保持待审、不写 failed、不计熔断、事件驱动重投。
    * - `structural_before_submit`：**零副作用 · 结构性**。提交命令从未下发，且重新加载页面原样重来
-   *   **必然同样结果**（正文超长 / 配图全败 / 未授权 / 排期非法）→ failed 终态、MUST NOT 自动重投、
-   *   回执写清「为什么重来也不会变」；**不计熔断**（它不是边缘系统性故障，停整批 drain 救不了任何一稿）。
+   *   **必然同样结果**——只收**单稿自身属性**（正文超长 / 未授权 / 排期非法）→ failed 终态、
+   *   MUST NOT 自动重投、回执写清「为什么重来也不会变」；**不计熔断**（不是边缘系统性故障，
+   *   停整批 drain 救不了任何一稿）。
    * - `deferred_before_submit`：**零副作用 · 可恢复**。提交命令从未下发，且**无法证明重来结果必然相同**
-   *   （导航抖动 / 页面未就绪 / 探测超时 / 回执未达 / 未识别的提交前原因）→ 保持待审、保留授权、
-   *   素材归还、**不计熔断**、有界自动重投；重投耗尽才落 failed 且文案写「重试 N 次未成」。
+   *   （导航抖动 / 页面未就绪 / 探测超时 / 回执未达 / **配图全失败** / 未识别的提交前原因）→ 保持待审、
+   *   保留授权、素材归还、**不计熔断**、有界自动重投；重投耗尽才落 failed 且文案写「重试 N 次未成」。
    * - `failed_page_state_unknown`：**页面状态未知**。提交命令**已推送**但拿不到「确实没按下」的证据
    *   （回执超时 / 边缘断连 / 提交步回 ok:false 而未带 submitDispatched）→ failed 终态、MUST NOT 自动重投
    *   （重跑可能双发）、**计入熔断**。这一档是旧 `else` 分支注释里写的那一类，现在名字与实情一致。
@@ -125,17 +126,18 @@ export interface PublishSequenceResult {
  * 准入判据只有一条（`docs/stop-or-continue.md` Q2）：**同一步在页面重新加载后原样重来，
  * 有没有可能得到不同结果？** 只有「不可能」才配进这张表。逐条理由：
  * - `not_approved`：序列按 AC-PUB 第 2 闸截止于提交前，压根没生成提交指令——重来仍然没有。
- * - `all_images_failed`：图文帖被「先传图」门控，K=0 即无有效帖；这一档由本序列器在**全部上传都已尝试完**
- *   之后才判，重来面对的是同一批 URL。
  * - `content_too_long`：正文字数超出逐字输入预算上限，是算术比较，与页面无关。
  * - 三个 `ScheduleValidationError`：排期时间来自冻结草稿、上下界是常量；重来只会更晚，不会变合法。
  *
- * **这张表 MUST 只收「本序列器自己判出来的」原因**：边缘回执里的原因一律不进——那些描述的是页面此刻的
- * 姿态（找不到控件 / 没就绪 / 探测超时），而姿态恰恰是重来可能不同的那一类。
+ * 剩下的三条有个共同点，**是这张表的真正准入线**：它们都是**单稿自身的属性**（这份授权、这段正文、
+ * 这个排期时间），与图源 / 网络 / 页面此刻的状态全都无关。
+ *
+ * **这张表 MUST 只收「本序列器自己判出来的」原因，且 MUST NOT 收任何「多次尝试累计而成」的原因**：
+ * 边缘回执里的原因描述的是页面此刻的姿态（找不到控件 / 没就绪 / 探测超时），姿态恰恰是重来可能不同的
+ * 那一类；而累计型原因（典型即 `all_images_failed`）的成因往往在**图源/上传通道侧**，是系统性瞬态。
  */
 export const STRUCTURAL_PRE_SUBMIT_REASONS = [
   'not_approved',
-  'all_images_failed',
   'content_too_long',
   'schedule_platform_unsupported',
   'schedule_time_required',
@@ -152,6 +154,10 @@ export type StructuralPreSubmitReason = (typeof STRUCTURAL_PRE_SUBMIT_REASONS)[n
  * - `command_result_unavailable`：回执未达（超时 / 边缘断连 / 送达 0）。**仅在提交指令尚未推送时**才归此档。
  * - `no_target` / `element_not_found`：定位落空——DOM-first 三道闸下的典型间歇失败。
  * - `page_not_ready` / `navigation_failed`：页面姿态类。
+ * - `all_images_failed`：**它是逐张累计出来的，不是一次判断**——单张 upload 的超时/异常/失败都会被丢弃
+ *   并继续（见 `executePublishSequence` 里那条「配图唯一放宽」），全都没成才归这一档。所以它最可能的成因
+ *   是**图源侧的系统性瞬态**（上传通道 / 图床 / 对象存储，本仓已知的 OSS 匿名读 403 就是现成实例），
+ *   而不是这份稿子本身不可发。按 Q2 问一遍「重来有没有可能不同」——显然有，所以它不是结构性。
  */
 export const RECOVERABLE_PRE_SUBMIT_REASONS = [
   'command_result_unavailable',
@@ -159,6 +165,7 @@ export const RECOVERABLE_PRE_SUBMIT_REASONS = [
   'element_not_found',
   'page_not_ready',
   'navigation_failed',
+  'all_images_failed',
 ] as const;
 
 /** 提交前失败的处置分档。`unrecognized` 只影响**说法**（日志具名 + 带原始串），不影响处置。 */
@@ -351,8 +358,9 @@ export class CommandSequencer {
       // MUST 诚实 failed，绝不进 fill_field 假装纯文字继续（红线：不假成功）。uploadsAttempted<total 时仍在上传阶段前/中，不误触发。
       if (imagesRequested && uploadsAttempted >= totalImages && attachedCount === 0 && cmd.kind !== 'upload_image' && cmd.kind !== 'set_cover') {
         this.logger.warn(`[CommandSequencer] 全部配图失败（K=0）、图文帖无有效内容 → failed（触发于 seq=${cmd.seq}，归因末条 upload seq=${lastUploadSeq}）`);
-        // 全部上传都已尝试完仍 K=0 ⇒ 重来面对同一批 URL、同一道门控（STRUCTURAL_PRE_SUBMIT_REASONS）。
-        return { ok: false, outcome: 'structural_before_submit', attachedCount: 0, failedAt: { seq: lastUploadSeq, kind: 'upload_image', error: 'all_images_failed' } };
+        // K=0 是**逐张失败累计**出来的，最可能的成因在图源/上传通道侧（系统性瞬态），不是这份稿不可发
+        // ⇒ 可恢复档、有界重投（RECOVERABLE_PRE_SUBMIT_REASONS）。提交指令一条都没推送，零平台副作用。
+        return { ok: false, outcome: 'deferred_before_submit', attachedCount: 0, failedAt: { seq: lastUploadSeq, kind: 'upload_image', error: 'all_images_failed' } };
       }
       // 无成功配图 → 不下发依赖首图的封面（红线：绝不在配图全失败后下发 set_cover）。
       if (cmd.kind === 'set_cover' && attachedCount === 0) {
