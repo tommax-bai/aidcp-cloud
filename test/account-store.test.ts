@@ -424,16 +424,68 @@ test('ensureAccount: 缺省平台回落 xiaohongshu（行为不变）', async ()
   assert.deepEqual(calls[0].params, ['legacy-acc', 'xiaohongshu']);
 });
 
-test('ensureAccount: 既有行冲突（RETURNING 空）→ 不回填缓存（不污染既有平台）', async () => {
-  // ON CONFLICT DO NOTHING 命中既有行 → RETURNING 空。
-  const { calls, pool } = fakePoolReturning([]);
+/** 假 pool：按 SQL 形状分别应答（INSERT 与其后的回填 SELECT 要给不同结果）。 */
+function fakePoolByQuery(
+  responder: (text: string) => unknown[],
+): { calls: { text: string; params: unknown[] }[]; pool: pg.Pool } {
+  const calls: { text: string; params: unknown[] }[] = [];
+  const pool = {
+    query: async (text: string, params: unknown[]) => {
+      const __probe = schemaProbe(text);
+      if (__probe) return __probe;
+      calls.push({ text, params });
+      const rows = responder(text);
+      return { rows, rowCount: rows.length };
+    },
+  } as unknown as pg.Pool;
+  return { calls, pool };
+}
+
+const isEnsureInsert = (text: string): boolean =>
+  /INSERT INTO accounts \(account_id, label, platform\)/.test(text);
+
+test('ensureAccount: 既有行冲突（RETURNING 空）→ 绝不拿 edge 声明平台覆盖，只补库里真值', async () => {
+  // ON CONFLICT DO NOTHING 命中既有行 → RETURNING 空；随后的回填读的是库里的真值。
+  // 本次 edge 声明 facebook、库里是 xiaohongshu：缓存 MUST 取库里那个，否则就是原来防的那种污染。
+  const { pool } = fakePoolByQuery((text) => (isEnsureInsert(text)
+    ? []
+    : [{ platform: 'xiaohongshu', created_at: null, label: null, nickname: null, operator_alias: null }]));
   const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   await store.ensureAccount('existing', 'facebook');
+  assert.equal(store.platformFor('existing'), 'xiaohongshu', '既有行平台 MUST 以库为准，不被 edge 声明覆盖');
+});
+
+test('ensureAccount: 既有行 + 本进程从未见过该账号 → 同步平台口必须能答出来（DEV/OL 共库，行是另一台云端插的）', async () => {
+  // 2026-08-04 实测回归：客户端中途从 OL 切到 dev，账号行是 OL 插的、dev 进程 init() 又早于它们出生，
+  // DO NOTHING 不回行 ⇒ dev 的 platformCache 永久缺这些账号。platformFor 是同步零 IO 口，缺键即
+  // 「平台未知」→ 慢启动判定答「不在爬坡」→ 客户端运行方式回落显示「普通」+ 冷启动配额一档不叠。
+  const createdAt = new Date('2026-08-04T04:00:00Z');
+  const { pool } = fakePoolByQuery((text) => (isEnsureInsert(text)
+    ? []
+    : [{ platform: 'facebook', created_at: createdAt, label: null, nickname: null, operator_alias: null }]));
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  assert.equal(store.platformFor('cross-cloud'), undefined, '前置：本进程确实没见过它');
+  await store.ensureAccount('cross-cloud', 'facebook');
+  assert.equal(store.platformFor('cross-cloud'), 'facebook');
+  assert.equal(store.createdAtFor('cross-cloud'), createdAt.getTime());
+});
+
+test('ensureAccount: 既有行但缓存已齐 → 不再回查库（回填只补缺键）', async () => {
+  const createdAt = new Date('2026-08-04T04:00:00Z');
+  let insertCount = 0;
+  const { calls, pool } = fakePoolByQuery((text) => {
+    if (!isEnsureInsert(text)) return [];
+    insertCount += 1;
+    // 第 1 次视为真插入新行（缓存就此填满），第 2 次视为冲突。
+    return insertCount === 1
+      ? [{ platform: 'facebook', created_at: createdAt, label: null, nickname: null, operator_alias: null }]
+      : [];
+  });
+  const store = new PgAccountStore({ schemaEnsurer: ensureCapabilitySchema, pool });
+  await store.ensureAccount('known', 'facebook');
   assert.equal(calls.length, 1);
-  // 缓存未被写成 facebook；getPlatform 落库读真态（这里 fake 返回空 → 归一化为 xiaohongshu），
-  // 关键是发生了第二次查询（= 未命中缓存），证明既有行平台没被 ensureAccount 覆盖/污染。
-  await store.getPlatform('existing');
-  assert.equal(calls.length, 2, '既有行不应回填缓存，getPlatform 必须落库读真态');
+  await store.ensureAccount('known', 'facebook');
+  assert.equal(calls.length, 2, '第二次只该发出那条 INSERT，不该追加回填 SELECT');
 });
 
 // ── change seed-facebook-automation-defaults-on-registration：新账号种入自动化默认配置 ──

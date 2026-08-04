@@ -461,7 +461,8 @@ export class PgAccountStore implements AccountStore {
     }
     // facebook-scheduled-comment 2.5：新账号登记时按 edge 声明的平台建行（缺省回落 xhs，行为不变）。
     // ON CONFLICT DO NOTHING → 既有行的 platform 绝不被覆盖（平台仍以现有行为事实源）。
-    // RETURNING 判定是否真插入了新行：仅新行才回填 platformCache（既有行不触碰缓存，防污染）。
+    // RETURNING 判定是否真插入了新行：新行按返回值回填 platformCache；既有行**绝不拿本次 edge
+    // 声明的值**回填（防污染），改由下面读库真值补缺键——见 hydrateCachesForExistingAccount 注释。
     // account-level-slow-start：同批回填 createdAtCache。风控的 env 全局旁路（AIDCP_COLDSTART_RAMP）
     // 已从「建 controller 时 await PG 读 created_at」改为经 provider 现读内存镜像；本进程 init() 之后
     // 新登记的账号若不在此回填，该旁路会对它静默失效（默认关，但那是回滚拉杆，不能悄悄少一半）。
@@ -492,6 +493,55 @@ export class PgAccountStore implements AccountStore {
       this.platformCache.set(accountId, normalizePlatformId(rows[0].platform));
       if (rows[0].created_at) this.createdAtCache.set(accountId, rows[0].created_at.getTime());
       await this.seedAutomationDefaults(accountId, platform, normalizePlatformId(rows[0].platform));
+      return;
+    }
+    // 行已存在 ⇒ **本进程未必见过它**。DEV/OL 共库：账号行可能是另一台云端插的，也可能是本进程
+    // init() 之后才出现的；两种情况下 DO NOTHING 都不回行，上面那段回填永远轮不到，而本进程的
+    // platformCache 里就此**永久缺这个账号**（只有别处恰好调过 getPlatform 才会偶然补上）。
+    // 后果不是报错：platformFor 是同步零 IO 口、缺键即「平台未知」，慢启动判定据此答「不在爬坡」
+    // → 客户端运行方式回落显示「普通」+ 设置冷启动的回读永远对不上，且冷启动配额一档不叠、
+    // 该号按满档跑（2026-08-04 实测：客户端中途从 OL 切到 dev 的 10 个 FB 号全中）。
+    // 回填只读库里的真值，**不写、也不拿 edge 声明的 platform 覆盖**，故上面那条「既有行不被
+    // 覆盖」的不变量原样成立；只补缺键、不动已有键，对已在缓存里的账号逐位无变化。
+    await this.hydrateCachesForExistingAccount(accountId);
+  }
+
+  /**
+   * 把已存在账号行的**库内真值**补进本进程的同步只读缓存（缺键才补）。
+   * 只读、永不抛：登记失败不该阻塞握手（调用方对 ensureAccount 的异常已按不阻塞处理）。
+   */
+  private async hydrateCachesForExistingAccount(accountId: string): Promise<void> {
+    if (
+      this.platformCache.has(accountId)
+      && this.createdAtCache.has(accountId)
+      && this.displayNameCache.has(accountId)
+    ) return;
+    const { rows } = await this.pool.query<{
+      platform: string | null;
+      created_at: Date | null;
+      label: string | null;
+      nickname: string | null;
+      operator_alias: string | null;
+    }>(
+      `SELECT platform, created_at, label, nickname, operator_alias
+         FROM accounts WHERE account_id = $1`,
+      [accountId],
+    );
+    const row = rows[0];
+    if (!row) return;
+    if (!this.displayNameCache.has(accountId)) {
+      this.displayNameCache.set(accountId, {
+        accountId,
+        operatorAlias: row.operator_alias ?? null,
+        nickname: row.nickname ?? null,
+        label: row.label ?? accountId,
+      });
+    }
+    if (!this.platformCache.has(accountId)) {
+      this.platformCache.set(accountId, normalizePlatformId(row.platform));
+    }
+    if (!this.createdAtCache.has(accountId) && row.created_at) {
+      this.createdAtCache.set(accountId, row.created_at.getTime());
     }
   }
 
