@@ -257,6 +257,27 @@ export type FacebookOperationPolicyEnvironmentSlowStartResolver = (input: {
   totalDays: number;
 }) => Promise<'active' | 'off' | 'graduated' | 'unknown'>;
 
+/**
+ * 环境锚点 → 慢启动态的**唯一实现**。每一个组装根（单体的 segA、派生 api 仓自己的 main）
+ * MUST 注入这一份，MUST NOT 各写一份、更 MUST NOT 干脆不注入。
+ *
+ * **不注入的后果不是报错**：`resolveEnvironmentSlowStart` 会退到账号投影那条路，而账号投影在
+ * api 进程要跨进程问自动化；问不到就诚实回 `slow_start_projection_unavailable`。那句诚实报告
+ * 说的是「接线漏了」，可它在客户端上与「这个账号确实查不到慢启动」完全同形 ——
+ * 表现就是凡跑过一次（因而绑了账号）的环境，运行方式回落显示底模式、设置冷启动的回读永远对不上。
+ *
+ * 锚点本身在 api 自己的库里，判定纯粹是算术：**这条路根本不该有跨进程依赖**。
+ */
+export function resolveEnvironmentSlowStartState(
+  input: { completedAt: number | null; since: number; totalDays: number },
+  now: number = Date.now(),
+): 'active' | 'off' | 'graduated' {
+  // 全局停用闸：无视所有环境级开关（raw SQL 改库不刷镜像时的秒级止血手段）。
+  if (process.env.AIDCP_SLOW_START_DISABLED === 'true') return 'off';
+  if (input.completedAt != null) return 'graduated';
+  return now - input.since >= input.totalDays * 86_400_000 ? 'graduated' : 'active';
+}
+
 interface OperationPolicyDbRow {
   env_key: string;
   base_mode: FacebookBaseOperationMode;

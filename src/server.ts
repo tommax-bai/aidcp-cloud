@@ -683,6 +683,7 @@ import { FacebookCommentConfigStore } from './config/facebook-comment-config-sto
 import { FacebookRuleModeStore } from './config/facebook-rule-mode-store.js';
 import {
   FacebookOperationPolicyStore,
+  resolveEnvironmentSlowStartState,
   type FacebookOperationPolicySlowStartResolver,
 } from './config/facebook-operation-policy-store.js';
 import { resolveFacebookSlowStartFromView } from './kernel/facebook-operation-policy-resolution.js';
@@ -2480,14 +2481,10 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
     ...(deploymentTarget ? { executionTarget: deploymentTarget } : {}),
     // segA runs in every service mode, including the split API process that
     // owns customer policy writes. Resolve the locked environment anchor here
-    // instead of relying on segC's account projection.
-    environmentSlowStartResolver: async ({ since, completedAt, totalDays }) => {
-      if (process.env.AIDCP_SLOW_START_DISABLED === 'true') return 'off';
-      if (completedAt != null) return 'graduated';
-      return Date.now() - since >= totalDays * 86_400_000
-        ? 'graduated'
-        : 'active';
-    },
+    // instead of relying on segC's account projection. The judgement itself is
+    // the store's single exported implementation -- the derived api repo writes
+    // its own main() and must inject that same one, never a second copy.
+    environmentSlowStartResolver: async (input) => resolveEnvironmentSlowStartState(input),
   });
   const facebookGroupCommentPolicyStore = deploymentTarget
     ? new FacebookGroupCommentPolicyStore({

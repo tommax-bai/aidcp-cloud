@@ -160,12 +160,23 @@ test('4a composition: exact-environment slow-start arbitration is wired in segA 
     'const facebookOperationPolicyStore = new FacebookOperationPolicyStore({',
     '\n  const facebookGroupCommentPolicyStore =',
   );
+  // 「注入了」仍在 segA 上守；「判定内容」已抬进存储的具名导出——派生 api 仓自己写 main，
+  // 必须注入**同一份**：各写一份漂开时的现形方式不是报错，而是某一侧永远答不出爬坡中。
   assert.match(
     operationPolicy,
-    /environmentSlowStartResolver:\s*async \(\{ since, completedAt, totalDays \}\)/,
+    /environmentSlowStartResolver:\s*async \(input\) => resolveEnvironmentSlowStartState\(input\)/,
   );
-  assert.match(operationPolicy, /AIDCP_SLOW_START_DISABLED/);
-  assert.match(operationPolicy, /totalDays \* 86_400_000/);
+  const storeSource = await readFile(
+    new URL('../../src/config/facebook-operation-policy-store.ts', import.meta.url),
+    'utf8',
+  );
+  const sharedJudgement = between(
+    storeSource,
+    'export function resolveEnvironmentSlowStartState(',
+    '\ninterface OperationPolicyDbRow',
+  );
+  assert.match(sharedJudgement, /AIDCP_SLOW_START_DISABLED/);
+  assert.match(sharedJudgement, /totalDays \* 86_400_000/);
 
   const automation = between(
     source,
