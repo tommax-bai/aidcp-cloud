@@ -1797,4 +1797,34 @@ describe('FacebookOperationPolicyStore', () => {
     assert.deepEqual(result, { ok: false, reason: 'unsupported_platform' });
     assert.equal(db.audits.length, 0);
   });
+
+  it('api-mode wiring (no account slow-start resolver) still reports ramping for a bound environment', async () => {
+    // getForEnv 是客户 HTTP 读写口的唯一取值处，而那个口跑在 api 进程：api 只跑 segA/segD，
+    // `bindSlowStartResolver` 在 segCAutomation、根本不执行。这里刻意**不注入** slowStartResolver
+    // 复现那个接线形态。若已绑账号的环境改回去问账号投影，它恒答 unknown ⇒ 凡跑过一次（因而绑了
+    // 账号）的环境，客户端「运行方式」一律回落显示底模式、且设置冷启动后回读永远对不上。
+    const db = database();
+    await db.store.init();
+    const seeded = await db.store.writeEnvironment(
+      'env-fb',
+      { expectedRevision: 0, mode: 'slow_start', requestId: 'api-mode-seed' },
+      'panel:alice',
+    );
+    assert.equal(seeded.ok, true);
+    assert.ok(db.environments.get('env-fb')?.accountId, '前置：该环境已绑账号（= 跑过至少一次）');
+
+    const apiModeStore = new FacebookOperationPolicyStore({
+      pool: db.pool,
+      schemaProber: readySchema(),
+      environmentResolver: () => ({ ok: true, envKey: 'env-fb' }),
+      environmentSlowStartResolver: async ({ completedAt }) => (completedAt == null ? 'active' : 'graduated'),
+    });
+    await apiModeStore.init();
+    const view = await apiModeStore.getForEnv('env-fb');
+    assert.ok(view);
+    assert.equal(view.binding.state, 'bound');
+    assert.equal(view.slowStart.state, 'active');
+    assert.equal(view.effectiveMode, 'slow_start');
+    assert.equal(view.blocker, null);
+  });
 });

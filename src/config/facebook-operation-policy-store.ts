@@ -1139,8 +1139,8 @@ export class FacebookOperationPolicyStore {
     return this.projectWithSlowStart(
       policy,
       surface,
-      environment.account_id,
-      environment.account_display_name,
+      key,
+      environment,
       'bound',
     );
   }
@@ -2764,14 +2764,34 @@ export class FacebookOperationPolicyStore {
     return slowStart.state === 'active' ? 'active' : 'inactive';
   }
 
+  /**
+   * 已绑账号环境的投影。慢启动**只从环境锚点解析**（`client_environments.slow_start_since`
+   * ＋ 毕业表），与本类写路径（writeEnvironment / writeSlowStartProgress 的前置判定）同一个事实源。
+   *
+   * **MUST NOT 改回问 segC 的账号投影**：本方法挂在 `getForEnv` 上，而 `getForEnv` 是客户 HTTP
+   * 读写口的唯一取值处，那个口跑在 **api 进程**里——`bindSlowStartResolver` 在 `segCAutomation`，
+   * api 模式根本不执行它。于是账号投影恒答 `unknown`，凡是**跑过一次因而绑了账号**的环境，
+   * 客户端「运行方式」一律回落显示底模式（冷启动看起来变成「普通」），且设置冷启动后的回读
+   * 永远对不上、报「回读与本次选择不一致」，重试无用。未绑账号的环境走上面那条环境锚点分支、
+   * 显示正常——「只有跑过的环境不对」正是这条边的形状（2026-08-04 dev 切分进程后实测）。
+   *
+   * 账号 id 仍然要带（绑定态与显示名），但它 MUST NOT 参与慢启动判定。
+   */
   private async projectWithSlowStart(
     policy: CachedPolicy,
     surface: CachedPrimaryBrowseSurface,
-    accountId: string,
-    accountDisplayName: string | null,
+    envKey: string,
+    environment: EnvironmentDbRow,
     bindingState: 'bound',
   ): Promise<FacebookOperationPolicyView> {
-    const slowStart = await this.resolveSlowStart(accountId);
+    const accountId = environment.account_id as string;
+    const accountDisplayName = environment.account_display_name;
+    const slowStart = await this.resolveEnvironmentSlowStart(
+      envKey,
+      accountId,
+      environment.slow_start_since,
+      environment.slow_start_completed_at,
+    );
     if (slowStart.state === 'unknown') {
       return this.project(policy, surface, {
         bindingState,
@@ -2779,7 +2799,9 @@ export class FacebookOperationPolicyStore {
         accountDisplayName,
         slowStart,
         effectiveMode: 'blocked',
-        blocker: slowStart.blocker,
+        // 具名不可用原因保持与账号投影同串：边缘对 blocker 有既有文案与降级路径，
+        // 换名等于把一个已知态变成未知态。
+        blocker: 'slow_start_projection_unavailable',
       });
     }
     return this.project(policy, surface, {
