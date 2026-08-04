@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
   serviceModeFromEnv,
+  RetiredServiceModeError,
   segmentsForMode,
   listenersForMode,
   ownsApiFeishuForMode,
@@ -15,6 +16,17 @@ import {
 
 const ALL_MODES: ServiceMode[] = ['monolith', 'content', 'automation', 'api', 'core'];
 
+/** 取回退役闸抛出的那个错误本体。**不抛就直接判失败** —— 「没抛」正是这道闸失效的样子。 */
+function captureRetired(raw: string): RetiredServiceModeError {
+  try {
+    serviceModeFromEnv({ AIDCP_SERVICE: raw });
+  } catch (caught) {
+    assert.ok(caught instanceof RetiredServiceModeError, `raw=${raw} 应抛 RetiredServiceModeError`);
+    return caught;
+  }
+  assert.fail(`raw=${raw} 未抛错 —— 退役闸已失效`);
+}
+
 describe('service-mode 纯选择器（Block② 2d：env → 段/监听计划，不起进程）', () => {
   it('AIDCP_SERVICE 未设 → monolith（默认安全底线）', () => {
     assert.equal(serviceModeFromEnv({}), 'monolith');
@@ -26,15 +38,41 @@ describe('service-mode 纯选择器（Block② 2d：env → 段/监听计划，�
     }
   });
 
-  it('精确匹配才切模式', () => {
-    assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'content' }), 'content');
-    assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'automation' }), 'automation');
-    assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'api' }), 'api');
-    assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'core' }), 'core');
+  // ── 退役闸（2026-08-04，change deploy-derived-services-to-dev task 8.0）──
+  // 这四条用例是这道闸**唯一**的存在证明：闸的正确行为是「抛错」，而抛错在
+  // 「进程没起来」这个维度上与「起来了但配错了」同形。没有喂违规输入的正向用例，
+  // 把 throw 删掉换回 return 一样全绿。
+  it('四个已退役的角色名 → fail-closed 抛错，MUST NOT 回落 monolith', () => {
+    for (const raw of ['content', 'automation', 'api', 'core']) {
+      assert.throws(
+        () => serviceModeFromEnv({ AIDCP_SERVICE: raw }),
+        (err: unknown) => {
+          assert.ok(err instanceof RetiredServiceModeError, `raw=${raw} 应抛具名错误`);
+          assert.equal(err.requestedMode, raw);
+          assert.ok(err.successor.length > 0, `raw=${raw} 必须说清该去哪`);
+          return true;
+        },
+        `raw=${raw}`,
+      );
+    }
   });
 
-  it('自定义 key 生效', () => {
-    assert.equal(serviceModeFromEnv({ MY_SVC: 'core' }, 'MY_SVC'), 'core');
+  it('退役错误必须具名指向去处，而不是只说「不支持」', () => {
+    // 折成一句「不支持」等于把「该去 aidcp-automation」这个唯一可执行信息丢掉。
+    const caught = captureRetired('automation');
+    assert.match(caught.message, /aidcp-automation/);
+    assert.match(caught.successor, /aidcp-automation/);
+
+    // core 没有对应派生仓，必须说清这一点，而不是指向一个不存在的仓。
+    assert.match(captureRetired('core').successor, /没有对应派生仓/);
+  });
+
+  it('自定义 key 生效：退役闸只看被指定的那个 key', () => {
+    assert.throws(
+      () => serviceModeFromEnv({ MY_SVC: 'core' }, 'MY_SVC'),
+      RetiredServiceModeError,
+    );
+    // 换了 key 之后 AIDCP_SERVICE 就不该再被读到 —— 不抛、回落 monolith。
     assert.equal(serviceModeFromEnv({ AIDCP_SERVICE: 'core' }, 'MY_SVC'), 'monolith');
   });
 

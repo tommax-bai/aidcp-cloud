@@ -1302,10 +1302,10 @@ interface CompositionContext {
 }
 
 async function main(): Promise<void> {
-  // Block② 2d 第一步：按 AIDCP_SERVICE 选运行模式（一套代码、多入口）。
-  //   - monolith（默认 / 未设 / 未识别值）：四段全跑、无新监听、网关默认 local —— 与拆分前逐字节等价。
-  //   - content：segA+segB，跳 segC/segD，额外起内部 HTTP 读 API 服务 curated-content 读端点。
-  //   - core：segA+segC+segD，跳 segB，curated 读侧经数据网关走 HTTP（需 env 指向 content 进程）。
+  // 按 AIDCP_SERVICE 选运行模式。**2026-08-04 起单体只剩 monolith 一种跑法**：
+  // 按角色切段的 content / automation / api / core 四个模式已退役、改由各自派生仓承担，
+  // 以那四个名字启动会在这一行 fail-closed 抛错（MUST NOT 静默回落成完整单体——
+  // 那会连带抢走自动化写者锁与边-云 8787）。详见 gateway/service-mode.ts。
   const mode: ServiceMode = serviceModeFromEnv();
   const segments = segmentsForMode(mode);
   const listeners = listenersForMode(mode);

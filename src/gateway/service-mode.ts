@@ -5,16 +5,21 @@
  * 起哪些监听」。本文件**只做纯映射**（env → 计划），不 import 任何业务模块、不起任何进程、
  * 无任何副作用 —— 因此可被单元测试直接 import 断言，不会拉起 `main()`、不碰网络/DB。
  *
- * ## 模式
+ * ## 模式（2026-08-04 起：单体只剩一种）
  *   - `monolith`（默认 / env 未设 / 未识别值）：四段全跑，无新监听，网关默认 local。
  *     **这是 dev 安全底线：AIDCP_SERVICE 未设时 main() 跑法与拆分前逐字节等价。**
- *   - `content`：跑 segA(基础)+segB(content)，跳过 segC/segD；segB 之后额外起一个
- *     内部 HTTP 读 API（承载 curated-content 读 + 发布状态读 + 发布生成触发端点）。
- *   - `automation`：跑 segA+segC，跳过 segB/segD；边缘 WS 8787 + 风控单写 + 编排 + 通知巡视。
- *     生成经 publishGenerationPort 远程触发 content；去胖后 segC 不再构造内容管线对象。
- *   - `api`：跑 segA+segD，跳过 segB/segC；面板 API + 客户鉴权 + 飞书 + 数据网关收口。
- *     content 读经网关 HTTP、风控读经 risk-read HTTP、风控写经命令 outbox、面板事件经 outbox 回放。
- *   - `core`：跑 segA+segC+segD，跳过 segB（= automation+api 合进一进程的过渡部署形态，保留）。
+ *     它同时是 **OL 的生产形态**与 **dev 的回滚路径**，两处都不设 `AIDCP_SERVICE`。
+ *   - ~~`content` / `automation` / `api` / `core`~~ —— **已退役**（change
+ *     `deploy-derived-services-to-dev` task 8.0），改由各自派生仓承担；以这四个名字启动单体
+ *     一律 fail-closed 抛错，MUST NOT 回落。理由与去处见 {@link RETIRED_ROLE_MODES}。
+ *
+ * ## 下面那几个 `xxxForMode` 分段函数为什么还留着
+ * 退役之后 {@link serviceModeFromEnv} 恒返回 `monolith`，故它们的非 monolith 分支在**运行时已不可达**。
+ * 保留是刻意的：一来这些分支里记着「哪个形态下谁有消费者」这类**判据本身**（尤其
+ * {@link panelEventTransportForMode} 与 {@link outboxRetentionForMode} 的那两张表），
+ * 删掉等于把结论连同理由一起丢；二来把它们连根拔起要同时改组合根十余处，
+ * 而单体正是 OL 生产 + dev 回滚路径 —— **那是一次独立的重构，不该搭在退役这一批里**。
+ * 已登记为后续清理项（见本 change task 8.0 的注记）。
  *
  * ## 为什么放在 src/gateway/（api 层）而非 composition
  * composition 白名单只含 `server.ts` / `index.ts`（组合根本体），不容纳新文件。本文件是**零依赖纯
@@ -24,6 +29,49 @@
 
 /** 运行模式。未识别值一律回落 `monolith`（安全底线）。 */
 export type ServiceMode = 'monolith' | 'content' | 'automation' | 'api' | 'core';
+
+/**
+ * **按角色切段的四个模式已于 2026-08-04 退役**（change `deploy-derived-services-to-dev` task 8.0）。
+ *
+ * 它们是「一套代码、多入口」那个过渡形态的产物：同一份 `src/` 靠 `AIDCP_SERVICE` 决定跑哪几段。
+ * 拆仓完成后，这几个角色改由**各自的派生仓**承担（各有自己的手写入口与启动守卫），
+ * 单体只剩 `monolith` 一种跑法 —— 它同时是 OL 的生产形态与 dev 的回滚路径。
+ *
+ * ## 为什么是「显式拒启动」而不是「回落 monolith」
+ * 回落等于：**有人要求按角色切段，进程却静默起成了完整单体** —— 连带抢走自动化写者锁、
+ * 占住边-云 8787。那是本仓的「静默假成功」红线：调用方拿到的是「起来了」，
+ * 实际起来的是另一个东西。故这四个名字一律 fail-closed，并具名指向该去的地方。
+ *
+ * 未识别的**其它**值仍回落 `monolith`（既有安全底线，本次不动）。
+ */
+const RETIRED_ROLE_MODES: ReadonlyMap<string, string> = new Map([
+  ['content', '派生仓 aidcp-content（入口 src/content-service-entry.ts）'],
+  ['automation', '派生仓 aidcp-automation（入口 src/server.ts，且硬要求 AIDCP_SERVICE=automation）'],
+  ['api', '派生仓 aidcp-api（入口 src/api-service-entry.ts，且硬要求 AIDCP_SERVICE=api）'],
+  [
+    'core',
+    'core 没有对应派生仓 —— 它是 automation+api 合进一个进程的过渡形态，已随拆仓一并取消；'
+      + '要这两个角色请分别起 aidcp-automation 与 aidcp-api',
+  ],
+]);
+
+/** 以已退役的角色模式启动单体时抛出。**具名、可执行**：直接说清该去哪个派生仓。 */
+export class RetiredServiceModeError extends Error {
+  // 具名字段而非只靠 instanceof：本仓的错误会跨进程/跨包传，`instanceof` 在那两条路径上恒 false。
+  override readonly name = 'RetiredServiceModeError';
+
+  constructor(
+    /** 请求的那个已退役模式名。 */
+    readonly requestedMode: string,
+    /** 该角色现在由谁承担。 */
+    readonly successor: string,
+  ) {
+    super(
+      `AIDCP_SERVICE=${requestedMode} 已退役：单体不再支持按角色切段启动，请改用 ${successor}。`
+        + '（本进程 fail-closed 退出，MUST NOT 回落成完整单体 —— 那会静默抢走自动化写者锁与边-云 8787。）',
+    );
+  }
+}
 
 /** 组合根四段的运行计划：给定模式，哪些段该跑。segA(基础)恒跑。 */
 export interface SegmentPlan {
@@ -52,18 +100,19 @@ export interface ListenerPlan {
 }
 
 /**
- * 从 env 解析运行模式。**默认 `monolith`**：仅当 `AIDCP_SERVICE` 精确等于 `content` / `core`
- * 才切换；未设、空串、任何其它值都回落 `monolith`（未识别值不得静默改变默认行为）。
+ * 从 env 解析运行模式。**单体只剩 `monolith` 一种跑法**：未设、空串、任何未识别值都回落
+ * `monolith`（既有安全底线）；而 `content` / `automation` / `api` / `core` 这四个**已退役**的
+ * 角色名 **MUST 抛 {@link RetiredServiceModeError}**，MUST NOT 回落 —— 理由见 {@link RETIRED_ROLE_MODES}。
  */
 export function serviceModeFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   key = 'AIDCP_SERVICE',
 ): ServiceMode {
   const raw = env[key];
-  if (raw === 'content') return 'content';
-  if (raw === 'automation') return 'automation';
-  if (raw === 'api') return 'api';
-  if (raw === 'core') return 'core';
+  if (typeof raw === 'string') {
+    const successor = RETIRED_ROLE_MODES.get(raw);
+    if (successor !== undefined) throw new RetiredServiceModeError(raw, successor);
+  }
   return 'monolith';
 }
 
