@@ -435,17 +435,30 @@ function cantor(left: bigint, right: bigint): bigint {
   return (sum * (sum + 1n)) / 2n + right;
 }
 
+/**
+ * 本属主**发得出**的同步读流全集。**唯一定义处**。
+ *
+ * 派生接口进程的组装根此前另手抄了一份同名清单去注册快照路由，两份漂了一条
+ * （`facebook_operation_policy` 只在这里、不在那份）。后果不是「少一条数据」：
+ * 自动化进程的消费方永远拿不到那条流 ⇒ 它的就绪度永远 not_ready ⇒ **业务入口永不放行 ⇒
+ * 边-云端口不监听、边缘一台都连不上**。dev 上实测过一次，外部现象是
+ * 「进程 active、内部口答得上，但没有任何边缘连得进来」。
+ *
+ * ⇒ 注册路由的那一侧 MUST 从这里取，别再抄第二份。
+ */
+export const API_OWNED_SYNC_READ_STREAMS = [
+  'account_persona',
+  'client_environment_automation',
+  'automation_account_projection',
+  'content_schedule',
+  'hot_lead_config',
+  'facebook_comment_config',
+  'facebook_group_join_automation_config',
+  'facebook_operation_policy',
+] as const satisfies readonly SyncReadStream[];
+
 function isApiOwnedStream(stream: SyncReadStream): stream is ApiOwnedStream {
-  return (
-    stream === 'account_persona' ||
-    stream === 'client_environment_automation' ||
-    stream === 'automation_account_projection' ||
-    stream === 'content_schedule' ||
-    stream === 'hot_lead_config' ||
-    stream === 'facebook_comment_config' ||
-    stream === 'facebook_group_join_automation_config' ||
-    stream === 'facebook_operation_policy'
-  );
+  return (API_OWNED_SYNC_READ_STREAMS as readonly SyncReadStream[]).includes(stream);
 }
 
 function actionMode(
