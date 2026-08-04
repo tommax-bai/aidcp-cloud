@@ -139,13 +139,21 @@ export class ReplyConfigScopeStore {
   async init(): Promise<void> {
     // 硬编码 schema 名**故意不收口**到 qualifiedObjectName()：api 层文件引 automation 层 schema-name.ts 会撞
     // AC-BOUND-06 冻结的 import 棘轮（详见 reply-config-store.ts init 同款说明）。等 §4.7 归属裁决后再收口。
+    //
+    // ## 这里**只查本属主的对象**（change deploy-derived-services-to-dev 实测修正）
+    //
+    // 本存储绑的是 **api 属主池**，而它此前还顺带断言 `interaction_reply_jobs.config_scope_id`
+    // 这一列 —— 那张表的属主是 **automation**（`boundaries/table-ownership.json`）。
+    // 三域同库时这条 join 恒成立；物理拆库之后，api 库里根本没有那张表 ⇒ 断言**永远为假**，
+    // 而它的表现不是「少校验一项」，是**进程启动直接失败**（派生接口进程实测：
+    // `interaction_scope_config_schema_missing_run_0048`，退出码 1、systemd 反复重启）。
+    // 单体侧看不见是因为它把这次 init 包在 try/catch 里、失败即把互动域标成「未启用」。
+    //
+    // 「那一列在不在」仍然要有人查，但**该由 automation 侧对自己的库查**——本进程既然不连那个库，
+    // 就没有立场声称它对或不对。已登记 backlog（簇 60），别在这里补回来。
     const { rows } = await this.pool.query<{ present: boolean }>(
       `SELECT to_regclass('public.interaction_reply_config_scopes') IS NOT NULL
-          AND to_regclass('public.interaction_reply_scope_versions') IS NOT NULL
-          AND EXISTS (
-            SELECT 1 FROM information_schema.columns
-             WHERE table_schema='public' AND table_name='interaction_reply_jobs' AND column_name='config_scope_id'
-          ) AS present`,
+          AND to_regclass('public.interaction_reply_scope_versions') IS NOT NULL AS present`,
     );
     if (rows[0]?.present !== true) throw new Error('interaction_scope_config_schema_missing_run_0048');
   }
