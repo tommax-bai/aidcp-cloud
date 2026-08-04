@@ -761,21 +761,31 @@ test('Facebook operation/group policy APIs report unavailable authorities as 503
   }
 });
 
-test('环境管理 API 展示资产/账号摘要并按环境写慢启动，旧删除路径保持不可用', async () => {
+test('环境管理 API 保留删除历史但归属候选过滤已删除环境，并按环境写慢启动', async () => {
   const writes: Array<{ envKey: string; enabled: boolean; now: number }> = [];
   const clientUsers = {
     async listAllEnvironments() {
-      return [{
-        envKey: 'profile-1', environmentName: '环境一', label: '环境一', platform: 'xiaohongshu',
-        slowStart: { enabled: true, since: 123 },
-        assignees: [{ userId: 'u1', name: '客户甲' }], assigneeCount: 1, cleanup: null,
-        account: { accountId: 'default', label: 'default', nickname: null, operatorAlias: null,
-          displayName: 'default', platform: 'xiaohongshu', groupLabel: '一组', riskStatus: 'normal',
-          riskQuotaLevel: 'normal' },
-        bindingObservedAt: 10, installation: null,
-        lifecycle: { state: 'active', requestId: null, requestedBy: null, requestedAt: null,
-          resultKind: null, resultError: null, resultAt: null, deletedAt: null },
-      }];
+      return [
+        {
+          envKey: 'profile-1', environmentName: '环境一', label: '环境一', platform: 'xiaohongshu',
+          slowStart: { enabled: true, since: 123 },
+          assignees: [{ userId: 'u1', name: '客户甲' }], assigneeCount: 1, cleanup: null,
+          account: { accountId: 'default', label: 'default', nickname: null, operatorAlias: null,
+            displayName: 'default', platform: 'xiaohongshu', groupLabel: '一组', riskStatus: 'normal',
+            riskQuotaLevel: 'normal' },
+          bindingObservedAt: 10, installation: null,
+          lifecycle: { state: 'active', requestId: null, requestedBy: null, requestedAt: null,
+            resultKind: null, resultError: null, resultAt: null, deletedAt: null },
+        },
+        {
+          envKey: 'profile-deleted', environmentName: '已删除环境', label: '已删除环境', platform: 'facebook',
+          slowStart: { enabled: false, since: null },
+          assignees: [], assigneeCount: 0, cleanup: null, account: null,
+          bindingObservedAt: null, installation: null,
+          lifecycle: { state: 'deleted', requestId: 'delete-1', requestedBy: 'alice', requestedAt: 100,
+            resultKind: 'deleted', resultError: null, resultAt: 200, deletedAt: 200 },
+        },
+      ];
     },
     async environmentSummariesByAccount() {
       return { default: { activeCount: 1, deletingCount: 0, onlineCount: 0 } };
@@ -831,16 +841,29 @@ test('环境管理 API 展示资产/账号摘要并按环境写慢启动，旧�
     });
     const { token } = await login.json() as { token: string };
     const auth = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    const ownershipCandidates = await fetch(`${base}/api/client-environments`, { headers: auth });
+    assert.equal(ownershipCandidates.status, 200);
+    assert.deepEqual(
+      ((await ownershipCandidates.json()) as { environments: Array<{ envKey: string }> })
+        .environments.map((environment) => environment.envKey),
+      ['profile-1'],
+    );
     const environments = await fetch(`${base}/api/environments`, { headers: auth });
     assert.equal(environments.status, 200);
     const environmentBody = (await environments.json()) as {
       environments: Array<{
+        envKey: string;
         environmentName: string;
         slowStart: { enabled: boolean; since: number | null; globallyDisabled: boolean };
         facebookRuleMode: unknown;
         commentApproval: unknown;
+        lifecycle: { state: string };
       }>;
     };
+    assert.deepEqual(
+      environmentBody.environments.map((environment) => [environment.envKey, environment.lifecycle.state]),
+      [['profile-1', 'active'], ['profile-deleted', 'deleted']],
+    );
     assert.equal(environmentBody.environments[0]?.environmentName, '环境一');
     assert.deepEqual(environmentBody.environments[0]?.slowStart, {
       enabled: true, since: 123, globallyDisabled: true,

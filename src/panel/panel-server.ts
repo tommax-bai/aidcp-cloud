@@ -877,14 +877,17 @@ function createRequestHandler(
       return;
     }
 
-    // 管理侧全局环境注册表（change client-user-env-picker）：受**内部** JWT。跨用户聚合读，
+    // 管理侧端用户环境归属候选（change client-user-env-picker）：受**内部** JWT。跨用户聚合读，
     // **只在此处消费、绝不接客户鉴权服务**（守 N2：客户可达读仍只有吃 userId 的 scoped 方法）。
+    // deleted 历史只属于下方环境资产读口，不得重新进入可分配候选池。
     if (method === 'GET' && url === '/api/client-environments') {
       if (!deps.clientUsers) {
         sendJson(res, 503, { error: 'client_users_unavailable' });
         return;
       }
-      sendJson(res, 200, { environments: await listPanelEnvironments() });
+      const environments = (await listPanelEnvironments())
+        .filter((environment) => environment.lifecycle.state !== 'deleted');
+      sendJson(res, 200, { environments });
       return;
     }
 
