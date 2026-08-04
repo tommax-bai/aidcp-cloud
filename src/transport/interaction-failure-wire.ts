@@ -154,6 +154,40 @@ export function translateInteractionFailure(
 }
 
 /**
+ * 属主进程里互动能力**没组装**时用的占位实现：每个方法都具名抛。
+ *
+ * ## 为什么不是「干脆别注册」
+ * 不注册的现形方式是 404，而 404 在调用侧只能被读成「对面漏注册了一族路由」——
+ * 那是本仓 2026-08-04 一天之内撞了两次的形状，排查方向完全不同。
+ * 「本进程的互动能力因为 X 没组装」是一个**有具体原因的事实**，它该被说出来，
+ * 而不是伪装成一条不存在的路由。
+ *
+ * 标不可重试：互动能力没组装是装配 / schema 问题，重试一万次也不会变。
+ *
+ * 入参用路由表而不是硬写方法名：路由表已被 `satisfies` 钉死「与端口方法一一对应」，
+ * 从它派生就不会漏——手抄的第二份名单在端口新增方法时不会有任何东西提醒你。
+ */
+export function unavailableInteractionPort<T extends object>(
+  routes: Readonly<Record<string, string>>,
+  reason: string,
+): T {
+  const stub: Record<string, () => never> = {};
+  for (const method of Object.keys(routes)) {
+    stub[method] = (): never => {
+      throw new InteractionError(
+        'INTERACTION_UPSTREAM_UNAVAILABLE',
+        `互动能力在属主进程未组装（${reason}）：${method} 无法执行。`
+          + '这不是「对面漏注册路由」，也不是「边缘不在线」。',
+        503,
+        false,
+        { reason: `interaction_support_unavailable:${reason}` },
+      );
+    };
+  }
+  return stub as unknown as T;
+}
+
+/**
  * 发一次互动域的内部 HTTP 调用。**零重试**（理由见文件头）。
  */
 export async function callInteraction<T>(
