@@ -1965,6 +1965,10 @@ export class FacebookOperationPolicyStore {
           input.reason ?? null,
         ],
       );
+      // 主浏览面也是同步读那条流的载荷字段（surfaceRevision / primarySurface），
+      // 所以改它 MUST 与本域其他写口一样在同事务里推版本。**漏掉不是延迟生效，是整条流卡死**：
+      // 游标只看这个镜像版本，版本不动而载荷变了 ⇒ 同游标不同摘要 ⇒ 消费方永久拒收。
+      await this.mirrorVersionBumper?.bumpInTx(client, 'facebook_operation_policy');
       await client.query('COMMIT');
       committed = true;
       this.surfaceCache.set(key, next);

@@ -2199,6 +2199,15 @@ export class ClientUserStore {
           ],
         );
         await this.mirrorVersionBumper?.bumpInTx(client, 'content_schedule');
+        // 本事务刚往 `facebook_operation_policy` 与 `facebook_primary_browse_surface_policy`
+        // 各插了一行 —— **同步读那条流的载荷正是从这两张表算出来的**，所以这里必须一起推版本。
+        //
+        // 漏掉它的后果不是「配置晚一点生效」，而是**整条流从此卡死**：游标只看这个镜像版本，
+        // 版本不动而载荷多了一个环境 ⇒ 同游标不同摘要 ⇒ 消费方按设计整条拒收，
+        // 而游标不会自己再动，于是拒收是永久的。2026-08-04 dev 实测代价：
+        // 一个客户端建了个新 Facebook 环境，之后单体重启**直接启动失败**
+        // （启动期那次 apply 是 fail-closed 的），整台 dev 起不来。
+        await this.mirrorVersionBumper?.bumpInTx(client, 'facebook_operation_policy');
         provisionedFacebookOperationPolicy = {
           primarySurface: resolvedFacebookPrimarySurface,
           surfaceRevision: 1,
