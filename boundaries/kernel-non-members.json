@@ -107,6 +107,7 @@
       "src/kernel/default-chat-provider.ts",
       "src/kernel/account-pause-port.ts",
       "src/kernel/soul-codec.ts",
+      "src/kernel/persona-soul-parse.ts",
       "src/kernel/publish-draft-contract.ts",
       "src/kernel/concept-pool.ts",
       "src/kernel/feishu-card-contract.ts",

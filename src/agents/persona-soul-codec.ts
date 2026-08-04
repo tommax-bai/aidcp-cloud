@@ -6,129 +6,18 @@
  * emits identity, interests, writing_language and behavior_guidelines, so the
  * content owner validates and serializes exactly that closed subset instead of
  * reaching back into the API implementation.
+ *
+ * 解析那一半**不在本文件实现**：它被同步读的 `account_persona` 流共用，
+ * 而那条流的消费方按「同游标必同载荷」判定 —— 两个进程各留一份解析实现时，
+ * 同一份人设文本会解出两种结构、摘要不同、整条快照被拒收。故解析收口在
+ * `src/kernel/persona-soul-parse.ts`，本文件按引用取用，只保留内容段自己的序列化。
  */
-import { LIKE_AFFINITY_VALUES } from '../kernel/like-affinity.js';
+import {
+  parsePersonaSoulValue,
+  parsePersonaSoulYaml,
+} from '../kernel/persona-soul-parse.js';
 import type { SoulCodec } from '../kernel/soul-codec.js';
-import type {
-  BehaviorGuidelines,
-  LikeAffinity,
-  Soul,
-  SoulIdentity,
-  SoulInterests,
-  WritingLanguage,
-} from '../kernel/soul-types.js';
-import { parseYaml, type YamlValue } from '../kernel/yaml.js';
-
-const WRITING_LANGUAGES: readonly WritingLanguage[] = ['zh-CN', 'en', 'vi'];
-
-function isRecord(value: YamlValue): value is Record<string, YamlValue> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function requireRecord(
-  value: YamlValue,
-  path: string,
-): Record<string, YamlValue> {
-  if (!isRecord(value)) throw new Error(`${path} 必须是对象`);
-  return value;
-}
-
-function requireString(
-  object: Record<string, YamlValue>,
-  key: string,
-  path: string,
-): string {
-  const value = object[key];
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`${path}.${key} 必须是非空字符串`);
-  }
-  return value;
-}
-
-function requireStringArray(
-  object: Record<string, YamlValue>,
-  key: string,
-  path: string,
-): string[] {
-  const value = object[key];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
-    throw new Error(`${path}.${key} 必须是字符串数组`);
-  }
-  return value as string[];
-}
-
-function parseIdentity(value: YamlValue): SoulIdentity {
-  const identity = requireRecord(value, 'soul.identity');
-  return {
-    name: requireString(identity, 'name', 'soul.identity'),
-    role: requireString(identity, 'role', 'soul.identity'),
-    background: requireString(identity, 'background', 'soul.identity'),
-    tone: requireString(identity, 'tone', 'soul.identity'),
-  };
-}
-
-function parseInterests(value: YamlValue): SoulInterests {
-  const interests = requireRecord(value, 'soul.interests');
-  return {
-    primary: requireStringArray(interests, 'primary', 'soul.interests'),
-    secondary: requireStringArray(interests, 'secondary', 'soul.interests'),
-    seed_keywords: requireStringArray(interests, 'seed_keywords', 'soul.interests'),
-  };
-}
-
-function parseBehaviorGuidelines(value: YamlValue): BehaviorGuidelines {
-  const behavior = requireRecord(value, 'soul.behavior_guidelines');
-  const rawAffinity = behavior.like_affinity;
-  let likeAffinity: LikeAffinity | undefined;
-  if (rawAffinity !== undefined) {
-    if (
-      typeof rawAffinity !== 'string'
-      || !LIKE_AFFINITY_VALUES.includes(rawAffinity as LikeAffinity)
-    ) {
-      throw new Error(`soul.behavior_guidelines.like_affinity 非法: ${String(rawAffinity)}`);
-    }
-    likeAffinity = rawAffinity as LikeAffinity;
-  }
-  return {
-    style: requireString(behavior, 'style', 'soul.behavior_guidelines'),
-    privacy: requireString(behavior, 'privacy', 'soul.behavior_guidelines'),
-    collection_principle: requireString(
-      behavior,
-      'collection_principle',
-      'soul.behavior_guidelines',
-    ),
-    like_principle: requireString(
-      behavior,
-      'like_principle',
-      'soul.behavior_guidelines',
-    ),
-    ...(likeAffinity ? { like_affinity: likeAffinity } : {}),
-  };
-}
-
-function parsePersonaSoul(value: YamlValue): Soul {
-  const root = requireRecord(value, 'soul');
-  const writingLanguage = root.writing_language;
-  if (
-    writingLanguage !== undefined
-    && (
-      typeof writingLanguage !== 'string'
-      || !WRITING_LANGUAGES.includes(writingLanguage as WritingLanguage)
-    )
-  ) {
-    throw new Error('soul.writing_language 只允许 zh-CN/en/vi');
-  }
-  return {
-    identity: parseIdentity(root.identity),
-    interests: parseInterests(root.interests),
-    ...(writingLanguage
-      ? { writing_language: writingLanguage as WritingLanguage }
-      : {}),
-    ...(root.behavior_guidelines
-      ? { behavior_guidelines: parseBehaviorGuidelines(root.behavior_guidelines) }
-      : {}),
-  };
-}
+import type { Soul } from '../kernel/soul-types.js';
 
 function quoteScalar(value: string): string {
   const escaped = value
@@ -186,7 +75,7 @@ function serializePersonaSoul(soul: Soul): string {
 }
 
 export const PERSONA_SOUL_CODEC: SoulCodec = {
-  parseValue: parsePersonaSoul,
+  parseValue: parsePersonaSoulValue,
   serialize: serializePersonaSoul,
-  parseYaml: (text) => parsePersonaSoul(parseYaml(text)),
+  parseYaml: parsePersonaSoulYaml,
 };

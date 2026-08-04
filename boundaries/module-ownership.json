@@ -1440,6 +1440,11 @@
     "note": "【待定稿裁决】P4-1 新写：人设通道的三个窄端口（PersonaWritePort / PersonaGeneratorPort / AccountPersonaPort）+ 传输层两个上限常量 + PersonaGenerateInput/Outcome（从 src/agents/persona-generator.ts 整段抬入，原位等值再导出）。端口按**调用方视角**收窄：实现侧成功分支上的 view / summary 字段刻意不进 kernel（那是面板目录视图闭包，整搬会把面板契约拖进共享层），结构可赋值方向上多余字段无害。唯一 import 是 kernel→kernel 的 soul-types.js。四条准入正则实跑零命中。消除 import 豁免 3 条（handler.ts -> panel/types.ts、handler.ts -> agents/persona-generator.ts、handler.ts -> config/account-persona-service.ts）+ 1 条（config/account-persona-service.ts -> agents/persona-generator.ts）。请求回写 §4.7 见 docpatch RK-P4-1"
   },
   {
+    "path": "src/kernel/persona-soul-parse.ts",
+    "layer": "kernel",
+    "note": "【待定稿裁决】change deploy-derived-services-to-dev 从 src/agents/persona-soul-codec.ts（content）析出的**纯解析那一段**：人设闭子集（identity / interests / writing_language / behavior_guidelines）的结构校验，外加同步读 account_persona 流的取值口（解析 + JSON 归一 + 失败回 null 三件事收在一处）。**必须进 kernel 而不是留在任一属主**：同一份人设文本被两个进程各解一遍时，同游标发出两种载荷摘要，消费方按「同游标必同载荷」整条拒收，而两侧各自的行为测试全绿（dev 切流演练实测，游标 902）。序列化那一半留在 content（PersonaGenerator 专用形态），残壳按引用取用本文件。只 import kernel 的 like-affinity / soul-types / sync-read-snapshot（仅类型）/ yaml；四条准入正则实跑零命中，零 SQL/HTTP/LLM/模块级活状态。**通用装载器 src/soul/loader.ts 仍进不了 kernel**（模块级 new Set 单例 + 引 api 段写作语言判定），本文件不覆盖它那三个 api 段自管字段。请求回写 §4.7 见 docpatch RK-PSP"
+  },
+  {
     "path": "src/kernel/pg-config.ts",
     "layer": "kernel",
     "note": "§4.7 kernel 花名册成员（27 行）。change decouple-store-schema-pgconfig-cluster 从 src/cache/pg-config.ts git mv 到 src/kernel/（物理位置归位 kernel 目录，字节等价，唯一 import 是 import type pg，无 SQL / 无业务依赖 / 无进程内活状态）。消费方改为直接从 kernel import DEFAULT_PG_CONFIG，消除经 pg-anchor-cache（automation）再导出的跨边界边。请求回写 §4.7 见 docpatch"

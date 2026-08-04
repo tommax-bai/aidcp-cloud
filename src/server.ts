@@ -155,6 +155,7 @@ import type { BaseRole } from './agents/base-role.js';
 import { CommentSearchTermGenerator, type RoleLlmLike } from './agents/comment-search-term-generator.js';
 import { PersonaGenerator } from './agents/persona-generator.js';
 import { PERSONA_SOUL_CODEC } from './agents/persona-soul-codec.js';
+import { parseSyncReadPersonaSoul } from './kernel/persona-soul-parse.js';
 import { PersonaAutoFillService } from './agents/persona-auto-fill.js';
 import { PersonaGeneratorCommandReceiver } from './llm/persona-generator-command-receiver.js';
 import { EdgeResumeCommandReceiver } from './comm/edge-resume-command-receiver.js';
@@ -1557,15 +1558,10 @@ function createApiSyncReadSource(
   return createApiSyncReadSnapshotSource({
     executionTarget,
     pool: ctx.apiPool,
-    parseSoul: (personaText) => {
-      try {
-        return JSON.parse(
-          JSON.stringify(PERSONA_SOUL_CODEC.parseYaml(personaText)),
-        );
-      } catch {
-        return null;
-      }
-    },
+    // **按引用取用同一份**，MUST NOT 在此就地重写一遍「解析 + 归一 + 失败回 null」：
+    // 这三件事的任何一件与派生接口服务那一侧不一致，都会让同一个游标发出两种载荷摘要，
+    // 消费方按设计整条拒收，而两侧各自的行为测试都是绿的。
+    parseSoul: parseSyncReadPersonaSoul,
     // 取用口**在快照期才解**（不是装配期）：句柄由本段稍后赋值，装配期读必然 undefined。
     // 缺了就响亮抛 —— 回落空表等于告诉自动化进程「这台机器没有任何 Facebook 环境」，
     // 于是每个 FB 账号都被一个错误原因永久拦住。
