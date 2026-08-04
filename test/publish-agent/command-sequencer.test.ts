@@ -1,6 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { CommandSequencer } from '../../src/publish-agent/command-sequencer.js';
+import {
+  CommandSequencer,
+  classifyPreSubmitReason,
+  STRUCTURAL_PRE_SUBMIT_REASONS,
+  RECOVERABLE_PRE_SUBMIT_REASONS,
+} from '../../src/publish-agent/command-sequencer.js';
 import type { PublishSequenceInput } from '../../src/publish-agent/command-sequencer.js';
 import type { PublishCommandPayload, PublishCommandResultPayload } from '../../src/comm/protocol.js';
 
@@ -170,7 +175,9 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
       : okFor(cmd), 50, now);
     const result = await seq.executePublishSequence(input({ metadata }));
     assert.equal(result.ok, false);
-    assert.equal(result.outcome, 'failed_before_submit');
+    // 边缘回执说「这一步没做成」，没说「重来也做不成」⇒ 可恢复档（提交指令从未推送、零平台副作用）。
+    // 本用例守的仍是「绝不退化成立即发布」：submit_publish 一条都不许下发。
+    assert.equal(result.outcome, 'deferred_before_submit');
     assert.equal(result.failedAt?.kind, 'set_schedule');
     assert.equal(pushed.some((cmd) => cmd.kind === 'submit_publish'), false);
   });
@@ -209,7 +216,8 @@ describe('AC-CMD CommandSequencer（云端编排驱动）', () => {
       };
       const { seq, pushed } = makeSequencer(okFor, 50, now);
       const result = await seq.executePublishSequence(input({ metadata }));
-      assert.equal(result.outcome, 'failed_before_submit');
+      // 排期时间来自冻结草稿、上下界是常量 ⇒ 重来必然同样结果 ⇒ 结构性档。
+      assert.equal(result.outcome, 'structural_before_submit');
       assert.equal(result.failedAt?.error, 'schedule_time_out_of_range');
       assert.equal(pushed.length, 0);
     }
@@ -369,7 +377,7 @@ describe('AC-PREEMPT 被抢占分档（change lease-strict-preemption 批 C：�
     ...over,
   });
 
-  it('AC-PREEMPT-1 submit_publish 回 ok:false + submitDispatched → submitted_unconfirmed（6.2/HOLE-2：不烧 failed_before_submit）', async () => {
+  it('AC-PREEMPT-1 submit_publish 回 ok:false + submitDispatched → submitted_unconfirmed（6.2/HOLE-2：不烧成提交前失败）', async () => {
     // 提交按下已派发但确认失败（post_validate_failed）：帖子可能已发出 → 已提交待确认终态、绝不重投。
     const { seq } = makeSequencer((cmd) =>
       cmd.kind === 'submit_publish' ? fail(cmd, { error: 'post_validate_failed', submitDispatched: true }) : okFor(cmd),
@@ -379,7 +387,7 @@ describe('AC-PREEMPT 被抢占分档（change lease-strict-preemption 批 C：�
     assert.equal(r.outcome, 'submitted_unconfirmed');
   });
 
-  it('AC-PREEMPT-2 核心步回 ok:false + error=preempted_by_task → preempted（独立终局、绝不并入 failed_before_submit）', async () => {
+  it('AC-PREEMPT-2 核心步回 ok:false + error=preempted_by_task → preempted（独立终局、绝不并入提交前失败档）', async () => {
     const { seq } = makeSequencer((cmd) =>
       cmd.kind === 'fill_field' ? fail(cmd, { error: 'preempted_by_task' }) : okFor(cmd),
     );
@@ -422,12 +430,15 @@ describe('AC-PREEMPT 被抢占分档（change lease-strict-preemption 批 C：�
     assert.equal(r.outcome, 'submitted_unconfirmed', 'yield_timeout MUST NOT 归 preempted（那会自动重投双发）');
   });
 
-  it('AC-PREEMPT-6 真实业务失败仍 failed_before_submit（no_target 非抢占，零回归）', async () => {
+  it('AC-PREEMPT-6 真实业务失败非抢占（no_target 走提交前分档，绝不并入 preempted）', async () => {
     const { seq } = makeSequencer((cmd) =>
       cmd.kind === 'fill_field' ? fail(cmd, { error: 'no_target' }) : okFor(cmd),
     );
     const r = await seq.executePublishSequence(input({ tags: [] }));
-    assert.equal(r.outcome, 'failed_before_submit');
+    assert.notEqual(r.outcome, 'preempted', '业务失败绝不冒充抢占');
+    // change defer-transient-publish-predispatch-failures：定位落空是页面姿态类失败，
+    // 重新加载后重来有可能不同 ⇒ 可恢复档（此前被一律烧成不可逆 failed）。
+    assert.equal(r.outcome, 'deferred_before_submit');
   });
 
   it('AC-PREEMPT-7 onFirstSideEffect 恰在 submit_publish 下发前触发一次（HOLE-13「已开始」下移）', async () => {
@@ -435,5 +446,153 @@ describe('AC-PREEMPT 被抢占分档（change lease-strict-preemption 批 C：�
     const { seq } = makeSequencer((cmd) => okFor(cmd));
     await seq.executePublishSequence(input({ tags: [], onFirstSideEffect: () => { fired++; } }));
     assert.equal(fired, 1);
+  });
+});
+
+// ── change defer-transient-publish-predispatch-failures：提交前失败分档 ──────────────
+describe('AC-PREDISPATCH 提交前失败分档（零副作用可恢复 / 零副作用结构性 / 页面状态未知）', () => {
+  const fail = (cmd: PublishCommandPayload, over: Partial<PublishCommandResultPayload>): PublishCommandResultPayload => ({
+    recordId: cmd.recordId,
+    seq: cmd.seq,
+    kind: cmd.kind,
+    ok: false,
+    ...over,
+  });
+
+  // ── 1.3 / stop-or-continue §7 唯一可机械化的那条断言 ──────────────────────────
+  it('AC-PREDISPATCH-1 结构性集合与可恢复集合互斥，且对原因全集穷尽（无兜底桶、无重叠）', () => {
+    const structural = STRUCTURAL_PRE_SUBMIT_REASONS as readonly string[];
+    const recoverable = RECOVERABLE_PRE_SUBMIT_REASONS as readonly string[];
+
+    // 互斥：同一个原因不能同时是「重来必然一样」和「重来可能不同」。
+    assert.deepEqual(structural.filter((r) => recoverable.includes(r)), [], '两张表 MUST 互斥');
+
+    // 每个具名成员都必须被判到它自己那一档（表与判据不许各说各话）。
+    for (const reason of structural) {
+      assert.equal(classifyPreSubmitReason(reason).disposition, 'structural', reason);
+      assert.equal(classifyPreSubmitReason(reason).recognized, true, reason);
+    }
+    for (const reason of recoverable) {
+      assert.equal(classifyPreSubmitReason(reason).disposition, 'recoverable', reason);
+      assert.equal(classifyPreSubmitReason(reason).recognized, true, reason);
+    }
+
+    // 穷尽：**任意**字符串都得到一个具名答案，且表外的一律落可恢复侧（证明不了重来必然相同）。
+    for (const outside of ['', '   ', 'brand_new_edge_reason', 'unknown', 'null', '未知原因']) {
+      const verdict = classifyPreSubmitReason(outside);
+      assert.equal(verdict.disposition, 'recoverable', `表外原因 MUST NOT 落结构性: ${outside}`);
+      assert.equal(verdict.recognized, false, `表外原因 MUST 标未识别: ${outside}`);
+    }
+    for (const nullish of [null, undefined]) {
+      assert.equal(classifyPreSubmitReason(nullish).disposition, 'recoverable');
+    }
+  });
+
+  it('AC-PREDISPATCH-2 「码: 明细」形态按码判，明细不参与分档（content_too_long: 800>500）', () => {
+    const verdict = classifyPreSubmitReason('content_too_long: 800>500');
+    assert.equal(verdict.disposition, 'structural');
+    assert.equal(verdict.code, 'content_too_long');
+  });
+
+  // ── 3.3 未识别原因不得被折进已有失败值 ────────────────────────────────────────
+  it('AC-PREDISPATCH-3 未识别的提交前原因 → 可恢复档，且日志具名标注 + 带原始串', async () => {
+    const logs: string[] = [];
+    const pushed: PublishCommandPayload[] = [];
+    let seq!: CommandSequencer;
+    const pusher = {
+      pushToEdges(env: unknown): number {
+        const cmd = (env as { payload: PublishCommandPayload }).payload;
+        pushed.push(cmd);
+        seq.onResult(
+          cmd.kind === 'select_mode'
+            ? fail(cmd, { error: 'hydration_race_v9' })
+            : okFor(cmd),
+          'env',
+        );
+        return 1;
+      },
+    };
+    seq = new CommandSequencer({
+      pusher,
+      clock: () => 0,
+      timeoutMs: 50,
+      logger: { log() {}, warn: (m: unknown) => logs.push(String(m)), error: (m: unknown) => logs.push(String(m)) },
+    });
+
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    assert.equal(r.outcome, 'deferred_before_submit', '没认出来 MUST NOT 折进终局失败值');
+    const named = logs.find((l) => l.includes('未识别提交前原因'));
+    assert.ok(named, '未识别 MUST 具名说出来，否则跨层传下去就成了终局判决');
+    assert.ok(named!.includes('hydration_race_v9'), '原始原因串 MUST 带进日志');
+    assert.equal(pushed.some((c) => c.kind === 'submit_publish'), false, '提交指令一条都没推送');
+  });
+
+  // ── 3.4 回归：跨过提交点（或证明不了没跨过）的处置逐字未变 ──────────────────────
+  it('AC-PREDISPATCH-4 前三档优先级未被削弱：submitDispatched / yield_timeout / 抢占 一字不动', async () => {
+    // ① submitDispatched 压过一切（含抢占原因）→ 已提交待确认，绝不重投。
+    const dispatched = makeSequencer((cmd) =>
+      cmd.kind === 'submit_publish' ? fail(cmd, { error: 'preempted_by_task', submitDispatched: true }) : okFor(cmd),
+    );
+    assert.equal((await dispatched.seq.executePublishSequence(input({ tags: [] }))).outcome, 'submitted_unconfirmed');
+
+    // ② yield_timeout（控制面故障，卡死写者可能仍会按下提交）→ 已提交待确认，绝不进重投通道。
+    const stuck = makeSequencer(() => null);
+    const running = stuck.seq.executePublishSequence(input({ tags: [] }));
+    stuck.seq.preemptTask('task-publish-1', 'yield_timeout');
+    assert.equal((await running).outcome, 'submitted_unconfirmed', 'yield_timeout MUST NOT 变成任何可恢复档');
+
+    // ③ 抢占原因仍归 preempted（走抢占自己的预算，不占提交前恢复预算）。
+    const preempted = makeSequencer((cmd) =>
+      cmd.kind === 'fill_field' ? fail(cmd, { error: 'task_lease_mismatch' }) : okFor(cmd),
+    );
+    assert.equal((await preempted.seq.executePublishSequence(input({ tags: [] }))).outcome, 'preempted');
+  });
+
+  it('AC-PREDISPATCH-5 提交指令已推送但回执未达 → 页面状态未知，MUST NOT 判可恢复（防重投双发）', async () => {
+    // 提交命令推出去了，边缘再没回话（超时）。云端**证明不了**那一下没按下去。
+    const { seq, pushed } = makeSequencer((cmd) => (cmd.kind === 'submit_publish' ? null : okFor(cmd)), 20);
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    assert.equal(pushed.some((c) => c.kind === 'submit_publish'), true, '提交指令确实推送过');
+    assert.equal(r.outcome, 'failed_page_state_unknown');
+    assert.notEqual(r.outcome, 'deferred_before_submit', '这一格重投就是双发');
+    assert.equal(seq.pendingCount, 0);
+  });
+
+  it('AC-PREDISPATCH-6 提交步回 ok:false 且未带 submitDispatched → 仍判页面状态未知（不拿沉默当证据）', async () => {
+    const { seq } = makeSequencer((cmd) =>
+      cmd.kind === 'submit_publish' ? fail(cmd, { error: 'no_target' }) : okFor(cmd),
+    );
+    const r = await seq.executePublishSequence(input({ tags: [] }));
+    // 同一个 no_target：出现在 fill_field 上是可恢复（AC-PREEMPT-6），出现在**提交步**上就不是——
+    // 判据不是原因串，是「提交指令有没有推出去」。
+    assert.equal(r.outcome, 'failed_page_state_unknown');
+  });
+
+  it('AC-PREDISPATCH-7 提交指令从未推送的失败 → 可恢复档（导航/就绪/探测类，零平台副作用）', async () => {
+    for (const reason of ['no_target', 'element_not_found', 'page_not_ready', 'navigation_failed']) {
+      const { seq, pushed } = makeSequencer((cmd) =>
+        cmd.kind === 'navigate_entry' ? fail(cmd, { error: reason }) : okFor(cmd),
+      );
+      const r = await seq.executePublishSequence(input({ tags: [] }));
+      assert.equal(r.outcome, 'deferred_before_submit', reason);
+      assert.equal(pushed.some((c) => c.kind === 'submit_publish'), false, `${reason}: 提交指令零推送`);
+    }
+  });
+
+  it('AC-PREDISPATCH-8 结构性档的四个入口都落 structural_before_submit（与判据表逐条对齐）', async () => {
+    // 未授权：序列截止于提交前，重来仍生成不出提交指令。
+    const notApproved = makeSequencer(okFor);
+    const a = await notApproved.seq.executePublishSequence(input({ tags: [], approvedByUser: false }));
+    assert.equal(a.outcome, 'structural_before_submit');
+    assert.equal(a.failedAt?.error, 'not_approved');
+    assert.equal(classifyPreSubmitReason(a.failedAt!.error).disposition, 'structural', '入口用的原因串 MUST 在结构性表内');
+
+    // 配图全失败：K=0 无有效图文帖，重来面对同一批 URL。
+    const noImages = makeSequencer((cmd) =>
+      cmd.kind === 'upload_image' ? fail(cmd, { error: 'image_not_attached' }) : okFor(cmd),
+    );
+    const b = await noImages.seq.executePublishSequence(input({ tags: [], images: ['x'] }));
+    assert.equal(b.outcome, 'structural_before_submit');
+    assert.equal(classifyPreSubmitReason(b.failedAt!.error).disposition, 'structural');
   });
 });

@@ -45,6 +45,8 @@ function harness(opts: {
   isEdgePaused?: (edgeId: string) => boolean;
   /** 7.2：同稿连续被抢占达此阈值停自动重投（缺省 3）。 */
   preemptRedispatchMax?: number;
+  /** change defer-transient-publish-predispatch-failures：提交前零副作用失败的重投上限（缺省 2）。 */
+  deferredRedispatchMax?: number;
   executionTarget?: 'dev' | 'ol' | null;
   /** change publish-approval-signal-to-database：授权查询不可读（超时 / 接口不可达）。 */
   approvalUnreadable?: boolean;
@@ -122,6 +124,7 @@ function harness(opts: {
     executionTarget: opts.executionTarget,
     isEdgePaused: opts.isEdgePaused,
     preemptRedispatchMax: opts.preemptRedispatchMax,
+    deferredRedispatchMax: opts.deferredRedispatchMax,
     scheduleRedispatch: (fn) => { redispatched.push(fn); },
     readApproval: async () => {
       if (opts.approvalUnreadable) throw new Error('approval_lookup_503');
@@ -804,5 +807,196 @@ describe('Facebook 素材记账没做成时必须留下可数的痕迹', () => {
       '「没有素材保留」是一次正常返回，把它也弄响只会制造噪声',
     );
     assert.equal(logs.filter((line) => line.includes('facebook_media_settle_dropped')).length, 0);
+  });
+});
+
+/**
+ * change defer-transient-publish-predispatch-failures —— 提交前失败按分档处置。
+ *
+ * 治的是这个：一个**已被序列器证明零派发**的失败，此前被当成「页面状态未知」——写 failed 终态、
+ * 烧掉授权签名、计入熔断。熔断阈值默认 2，于是同账号连撞两次网络抖动就停掉整批已批准草稿，
+ * 必须运营重新逐条点批准才能清除。**一次抖动的代价是重审一批稿。**
+ */
+describe('PublishDispatcher · 提交前失败分档', () => {
+  /** 记录 FB 素材三个写各被调了几次（归还 vs 隔离是这一档最关键的分叉）。 */
+  function mediaSpy() {
+    const calls: string[] = [];
+    return {
+      calls,
+      port: {
+        releaseReservation: async () => { calls.push('release'); return true; },
+        markUsed: async () => { calls.push('markUsed'); return true; },
+        quarantine: async () => { calls.push('quarantine'); return true; },
+      },
+    };
+  }
+
+  const facebookDraft = () =>
+    makeDraft({
+      platform: 'facebook',
+      metadata: { facebookMedia: { setId: 42, reservationId: 'rsv-1' } } as any,
+    } as Partial<DispatchDraft>);
+
+  const deferred = (error = 'no_target') => ({
+    ok: false,
+    outcome: 'deferred_before_submit',
+    attachedCount: 0,
+    failedAt: { seq: 1, kind: 'select_mode', error },
+  });
+
+  // ── 3.1 ────────────────────────────────────────────────────────────────────
+  test('提交前抖动 → 保持待审 + 授权保留 + 素材归还 + 熔断计数不变 + 触发重投', async () => {
+    const media = mediaSpy();
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      draft: facebookDraft(),
+      facebookPublishMedia: media.port,
+      seqResult: deferred(),
+    });
+    await h.dispatcher.dispatch(7);
+
+    assert.equal(h.events.includes('seq'), true, '序列确实跑过（抖动发生在提交点之前）');
+    assert.deepEqual(h.statusUpdates, [], '绝不写任何终态：草稿留 pending_approval（failed 不可逆）');
+    assert.deepEqual(h.voided, [], '授权签名保留（不 void）→ 重投可再过 AC-PUB');
+    assert.deepEqual(
+      h.progress.map((p) => p.action),
+      ['dispatching', 'pending_dispatch'],
+      '授权退回待下发，MUST NOT markConsumed —— 消耗掉就得运营重新批准',
+    );
+    assert.deepEqual(media.calls, ['release'], '素材归还而非隔离（这一档零平台副作用）');
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), false);
+    assert.equal(h.notices.some((n) => n.kind === 'breaker_open'), false, '零副作用档 MUST NOT 计熔断');
+    assert.equal(h.redispatched.length, 1, '事件驱动重投一次');
+  });
+
+  test('同账号连撞多次提交前抖动仍不熔断（原来两次就停掉整批已批草稿）', async () => {
+    const h = harness({ approved: true, edgeId: 'edge-A', seqResult: deferred(), deferredRedispatchMax: 99 });
+    for (let i = 0; i < 4; i++) await h.dispatcher.dispatch(7);
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), false, '熔断守的是连环烧稿，这一档根本不烧稿');
+    assert.deepEqual(h.statusUpdates, [], '四次抖动、零终态');
+  });
+
+  // ── 3.2 ────────────────────────────────────────────────────────────────────
+  test('重投耗尽 → failed 终态，且说的是「重试 N 次未成」而不是「做不到」', async () => {
+    const logs: string[] = [];
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      seqResult: deferred('page_not_ready'),
+      deferredRedispatchMax: 2,
+      captureLogs: logs,
+    });
+    // 三次下发 = 首投 + 2 次重投；第三次时预算已用尽。
+    await h.dispatcher.dispatch(7);
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates, [], '预算未尽前绝不落终态');
+    assert.equal(h.redispatched.length, 2, '上限 2 ⇒ 恰好调度 2 次重投');
+
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' }, '耗尽后才落 failed');
+    assert.equal(h.redispatched.length, 2, '耗尽后不再调度重投');
+    const notice = h.notices.find((n) => n.kind === 'predispatch_retry_exhausted');
+    assert.ok(notice, '耗尽 MUST 如实通知运营');
+    assert.equal(notice!.attempts, 2, '通知带上真实次数，文案才写得出「重试 2 次未成」');
+    assert.equal(h.notices.some((n) => n.kind === 'breaker_open'), false, '耗尽落 failed 仍不计熔断（零平台副作用）');
+    const said = logs.find((l) => l.includes('重试 2 次未成'));
+    assert.ok(said, '日志 MUST 说「重试 N 次未成」——「做不到」会让运营以为重批也没用');
+  });
+
+  test('恢复预算只由本档消费：被抢占重投 MUST NOT 递减它', async () => {
+    // 先被抢占两次（走抢占自己的预算），再连吃两次提交前抖动——后者必须还有满额预算。
+    let mode: 'preempted' | 'deferred' = 'preempted';
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      preemptRedispatchMax: 99,
+      deferredRedispatchMax: 2,
+      get seqResult() {
+        return mode === 'preempted'
+          ? { ok: false, outcome: 'preempted', attachedCount: 0, failedAt: { seq: 3, kind: 'fill_field', error: 'preempted_by_task' } }
+          : deferred();
+      },
+    } as any);
+    await h.dispatcher.dispatch(7);
+    await h.dispatcher.dispatch(7);
+    mode = 'deferred';
+    await h.dispatcher.dispatch(7);
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates, [], '抢占吃掉的是抢占预算；恢复预算此时才用掉 2 次里的 2 次，尚未越界');
+  });
+
+  // ── 结构性档 ────────────────────────────────────────────────────────────────
+  test('结构性提交前失败 → failed 终态、不重投、素材归还，但同样不计熔断', async () => {
+    const media = mediaSpy();
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      draft: facebookDraft(),
+      facebookPublishMedia: media.port,
+      seqResult: {
+        ok: false,
+        outcome: 'structural_before_submit',
+        attachedCount: 0,
+        failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' },
+      },
+    });
+    await h.dispatcher.dispatch(7);
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' }, '重来必然一样 ⇒ 终态');
+    assert.equal(h.redispatched.length, 0, '结构性档 MUST NOT 自动重投');
+    assert.deepEqual(media.calls, ['release', 'release'], '零平台副作用 ⇒ 素材归还');
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), false, '零副作用档不计熔断');
+    assert.deepEqual(h.progress.map((p) => p.action).filter((a) => a === 'consumed').length, 2, '终态 ⇒ 授权消耗');
+  });
+
+  // ── 3.4 回归：跨过提交点的处置逐字未变 ────────────────────────────────────────
+  test('回归：submitted_unconfirmed 处置一字不动——转 submitted、绝不重投、素材隔离', async () => {
+    const media = mediaSpy();
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      draft: facebookDraft(),
+      facebookPublishMedia: media.port,
+      seqResult: { ok: true, outcome: 'submitted_unconfirmed', attachedCount: 1 },
+    });
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'submitted' });
+    assert.equal(h.redispatched.length, 0, '跨过提交点 MUST NOT 进任何重投通道（会双发）');
+    assert.deepEqual(media.calls, ['quarantine'], '可能已上墙 ⇒ 隔离，MUST NOT 归还给别的稿');
+    assert.equal(h.postWrite, undefined, '没抓到 postId 绝不伪造');
+    assert.deepEqual(h.progress.map((p) => p.action), ['dispatching', 'consumed'], '授权已用掉，绝不留在待下发');
+  });
+
+  test('回归：页面状态未知（提交已推送、证明不了没按下）仍 failed + 计熔断 + 绝不重投', async () => {
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      seqResult: {
+        ok: false,
+        outcome: 'failed_page_state_unknown',
+        attachedCount: 0,
+        failedAt: { seq: 6, kind: 'submit_publish', error: 'publish.command timeout' },
+      },
+    });
+    await h.dispatcher.dispatch(7);
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' });
+    assert.equal(h.redispatched.length, 0, '证明不了没跨过提交点 ⇒ 绝不自动重投');
+    assert.equal(h.dispatcher.isBreakerOpen('acct-A'), true, '只有这一档计熔断（连环烧稿的那一档）');
+  });
+
+  test('未识别的 outcome → 按最保守的一档处置，且 MUST 当场喊出来（不静默漂移）', async () => {
+    const logs: string[] = [];
+    const h = harness({
+      approved: true,
+      edgeId: 'edge-A',
+      captureLogs: logs,
+      seqResult: { ok: false, outcome: 'some_future_outcome', attachedCount: 0, failedAt: { seq: 2, kind: 'x', error: 'y' } },
+    });
+    await h.dispatcher.dispatch(7);
+    assert.deepEqual(h.statusUpdates.at(-1), { id: 7, status: 'failed' }, '不认识就按不重投处置（落错这一侧只会更保守）');
+    assert.equal(h.redispatched.length, 0);
+    assert.ok(logs.some((l) => l.includes('未识别的序列终局')), '沉默地更保守也是漂移，MUST 喊出来');
   });
 });

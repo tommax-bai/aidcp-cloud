@@ -6740,7 +6740,14 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
               ? `⏸️ 发布暂缓：账号「${name}」正处于验证码/风控暂停，${ref} 暂不下发、仍待审（授权保留）。验证码解除后会自动重投，无需重新批准。`
               : notice.kind === 'preempted_exhausted'
               ? `⚠️ 发布反复被打断：账号「${name}」${ref} 连续多次被更高优先任务抢占，已暂停自动重投、仍保持待审（未烧稿）。稍后手动重新批准即可再次尝试。`
-              : `🟢 发布熔断解除：账号「${name}」人工批准确认，恢复下发已批队列。`;
+              : notice.kind === 'predispatch_retry_exhausted'
+              // 文案红线（stop-or-continue Q2）：说「重试 N 次未成」，绝不说「做不到」——
+              // 这一档全程零平台副作用，每次失败都可能只是一次抖动，重批仍有机会。
+              ? `⚠️ 发布未成：账号「${name}」${ref} 在提交动作之前连续失败，已自动重试 ${notice.attempts ?? '多'} 次仍未成（全程未在平台留下任何痕迹）。已标记失败，可重新批准再试一次。`
+              : notice.kind === 'breaker_cleared'
+              ? `🟢 发布熔断解除：账号「${name}」人工批准确认，恢复下发已批队列。`
+              // 未识别的通知类型：宁可发一条难看的、也绝不套用上一条的文案冒充（那等于把新事件说成熔断解除）。
+              : `ℹ️ 发布下发事件（未识别类型 ${notice.kind}）：账号「${name}」${ref}。请检查通知映射是否漏接。`;
         await deliverStructuredNotification({
           kind: 'operational_text',
           input: { route: 'account', accountId: notice.accountId, text },
@@ -6758,6 +6765,9 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     // 抄一遍反而多一处会漂的地方（属主换实现时这三行要跟着改，漏改不报错）。
     facebookPublishMedia: facebookPublishMediaPort,
     breakerThreshold: Number(process.env.AIDCP_PUBLISH_BREAKER_THRESHOLD ?? 2),
+    // 提交前零副作用失败的自动重投上限（change defer-transient-publish-predispatch-failures）。
+    // 设 1 = 首次即耗尽 = 回到本 change 之前的「一次抖动即落 failed」，秒级回滚旋钮。
+    deferredRedispatchMax: Number(process.env.AIDCP_PUBLISH_DEFER_REDISPATCH_MAX ?? 2),
     logger: console,
   });
   ctx.scheduledPublishReconciler = new ScheduledPublishReconciler({

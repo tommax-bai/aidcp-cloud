@@ -43,7 +43,7 @@ export function isPreemptionReason(reason: string | null | undefined): reason is
 /**
  * 7.5 活跃租约中断的**结构化**载体：edge-task-lease-client 收到活跃租约的抢占释放时，用它 reject
  * 命令编排的在飞 publish.command，使 catch 能**按类型**判抢占（而非脆弱的 message 子串匹配）、
- * 归入独立 `preempted` outcome 而非 `failed_before_submit`。
+ * 归入独立 `preempted` outcome 而非任何提交前失败档。
  * `submitDispatched` 透传「提交是否已派发」：若中断时提交已派发，MUST 走「已提交待确认」、绝不重投。
  */
 export class CommandPreemptedError extends Error {

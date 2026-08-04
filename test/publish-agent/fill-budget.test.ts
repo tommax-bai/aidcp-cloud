@@ -93,7 +93,8 @@ describe('正文填写单步预算（FB 逐字输入 vs 固定单步墙）', () 
     const result = await seq.executePublishSequence(input({ platform: 'facebook', content: tooLong, images: ['a'] }));
 
     assert.equal(result.ok, false);
-    assert.equal(result.outcome, 'failed_before_submit');
+    // 字数比较与页面无关 ⇒ 重来必然同样结果 ⇒ 结构性档：failed 终态、绝不自动重投。
+    assert.equal(result.outcome, 'structural_before_submit');
     assert.match(String(result.failedAt?.error), /^content_too_long/);
     assert.equal(pushed.length, 0, '越界内容绝不进浏览器');
   });

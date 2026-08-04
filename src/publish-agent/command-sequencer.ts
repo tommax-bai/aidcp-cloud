@@ -73,15 +73,34 @@ export interface PublishSequenceInput {
 export interface PublishSequenceResult {
   ok: boolean;
   /**
-   * 终局五态：
+   * 终局六态。**每个值都自带处置语义，下发段 MUST 逐值分支**——名字说的必须就是它接住的那一类
+   * （change defer-transient-publish-predispatch-failures：旧的 `failed_before_submit` 同时接住了
+   * 「重来必然一样」与「重来有可能不同」两类，下发段拿到后无从分辨，于是一次网络抖动被烧成不可逆 failed）：
    * - `published_confirmed`：已提交且抓到 postId。
    * - `submitted_unconfirmed`：提交动作已派发但未拿到确认（含提交后被抢占）——页面态 submitted、绝不重投。
    * - `scheduled_pending`：平台已接受 XHS 原生定时任务，等待目标时刻后对账；不计发布次数。
-   * - `failed_before_submit`：提交前真失败——可安全烧待审重投。
-   * - `preempted`：提交前被严格高档位抢占（零平台副作用）——**保持待审、不写 failed、不计熔断、事件驱动重投**，
-   *   下发段（publish-dispatcher）MUST 单独分支处置，绝不并入 failed_before_submit（否则被抢占的稿被烧成不可逆 failed）。
+   * - `preempted`：提交前被严格高档位抢占（零平台副作用）——保持待审、不写 failed、不计熔断、事件驱动重投。
+   * - `structural_before_submit`：**零副作用 · 结构性**。提交命令从未下发，且重新加载页面原样重来
+   *   **必然同样结果**（正文超长 / 配图全败 / 未授权 / 排期非法）→ failed 终态、MUST NOT 自动重投、
+   *   回执写清「为什么重来也不会变」；**不计熔断**（它不是边缘系统性故障，停整批 drain 救不了任何一稿）。
+   * - `deferred_before_submit`：**零副作用 · 可恢复**。提交命令从未下发，且**无法证明重来结果必然相同**
+   *   （导航抖动 / 页面未就绪 / 探测超时 / 回执未达 / 未识别的提交前原因）→ 保持待审、保留授权、
+   *   素材归还、**不计熔断**、有界自动重投；重投耗尽才落 failed 且文案写「重试 N 次未成」。
+   * - `failed_page_state_unknown`：**页面状态未知**。提交命令**已推送**但拿不到「确实没按下」的证据
+   *   （回执超时 / 边缘断连 / 提交步回 ok:false 而未带 submitDispatched）→ failed 终态、MUST NOT 自动重投
+   *   （重跑可能双发）、**计入熔断**。这一档是旧 `else` 分支注释里写的那一类，现在名字与实情一致。
+   *
+   * 红线：`submitted_unconfirmed` / `scheduled_pending`（跨过提交点）与 `failed_page_state_unknown`
+   * （证明不了没跨过）三者一律 MUST NOT 进任何自愈 / 重投通道。
    */
-  outcome: 'published_confirmed' | 'submitted_unconfirmed' | 'scheduled_pending' | 'failed_before_submit' | 'preempted';
+  outcome:
+    | 'published_confirmed'
+    | 'submitted_unconfirmed'
+    | 'scheduled_pending'
+    | 'preempted'
+    | 'structural_before_submit'
+    | 'deferred_before_submit'
+    | 'failed_page_state_unknown';
   /** 成功时的真实平台 postId（来自 capture_postId 回报） */
   postId?: string;
   /** 成功时的小红书详情页分享 URL（带 xsec_token，来自 capture_postId 回报；边缘抓不到则 undefined） */
@@ -98,6 +117,74 @@ export interface PublishSequenceResult {
   attachedCount: number;
   /** 失败位置（seq=-1 表示未授权而未生成提交指令） */
   failedAt?: { seq: number; kind: PublishCommandKind; error: string };
+}
+
+/**
+ * **提交前失败的结构性原因全集**（change defer-transient-publish-predispatch-failures）。
+ *
+ * 准入判据只有一条（`docs/stop-or-continue.md` Q2）：**同一步在页面重新加载后原样重来，
+ * 有没有可能得到不同结果？** 只有「不可能」才配进这张表。逐条理由：
+ * - `not_approved`：序列按 AC-PUB 第 2 闸截止于提交前，压根没生成提交指令——重来仍然没有。
+ * - `all_images_failed`：图文帖被「先传图」门控，K=0 即无有效帖；这一档由本序列器在**全部上传都已尝试完**
+ *   之后才判，重来面对的是同一批 URL。
+ * - `content_too_long`：正文字数超出逐字输入预算上限，是算术比较，与页面无关。
+ * - 三个 `ScheduleValidationError`：排期时间来自冻结草稿、上下界是常量；重来只会更晚，不会变合法。
+ *
+ * **这张表 MUST 只收「本序列器自己判出来的」原因**：边缘回执里的原因一律不进——那些描述的是页面此刻的
+ * 姿态（找不到控件 / 没就绪 / 探测超时），而姿态恰恰是重来可能不同的那一类。
+ */
+export const STRUCTURAL_PRE_SUBMIT_REASONS = [
+  'not_approved',
+  'all_images_failed',
+  'content_too_long',
+  'schedule_platform_unsupported',
+  'schedule_time_required',
+  'schedule_time_out_of_range',
+] as const;
+
+export type StructuralPreSubmitReason = (typeof STRUCTURAL_PRE_SUBMIT_REASONS)[number];
+
+/**
+ * 已具名的**可恢复**提交前原因（诊断/文档用；**不是判据白名单**）。
+ *
+ * 判据是补集而非白名单——白名单会让「没认出来的新原因」落回终局，正是本 change 要消灭的兜底桶
+ * （`docs/stop-or-continue.md` §4 跨层义务）。这张表只回答「我们已经见过哪些」，供运维对照。
+ * - `command_result_unavailable`：回执未达（超时 / 边缘断连 / 送达 0）。**仅在提交指令尚未推送时**才归此档。
+ * - `no_target` / `element_not_found`：定位落空——DOM-first 三道闸下的典型间歇失败。
+ * - `page_not_ready` / `navigation_failed`：页面姿态类。
+ */
+export const RECOVERABLE_PRE_SUBMIT_REASONS = [
+  'command_result_unavailable',
+  'no_target',
+  'element_not_found',
+  'page_not_ready',
+  'navigation_failed',
+] as const;
+
+/** 提交前失败的处置分档。`unrecognized` 只影响**说法**（日志具名 + 带原始串），不影响处置。 */
+export interface PreSubmitDisposition {
+  disposition: 'structural' | 'recoverable';
+  /** 该原因是否落在两张具名表内。false ⇒ 日志 MUST 标「未识别提交前原因」并带上原始串。 */
+  recognized: boolean;
+  /** 归一后的原因码（去掉 `code: detail` 里的 detail）；空串表示调用方没给原因。 */
+  code: string;
+}
+
+/**
+ * 提交前原因 → 处置分档。**全函数、无兜底桶**：任意字符串都得到一个具名答案。
+ *
+ * 「其余全归可恢复」不是兜底桶而是**判据本身**：结构性要求「能证明重来必然相同」，证明不了就不是结构性。
+ * 未识别的原因照样按可恢复处置，但 `recognized:false` 强制调用方把原始串说出来。
+ */
+export function classifyPreSubmitReason(reason: string | null | undefined): PreSubmitDisposition {
+  const raw = (reason ?? '').trim();
+  // `content_too_long: 800>500` 这类「码 + 冒号 + 明细」的形态按码判；明细只进日志。
+  const code = raw.includes(':') ? raw.slice(0, raw.indexOf(':')).trim() : raw;
+  if ((STRUCTURAL_PRE_SUBMIT_REASONS as readonly string[]).includes(code)) {
+    return { disposition: 'structural', recognized: true, code };
+  }
+  const recognized = (RECOVERABLE_PRE_SUBMIT_REASONS as readonly string[]).includes(code);
+  return { disposition: 'recoverable', recognized, code };
 }
 
 export interface CommandSequencerDeps {
@@ -204,9 +291,10 @@ export class CommandSequencer {
     if (scheduled) {
       const scheduleError = validatePublishSchedule(platform, 'scheduled', input.metadata?.publishTime ?? null, this.clock());
       if (scheduleError) {
+        // 排期时间来自冻结草稿、上下界是常量 ⇒ 重来必然同样结果（STRUCTURAL_PRE_SUBMIT_REASONS）。
         return {
           ok: false,
-          outcome: 'failed_before_submit',
+          outcome: 'structural_before_submit',
           attachedCount: 0,
           failedAt: { seq: -1, kind: 'set_schedule', error: scheduleError },
         };
@@ -225,7 +313,8 @@ export class CommandSequencer {
       );
       return {
         ok: false,
-        outcome: 'failed_before_submit',
+        // 字数比较与页面无关 ⇒ 重来必然同样结果（STRUCTURAL_PRE_SUBMIT_REASONS）。
+        outcome: 'structural_before_submit',
         attachedCount: 0,
         failedAt: { seq: -1, kind: 'fill_field', error: `content_too_long: ${chars}>${limit}` },
       };
@@ -238,6 +327,13 @@ export class CommandSequencer {
     let postUrl: string | undefined;
     let scheduledPlatformId: string | undefined;
     let submitted = false;
+    /**
+     * 提交指令**是否已推送到边缘**（而非「是否已确认按下」）。这两件事必须分开记：
+     * `submitted` 只有拿到 ok:true 才为真，所以「提交已推送、回执超时/断连」时它仍是 false——
+     * 光凭它判「提交点没跨过」是**证明不了**的（`docs/stop-or-continue.md` Q0），而按可恢复自动重投
+     * 就会双发。推送前置一格即为「零副作用」的唯一硬证据。
+     */
+    let submitPushed = false;
     let attachedCount = 0;
     // 已尝试上传张数（成功+失败）。upload 均在 fill 前且连续；据此判「全部上传已尝试完」，
     // 避免在 upload 阶段之前（navigate/select_mode，此时 attachedCount 天然为 0）误触发 K===0 早停。
@@ -255,7 +351,8 @@ export class CommandSequencer {
       // MUST 诚实 failed，绝不进 fill_field 假装纯文字继续（红线：不假成功）。uploadsAttempted<total 时仍在上传阶段前/中，不误触发。
       if (imagesRequested && uploadsAttempted >= totalImages && attachedCount === 0 && cmd.kind !== 'upload_image' && cmd.kind !== 'set_cover') {
         this.logger.warn(`[CommandSequencer] 全部配图失败（K=0）、图文帖无有效内容 → failed（触发于 seq=${cmd.seq}，归因末条 upload seq=${lastUploadSeq}）`);
-        return { ok: false, outcome: 'failed_before_submit', attachedCount: 0, failedAt: { seq: lastUploadSeq, kind: 'upload_image', error: 'all_images_failed' } };
+        // 全部上传都已尝试完仍 K=0 ⇒ 重来面对同一批 URL、同一道门控（STRUCTURAL_PRE_SUBMIT_REASONS）。
+        return { ok: false, outcome: 'structural_before_submit', attachedCount: 0, failedAt: { seq: lastUploadSeq, kind: 'upload_image', error: 'all_images_failed' } };
       }
       // 无成功配图 → 不下发依赖首图的封面（红线：绝不在配图全失败后下发 set_cover）。
       if (cmd.kind === 'set_cover' && attachedCount === 0) {
@@ -265,7 +362,10 @@ export class CommandSequencer {
       // 记录末条 upload seq（发送前即记；供上方 K===0 早停诚实归因）。
       if (cmd.kind === 'upload_image') lastUploadSeq = cmd.seq;
       // 7.1 HOLE-13：提交点击（唯一的不可逆平台副作用）下发前置「已开始」标志，让此前的零副作用意外失败可回待审。
-      if (cmd.kind === 'submit_publish') input.onFirstSideEffect?.();
+      if (cmd.kind === 'submit_publish') {
+        submitPushed = true;
+        input.onFirstSideEffect?.();
+      }
 
       let result: PublishCommandResultPayload;
       try {
@@ -294,7 +394,17 @@ export class CommandSequencer {
         const preempted = err instanceof CommandPreemptedError ? err : null;
         return {
           ok: false,
-          outcome: this.classifyFailureOutcome(scheduled, submitted, preempted?.submitDispatched ?? false, preempted?.reason),
+          outcome: this.classifyFailureOutcome(scheduled, submitted, preempted?.submitDispatched ?? false, {
+            reason: preempted?.reason,
+            // 非抢占异常＝回执根本没到（超时 / 断连 / 送达 0）。原因串是本模块自造的诊断文案（带 seq/kind），
+            // 拿它做分档判据只会得到「未识别」；此处按渠道给出具名可恢复原因，原文仍留在 failedAt.error。
+            preSubmitReason: preempted ? undefined : 'command_result_unavailable',
+            submitPushed,
+            detail: error,
+            seq: cmd.seq,
+            kind: cmd.kind,
+            recordId: input.recordId,
+          }),
           attachedCount,
           failedAt: { seq: cmd.seq, kind: cmd.kind, error },
         };
@@ -317,10 +427,18 @@ export class CommandSequencer {
           continue;
         }
         // 红线：核心步失败即停，后续不下发、不假成功。分档见 classifyFailureOutcome
-        // （提交已派发→submitted_unconfirmed；抢占原因→preempted；余→failed_before_submit）。
+        // （提交已派发→submitted_unconfirmed；抢占原因→preempted；提交前再按结构性/可恢复分流）。
         return {
           ok: false,
-          outcome: this.classifyFailureOutcome(scheduled, submitted, result.submitDispatched === true, result.error),
+          outcome: this.classifyFailureOutcome(scheduled, submitted, result.submitDispatched === true, {
+            reason: result.error,
+            preSubmitReason: result.error,
+            submitPushed,
+            detail: result.error,
+            seq: cmd.seq,
+            kind: cmd.kind,
+            recordId: input.recordId,
+          }),
           attachedCount,
           failedAt: { seq: cmd.seq, kind: cmd.kind, error: result.error ?? 'unknown' },
         };
@@ -339,9 +457,9 @@ export class CommandSequencer {
       if (cmd.kind === 'capture_scheduled') scheduledPlatformId = result.value;
     }
 
-    // 未授权 → 序列不含 submit → 未真正发布（红线：不假成功）。
+    // 未授权 → 序列不含 submit → 未真正发布（红线：不假成功）。重来仍然生成不出提交指令 ⇒ 结构性。
     if (!submitted) {
-      return { ok: false, outcome: 'failed_before_submit', attachedCount, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
+      return { ok: false, outcome: 'structural_before_submit', attachedCount, failedAt: { seq: -1, kind: 'submit_publish', error: 'not_approved' } };
     }
     if (scheduled) {
       return {
@@ -362,25 +480,62 @@ export class CommandSequencer {
   }
 
   /**
-   * 提交前失败分档（change lease-strict-preemption 批 C）。三态优先级，顺序不可乱：
+   * 失败分档（change lease-strict-preemption 批 C；change defer-transient-publish-predispatch-failures 补后两档）。
+   * 优先级顺序不可乱，**前三档逐字不动**：
    * ① 提交动作已派发（前序 submit 已 ok:true，或本条回执带 submitDispatched）→ `submitted_unconfirmed`：
    *    帖子/评论可能已发出，绝不重投（防双发）。**压过抢占判据**——提交后被抢占仍是「已提交待确认」。
-   * ② 抢占类原因（preempted_by_task / task_lease_mismatch / …）→ `preempted`：提交前零副作用、保持待审、事件驱动重投。
-   * ③ 其余提交前失败 → `failed_before_submit`：可安全烧待审重投（content_too_long / all_images_failed / not_approved 等）。
+   * ② `yield_timeout`（写者收到取消仍不停手＝控制面故障）→ `submitted_unconfirmed`：页面状态未知、绝不重投。
+   * ③ 抢占类原因（preempted_by_task / task_lease_mismatch / …）→ `preempted`：提交前零副作用、保持待审、事件驱动重投。
+   * ④ 提交指令**已推送**却走到这里 → `failed_page_state_unknown`：拿不到「确实没按下」的证据（回执超时 /
+   *    断连 / 提交步 ok:false 未带 submitDispatched）。Q0 的答案是「证明不了没跨过」⇒ 与已提交同等对待、
+   *    绝不进重投通道；但它**不是**零副作用档，仍计熔断。
+   * ⑤ 提交指令从未推送 ⇒ 零平台副作用，按原因分流结构性 / 可恢复（`classifyPreSubmitReason`）。
+   *
+   * **MUST NOT 再有一个「其余全归它」的无条件 return**：⑤ 的可恢复分支不是兜底桶而是判据本身
+   * （证明不了重来必然相同 ⇒ 不是结构性），未识别的原因照样按可恢复处置且日志具名 + 带原始串。
    */
   private classifyFailureOutcome(
     scheduled: boolean,
     submitted: boolean,
     submitDispatchedNow: boolean,
-    reason: string | undefined,
+    ctx: {
+      /** 抢占 / yield_timeout 判据用的**原因码**；异常渠道下为 undefined（前三档因此不误命中）。 */
+      reason: string | undefined;
+      /** 提交前分档用的原因串（边缘回执原文，或按渠道给出的具名原因）。 */
+      preSubmitReason: string | undefined;
+      submitPushed: boolean;
+      /** 诊断原文（异常 message / 回执 error），只进日志。 */
+      detail: string | undefined;
+      seq: number;
+      kind: PublishCommandKind;
+      recordId: number;
+    },
   ): PublishSequenceResult['outcome'] {
     if (submitted || submitDispatchedNow) return scheduled ? 'scheduled_pending' : 'submitted_unconfirmed';
     // yield_timeout（写者收到取消仍不停手＝控制面故障）：页面状态**未知**——卡死的写者可能仍会走完提交按下。
     // MUST NOT 当作「提交前零副作用」的 preempted 去自动重投（否则卡死写者最终按下提交 → 双发）。按「已提交待确认」
     // 终态处置（不重投、不烧稿），控制面回收 / 请运营重启客户端由边缘掉线侧信号驱动（spec 10.4）。
-    if (reason === 'yield_timeout') return scheduled ? 'scheduled_pending' : 'submitted_unconfirmed';
-    if (isPreemptionReason(reason)) return 'preempted';
-    return 'failed_before_submit';
+    if (ctx.reason === 'yield_timeout') return scheduled ? 'scheduled_pending' : 'submitted_unconfirmed';
+    if (isPreemptionReason(ctx.reason)) return 'preempted';
+    if (ctx.submitPushed) {
+      // 提交指令已经推给边缘了。`submitted===false` 只说明「云端没收到成功回执」，**不等于没按下**——
+      // 这一格正是旧代码把「页面状态未知」误装进 `failed_before_submit` 的地方。绝不自动重投。
+      this.logger.warn(
+        `[CommandSequencer] recordId=${ctx.recordId} 提交指令已推送但未取得「确实未按下」的证据`
+          + ` seq=${ctx.seq} kind=${ctx.kind} reason=${ctx.detail ?? '-'} → 页面状态未知、绝不自动重投`,
+      );
+      return 'failed_page_state_unknown';
+    }
+    const verdict = classifyPreSubmitReason(ctx.preSubmitReason);
+    if (verdict.disposition === 'structural') return 'structural_before_submit';
+    if (!verdict.recognized) {
+      // 跨层义务（stop-or-continue §4）：没认出来的原因 MUST 以「未识别」露出、MUST NOT 折进已有失败名。
+      this.logger.warn(
+        `[CommandSequencer] recordId=${ctx.recordId} 未识别提交前原因（按可恢复处置、有界重投）`
+          + ` seq=${ctx.seq} kind=${ctx.kind} raw=${JSON.stringify(ctx.preSubmitReason ?? ctx.detail ?? null)}`,
+      );
+    }
+    return 'deferred_before_submit';
   }
 
   /** 到期后单步只读核验；退避与持久化状态机由 ScheduledPublishReconciler 负责。 */
