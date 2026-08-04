@@ -406,11 +406,20 @@ export class InteractionStore implements InteractionStoreReaderPort {
   async init(): Promise<InteractionSchemaMode> {
     const { rows } = await this.pool.query<{
       base_present: boolean;
+      has_threads: boolean;
+      has_offboards: boolean;
+      has_reconciliation_state: boolean;
+      has_runtime_controls_version: boolean;
       active_attempt_index_present: boolean;
       legacy_retryable_column_present: boolean;
     }>(
+      // ⚠ 这里**刻意不再断言 `interaction_reply_configs`**（2026-08-04 移除）。
+      // 那张表按 §5.1 归 **api** 属主，物理拆库后住在 api 库里；而本探测跑在
+      // automation 属主池上 ⇒ 拆库之后它**永远为假**，于是互动能力从拆库那天起就整体关着。
+      // 而本进程**从不读写那张表**（全仓引用只有这一处断言），所以它从来就不是本域的就绪条件——
+      // 它是三域共库时代留下的顺带断言，与 `aidcp-cloud@71f41cb` 修掉的那条同型、方向相反。
+      // **新增断言前先问一句：这张表是不是本进程属主？** 不是就不该出现在这里。
       `SELECT to_regclass('${qualifiedObjectName('interaction_threads')}') IS NOT NULL
-          AND to_regclass('${qualifiedObjectName('interaction_reply_configs')}') IS NOT NULL
           AND to_regclass('${qualifiedObjectName('interaction_offboards')}') IS NOT NULL
           AND EXISTS (
             SELECT 1 FROM information_schema.columns
@@ -423,6 +432,20 @@ export class InteractionStore implements InteractionStoreReaderPort {
               AND column_name='runtime_controls_version'
           )
           AS base_present,
+          -- 逐项也各报一次：base_present 是个与，只报它等于让排查的人自己去猜是哪一项。
+          -- （注：本注释在 TS 模板字符串里，不能出现反引号——那会当场截断字符串。）
+          to_regclass('${qualifiedObjectName('interaction_threads')}') IS NOT NULL AS has_threads,
+          to_regclass('${qualifiedObjectName('interaction_offboards')}') IS NOT NULL AS has_offboards,
+          EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='interaction_send_attempts'
+              AND column_name='reconciliation_state'
+          ) AS has_reconciliation_state,
+          EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='interaction_auth_state'
+              AND column_name='runtime_controls_version'
+          ) AS has_runtime_controls_version,
           EXISTS (
             SELECT 1 FROM pg_indexes
             WHERE schemaname='public' AND tablename='interaction_send_attempts'
@@ -435,10 +458,21 @@ export class InteractionStore implements InteractionStoreReaderPort {
           ) AS legacy_retryable_column_present`,
     );
     const shape = rows[0];
+    const missingBaseObjects = [
+      shape?.has_threads === true ? null : 'table interaction_threads',
+      shape?.has_offboards === true ? null : 'table interaction_offboards',
+      shape?.has_reconciliation_state === true
+        ? null
+        : 'column interaction_send_attempts.reconciliation_state',
+      shape?.has_runtime_controls_version === true
+        ? null
+        : 'column interaction_auth_state.runtime_controls_version',
+    ].filter((v): v is string => v !== null);
     return classifyInteractionSchema({
       basePresent: shape?.base_present === true,
       activeAttemptIndexPresent: shape?.active_attempt_index_present === true,
       legacyRetryableColumnPresent: shape?.legacy_retryable_column_present === true,
+      missingBaseObjects,
     });
   }
 
