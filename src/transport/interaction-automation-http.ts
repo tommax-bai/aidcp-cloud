@@ -47,6 +47,52 @@ export const INTERACTION_SEND_ROUTES = {
   requestBrowserControl: 'interaction-send/request-browser-control',
 } as const satisfies Record<keyof InteractionSendPort, string>;
 
+/**
+ * 运行时开关改动后的**即时下发**。
+ *
+ * 契约只在这里声明一份（api 那一侧把它当成一个普通回调用，没有第二处接口定义）。
+ * 入参刻意只有账号与版本：**快照由属主进程就地取**——把快照从调用方递过去，
+ * 等于让「发给边缘的是什么」取自一份可能已经陈旧的副本。
+ *
+ * `delivered` 是**事实**（推给了几条边缘），0 的含义是「边缘不在线」，
+ * 不是失败。调用方据此告诉客户端「已保存、待生效」。
+ */
+export interface InteractionRuntimeControlsDelivery {
+  deliverRuntimeControls(input: { accountId: string; version: number }): Promise<{ delivered: number }>;
+}
+
+export const INTERACTION_RUNTIME_CONTROLS_ROUTES = {
+  deliverRuntimeControls: 'interaction-runtime-controls/deliver',
+} as const satisfies Record<keyof InteractionRuntimeControlsDelivery, string>;
+
+export function registerInteractionRuntimeControlsRoutes(
+  server: InternalHttpServer,
+  local: InteractionRuntimeControlsDelivery,
+): void {
+  server.register(
+    INTERACTION_RUNTIME_CONTROLS_ROUTES.deliverRuntimeControls,
+    interactionRoute((args) =>
+      local.deliverRuntimeControls(args as { accountId: string; version: number }),
+    ),
+  );
+}
+
+/**
+ * 下发口的 HTTP 实现。
+ *
+ * 按 `read` 归类而不是提交点：下发的是一份**带版本的快照**，重下一次与下一次重连时的
+ * 对账收敛结果完全相同，不存在「重投一条已上墙的内容」那种代价。
+ */
+export class InteractionRuntimeControlsHttpClient implements InteractionRuntimeControlsDelivery {
+  constructor(private readonly http: InternalHttpClient) {}
+
+  deliverRuntimeControls(input: { accountId: string; version: number }): Promise<{ delivered: number }> {
+    return callInteraction(
+      this.http, INTERACTION_RUNTIME_CONTROLS_ROUTES.deliverRuntimeControls, input, 'read',
+    );
+  }
+}
+
 const SUBMISSION_METHOD_NAMES: ReadonlySet<string> = new Set(INTERACTION_SUBMISSION_METHODS);
 
 /**
