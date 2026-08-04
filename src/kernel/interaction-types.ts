@@ -100,6 +100,45 @@ export class InteractionError extends Error {
   }
 }
 
+/**
+ * 「这是不是一个互动域失败」的**结构判别**，`instanceof` 的替代物。
+ *
+ * ## 为什么不能用 instanceof
+ * 拆进程之后，一条互动失败可能是**另一个进程抛的、经序列化搬过来的**——它带着同样的
+ * code / httpStatus / retryable，但根本不是本进程这个类的实例，`instanceof` 恒 false。
+ * 后果不是报错：调用侧那句 `error instanceof InteractionError ? error : 兜底` 会把它
+ * 折成一句「服务暂时不可用、可重试」，于是一个**语义为「已发出但核不到」的 409**
+ * 变成一个**可重试的 500** —— 客户端据此重投一条可能已经上墙的命令。
+ * 同一形状在同进程里也会发生：包管理器一旦把 kernel 装成两份（版本分叉时就会），
+ * 两份类互不 instanceof，而这件事编译期、测试期都不会说话。
+ *
+ * ## 判据为什么是这几格
+ * 按 `name` + 下游真正会用到的具名字段判。**刻意不校验 code 是否在已知枚举里**：
+ * 那需要在这里再抄一份代码表，而抄出来的表会滞后（本仓已有一份就漏了两个码），
+ * 滞后的后果是把一个没认出来的真实原因折进兜底桶——正是本函数要消灭的那件事。
+ * 认不出的 code 原样放行，比压成兜底更诚实。
+ */
+export function asInteractionFailure(error: unknown): InteractionError | null {
+  if (error instanceof InteractionError) return error;
+  if (typeof error !== 'object' || error === null) return null;
+  const candidate = error as {
+    name?: unknown; code?: unknown; message?: unknown;
+    httpStatus?: unknown; retryable?: unknown; details?: unknown;
+  };
+  if (candidate.name !== 'InteractionError') return null;
+  if (typeof candidate.code !== 'string' || candidate.code.length === 0) return null;
+  if (typeof candidate.message !== 'string') return null;
+  if (!Number.isInteger(candidate.httpStatus)) return null;
+  if (typeof candidate.retryable !== 'boolean') return null;
+  return new InteractionError(
+    candidate.code as InteractionErrorCode,
+    candidate.message,
+    candidate.httpStatus as number,
+    candidate.retryable,
+    (candidate.details ?? undefined) as InteractionError['details'],
+  );
+}
+
 export interface ValidationIssue {
   path: string;
   code: string;

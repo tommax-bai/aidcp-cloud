@@ -505,7 +505,7 @@ test('startup/reconnect recovery emits verification-only reconcile and never rep
   assert.deepEqual((pushed[0].payload as { attempts: Array<{ command: unknown }> }).attempts[0].command, command);
 });
 
-test('browser foreground control requires the negotiated capability and pushes an exact scope-bound command', () => {
+test('browser foreground control requires the negotiated capability and pushes an exact scope-bound command', async () => {
   const pushed: Envelope[] = [];
   const resolutions: Array<[string, string | undefined]> = [];
   const sender = new InteractionSendOrchestrator({
@@ -528,7 +528,7 @@ test('browser foreground control requires the negotiated capability and pushes a
     clock: () => now,
   });
 
-  const requestId = sender.requestBrowserControl({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', action: 'open' });
+  const requestId = await sender.requestBrowserControl({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', action: 'open' });
   assert.deepEqual(resolutions, [['acct_wc_demo', 'interaction_browser_control_v1']]);
   assert.equal(pushed[0].type, 'interaction.browser.control');
   assert.deepEqual(pushed[0].payload, {
@@ -541,7 +541,7 @@ test('browser foreground control requires the negotiated capability and pushes a
   });
 });
 
-test('browser foreground control fails honestly when only an old Edge is online', () => {
+test('browser foreground control fails honestly when only an old Edge is online', async () => {
   const sender = new InteractionSendOrchestrator({
     store: {} as InteractionStore,
     configs: {} as ReplyConfigStore,
@@ -556,7 +556,7 @@ test('browser foreground control fails honestly when only an old Edge is online'
     controllerFor: () => undefined,
     metrics: new InteractionMetrics(), env: {}, clock: () => now,
   });
-  assert.throws(
+  await assert.rejects(
     () => sender.requestBrowserControl({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', action: 'close' }),
     (error: unknown) => (error as { code?: string; httpStatus?: number }).code === 'INTERACTION_UPSTREAM_UNAVAILABLE'
       && (error as { httpStatus?: number }).httpStatus === 503,

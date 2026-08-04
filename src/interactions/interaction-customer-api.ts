@@ -9,6 +9,7 @@ import type { InteractionSendPort, ReplyWorkflowWritePort } from './interaction-
 import {
   INTERACTION_PLATFORM,
   InteractionError,
+  asInteractionFailure,
   type InteractionChannel,
   type RuntimeControls,
   type ReplyJobState,
@@ -426,6 +427,7 @@ export class InteractionCustomerApi {
       const claim = await this.deps.store.claimApiRequest({ actor: `client:${userId}`, action: 'sync', idempotencyKey: key,
         accountId, envKey, resourceId: syncResource });
       if (claim.response) { sendJson(res, 200, claim.response); return true; }
+      this.refuseUnconfirmedReplay(claim, '同步');
       const channels: InteractionChannel[] = body.channel ? [body.channel as InteractionChannel] : ['comment', 'dm'];
       const ids = await Promise.all(channels.map((channel) => this.deps.sender.requestSync({ accountId, envKey, channel,
         scopeExternalId: typeof body.scopeExternalId === 'string' ? body.scopeExternalId : null, reason: 'user_requested' })));
@@ -465,7 +467,7 @@ export class InteractionCustomerApi {
           scopeExternalId: null, reason: 'test_reset' });
         resync = 'accepted';
       } catch (error) {
-        const reason = error instanceof InteractionError ? error.code : 'INTERACTION_INTERNAL_ERROR';
+        const reason = asInteractionFailure(error)?.code ?? 'INTERACTION_INTERNAL_ERROR';
         await this.deps.store.recordAudit({ accountId, envKey, actor, action: 'test_data_reset_resync_skipped',
           entityType: 'interaction_channel', entityId: channel,
           summary: 'test data reset committed; automatic re-pull not dispatched', labels: { channel, deleted: reset.deleted, reason } });
@@ -484,7 +486,8 @@ export class InteractionCustomerApi {
       const claim = await this.deps.store.claimApiRequest({ actor: `client:${userId}`, action: 'auth_reopen',
         idempotencyKey: key, accountId, envKey });
       if (claim.response) { sendJson(res, 200, claim.response); return true; }
-      const actionRequestId = this.deps.sender.requestAuthReopen({ accountId, envKey, reason: 'user_requested' });
+      this.refuseUnconfirmedReplay(claim, '登录重开');
+      const actionRequestId = await this.deps.sender.requestAuthReopen({ accountId, envKey, reason: 'user_requested' });
       const response = this.envelope(requestId, this.clock(), { envKey, accountId, action: 'auth_reopen', actionRequestId, status: 'accepted' });
       await this.deps.store.completeApiRequest(claim.requestId, response);
       sendJson(res, 200, response);
@@ -505,7 +508,8 @@ export class InteractionCustomerApi {
       const claim = await this.deps.store.claimApiRequest({ actor: `client:${userId}`, action: 'browser_control',
         idempotencyKey: key, accountId, envKey, resourceId: action });
       if (claim.response) { sendJson(res, 200, claim.response); return true; }
-      const actionRequestId = this.deps.sender.requestBrowserControl({ accountId, envKey, action });
+      this.refuseUnconfirmedReplay(claim, '浏览器控制');
+      const actionRequestId = await this.deps.sender.requestBrowserControl({ accountId, envKey, action });
       const response = this.envelope(requestId, this.clock(), {
         envKey, accountId, action: 'browser_control', browserAction: action, actionRequestId, status: 'accepted',
       });
@@ -514,6 +518,29 @@ export class InteractionCustomerApi {
       return true;
     }
     return false;
+  }
+
+  /**
+   * 幂等窗里**上一次的结果还没确认**时，拒绝把同一条指令再发一遍。
+   *
+   * `claim.fresh === false` 且没有已存回执，含义是「同一幂等键已经认领过，但那一趟没走完」。
+   * 那一趟**可能已经把指令推给了边缘**——认领在前、推送在后，而没有回执正说明我们不知道它推到哪一步。
+   * 此时再发一次，就是在一条可能已经上墙的命令上再叠一条。
+   *
+   * 这条守卫在单体时代也该有，只是那时失窗的唯一诱因是「进程正好在这两步之间崩了」，罕见到没人碰上；
+   * 拆进程之后，**一次网络超时**就能造出同一个状态，于是它从理论缺口变成日常路径。
+   * 重开登录尤其贵：用户此刻可能正在扫上一次弹出的二维码，重来一次会把它顶掉。
+   *
+   * 回的是 409 + 不可重试语义，并明说「先刷新状态」——MUST NOT 说成「失败了」，
+   * 因为我们并不知道它失败了；我们只知道**核不到**。
+   */
+  private refuseUnconfirmedReplay(claim: { fresh: boolean }, action: string): void {
+    if (claim.fresh) return;
+    throw new InteractionError(
+      'INTERACTION_STATE_CONFLICT',
+      `同一幂等键的上次${action}请求尚未确认结果；请先刷新状态，确认后再用新的幂等键重试。`,
+      409,
+    );
   }
 
   private idempotencyKey(req: http.IncomingMessage): string {
@@ -533,8 +560,11 @@ export class InteractionCustomerApi {
   }
 
   private sendError(res: http.ServerResponse, requestId: string, error: unknown): void {
-    const known = error instanceof InteractionError ? error :
-      new InteractionError('INTERACTION_INTERNAL_ERROR', '互动服务暂时不可用。', 500, true);
+    // **结构判别，不用 instanceof**：编排面拆到另一个进程之后，这里收到的失败是搬过来的，
+    // 不是本进程这个类的实例。用 instanceof 判会把「已发出但核不到」（409、不可重试）
+    // 折成「服务暂时不可用」（500、可重试），而客户端会据此重投一条可能已经上墙的命令。
+    const known = asInteractionFailure(error)
+      ?? new InteractionError('INTERACTION_INTERNAL_ERROR', '互动服务暂时不可用。', 500, true);
     sendJson(res, known.httpStatus, { error: { code: known.code, message: known.message,
       requestId, retryable: known.retryable, ...(known.details ? { details: known.details } : {}) } });
   }

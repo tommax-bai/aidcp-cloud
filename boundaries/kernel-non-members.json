@@ -13,6 +13,7 @@
       "src/kernel/pg-owner-connection-resolver.ts", "src/kernel/config-mirror-bump-types.ts",
       "src/kernel/soul-types.ts",
       "src/kernel/interaction-types.ts",
+      "src/kernel/interaction-automation-ports.ts",
       "src/kernel/persona-format.ts",
       "src/kernel/title-clamp.ts",
       "src/kernel/schema-capability-contract.ts",

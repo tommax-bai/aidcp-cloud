@@ -1340,6 +1340,11 @@
     "note": "【待定稿裁决】change block3-l3-auth-write-owner-collapse 新写：互动域环境授权闸的**跨域操作**端口契约（InteractionAuthGate 接口 + 回执 / 输入输出纯类型 + 拒绝档与环境串行档字面量联合）。零 import、零 SQL / HTTP / LLM / 模块级 Set-Map。与 offboard-cleanup-grant-types 同族且方向相反：那一条是 api 调 automation，本条是 automation 调 api。文件头载明「闸在 api、写在 automation ⇒ 两笔 + 条件写回执」的判据，以及回执**能**与**不能**保证什么。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch RK-block3"
   },
   {
+    "path": "src/kernel/interaction-automation-ports.ts",
+    "layer": "kernel",
+    "note": "change deploy-derived-services-to-dev 抬入：原 src/interactions/interaction-automation-ports.ts（api）里的 ReplyWorkflowWritePort / InteractionSendPort 两个纯类型端口 + 提交点名单常量。拆进程后这两个端口必须被三方同时看见（api 消费者标注构造参数 / automation 属主按结构兼容提供实例 / aidcp-transport 的 registrar+client 搬同一组方法），而传输包只许引 kernel，否则只能在传输层再声明一份结构相同的——两份声明各自编译通过、各自测试通过，签名漂开时无人会说话。零运行时副作用 / 零 SQL / 只 import kernel 内 interaction-types，KERNEL_ADMISSION_CHECKS 实跑通过。原属主文件保留为残壳并具名再导出（ReplyPreviewBuilderPort 只被 api 内部用，刻意留原处）。请求回写 §4.7"
+  },
+  {
     "path": "src/kernel/interaction-reply-contract.ts",
     "layer": "kernel",
     "note": "【待定稿裁决·部分析出】change decouple-llm-lang-interaction-contracts 析出无模块级 Set 依赖的纯物：从 reply-config.ts（api，§4.6.1）析出 validateFinalReplyText（只读 profile 字段+内联正则，无 Set）；从 reply-config-resolver.ts（api）析出纯读取端口 ReplyConfigReader 与两个无状态读取函数 readPublishedConfig/readJobConfig（只对注入 reader 端口取数、不连库）。**reply-config.ts 其余校验/渲染函数依赖模块级 VARIABLE_SET/HARD_RISK_SET/INTENTS/… 等 const=new Set，被门禁 §4.7 判「进程内活状态」故不入 kernel、留原文件**（reply-auto-send / reply-workflow 引这些的边留 residual）。两 api 原文件保持属主并等值再导出；连库的 ReplyConfigResolver 类留 reply-config-resolver.ts（api）。零 SQL/HTTP/LLM/fetch/活状态。满足 §4.7 kernel 准入。请求回写 §4.7 见 docpatch"
@@ -2611,6 +2616,16 @@
   },
   {
     "path": "src/transport/image-model-selection-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的跨进程传输原语，整目录归 automation、无逐文件切分、新文件 inherit。MUST 回写 §4.7。【2026-07-29 校订，change split-cloud-automation-production-runtime】原文写的是「异步事件 outbox 传输原语（有 SQL、不进 kernel）」——那只是本目录的**第一批**成员（首个消费者为风控事件、与既有 risk_counter_outbox 同域）。此后目录已长出第二种形态：「服务端注册 + 类型化客户端 + 路径常量」三件套（3a/4a 那两批，以及本 change 的 operator-command-http.ts / content-authority-http.ts），它们**零 SQL**。归属判定不受影响（整目录归 automation 的理由是「跨进程运行时原语、有副作用故不进 kernel」，与是否含 SQL 无关），但生成物里那句 note 会照抄本 basis，不校订就会让后来人以为新文件必须有 SQL 才配进这个目录"
+  },
+  {
+    "path": "src/transport/interaction-automation-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的跨进程传输原语，整目录归 automation、无逐文件切分、新文件 inherit。MUST 回写 §4.7。【2026-07-29 校订，change split-cloud-automation-production-runtime】原文写的是「异步事件 outbox 传输原语（有 SQL、不进 kernel）」——那只是本目录的**第一批**成员（首个消费者为风控事件、与既有 risk_counter_outbox 同域）。此后目录已长出第二种形态：「服务端注册 + 类型化客户端 + 路径常量」三件套（3a/4a 那两批，以及本 change 的 operator-command-http.ts / content-authority-http.ts），它们**零 SQL**。归属判定不受影响（整目录归 automation 的理由是「跨进程运行时原语、有副作用故不进 kernel」，与是否含 SQL 无关），但生成物里那句 note 会照抄本 basis，不校订就会让后来人以为新文件必须有 SQL 才配进这个目录"
+  },
+  {
+    "path": "src/transport/interaction-failure-wire.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的跨进程传输原语，整目录归 automation、无逐文件切分、新文件 inherit。MUST 回写 §4.7。【2026-07-29 校订，change split-cloud-automation-production-runtime】原文写的是「异步事件 outbox 传输原语（有 SQL、不进 kernel）」——那只是本目录的**第一批**成员（首个消费者为风控事件、与既有 risk_counter_outbox 同域）。此后目录已长出第二种形态：「服务端注册 + 类型化客户端 + 路径常量」三件套（3a/4a 那两批，以及本 change 的 operator-command-http.ts / content-authority-http.ts），它们**零 SQL**。归属判定不受影响（整目录归 automation 的理由是「跨进程运行时原语、有副作用故不进 kernel」，与是否含 SQL 无关），但生成物里那句 note 会照抄本 basis，不校订就会让后来人以为新文件必须有 SQL 才配进这个目录"
   },

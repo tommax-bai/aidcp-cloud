@@ -341,7 +341,12 @@ export class InteractionSendOrchestrator {
     return requestId;
   }
 
-  requestAuthReopen(input: Omit<InteractionAuthReopenPayload, 'requestId' | 'requestedAt' | 'platform'>): string {
+  // 下面两个方法**签名恒异步**（本地实现里没有一个 await，这是正常的）：同一个端口在拆进程后
+  // 会由一个必须过网络的实现满足，若这里留成同步，端口就只能写成「同步或异步」——那让调用方
+  // 有机会漏掉 await 而把一个 Promise 当 requestId 写进台账，且不报错。见 kernel 端口注释。
+  async requestAuthReopen(
+    input: Omit<InteractionAuthReopenPayload, 'requestId' | 'requestedAt' | 'platform'>,
+  ): Promise<string> {
     const requestId = randomUUID();
     const edgeId = this.deps.pusher.resolveEdgeIdForAccount?.(input.accountId) ?? null;
     if (!edgeId) throw new InteractionError('INTERACTION_UPSTREAM_UNAVAILABLE', '账号当前没有在线 Edge。', 503, true);
@@ -352,7 +357,9 @@ export class InteractionSendOrchestrator {
     return requestId;
   }
 
-  requestBrowserControl(input: Omit<InteractionBrowserControlPayload, 'requestId' | 'requestedAt' | 'platform'>): string {
+  async requestBrowserControl(
+    input: Omit<InteractionBrowserControlPayload, 'requestId' | 'requestedAt' | 'platform'>,
+  ): Promise<string> {
     const requestId = randomUUID();
     const edgeId = this.deps.pusher.resolveEdgeIdForAccount?.(
       input.accountId,

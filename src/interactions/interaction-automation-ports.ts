@@ -9,21 +9,30 @@
  *
  * 端口只覆盖 customer-api 实际调用的方法；返回/入参类型全部取自 kernel 契约，本文件零 automation 依赖。
  * 参照已落地的 ReplyAiPort（kernel）/ InteractionApiPurgePort（automation 消费者自持端口）同一手法。
+ *
+ * ## 两个端口已抬进 kernel，这里只再导出
+ * `ReplyWorkflowWritePort` / `InteractionSendPort` 拆进程后还要被 `aidcp-transport` 里那对
+ * registrar / client 看见，而传输包只许引 kernel。**唯一声明**因此挪到
+ * `../kernel/interaction-automation-ports.ts`，本文件按引用再导出——既有 import 路径一律不变，
+ * 也不会出现第二份结构相同的声明（那种漂移两侧都编译得过、只有真跑起来才现形）。
  */
 import type {
-  ScopedJobContext,
-  InteractionSyncRequestPayload,
-  InteractionAuthReopenPayload,
-  InteractionBrowserControlPayload,
   ReplyConfigSnapshot,
   MinimalInbound,
   ReplyPreviewResult,
 } from '../kernel/interaction-types.js';
 
+export type {
+  ReplyWorkflowWritePort,
+  InteractionSendPort,
+} from '../kernel/interaction-automation-ports.js';
+
 /**
  * 回复预览生成的**只读窄面**：internal-api / scope-internal-api 只驱动 buildPreview 一个方法，
  * 用来把配置快照 + 入站消息投影成一份预览结果（不落库、不改任务状态）。automation 的
  * ReplyWorkflow 结构兼容本端口，由组合根 src/server.ts 注入其实例；automation 类不 import 本端口。
+ *
+ * **刻意留在这里、不进 kernel**：它只被 api 内部两个 internal-api 用，跨进程那条路上没有它。
  */
 export interface ReplyPreviewBuilderPort {
   buildPreview(
@@ -31,33 +40,4 @@ export interface ReplyPreviewBuilderPort {
     inbound: MinimalInbound,
     sourceExternalId: string | null,
   ): Promise<ReplyPreviewResult>;
-}
-
-/** 回复工作流的「写侧」窄面：customer-api 只驱动人工审批/生成/编辑这三个跃迁。 */
-export interface ReplyWorkflowWritePort {
-  generate(input: {
-    accountId: string; envKey: string; jobId: string; expectedVersion: number; actor: string;
-  }): Promise<ScopedJobContext['job']>;
-  approve(input: {
-    accountId: string; envKey: string; jobId: string; expectedVersion: number; actor: string;
-  }): Promise<ScopedJobContext['job']>;
-  edit(input: {
-    accountId: string; envKey: string; jobId: string; expectedVersion: number; actor: string; text: string;
-  }): Promise<ScopedJobContext['job']>;
-}
-
-/** 发送编排的窄面：customer-api 用到的入队/下发/请求同步/请求重开授权/请求浏览器控制。 */
-export interface InteractionSendPort {
-  queueApproved(input: {
-    accountId: string; envKey: string; jobId: string; expectedVersion: number; actor: string;
-  }): Promise<ScopedJobContext['job']>;
-  dispatchQueued(input: {
-    accountId: string; envKey: string; jobId: string; expectedVersion: number;
-  }): Promise<{ job: ScopedJobContext['job']; attemptId: string }>;
-  requestSync(
-    input: Omit<InteractionSyncRequestPayload, 'requestId' | 'requestedAt' | 'platform'>,
-    options?: { beforeDispatch?: () => Promise<void> },
-  ): Promise<string>;
-  requestAuthReopen(input: Omit<InteractionAuthReopenPayload, 'requestId' | 'requestedAt' | 'platform'>): string;
-  requestBrowserControl(input: Omit<InteractionBrowserControlPayload, 'requestId' | 'requestedAt' | 'platform'>): string;
 }
