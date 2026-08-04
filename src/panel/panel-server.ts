@@ -328,6 +328,68 @@ function sendDelegatedTaskError(res: http.ServerResponse, err: unknown): void {
   sendJson(res, 500, { error: 'delegated_task_error', message: (err as Error).message ?? String(err) });
 }
 
+/**
+ * 跨进程调用失败 → 面板具名 503。
+ *
+ * **存在理由就是判据本身**：拆开之后面板这一批取数句柄是跨进程客户端，它们的失败原样冒到
+ * 顶层 catch、被压成一句 500 `internal_error` —— 于是管理后台上「对面没起」「对面没有这条路由」
+ * 「本进程自己炸了」三件事**完全同形**，原因只留在进程日志里。2026-08-04 切流当天，
+ * 整页 500 就是这么来的，判因只能靠去机器上翻日志。
+ *
+ * **结构化识别、MUST NOT 用 instanceof**：那个错误类在共享包与自动化仓各有一份逐字相同的定义
+ * （两个类身份），加上跨进程反序列化出来的是裸对象、没有原型链 —— `instanceof` 在这两条路径上
+ * 都恒 false。只判 `name` 与非空字符串 `code` 两个自有可枚举属性；**不判 message**
+ * （Error 的 message 不可枚举，序列化往返后就没了）。
+ */
+const INTERNAL_HTTP_ERROR_NAME = 'InternalHttpError';
+
+interface InternalHttpFailureShape {
+  name: typeof INTERNAL_HTTP_ERROR_NAME;
+  code: string;
+  message?: string;
+}
+
+export function isInternalHttpFailure(value: unknown): value is InternalHttpFailureShape {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as { name?: unknown; code?: unknown };
+  return (
+    candidate.name === INTERNAL_HTTP_ERROR_NAME
+    && typeof candidate.code === 'string'
+    && candidate.code !== ''
+  );
+}
+
+/**
+ * 跨进程失败码 → 面板具名原因。**认不出的返回 null，MUST NOT 有兜底桶**：
+ * 把没认出来的折进「对面不可达」，等于替对面断言「它没起」——
+ * 而此刻我们只知道「这一跳失败了、失败的名字我们不认识」。
+ */
+export function upstreamFailureReason(code: string): string | null {
+  switch (code) {
+    // 连不上。**到此为止，绝不去 parse 文本猜是拒连还是 DNS**：
+    // 传输层已经把系统原始错误码丢了，要更细必须先改传输层把它放进 details。
+    case 'transport_error':
+      return 'upstream_unreachable';
+    // 连上了但没在预算内答完。与「对面没起」是两回事，混一起会让人去查错的进程。
+    case 'timeout':
+      return 'upstream_timeout';
+    // 对面在、令牌也对，就是没有这条路由：版本落后 / 那个能力没注册。
+    case 'route_not_found':
+      return 'upstream_route_missing';
+    // 对面明确拒绝（令牌轮换没同步），**不是「没配」**。
+    case 'internal_http_unauthorized':
+      return 'upstream_unauthorized';
+    // 本进程令牌没配好，一个字节都没发出去。与上一条分开：一个是「我没配」，一个是「它拒了」。
+    case 'internal_http_auth_config_invalid':
+      return 'upstream_token_not_configured';
+    // 答了但不是约定信封（版本对不上 / 中间插了别的东西）。也不是本进程的 bug。
+    case 'bad_response':
+      return 'upstream_bad_response';
+    default:
+      return null;
+  }
+}
+
 async function readJsonBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -3733,6 +3795,25 @@ function createRequestHandler(
       // 那一态就此不再出现。
       if (isCuratedContentUnavailableError(err)) {
         if (!res.headersSent) sendJson(res, 503, { error: 'curated_unavailable' });
+        return;
+      }
+      // 跨进程调用失败 ⇒ 503 + 具名原因（依赖不可用），而不是本进程 500。
+      // 形状照本文件既有那条「运行时依赖读失败」：`error` 是粗码、`reason` 是机器细分码。
+      if (isInternalHttpFailure(err)) {
+        const reason = upstreamFailureReason(err.code);
+        if (reason !== null) {
+          logger.warn(
+            `[panel] 跨进程调用失败 code=${err.code} reason=${reason}: ${err.message ?? ''}`,
+          );
+          if (!res.headersSent) sendJson(res, 503, { error: 'unavailable', reason });
+          return;
+        }
+        // 认不出的跨进程码：**MUST NOT 折进上面任何一个名字**，但也 MUST NOT 因为不认识就沉默 ——
+        // 仍然是 500，另带一个具名留痕，好让下一个人知道该去补哪一条映射。
+        logger.warn(`[panel] 未识别的跨进程失败 code=${err.code}: ${err.message ?? ''}`);
+        if (!res.headersSent) {
+          sendJson(res, 500, { error: 'internal_error', reason: 'unclassified_upstream_error' });
+        }
         return;
       }
       logger.warn(`[panel] 请求处理异常: ${(err as Error).message}`);
