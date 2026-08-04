@@ -35,7 +35,7 @@ function job(scope: DraftRefinementScope): DraftRefinementJob {
   };
 }
 
-function fixture(scope: DraftRefinementScope, imageFailure = false) {
+function fixture(scope: DraftRefinementScope, imageFailure = false, writeFailure?: unknown) {
   const currentJob = job(scope);
   const progressSnapshots: unknown[] = [];
   const completed: unknown[] = [];
@@ -53,6 +53,7 @@ function fixture(scope: DraftRefinementScope, imageFailure = false) {
     drafts: {
       async loadForDispatch() { return structuredClone(draft); },
       async refineDraft(_recordId, _accountId, _version, actualScope, _selection, patch) {
+        if (writeFailure !== undefined) throw writeFailure;
         writes.push({ scope: actualScope, patch: structuredClone(patch) });
         return { ok: true as const, contentVersion: 3, title: patch.title ?? draft.title, content: patch.content ?? draft.content, metadata: draft.metadata, images: patch.images ?? draft.imageUrls };
       },
@@ -138,5 +139,34 @@ describe('DraftRefinementWorker scopes', () => {
     assert.equal(fx.completed.length, 0);
     assert.equal(fx.failed.length, 1);
     assert.equal((fx.failed[0] as unknown[])[2], 'image_generation_failed');
+  });
+});
+
+describe('DraftRefinementWorker 落稿失败的三态', () => {
+  test('「结果未知」MUST NOT 说「原稿未变化」，也 MUST NOT 劝重投', async () => {
+    // 拆进程后才有的一态：写可能已经提交、应答在回程丢了。传输层把它归成具名码。
+    const fx = fixture('body', false, Object.assign(new Error('call timed out'), {
+      code: 'api_authority_result_unknown',
+    }));
+    await fx.worker.processNext();
+    assert.equal(fx.writes.length, 0);
+    assert.equal(fx.completed.length, 0);
+    assert.equal(fx.failed.length, 1);
+    const [, , code, message] = fx.failed[0] as [string, string, string, string];
+    assert.equal(code, 'refinement_result_unknown');
+    assert.ok(
+      !message.includes('原稿未变化'),
+      '这一态下「原稿未变化」是假话 —— 稿子可能已经是新版本了',
+    );
+    assert.ok(message.includes('刷新'), '该让用户去看一眼当前版本，而不是再发一次');
+  });
+
+  test('其余抛出物仍走「确认没做成」那条（新分支 MUST NOT 把它一起吞了）', async () => {
+    const fx = fixture('body', false, new Error('unexpected'));
+    await fx.worker.processNext();
+    assert.equal(fx.failed.length, 1);
+    const [, , code, message] = fx.failed[0] as [string, string, string, string];
+    assert.equal(code, 'refinement_failed');
+    assert.ok(message.includes('原稿未变化'));
   });
 });

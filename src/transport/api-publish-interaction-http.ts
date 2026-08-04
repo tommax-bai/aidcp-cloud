@@ -583,7 +583,13 @@ function isScheduledReconcileUpdate(
   );
 }
 
-function isEditDraftResult(value: unknown): value is EditDraftResult {
+/**
+ * 导出给 `./draft-refinement-http.ts` 复用：精修写口的结果类型是本类型的超集
+ * （多两个 `reason`，成功分支逐字相同）。**刻意不在那边另写一份**——两份结构校验
+ * 各自编译通过、各自测试通过，漂开的那天没有任何东西会说出来，而它守的正是
+ * 「写后真态回读」那一格：判宽了会把畸形响应当成功、把错的版本号写回客户端。
+ */
+export function isEditDraftResult(value: unknown): value is EditDraftResult {
   if (!isRecord(value) || typeof value.ok !== 'boolean') return false;
   if (!value.ok) return typeof value.reason === 'string';
   return (

@@ -11,7 +11,27 @@ import type {
   DraftRefinementStage,
   RefineDraftPatch,
 } from '../kernel/publish-draft-contract.js';
+import type { ApiDirectWriteErrorCode } from '../kernel/api-direct-port.js';
 import type { DraftRefinementStore } from './draft-refinement.js';
+
+/**
+ * 落稿写口跨进程后「写可能已提交、应答在回程丢了」的具名码。
+ *
+ * 单体里没有这一态：`refineDraft` 是一次进程内调用，要么抛（没写）要么返回。
+ * 拆进程之后，超时 / 连接断 / 响应畸形都会让**已经落库的一次改稿**看起来像失败 ——
+ * 而本 worker 的兜底文案写着「原稿未变化」。那句话在这一态下是假的，
+ * 用户会照着它再发一次（虽然 CAS 会挡住重复写，但他看到的是一次谎报的失败）。
+ *
+ * `satisfies` 钉住它确实是写口错误码联合里的成员：这是一个手抄的字符串，
+ * 抄错的表现不是报错，是这条分支永远进不去、又回到那句「原稿未变化」。
+ */
+const REFINE_RESULT_UNKNOWN_CODE = 'api_authority_result_unknown' satisfies ApiDirectWriteErrorCode;
+
+/** 结构化判别（跨进程后 `instanceof` 恒 false，只能按具名 `code` 判）。 */
+function isResultUnknown(err: unknown): boolean {
+  return typeof err === 'object' && err !== null
+    && (err as { code?: unknown }).code === REFINE_RESULT_UNKNOWN_CODE;
+}
 
 class RefinementFailure extends Error {
   constructor(readonly code: string, message: string) {
@@ -233,7 +253,14 @@ export class DraftRefinementWorker {
     } catch (err) {
       const failure = err instanceof RefinementFailure
         ? err
-        : new RefinementFailure('refinement_failed', '调整没有完成，原稿未变化，请稍后重试。');
+        // 「已提交但核不到」与「确认到没做成」MUST 是两条回执：前者绝不能说「原稿未变化」，
+        // 也绝不能劝用户重来 —— 稿件可能已经是新版本了，该做的是去看一眼。
+        : isResultUnknown(err)
+          ? new RefinementFailure(
+              'refinement_result_unknown',
+              '调整已提交，但没能确认是否写入稿件。请刷新这份稿件查看当前版本，不要重复发起。',
+            )
+          : new RefinementFailure('refinement_failed', '调整没有完成，原稿未变化，请稍后重试。');
       this.logger.warn(`[draft-refinement] job=${job.id} code=${failure.code}: ${failure.message}`);
       await this.deps.store.fail(job.id, token, failure.code, failure.message, progress).catch(() => false);
       return true;
