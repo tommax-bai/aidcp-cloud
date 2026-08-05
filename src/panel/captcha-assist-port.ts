@@ -192,11 +192,22 @@ export type CaptchaAssistDispatchResult =
 
 /* ---------------------------------------------------------------- 窄端口 */
 
+/**
+ * change restore-panel-capability-wiring：前三个方法由同步改成**可能异步**。
+ *
+ * 拆进程之后本能力的属主在自动化进程（现场快照、scoped-token 的秘密、edge 实时循环都在那边），
+ * 面板在接口进程。同步签名在跨进程形态下不再可能被诚实实现——留着它，唯一的实现方式是
+ * 在调用侧本地猜一个值。用 `| Promise<T>` 是为了让单体那份就地实现原样满足（它仍同步返回）。
+ */
 export interface PanelCaptchaAssist {
-  verifyToken(token: string | undefined): CaptchaAssistTokenVerifyResult;
-  getIncident(incidentId: string): CaptchaAssistIncidentView | null;
+  verifyToken(
+    token: string | undefined,
+  ): CaptchaAssistTokenVerifyResult | Promise<CaptchaAssistTokenVerifyResult>;
+  getIncident(
+    incidentId: string,
+  ): CaptchaAssistIncidentView | null | Promise<CaptchaAssistIncidentView | null>;
   /** 运营轮询即在场信号（change captcha-assist-live-snapshot）：窗口到期则重新武装 edge 实时循环。 */
-  noteViewerPresence(incidentId: string): void;
+  noteViewerPresence(incidentId: string): void | Promise<void>;
   requestCapture(
     incidentId: string,
     actor: string,

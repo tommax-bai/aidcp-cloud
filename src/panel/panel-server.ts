@@ -623,7 +623,14 @@ function createRequestHandler(
     | { ok: true; actor: string }
     | { ok: false; status: number; body: { error: string; reason?: string } };
 
-  function authenticateCaptchaAssist(req: http.IncomingMessage, incidentId: string): CaptchaAssistAuth {
+  // change restore-panel-capability-wiring：本函数改成 async —— 验证码协助的属主在自动化进程，
+  // scoped-token 的校验要跨进程问它（令牌的秘密与现场都在那边）。同理下面几处读也改 await。
+  // 这不是把同步逻辑硬拗成异步：拆进程之后，「同步拿到答案」这件事本身就不再成立，
+  // 留着同步签名只能靠本地猜一个值，那正是编答案。
+  async function authenticateCaptchaAssist(
+    req: http.IncomingMessage,
+    incidentId: string,
+  ): Promise<CaptchaAssistAuth> {
     const bearer = parseBearer(req.headers.authorization);
     if (bearer) {
       const verified = verifyJwt(bearer, config.jwtSecret);
@@ -640,7 +647,7 @@ function createRequestHandler(
     if (!scopedToken) {
       return { ok: false, status: 401, body: { error: 'unauthorized', reason: 'missing_token' } };
     }
-    const verified = deps.captchaAssist?.verifyToken(scopedToken);
+    const verified = await deps.captchaAssist?.verifyToken(scopedToken);
     if (!verified?.ok) {
       return { ok: false, status: 401, body: { error: 'unauthorized', reason: verified?.reason ?? 'unavailable' } };
     }
@@ -686,7 +693,7 @@ function createRequestHandler(
       sendJson(res, 404, { error: 'not_found' });
       return;
     }
-    const auth = authenticateCaptchaAssist(req, incidentId);
+    const auth = await authenticateCaptchaAssist(req, incidentId);
     if (!auth.ok) {
       sendJson(res, auth.status, auth.body);
       return;
@@ -695,8 +702,8 @@ function createRequestHandler(
     if (method === 'GET' && parts.length === 1) {
       // 轮询即"运营在场"（change captcha-assist-live-snapshot）：窗口到期则重新武装实时循环。
       // 先记在场再取快照，使本次回包即反映 re-arm 后的 liveUntil。
-      deps.captchaAssist.noteViewerPresence(incidentId);
-      const incident = deps.captchaAssist.getIncident(incidentId);
+      await deps.captchaAssist.noteViewerPresence(incidentId);
+      const incident = await deps.captchaAssist.getIncident(incidentId);
       if (!incident) {
         sendJson(res, 404, { error: 'not_found' });
         return;

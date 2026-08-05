@@ -2685,6 +2685,11 @@
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的跨进程传输原语，整目录归 automation、无逐文件切分、新文件 inherit。MUST 回写 §4.7。【2026-07-29 校订，change split-cloud-automation-production-runtime】原文写的是「异步事件 outbox 传输原语（有 SQL、不进 kernel）」——那只是本目录的**第一批**成员（首个消费者为风控事件、与既有 risk_counter_outbox 同域）。此后目录已长出第二种形态：「服务端注册 + 类型化客户端 + 路径常量」三件套（3a/4a 那两批，以及本 change 的 operator-command-http.ts / content-authority-http.ts），它们**零 SQL**。归属判定不受影响（整目录归 automation 的理由是「跨进程运行时原语、有副作用故不进 kernel」，与是否含 SQL 无关），但生成物里那句 note 会照抄本 basis，不校订就会让后来人以为新文件必须有 SQL 才配进这个目录"
   },
   {
+    "path": "src/transport/panel-automation-extra-http.ts",
+    "layer": "automation",
+    "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的跨进程传输原语，整目录归 automation、无逐文件切分、新文件 inherit。MUST 回写 §4.7。【2026-07-29 校订，change split-cloud-automation-production-runtime】原文写的是「异步事件 outbox 传输原语（有 SQL、不进 kernel）」——那只是本目录的**第一批**成员（首个消费者为风控事件、与既有 risk_counter_outbox 同域）。此后目录已长出第二种形态：「服务端注册 + 类型化客户端 + 路径常量」三件套（3a/4a 那两批，以及本 change 的 operator-command-http.ts / content-authority-http.ts），它们**零 SQL**。归属判定不受影响（整目录归 automation 的理由是「跨进程运行时原语、有副作用故不进 kernel」，与是否含 SQL 无关），但生成物里那句 note 会照抄本 basis，不校订就会让后来人以为新文件必须有 SQL 才配进这个目录"
+  },
+  {
     "path": "src/transport/panel-automation-http.ts",
     "layer": "automation",
     "note": "§4.7 基线 sha 之后由 change block2-outbox-transport 新增的目录：拆进程用的跨进程传输原语，整目录归 automation、无逐文件切分、新文件 inherit。MUST 回写 §4.7。【2026-07-29 校订，change split-cloud-automation-production-runtime】原文写的是「异步事件 outbox 传输原语（有 SQL、不进 kernel）」——那只是本目录的**第一批**成员（首个消费者为风控事件、与既有 risk_counter_outbox 同域）。此后目录已长出第二种形态：「服务端注册 + 类型化客户端 + 路径常量」三件套（3a/4a 那两批，以及本 change 的 operator-command-http.ts / content-authority-http.ts），它们**零 SQL**。归属判定不受影响（整目录归 automation 的理由是「跨进程运行时原语、有副作用故不进 kernel」，与是否含 SQL 无关），但生成物里那句 note 会照抄本 basis，不校订就会让后来人以为新文件必须有 SQL 才配进这个目录"
