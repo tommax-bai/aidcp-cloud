@@ -302,6 +302,56 @@ const START_GATE_VERDICT_RECOVERABLE: Record<Exclude<SessionStartVerdict, 'ok'>,
  */
 const START_GATE_RECHECK_BACKOFF_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
 
+/**
+ * 本场 Facebook 主浏览入口的钉定结果（change recheck-facebook-primary-surface-pin）。
+ *
+ * **为什么不是一个裸的 `'feed' | 'reels'`**：裸值把「运营选了 Feed」与「钉的那一刻基线问不到、
+ * 按 Feed 保守跑」压成同一个值，于是后者整场无人再问、也没人说得出为什么。2026-08-05 dev 实测代价：
+ * 11 个首次真实握手的新账号 11/11 整场停在信息流，而它们所属环境的配置全是 `reels`。
+ */
+interface FacebookPrimarySurfacePin {
+  readonly surface: 'feed' | 'reels';
+  /** `unresolved` = 钉定那一刻基线问不到；MUST NOT 被当作运营选定的 Feed。 */
+  readonly resolution: 'authoritative' | 'unresolved';
+  /** 仅 `unresolved` 有值：导致问不到的具名原因。 */
+  readonly blocker: string | null;
+}
+
+/**
+ * 裁决短路了却没给出名字时用的显式值。
+ *
+ * **MUST NOT 折进任何已有 blocker 名**：把没认出来的原因折进已有失败名，跨层传下去就成了终局判决。
+ * 出现它 = 有人给基线裁决加了一条早退却忘了具名，回执要让这件事当场可见。
+ */
+const FACEBOOK_PRIMARY_SURFACE_UNNAMED_BLOCKER = 'unnamed_baseline_short_circuit';
+
+/**
+ * 主浏览入口复判退避（ms）。跳数 = 本表长度（合计约 107s）——首次握手的实测竞态窗口是 1.6~16.3s，
+ * 两个数量级余量。**有上限是刻意的**：无界重问会把一次裁决口异常放大成持续脉冲。
+ */
+const FACEBOOK_PRIMARY_SURFACE_RECHECK_BACKOFF_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
+
+/**
+ * 裁决 → 本场钉定。**纯函数**，故「带面值但 mode=blocked 仍算权威」这条判据可以被直接喂违规输入验证，
+ * 不必绕整条会话。
+ *
+ * 判据只有一条：**带 `primarySurface` 即权威**。刻意不看 `mode` —— 裁决可以 `blocked` 却带着面值
+ *（如慢启动状态问不到、但环境基线读到了），那种情况浏览面是确定的，MUST NOT 因此降级成 unresolved
+ * 并去复判；否则这条通道会从「问不到才重问」扩成「凡 blocked 都重问」。
+ */
+export function resolveFacebookPrimarySurfacePin(
+  decision: { primarySurface?: 'feed' | 'reels'; blocker?: string | null },
+): FacebookPrimarySurfacePin {
+  if (decision.primarySurface) {
+    return { surface: decision.primarySurface, resolution: 'authoritative', blocker: null };
+  }
+  return {
+    surface: 'feed',
+    resolution: 'unresolved',
+    blocker: decision.blocker?.trim() || FACEBOOK_PRIMARY_SURFACE_UNNAMED_BLOCKER,
+  };
+}
+
 /** 评论角色单次 LLM 硬 deadline；不沿用面向慢 thinking 角色的全局 180s。 */
 export const DEFAULT_COMMENT_LLM_TIMEOUT_MS = 30_000;
 /** 整条评论子链的安全兜底；局部 LLM / 人审超时应更早结束。 */
@@ -798,7 +848,25 @@ export class RoleDispatcher {
   private pendingFeedFloorMs = 0;
   /** Facebook Reels 重驱只保留在途闸；可读 Reel 到达即清，不把历史成功冒充当前页面。 */
   private reelsRedrivePending = false;
-  private sessionFacebookPrimarySurface: 'feed' | 'reels' = 'feed';
+  /**
+   * 本场主浏览入口钉定。会话外的惰性初值取「权威 feed」：所有读取点都先过平台闸，
+   * 没有会话时它不会被任何一条浏览判断消费。
+   */
+  private facebookPrimarySurfacePin: FacebookPrimarySurfacePin = {
+    surface: 'feed',
+    resolution: 'authoritative',
+    blocker: null,
+  };
+  /** 主浏览入口复判定时器；未武装为 undefined。 */
+  private facebookSurfaceRecheckTimer: unknown;
+  /** 复判退避进度下标；解除武装时归零。到达退避表长度即预算耗尽。 */
+  private facebookSurfaceRecheckStep = 0;
+  /**
+   * 本场已出过回执的 blocker 值。
+   * 去重口径是**按值**而非按次：同一个原因每场只说一次，原因迁移（如「问不到」→「确认没有」）
+   * 是新信息、允许再出一条。会话开始清空。
+   */
+  private readonly facebookSurfaceReportedBlockers = new Set<string>();
   /** pending 期间已真正下发的有界恢复次数；被调度/配额闸抑制不消耗次数。 */
   private reelsRedriveRecoveryAttempts = 0;
   /** 本场已用掉的 Reels 重开次数（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。 */
@@ -1108,12 +1176,28 @@ export class RoleDispatcher {
     }
   }
 
+  /**
+   * 会话启动钉定本场主浏览入口。**只在会话启动处调用**；会话中途唯一允许改钉的路径是
+   * 主浏览入口复判通道，且单向（unresolved → authoritative），故「配置中途写入不影响本场」
+   * 对权威钉定逐字不变。
+   */
   private pinFacebookPrimarySurface(): void {
+    this.facebookSurfaceReportedBlockers.clear();
     if (this.accountPlatform !== 'facebook') {
-      this.sessionFacebookPrimarySurface = 'feed';
+      // 非 Facebook 连接根本没有「主浏览入口」这个概念，所有读取点也都先过平台闸：
+      // 这是**不适用**、不是「问不到」。故不记账、不武装复判——否则每个小红书账号每场都要刷一行。
+      this.facebookPrimarySurfacePin = { surface: 'feed', resolution: 'authoritative', blocker: null };
       return;
     }
-    this.sessionFacebookPrimarySurface = this.facebookRuleDecision().primarySurface ?? 'feed';
+    this.facebookPrimarySurfacePin = resolveFacebookPrimarySurfacePin(this.facebookRuleDecision());
+    if (this.facebookPrimarySurfacePin.resolution === 'unresolved') {
+      this.reportUnresolvedFacebookPrimarySurface(this.facebookPrimarySurfacePin.blocker, 'pin');
+    }
+  }
+
+  /** 本场主浏览入口是不是 Reels。**所有浏览判断只经此口读钉定**，不各自解构结构体。 */
+  private facebookPrimarySurfaceIsReels(): boolean {
+    return this.facebookPrimarySurfacePin.surface === 'reels';
   }
 
   private isFacebookAutomatedBrowseMode(): boolean {
@@ -2373,7 +2457,7 @@ export class RoleDispatcher {
   redriveBrowse(): boolean {
     if (!this.sessionActive) return false;
     if (this.accountPlatform !== 'facebook') return this.sendScrollCommand('resume_redrive');
-    if (this.sessionFacebookPrimarySurface === 'reels') {
+    if (this.facebookPrimarySurfaceIsReels()) {
       // Task takeover cancelled/quiesced any older browse command and may have navigated away.
       // Its terminal release is a new causal boundary, so an older in-flight entry cannot suppress it.
       this.resetFacebookReelsRedrive();
@@ -2386,7 +2470,7 @@ export class RoleDispatcher {
     if (
       this.accountPlatform !== 'facebook'
       || !this.sessionActive
-      || this.sessionFacebookPrimarySurface !== 'reels'
+      || !this.facebookPrimarySurfaceIsReels()
     ) return false;
     const sent = this.beginFacebookReelsRedrive();
     if (!sent) return false;
@@ -2397,7 +2481,7 @@ export class RoleDispatcher {
   private authorizeFacebookReelsFromFeedObservation(
     source: 'empty_feed' | 'feed_exhausted' | 'present_unreportable',
   ): boolean {
-    return this.sessionFacebookPrimarySurface === 'reels'
+    return this.facebookPrimarySurfaceIsReels()
       ? this.authorizeFacebookPrimaryReels()
       : this.authorizeFacebookReelsFallback(source);
   }
@@ -2412,7 +2496,7 @@ export class RoleDispatcher {
     if (
       this.accountPlatform !== 'facebook'
       || !this.sessionActive
-      || this.sessionFacebookPrimarySurface !== 'feed'
+      || this.facebookPrimarySurfaceIsReels()
     ) return false;
     const sent = this.beginFacebookReelsRedrive();
     if (!sent) {
@@ -2458,6 +2542,108 @@ export class RoleDispatcher {
   private resetFacebookReelsRedrive(): void {
     this.reelsRedrivePending = false;
     this.reelsRedriveRecoveryAttempts = 0;
+  }
+
+  // ── 主浏览入口复判通道（change recheck-facebook-primary-surface-pin）────────────────
+  //
+  // 为什么要有这条通道：本场浏览面是**一次性钉定**的，钉的那一刻基线问不到就按 Feed 保守跑，
+  // 此后没有任何东西会再问一遍——首页有卡时连降级通道都不会响，于是整场停在错的入口上。
+  // 与启动闸复判同族、同形状，但**独立计数**：那条的使命是「能不能开工」、会话一起来就解除，
+  // 这条恰恰要在会话已经在跑的时候继续问。答案自己会变好，只是没人再问一遍。
+
+  /**
+   * 具名回执。**MUST NOT 静默回落**——回落到 Feed 这件事必须有人说得出为什么，
+   * 否则同类故障事后不可回溯（这正是 2026-08-05 那 11 例查不动的原因）。
+   *
+   * 去重按 blocker 值：同一原因每场至多一条，防止复判把一次异常放大成日志脉冲；
+   * 原因迁移是新信息、允许再出一条。到顶那条终态回执不参与去重、必出。
+   */
+  private reportUnresolvedFacebookPrimarySurface(
+    blocker: string | null,
+    phase: 'pin' | 'recheck' | 'exhausted',
+  ): void {
+    const named = blocker?.trim() || FACEBOOK_PRIMARY_SURFACE_UNNAMED_BLOCKER;
+    if (phase !== 'exhausted') {
+      if (this.facebookSurfaceReportedBlockers.has(named)) return;
+      this.facebookSurfaceReportedBlockers.add(named);
+    }
+    const account = this.currentAccountId;
+    console.warn(
+      phase === 'exhausted'
+        ? `[RoleDispatcher] Facebook 主浏览入口复判已到上限仍问不到（account=${account} blocker=${named}）`
+          + ' → 本场保持 Feed 并停止复判；重来一次仍可能问到，故这是本场终态、不是该环境的结论'
+        : `[RoleDispatcher] Facebook 主浏览入口未解析（account=${account} blocker=${named} phase=${phase}）`
+          + ' → 本场按 Feed 保守运行，这不是运营选定的 Feed；已武装有界复判',
+    );
+  }
+
+  /** 武装复判。已武装 → 直接返回：不重复武装、不重置退避进度。 */
+  private armFacebookPrimarySurfaceRecheck(): void {
+    if (this.accountPlatform !== 'facebook') return;
+    if (this.facebookPrimarySurfacePin.resolution !== 'unresolved') return;
+    if (this.facebookSurfaceRecheckTimer !== undefined) return;
+    this.scheduleFacebookPrimarySurfaceRecheck();
+  }
+
+  /** 排下一跳；退避表用尽即预算耗尽 → 记终态并收摊，绝不无限空转。 */
+  private scheduleFacebookPrimarySurfaceRecheck(): void {
+    const delay = FACEBOOK_PRIMARY_SURFACE_RECHECK_BACKOFF_MS[this.facebookSurfaceRecheckStep];
+    if (delay === undefined) {
+      this.reportUnresolvedFacebookPrimarySurface(this.facebookPrimarySurfacePin.blocker, 'exhausted');
+      this.cancelFacebookPrimarySurfaceRecheck();
+      return;
+    }
+    this.facebookSurfaceRecheckStep += 1;
+    this.facebookSurfaceRecheckTimer = this.setTimeoutFn(() => {
+      this.facebookSurfaceRecheckTimer = undefined;
+      this.onFacebookPrimarySurfaceRecheckElapsed();
+    }, delay);
+    (this.facebookSurfaceRecheckTimer as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  /**
+   * 解除武装。**会话结束必经此处**——一个活过会话的复判会对着已结束的会话改钉、发命令，
+   * 那比原缺陷更坏。故调用点与启动闸复判同处，排在「本来就不活跃即返回」的短路之前。
+   */
+  private cancelFacebookPrimarySurfaceRecheck(): void {
+    if (this.facebookSurfaceRecheckTimer !== undefined) {
+      this.clearTimeoutFn(this.facebookSurfaceRecheckTimer);
+      this.facebookSurfaceRecheckTimer = undefined;
+    }
+    this.facebookSurfaceRecheckStep = 0;
+  }
+
+  /**
+   * 复判到点：重问基线。问到即就地改钉并把浏览纠正到正确入口；仍问不到就静默排下一跳
+   *（不打日志、不发命令——那又是脉冲）。
+   */
+  private onFacebookPrimarySurfaceRecheckElapsed(): void {
+    if (!this.sessionActive || this.accountPlatform !== 'facebook') {
+      return void this.cancelFacebookPrimarySurfaceRecheck();
+    }
+    // 别的路径（新会话钉定）已经把它变成权威 → 使命完成。
+    if (this.facebookPrimarySurfacePin.resolution !== 'unresolved') {
+      return void this.cancelFacebookPrimarySurfaceRecheck();
+    }
+    const pin = resolveFacebookPrimarySurfacePin(this.facebookRuleDecision());
+    if (pin.resolution !== 'authoritative') {
+      this.reportUnresolvedFacebookPrimarySurface(pin.blocker, 'recheck');
+      this.scheduleFacebookPrimarySurfaceRecheck();
+      return;
+    }
+    const browsing = this.facebookPrimarySurfacePin.surface;
+    this.facebookPrimarySurfacePin = pin;
+    this.cancelFacebookPrimarySurfaceRecheck();
+    console.log(
+      `[RoleDispatcher] Facebook 主浏览入口复判已问到（account=${this.currentAccountId}）→ 本场改钉 ${pin.surface}`,
+    );
+    // 纠正面与正在浏览的面相同 ⇒ 只是把「问不到」升为「权威」，不发任何命令。
+    if (pin.surface === browsing) return;
+    // 不同 ⇒ 走既有主入口授权口（同一条统一重驱命令、同一行回执）。
+    // **不 reset 在途闸**：若首页降级通道已经在把本场往 Reels 带，重复下发就是多余的第二条命令。
+    // 命令被既有风控/配额/软暂停闸抑制时不回滚改钉、不消耗复判预算——钉定已经是权威的，
+    // 后续任何一次自然重驱（任务归位、下一批首页卡片）都会用上正确的面。
+    this.authorizeFacebookPrimaryReels();
   }
 
   private emitSearchSkippedAfterIntercept(currentPageType: 'feed' | 'search', reason: string): void {
@@ -3099,6 +3285,9 @@ export class RoleDispatcher {
     this.pinFacebookPrimarySurface();
     this.sessionActive = true;
     this.cancelStartGateRecheck(); // 会话真起来了 → 复判使命完成
+    // 浏览面钉定若是「问不到」→ 武装复判。**必须排在 sessionActive 置真之后**：
+    // 一跳打在还没激活的会话上会被自身的活跃闸直接解除，等于白白丢掉这条通道。
+    this.armFacebookPrimarySurfaceRecheck();
     this.sessionStartedAt = this.clock();
     this.reelsReentryCount = 0; // 重开次数按**场**计（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。
     // 按当前账号刷新单场预算 + 快照（热加载：会话开始即取最新配置）。
@@ -3245,6 +3434,9 @@ export class RoleDispatcher {
     this.pinFacebookPrimarySurface();
     this.sessionActive = true;
     this.cancelStartGateRecheck(); // 会话真起来了 → 复判使命完成
+    // 浏览面钉定若是「问不到」→ 武装复判。**必须排在 sessionActive 置真之后**：
+    // 一跳打在还没激活的会话上会被自身的活跃闸直接解除，等于白白丢掉这条通道。
+    this.armFacebookPrimarySurfaceRecheck();
     this.sessionStartedAt = this.clock();
     this.reelsReentryCount = 0; // 重开次数按**场**计（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。
     // 会话启动现问一次 view 配额（change session-start-quota-honest-sleep）：被拒即当场休眠。
@@ -3280,6 +3472,8 @@ export class RoleDispatcher {
     // 连接拆除走的正是这条路（会话可能从未激活）。漏在短路之后，计时器就会活过连接，
     // 到点对着一条已断开的连接起会话、发命令；那比本 change 要修的原缺陷更坏。
     this.cancelStartGateRecheck();
+    // 主浏览入口复判同理：活过会话的一跳会对着已结束的会话改钉并下发重驱。同处解除、同一条理由。
+    this.cancelFacebookPrimarySurfaceRecheck();
     this.cancelViewQuotaSleep(false);
     this.settlePendingMandatoryCommentAsUnknown(`session_ended:${reason ?? 'manual'}`);
     this.reconcileFacebookRuleBatchOnSessionBoundary(`session_ended:${reason ?? 'manual'}`);
@@ -4316,7 +4510,7 @@ export class RoleDispatcher {
         if (
           this.accountPlatform === 'facebook'
           && payload.listKind === 'feed'
-          && this.sessionFacebookPrimarySurface === 'reels'
+          && this.facebookPrimarySurfaceIsReels()
         ) {
           this.authorizeFacebookPrimaryReels();
           return;
