@@ -92,6 +92,27 @@ test('钉定缺面值 → 记具名回执并武装复判，MUST NOT 静默回落
   h.dispatcher.endSession('test');
 });
 
+test('权威钉定的会话中途改配置 → 本场不改钉（复判 MUST NOT 扩成「配置中途生效」）', () => {
+  // 本 change 让钉定第一次成为**可改**的，故这条既有保证从「结构上不可能违反」降为「靠一道闸守住」，
+  // 必须有用例守着：权威钉定不武装复判 ⇒ 没有任何路径能在本场改钉。
+  const h = harness([AUTHORITATIVE_REELS, AUTHORITATIVE_FEED]);
+  h.dispatcher.setup();
+  h.capture(() => h.dispatcher.startSession());
+  assert.equal(h.pending().length, 0, '权威钉定不得武装复判');
+
+  const before = h.commands.length;
+  h.capture(() => h.dispatcher.redriveBrowse());
+  const issued = h.commands.slice(before);
+
+  assert.equal(issued.length, 1, '重驱恰好一条');
+  assert.equal(
+    issued[0]!.params?.targetSurface,
+    'reels',
+    '裁决已改成 feed，但本场仍用启动时钉的 reels——新配置只对下一场生效',
+  );
+  h.dispatcher.endSession('test');
+});
+
 test('带面值但 mode=blocked 仍算权威 → 不武装、不记账', () => {
   const h = harness([{ mode: 'blocked', blocker: 'slow_start_binding_unknown', primarySurface: 'reels' }]);
   h.dispatcher.setup();
