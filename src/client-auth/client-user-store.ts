@@ -72,6 +72,7 @@ import type {
   HandshakeEnvironmentObservation,
 } from '../kernel/api-direct-port.js';
 import { parseDeploymentTarget, type DeploymentTarget } from '../deployment-target.js';
+import { FACEBOOK_GLOBAL_POLICY_SCOPE } from '../config/facebook-global-policy-scope.js';
 
 const { Pool } = pg;
 
@@ -1268,7 +1269,7 @@ export class ClientUserStore {
            AND COALESCE(e.lifecycle_state, 'active') = 'active'
            AND lower(btrim(COALESCE(e.platform, ''))) IN ('facebook', 'fb')
          ORDER BY e.account_id, e.env_key`,
-      [this.executionTarget ?? 'dev'],
+      [FACEBOOK_GLOBAL_POLICY_SCOPE],
     );
     const grouped = new Map<string, {
       envKey: string;
@@ -1510,7 +1511,7 @@ export class ClientUserStore {
             AND EXISTS(SELECT 1 FROM client_env_scope s
                         WHERE s.user_id=$1 AND s.env_key=e.env_key AND s.source='admin')
         RETURNING e.env_key`,
-            [userId, key, value, this.executionTarget ?? 'dev'],
+            [userId, key, value, FACEBOOK_GLOBAL_POLICY_SCOPE],
           );
           if (enabled && (written.rowCount ?? written.rows.length) > 0) {
             await q.query(
@@ -1520,7 +1521,7 @@ export class ClientUserStore {
                     SELECT 1 FROM facebook_environment_slow_start_completion current
                      WHERE current.env_key=$1 AND current.execution_target=$2
                   )`,
-              [key, this.executionTarget ?? 'dev'],
+              [key, FACEBOOK_GLOBAL_POLICY_SCOPE],
             );
           }
           return written;
@@ -1568,7 +1569,7 @@ export class ClientUserStore {
                 AND lifecycle_state='active'
                 AND platform='facebook'
           RETURNING slow_start_since`,
-            [key, enabled, value, this.executionTarget ?? 'dev'],
+            [key, enabled, value, FACEBOOK_GLOBAL_POLICY_SCOPE],
           );
           if (enabled && written.rows[0]) {
             await q.query(
@@ -1578,7 +1579,7 @@ export class ClientUserStore {
                     SELECT 1 FROM facebook_environment_slow_start_completion current
                      WHERE current.env_key=$1 AND current.execution_target=$2
                   )`,
-              [key, this.executionTarget ?? 'dev'],
+              [key, FACEBOOK_GLOBAL_POLICY_SCOPE],
             );
           }
           return written;
@@ -2128,7 +2129,7 @@ export class ClientUserStore {
                     consumption_confirmed_joins_per_comment
                FROM facebook_operation_global_policy
               WHERE execution_target=$1`,
-            [this.executionTarget],
+            [FACEBOOK_GLOBAL_POLICY_SCOPE],
           );
           const global = globalResult.rows[0];
           if (!global) {

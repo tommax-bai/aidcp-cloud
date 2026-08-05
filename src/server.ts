@@ -2489,7 +2489,6 @@ async function segAApiFoundation(ctx: CompositionContext): Promise<void> {
   const facebookGroupCommentPolicyStore = deploymentTarget
     ? new FacebookGroupCommentPolicyStore({
         pool: configMirrorPool,
-        executionTarget: deploymentTarget,
         schemaProber: probeSchemaShape,
         mirrorVersionBumper: mirrorVersionStore,
         legacyWarmupHours: () => process.env.AIDCP_FB_GROUP_COVERAGE_WARMUP_HOURS,

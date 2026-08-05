@@ -125,7 +125,6 @@ describe('FacebookGroupCommentPolicyStore', () => {
     const db = database();
     const legacy = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
-      executionTarget: 'dev',
       schemaProber: readySchema,
       legacyWarmupHours: () => '36',
       legacyRecommentCooldownHours: () => '80',
@@ -144,7 +143,6 @@ describe('FacebookGroupCommentPolicyStore', () => {
 
     const fallback = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
-      executionTarget: 'ol',
       schemaProber: readySchema,
       legacyWarmupHours: () => 'bad',
     });
@@ -157,17 +155,14 @@ describe('FacebookGroupCommentPolicyStore', () => {
     const db = database();
     const dev = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
-      executionTarget: 'dev',
       schemaProber: readySchema,
     });
     const ol = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
-      executionTarget: 'ol',
       schemaProber: readySchema,
     });
     const staleDev = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
-      executionTarget: 'dev',
       schemaProber: readySchema,
     });
     await dev.init();
@@ -209,7 +204,6 @@ describe('FacebookGroupCommentPolicyStore', () => {
     const db = database();
     const store = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
-      executionTarget: 'dev',
       schemaProber: readySchema,
     });
     await store.init();
