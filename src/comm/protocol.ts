@@ -278,7 +278,6 @@ export type InteractionAuthStatus =
 export type InteractionBrowserState = 'closed' | 'opening' | 'open' | 'closing' | 'unavailable';
 export type InteractionErrorCode =
   | 'INTERACTION_AUTH_REQUIRED'
-  | 'INTERACTION_BROWSER_PROFILE_IN_USE'
   | 'INTERACTION_PERMISSION_DENIED'
   | 'INTERACTION_NOT_FOUND'
   | 'INTERACTION_SCOPE_MISMATCH'
@@ -294,6 +293,7 @@ export type InteractionErrorCode =
   | 'INTERACTION_UPSTREAM_UNAVAILABLE'
   | 'INTERACTION_TEST_RESET_PARTIAL'
   | 'INTERACTION_INTERNAL_ERROR'
+  | 'INTERACTION_BROWSER_PROFILE_IN_USE'
   | 'WECHAT_AUTH_REQUIRED'
   | 'WECHAT_CHALLENGE_REQUIRED'
   | 'WECHAT_IDENTITY_MISMATCH'
@@ -301,7 +301,6 @@ export type InteractionErrorCode =
   | 'WECHAT_PERMISSION_DENIED'
   | 'WECHAT_SCHEMA_CHANGED';
 export type InteractionAuthReasonCode =
-  | 'INTERACTION_BROWSER_PROFILE_IN_USE'
   | 'WECHAT_AUTH_REQUIRED'
   | 'WECHAT_CHALLENGE_REQUIRED'
   | 'WECHAT_IDENTITY_MISMATCH'
@@ -309,6 +308,7 @@ export type InteractionAuthReasonCode =
   | 'WECHAT_PERMISSION_DENIED'
   | 'WECHAT_SCHEMA_CHANGED'
   | 'INTERACTION_FEATURE_DISABLED'
+  | 'INTERACTION_BROWSER_PROFILE_IN_USE'
   | 'INTERACTION_UPSTREAM_UNAVAILABLE';
 
 export interface InteractionEffectiveCapabilities {
@@ -1541,7 +1541,7 @@ export interface InteractionCommentPayload {
   groupChatCode?: string;
   /**
    * 手工 `/comment --feed`：提交动作派发后跳过平台确认，500ms 后直回平台首页。
-   * 缺省 false；该模式只能诚实回 submitted-unconfirmed / verification_ambiguous，绝不表示平台确认成功。
+   * 缺省 false；该模式只能诚实回 submitted_unconfirmed / verification_ambiguous，绝不表示平台确认成功。
    */
   fastReturnToFeed?: boolean;
   reason?: string;
