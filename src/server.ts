@@ -4715,10 +4715,18 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
     title: string;
     detail: string;
   }): Promise<void> => {
-    console.warn(`[aidcp-cloud][risk] ${input.title} — ${input.detail}`);
+    // 来源 target 标注（change scope-risk-reconcile-to-owned-accounts）：`alerts` 表由 dev / ol
+    // 共库共用且没有 target 列，两方的告警混在同一个列表里，看卡片分不出是谁报的——而风控告警的
+    // 处置动作（去哪台机器看、改哪个环境）完全取决于这一点。收口在此一处，覆盖是结构性的，
+    // 不依赖逐个告警点接线；不加表列的取舍见本 change design D5。
+    const stamped = {
+      ...input,
+      detail: `[${deploymentTarget ?? 'target未知'}] ${input.detail}`,
+    };
+    console.warn(`[aidcp-cloud][risk] ${stamped.title} — ${stamped.detail}`);
     if (!riskAlertSink) return;
     try {
-      await riskAlertSink.raise(input);
+      await riskAlertSink.raise(stamped);
     } catch (err) {
       console.warn(`[aidcp-cloud][risk] 告警落库失败: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -5222,6 +5230,21 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
       riskReconciler = new RiskCounterReconciler({
         registry: riskRegistry,
         totalsSince: (accountId, since) => riskStore.totalsForAccountSince(accountId, since),
+        // 对账范围按归属收敛（change scope-risk-reconcile-to-owned-accounts）：`risk_counters` 是
+        // dev / ol 共用且不带 target 的既成事实账本，内存计数却只跟本进程的记账走 ⇒ 对「归属在另一个
+        // target 的账号」两者结构上不可能相等。而面板 / 客户端的只读用量查询会顺手物化这些账号的
+        // controller，把它们拖进对账范围 ⇒ 每 5 分钟每账号每动作刷一条 P1，把这条零容忍信号淹掉。
+        // ⚠️ 归属读 MUST 复用风控条件写在用的这一口，MUST NOT 另起读法（两份读法漂开不会报错，
+        //    只会让「条件写认为账号是我的、对账认为不是」，且无任何机械手段提醒）。
+        // ⚠️ 判据 MUST 与握手侧占位归属的接线条件**逐字相同**（`ownershipMode !== 'off'`），不能只判
+        //    「读口在不在」：enforce 被回滚成 off 时握手不再改写归属，库里那份归属随即变陈旧——
+        //    按陈旧归属过滤会把本进程真正在驱动的账号判成「别人的」而跳过，这道保护就静默消失了。
+        ...(deploymentTarget && ownershipPort && ownershipMode !== 'off'
+          ? {
+              executionTarget: deploymentTarget,
+              ownerTargetFor: (accountId: string) => ownershipPort.resolveExecutionTarget(accountId),
+            }
+          : {}),
         intervalMs: readEnvNumber('AIDCP_RISK_RECONCILE_INTERVAL_MS', 5 * 60_000),
         logger: console,
         onDrift: (drift) =>
@@ -5232,11 +5255,18 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
             title: `风控计数与库内事实不一致：账号 ${drift.accountId} 的 ${drift.action}`,
             detail:
               `内存=${drift.memory}，库=${drift.database}。判据是偏差是否为零（无容忍阈值）。` +
-              `已按库内事实重建该账号计数；偏差来源通常是归属变更、运维手工 SQL 或另一 target 的遗留行。`,
+              `已按库内事实重建该账号计数；对账范围已限定为归属本 target 的账号，故这条偏差不来自另一 target 的正常驱动；` +
+              `来源通常是运维手工 SQL、归属刚变更时飞在半路的回执，或本进程记账链路漏记。`,
           }),
       });
       riskReconciler.start();
-      console.log('[aidcp-cloud] 风控计数对账已启动（偏差非零即告警并以库为准重建）');
+      console.log(
+        `[aidcp-cloud] 风控计数对账已启动（偏差非零即告警并以库为准重建）：范围=${
+          deploymentTarget && ownershipPort && ownershipMode !== 'off'
+            ? `归属为 ${deploymentTarget} 的账号`
+            : '全部已物化账号（归属强制未生效，未过滤）'
+        }`,
+      );
     } catch (err) {
       // 记账链路起不来 = 记不上账。这里 MUST NOT 静默降级为「照跑」——但也不该把整个云端拖死
       // （客户数据、内容服务与已在跑的会话都不依赖它）。折中：诚实告警 + 明确日志，

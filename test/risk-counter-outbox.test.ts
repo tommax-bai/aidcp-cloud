@@ -355,12 +355,12 @@ test('库里被外部插入一行 → 对账检出偏差、告警、以库为准
   });
 
   const found = await reconciler.runOnce();
-  assert.equal(found.length, 1);
+  assert.equal(found.drifts.length, 1);
   assert.deepEqual(drifts, [{ action: 'like', memory: 1, database: 3 }]);
   assert.equal(controller.counts().day.like, 3, '重建后内存值 MUST 等于库值');
 
   // 再跑一次：已一致 ⇒ 零偏差。
-  assert.deepEqual(await reconciler.runOnce(), []);
+  assert.deepEqual((await reconciler.runOnce()).drifts, []);
 });
 
 test('偏差 1 也算偏差：MUST NOT 因差值小而判为一致', async () => {
@@ -383,9 +383,159 @@ test('偏差 1 也算偏差：MUST NOT 因差值小而判为一致', async () =>
     logger: silent,
   });
   const found = await reconciler.runOnce();
-  assert.equal(found.length, 1);
+  assert.equal(found.drifts.length, 1);
   assert.deepEqual(
-    { memory: found[0].memory, database: found[0].database },
+    { memory: found.drifts[0].memory, database: found.drifts[0].database },
     { memory: 1, database: 2 },
   );
+});
+
+// ── 对账范围按归属收敛（change scope-risk-reconcile-to-owned-accounts）─────────────
+
+/**
+ * 建一个「内存少于库」的账号：内存 1 次 like，库里 3 次。对账若把它算进来，必然报偏差。
+ * 桩 store 的 `loadCounters` 与 `totalsSince` 口径一致（都是库里那 3 行），
+ * 这样「以库为准重建」才是真的在断言重建结果、而不是在断言一个空桩。
+ */
+async function driftingController(accountId: string) {
+  const dbRows: { action: RiskAction; occurredAt: number; count: number }[] = [];
+  const controller = await RiskController.create({
+    accountId,
+    store: {
+      loadCounters: async () => dbRows.map((r) => ({ ...r })),
+      loadState: async () => null,
+      appendCounter: async () => undefined,
+      saveState: async () => undefined,
+    } as never,
+    clock: () => 5_000,
+  });
+  // 本进程只记了 1 笔；库里另有 2 笔外部写入 ⇒ 内存 1 / 库 3。
+  controller.recordFact('like', 4_000);
+  for (const occurredAt of [4_000, 4_100, 4_200]) dbRows.push({ action: 'like', occurredAt, count: 1 });
+  return controller;
+}
+
+const likeTotals = (n: number): ActionQuota =>
+  Object.fromEntries(RISK_ACTIONS.map((a) => [a, a === 'like' ? n : 0])) as ActionQuota;
+
+test('归属在另一个 target 的账号：有偏差也 MUST NOT 告警、MUST NOT 重建', async () => {
+  const controller = await driftingController('acc-foreign');
+  const drifts: string[] = [];
+  const reconciler = new RiskCounterReconciler({
+    registry: {
+      materializedAccountIds: () => ['acc-foreign'],
+      peek: () => Promise.resolve(controller),
+    } as never,
+    totalsSince: async () => likeTotals(3),
+    executionTarget: 'dev',
+    ownerTargetFor: async () => ({ outcome: 'owned', target: 'ol' }),
+    clock: () => 5_000,
+    logger: silent,
+    onDrift: (d) => {
+      drifts.push(d.accountId);
+    },
+  });
+
+  const round = await reconciler.runOnce();
+  assert.deepEqual(round.drifts, [], '共用账本 + 只跟本进程走的内存 ⇒ 他 target 账号本就不可能相等');
+  assert.deepEqual(drifts, [], 'MUST NOT 就他 target 的账号告警');
+  assert.equal(round.skippedForeign, 1);
+  assert.equal(round.reconciled, 0);
+  assert.equal(controller.counts().day.like, 1, '跳过的账号 MUST NOT 被重建');
+});
+
+test('归属为本 target 的账号：照旧检出偏差并以库为准重建', async () => {
+  const controller = await driftingController('acc-own');
+  const reconciler = new RiskCounterReconciler({
+    registry: {
+      materializedAccountIds: () => ['acc-own'],
+      peek: () => Promise.resolve(controller),
+    } as never,
+    totalsSince: async () => likeTotals(3),
+    executionTarget: 'dev',
+    ownerTargetFor: async () => ({ outcome: 'owned', target: 'dev' }),
+    clock: () => 5_000,
+    logger: silent,
+  });
+
+  const round = await reconciler.runOnce();
+  assert.equal(round.drifts.length, 1, '归属过滤 MUST NOT 削弱本 target 账号上的零容忍判据');
+  assert.equal(round.reconciled, 1);
+  assert.equal(round.skippedForeign, 0);
+  assert.equal(controller.counts().day.like, 3, '仍 MUST 以库为准重建');
+});
+
+test('归属未知（无归属行 / 账号不存在 / 读失败）MUST 跳过并计数，MUST NOT 冒充本 target', async () => {
+  const controllers = new Map(
+    await Promise.all(
+      ['acc-unowned', 'acc-missing', 'acc-throws'].map(
+        async (id) => [id, await driftingController(id)] as const,
+      ),
+    ),
+  );
+  const reconciler = new RiskCounterReconciler({
+    registry: {
+      materializedAccountIds: () => [...controllers.keys()],
+      peek: (id: string) => Promise.resolve(controllers.get(id)!),
+    } as never,
+    totalsSince: async () => likeTotals(3),
+    executionTarget: 'dev',
+    ownerTargetFor: async (accountId: string) => {
+      if (accountId === 'acc-unowned') return { outcome: 'unowned' as const };
+      if (accountId === 'acc-missing') return { outcome: 'account_not_found' as const };
+      throw new Error('ownership read exploded');
+    },
+    clock: () => 5_000,
+    logger: silent,
+  });
+
+  const round = await reconciler.runOnce();
+  assert.deepEqual(round.drifts, []);
+  assert.equal(round.skippedUnknown, 3, '「未知」不等于「是我的」；读失败也 MUST 计入而不是中断整轮');
+  assert.equal(round.reconciled, 0);
+  for (const [id, controller] of controllers) {
+    assert.equal(controller.counts().day.like, 1, `${id} 跳过后 MUST NOT 被重建`);
+  }
+});
+
+test('一轮全部跳过 MUST 响亮记录——过滤器把对账做成死代码与「一切正常」必须可区分', async () => {
+  const controller = await driftingController('acc-foreign');
+  const warnings: string[] = [];
+  const reconciler = new RiskCounterReconciler({
+    registry: {
+      materializedAccountIds: () => ['acc-foreign'],
+      peek: () => Promise.resolve(controller),
+    } as never,
+    totalsSince: async () => likeTotals(3),
+    executionTarget: 'dev',
+    ownerTargetFor: async () => ({ outcome: 'owned', target: 'ol' }),
+    clock: () => 5_000,
+    logger: { log: () => undefined, warn: (m: string) => warnings.push(m), error: () => undefined },
+  });
+
+  const round = await reconciler.runOnce();
+  assert.equal(round.materialized, 1);
+  assert.equal(round.reconciled, 0);
+  assert.ok(
+    warnings.some((w) => w.includes('本轮无账号参与对账') && w.includes('已物化=1')),
+    '已物化>0 而实际对账=0 MUST 响亮记录，否则「过滤条件写错」与「健康」在观测上同形',
+  );
+});
+
+test('归属读口缺席 ⇒ 不过滤、全量对账（逐字回到改动前行为）', async () => {
+  const controller = await driftingController('acc-1');
+  const reconciler = new RiskCounterReconciler({
+    registry: {
+      materializedAccountIds: () => ['acc-1'],
+      peek: () => Promise.resolve(controller),
+    } as never,
+    totalsSince: async () => likeTotals(3),
+    // executionTarget / ownerTargetFor 都不注入：归属强制未生效的形态。
+    clock: () => 5_000,
+    logger: silent,
+  });
+
+  const round = await reconciler.runOnce();
+  assert.equal(round.drifts.length, 1, '归属强制已关时对账器 MUST NOT 单方面把自己关成静默');
+  assert.equal(round.reconciled, 1);
 });
