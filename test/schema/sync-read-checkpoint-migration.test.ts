@@ -147,10 +147,15 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(
     !automation.includes('0109_content_schedule_hour_claim_env_key_optional'),
   );
+  // Facebook 全局策略与冷启动完成事实收成跨目标唯一一份：三张表都是 API 属主，故只进 api 组。
+  assert.ok(api.includes('0110_facebook_global_policy_single_scope'));
+  assert.ok(
+    !automation.includes('0110_facebook_global_policy_single_scope'),
+  );
   // 每加一条迁移都要在这里同步抬。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0109_content_schedule_hour_claim_env_key_optional',
+    '0110_facebook_global_policy_single_scope',
   );
 });
 

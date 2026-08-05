@@ -9,6 +9,7 @@ import { normalizePlatformId } from '../kernel/platform-types.js';
 import type { ActionQuota } from '../kernel/risk-contract.js';
 import type { DeploymentTarget } from '../deployment-target.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
+import { FACEBOOK_GLOBAL_POLICY_SCOPE } from './facebook-global-policy-scope.js';
 import type { MirrorVersionBumper } from './mirror-version-store.js';
 import {
   cloneFacebookReelCadence,
@@ -986,7 +987,7 @@ export class FacebookOperationPolicyStore {
                     slow_start_daily_caps,revision,updated_at,updated_by
                FROM facebook_operation_global_policy
               WHERE execution_target=$1`,
-            [this.executionTarget],
+            [FACEBOOK_GLOBAL_POLICY_SCOPE],
           )
         : Promise.resolve({ rows: [] as GlobalOperationPolicyDbRow[] }),
     ]);
@@ -1251,7 +1252,7 @@ export class FacebookOperationPolicyStore {
            FROM facebook_operation_global_policy
           WHERE execution_target=$1
           FOR UPDATE`,
-        [this.executionTarget],
+        [FACEBOOK_GLOBAL_POLICY_SCOPE],
       );
       const currentRow = currentResult.rows[0];
       if (!currentRow) {
@@ -1302,7 +1303,7 @@ export class FacebookOperationPolicyStore {
                     consumption_confirmed_joins_per_comment,slow_start_total_days,
                     slow_start_daily_caps,revision,updated_at,updated_by`,
         [
-          this.executionTarget,
+          FACEBOOK_GLOBAL_POLICY_SCOPE,
           input.reels.persona.viewsPerLike,
           input.reels.persona.viewsPerFollow,
           input.reels.slowStart.viewsPerLike,
@@ -1328,7 +1329,7 @@ export class FacebookOperationPolicyStore {
             actor_class,actor_id,request_id,reason,created_at)
          VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,now())`,
         [
-          this.executionTarget,
+          FACEBOOK_GLOBAL_POLICY_SCOPE,
           current.revision,
           next.revision,
           JSON.stringify(this.globalAuditSnapshot(current)),
@@ -1790,13 +1791,13 @@ export class FacebookOperationPolicyStore {
            VALUES ($1,$2,now())
            ON CONFLICT (env_key,execution_target)
            DO UPDATE SET completed_at=EXCLUDED.completed_at`,
-          [key, this.executionTarget],
+          [key, FACEBOOK_GLOBAL_POLICY_SCOPE],
         );
       } else {
         await client.query(
           `DELETE FROM facebook_environment_slow_start_completion
             WHERE env_key=$1 AND execution_target=$2`,
-          [key, this.executionTarget],
+          [key, FACEBOOK_GLOBAL_POLICY_SCOPE],
         );
       }
 
@@ -2512,7 +2513,7 @@ export class FacebookOperationPolicyStore {
         WHERE e.env_key=$1
           AND COALESCE(e.lifecycle_state,'active')='active'
         FOR UPDATE OF e`,
-      [envKey, this.executionTarget ?? 'dev'],
+      [envKey, FACEBOOK_GLOBAL_POLICY_SCOPE],
     );
     return rows[0] ?? null;
   }
@@ -2596,7 +2597,13 @@ export class FacebookOperationPolicyStore {
     const dailyCaps = normalizedDailyCaps(row.slow_start_daily_caps, totalDays);
     if (!dailyCaps) throw new Error('facebook_operation_global_policy_invalid_daily_caps');
     return {
-      executionTarget: row.execution_target,
+      // **这个字段现在表示「你正在通过哪个目标的接口读这份配置」，不再表示「这份配置属于谁」**
+      // （change unify-facebook-global-policy-across-targets）：策略已收成跨目标唯一一份，
+      // 行键是 FACEBOOK_GLOBAL_POLICY_SCOPE。这里 MUST NOT 回传行上的作用域键——
+      // 管理后台对该字段有 `['dev','ol']` 硬闸，回一个它不认识的值不是报错，是整页打不开。
+      // 前端据此显示的标签必须写成「当前连接」而非「配置归属」，并与「本页对全部运行目标
+      // 同时生效」的明示并排出现；只改这里而不改标签，会把旧误解原样保留下来。
+      executionTarget: this.executionTarget ?? 'dev',
       revision: Number(row.revision),
       schemaVersion: FACEBOOK_OPERATION_GLOBAL_POLICY_SCHEMA_VERSION,
       rule: {
@@ -2674,7 +2681,7 @@ export class FacebookOperationPolicyStore {
           AND lower(btrim(COALESCE(e.platform,''))) IN ('facebook','fb')
           AND now() >= e.slow_start_since + ($2 * interval '1 day')
        ON CONFLICT (env_key,execution_target) DO NOTHING`,
-      [this.executionTarget, totalDays],
+      [FACEBOOK_GLOBAL_POLICY_SCOPE, totalDays],
     );
   }
 
@@ -2709,7 +2716,7 @@ export class FacebookOperationPolicyStore {
          FROM client_environments e
         WHERE e.env_key=$1
           AND COALESCE(e.lifecycle_state,'active')='active'`,
-      [envKey, this.executionTarget ?? 'dev'],
+      [envKey, FACEBOOK_GLOBAL_POLICY_SCOPE],
     );
     return rows[0] ?? null;
   }

@@ -6,6 +6,7 @@ import {
   type SchemaProber,
 } from '../kernel/schema-capability-contract.js';
 import type { MirrorVersionBumper } from './mirror-version-store.js';
+import { FACEBOOK_GLOBAL_POLICY_SCOPE } from './facebook-global-policy-scope.js';
 
 const { Pool } = pg;
 
@@ -79,7 +80,12 @@ export interface FacebookGroupCommentPolicyStoreOptions {
   database?: string;
   user?: string;
   password?: string;
-  executionTarget: 'dev' | 'ol';
+  /**
+   * **本存储不再有 `executionTarget`**（change unify-facebook-global-policy-across-targets）。
+   * 这份策略已收成跨运行目标唯一一份，行键取 {@link FACEBOOK_GLOBAL_POLICY_SCOPE}。
+   * 刻意**删掉**这个入参而不是留着不用：留着会让下一个人以为这里还能按目标分，
+   * 而唯一拦着他的只是一个约定；删掉则任何仍在传它的组装根当场编译失败。
+   */
   schemaProber: SchemaProber;
   mirrorVersionBumper?: MirrorVersionBumper;
   legacyWarmupHours?: () => unknown;
@@ -120,7 +126,6 @@ function positiveNumber(value: unknown): number | null {
 export class FacebookGroupCommentPolicyStore {
   private readonly pool: pg.Pool;
   private readonly ownedPool?: pg.Pool;
-  private readonly executionTarget: 'dev' | 'ol';
   private readonly schemaProber: SchemaProber;
   private readonly mirrorVersionBumper?: MirrorVersionBumper;
   private readonly legacyWarmupHours?: () => unknown;
@@ -129,7 +134,6 @@ export class FacebookGroupCommentPolicyStore {
   private ready = false;
 
   constructor(options: FacebookGroupCommentPolicyStoreOptions) {
-    this.executionTarget = options.executionTarget;
     this.schemaProber = options.schemaProber;
     this.mirrorVersionBumper = options.mirrorVersionBumper;
     this.legacyWarmupHours = options.legacyWarmupHours;
@@ -173,7 +177,7 @@ export class FacebookGroupCommentPolicyStore {
       `SELECT execution_target,join_to_first_comment_hours,revision,updated_at,updated_by
          FROM facebook_group_comment_policy
         WHERE execution_target=$1`,
-      [this.executionTarget],
+      [FACEBOOK_GLOBAL_POLICY_SCOPE],
     );
     this.row = rows[0] ?? null;
   }
@@ -255,7 +259,7 @@ export class FacebookGroupCommentPolicyStore {
            FROM facebook_group_comment_policy
           WHERE execution_target=$1
           FOR UPDATE`,
-        [this.executionTarget],
+        [FACEBOOK_GLOBAL_POLICY_SCOPE],
       );
       const current = currentResult.rows[0];
       const currentRevision = current ? Number(current.revision) : 0;
@@ -279,7 +283,7 @@ export class FacebookGroupCommentPolicyStore {
               WHERE execution_target=$1
               RETURNING execution_target,join_to_first_comment_hours,revision,updated_at,updated_by`,
             [
-              this.executionTarget,
+              FACEBOOK_GLOBAL_POLICY_SCOPE,
               input.joinToFirstCommentHours,
               newRevision,
               actor,
@@ -291,7 +295,7 @@ export class FacebookGroupCommentPolicyStore {
              VALUES ($1,$2,$3,now(),$4)
              RETURNING execution_target,join_to_first_comment_hours,revision,updated_at,updated_by`,
             [
-              this.executionTarget,
+              FACEBOOK_GLOBAL_POLICY_SCOPE,
               input.joinToFirstCommentHours,
               newRevision,
               actor,
@@ -304,7 +308,7 @@ export class FacebookGroupCommentPolicyStore {
             actor_class,actor_id,request_id,reason,created_at)
          VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,now())`,
         [
-          this.executionTarget,
+          FACEBOOK_GLOBAL_POLICY_SCOPE,
           currentRevision,
           newRevision,
           current

@@ -6,6 +6,7 @@ import type { MirrorVersionBumper } from '../../src/config/mirror-version-store.
 import { FacebookOperationPolicyStore } from '../../src/config/facebook-operation-policy-store.js';
 import { isSyncReadFactPayload } from '../../src/kernel/sync-read-facts.js';
 import { RISK_ACTIONS } from '../../src/kernel/risk-contract.js';
+import { FACEBOOK_GLOBAL_POLICY_SCOPE } from '../../src/config/facebook-global-policy-scope.js';
 
 interface PolicyRow {
   env_key: string;
@@ -23,7 +24,7 @@ interface PolicyRow {
 }
 
 interface GlobalPolicyRow {
-  execution_target: 'dev' | 'ol';
+  execution_target: 'dev' | 'ol' | 'all';
   persona_reel_views_per_like: number;
   persona_reel_views_per_follow: number;
   slow_start_reel_views_per_like: number;
@@ -185,7 +186,9 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
   );
   let surfaceAudits: unknown[][] = [];
   let globalRow: GlobalPolicyRow = {
-    execution_target: options.executionTarget ?? 'dev',
+    // 合并后存储按 FACEBOOK_GLOBAL_POLICY_SCOPE 选行，不再按部署目标；
+    // 这里照旧播种成部署目标就会重现 change 前的行为，用例会以 policy_missing 报错。
+    execution_target: FACEBOOK_GLOBAL_POLICY_SCOPE as GlobalPolicyRow['execution_target'],
     persona_reel_views_per_like: 4,
     persona_reel_views_per_follow: 10,
     slow_start_reel_views_per_like: 15,
@@ -702,7 +705,10 @@ describe('FacebookOperationPolicyStore', () => {
     );
     assert.equal(db.globalAudits.length, 1);
     assert.equal(db.audits.length, 3, 'two direct writes plus one propagated audit');
-    assert.deepEqual(db.graduationMarks, [['dev', 7], ['dev', 14]]);
+    assert.deepEqual(db.graduationMarks, [
+      [FACEBOOK_GLOBAL_POLICY_SCOPE, 7],
+      [FACEBOOK_GLOBAL_POLICY_SCOPE, 14],
+    ]);
     assert.deepEqual(db.bumps.slice(-3), [
       'content_schedule',
       // 批 E-2 步骤 2：运营基线自己的同步读游标靠它推进。少了它，
