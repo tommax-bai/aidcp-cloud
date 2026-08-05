@@ -20,6 +20,24 @@ test('every registered Cloud push uses automation WebSocket and unknown active o
   assert.equal(automationOperationDescriptorFor('future.unclassified' as MessageType), null);
 });
 
+test('identity read commands are dispatchable — the edge identity-rescue allowlist needs them', () => {
+  // 边缘 src/client/identity-command-gate.ts 把这两条放进身份救援放行清单：运行期身份落到
+  // 「不知道浏览器里登着谁」的终局时，只有它们能问出当前登录身份、解开该终局。云端漏登记 ⇒
+  // 出口闸判 operation_unclassified 静默拒发（投递数 0）⇒ 该自救通道结构上不成立。
+  //
+  // 期望值**按引用取自本表里已知正确的同类命令**，不另抄一份字面量：抄一份就是第二实现，
+  // 它只能证明「我抄的和我抄的一样」，描述符字段真改了它照样绿。
+  const peer = automationOperationDescriptorFor('profile.open');
+  assert.notEqual(peer, null, 'profile.open 是本断言的参照锚点，它自己不能是 null');
+  for (const type of ['identity.read_current', 'identity.read_self_profile'] as MessageType[]) {
+    assert.deepEqual(
+      automationOperationDescriptorFor(type),
+      peer,
+      `${type} 必须可从云端下发，且分类与同类页面自动化命令一致`,
+    );
+  }
+});
+
 test('Cloud/admin cannot push AIDCP-owned data commands through the automation channel', () => {
   const forbiddenDataCommands = [
     'persona.generate',
