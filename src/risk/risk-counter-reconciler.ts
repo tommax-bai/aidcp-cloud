@@ -188,6 +188,14 @@ export class RiskCounterReconciler {
           `他target跳过=${skippedForeign} 归属未知跳过=${skippedUnknown}` +
           (this.ownershipScoped ? '' : '（未按归属过滤——此形态下不该出现，请检查注册表）'),
       );
+    } else if (materialized > 0) {
+      // 每轮一行的常态回执。**「没有日志」MUST NOT 是「一切正常」的表达方式**：那样「过滤器把范围
+      // 收成空」「定时器根本没跑」「确实逐项相等」三件事在运维视角下完全同形，而前两件是故障。
+      // 一行 / 5 分钟，代价可忽略；它同时是这道归属过滤在生产上唯一的正向证据。
+      this.deps.logger?.log?.(
+        `[risk-reconcile] 已物化=${materialized} 实际对账=${reconciled} ` +
+          `他target跳过=${skippedForeign} 归属未知跳过=${skippedUnknown} 偏差=${drifts.length}`,
+      );
     }
     return { drifts, materialized, reconciled, skippedForeign, skippedUnknown };
   }

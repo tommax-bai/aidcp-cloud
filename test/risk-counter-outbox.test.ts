@@ -465,6 +465,32 @@ test('归属为本 target 的账号：照旧检出偏差并以库为准重建', 
   assert.equal(controller.counts().day.like, 3, '仍 MUST 以库为准重建');
 });
 
+test('每轮 MUST 留一行常态回执——「没有日志」MUST NOT 是「一切正常」的表达方式', async () => {
+  const controller = await driftingController('acc-own');
+  const logs: string[] = [];
+  const reconciler = new RiskCounterReconciler({
+    registry: {
+      materializedAccountIds: () => ['acc-own'],
+      peek: () => Promise.resolve(controller),
+    } as never,
+    totalsSince: async () => likeTotals(3),
+    executionTarget: 'dev',
+    ownerTargetFor: async () => ({ outcome: 'owned', target: 'dev' }),
+    clock: () => 5_000,
+    logger: { log: (m: string) => logs.push(m), warn: () => undefined, error: () => undefined },
+  });
+
+  // 第二轮：已重建、零偏差——正是「看起来什么都没发生」的那一轮，它同样 MUST 留痕。
+  await reconciler.runOnce();
+  logs.length = 0;
+  const round = await reconciler.runOnce();
+  assert.deepEqual(round.drifts, []);
+  assert.ok(
+    logs.some((m) => m.includes('实际对账=1') && m.includes('偏差=0')),
+    '零偏差那一轮也 MUST 报出四个计数，否则「定时器没跑」「范围被收成空」「确实相等」三者同形',
+  );
+});
+
 test('归属未知（无归属行 / 账号不存在 / 读失败）MUST 跳过并计数，MUST NOT 冒充本 target', async () => {
   const controllers = new Map(
     await Promise.all(
