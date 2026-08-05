@@ -59,9 +59,24 @@ export type CaptchaAvailabilitySnapshot = {
   readonly state: 'disabled' | 'available' | 'unavailable' | 'unknown';
 };
 
+/**
+ * automation 本地镜像健康度的同步读载荷。
+ *
+ * ⚠️ **MUST NOT 加入观测时刻 / 序号一类「每次观测都变、却不描述事实」的字段。**
+ * 变更检测取的是整份 payload 的摘要（`syncReadPayloadDigest`），载荷里放一个时钟
+ * 等于把「变没变」打成恒真：generation 每轮 +1、每轮写一条 `sync_read.changed`。
+ * 曾实测：本流以每 target 每 10 秒一条的速度写进 dev/ol 共用的生产库，
+ * 撑到 14 万行 / 45MB 且占该表 99%，而载荷内容自始至终恒定。
+ * 投递时刻由 envelope 的 `asOf` 承担，消费方读的也正是那一份
+ * （`api-sync-read-mirrors.ts` 取 `view.metadata.sourceAsOf`），载荷里这份零消费方。
+ *
+ * 消除 churn 的正确形态是**把非事实字段移出 payload**，
+ * **MUST NOT** 改成「摘要排除若干字段」—— 摘要必须盖全 payload，
+ * 否则同 cursor 下的载荷漂移（`same_cursor_payload_drift`）不再可检出，
+ * 而本仓已因「同游标不同载荷」栽过整机起不来。
+ */
 export type AutomationConfigMirrorHealthSnapshot = {
   readonly sourceService: 'automation';
-  readonly asOf: number;
   readonly enabled: boolean;
   readonly pollMs: number;
   readonly entries: readonly {
@@ -317,15 +332,15 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'automation_config_mirror_health':
       return (
         isRecord(value) &&
+        // 穷举键：多一个键就判非法。这正是挡住「有人把观测时刻塞回载荷」的那道闸，
+        // MUST NOT 放宽成子集匹配（见 AutomationConfigMirrorHealthSnapshot 的头注）。
         hasExactKeys(value, [
           'sourceService',
-          'asOf',
           'enabled',
           'pollMs',
           'entries',
         ]) &&
         value.sourceService === 'automation' &&
-        isNonNegativeInteger(value.asOf) &&
         typeof value.enabled === 'boolean' &&
         isNonNegativeInteger(value.pollMs) &&
         Array.isArray(value.entries) &&

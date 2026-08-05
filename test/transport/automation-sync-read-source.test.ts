@@ -297,7 +297,6 @@ function runtimeSources(
     captchaAvailability: () => ({ state: 'disabled' }),
     configMirrorHealth: () => ({
       sourceService: 'automation',
-      asOf: 1,
       enabled: true,
       pollMs: 1_000,
       entries: [],
@@ -338,3 +337,82 @@ function generationPool() {
     },
   };
 }
+
+// change bound-event-outbox-growth：观测周期 MUST NOT 变成写入周期。
+//
+// 曾经的形态：health 载荷带 `asOf: Date.now()` ⇒ 每 10 秒观测一次就换一次摘要 ⇒
+// generation 每轮 +1 ⇒ 每轮写一条 sync_read.changed。dev/ol 共用的生产库因此长到
+// 14 万行 / 45MB，其中 99% 是这一条流，而它的事实内容自始至终没变过。
+//
+// 这里锁的是**语义**而不是某一个字段名：只要事实没变，无论观测了多少轮、
+// 观测时刻走出多远，都 MUST 不推进 generation、MUST 不发通知。
+test('repeated observation of unchanged facts advances no generation and emits nothing', async () => {
+  const durable = generationPool();
+  let emitted = 0;
+  let lastEmitted = '0';
+  let entries: Record<string, unknown>[] = [];
+  const runtime = runtimeSources(() => 0);
+  const source = new AutomationSyncReadSnapshotSource(
+    'dev',
+    {
+      ...runtime,
+      configMirrorHealth: () => ({
+        sourceService: 'automation',
+        enabled: false,
+        pollMs: 0,
+        entries: entries as never,
+      }),
+    },
+    new PgAutomationSyncReadGenerationStore('dev', durable.pool as never),
+    {
+      // 照 SyncReadChangedOutbox 的真实语义建模：那条 SQL 带
+      // `AND last_emitted_generation < generation` 守卫，代数没前进就一行都不写。
+      // 只数「真的写下去了」的次数——emit 被调了几次不是我们要锁的东西。
+      async emit(_stream, generation) {
+        if (BigInt(generation) <= BigInt(lastEmitted)) {
+          return { emitted: false, generation };
+        }
+        lastEmitted = generation;
+        emitted += 1;
+        return { emitted: true, generation };
+      },
+    },
+  );
+
+  const first = await source.publishChanged('automation_config_mirror_health', 1_000);
+  assert.equal(first.cursor, '1');
+  assert.equal(emitted, 1, '首次观测建立基线，写一条通知');
+
+  // 观测时刻一路前进，事实一动不动 —— 这正是生产上每 10 秒跑一轮的形态。
+  for (const observedAt of [11_000, 21_000, 31_000, 41_000]) {
+    const again = await source.publishChanged(
+      'automation_config_mirror_health',
+      observedAt,
+    );
+    assert.equal(again.cursor, '1', '事实未变 ⇒ generation MUST NOT 前进');
+    // 信封的 asOf/freshUntil 照常前进：新鲜度续期走的是这条路，与通知无关。
+    assert.equal(again.asOf, observedAt);
+  }
+  assert.equal(emitted, 1, '四轮空转 MUST NOT 多写一条通知');
+
+  // 反向断言：事实真变了必须发。否则「不再 churn」会被做成「再也不发通知」。
+  entries = [{
+    mirrorKey: 'quota_config',
+    tier: 'gate',
+    version: 2,
+    lastComparedAt: 9,
+    lastReloadedAt: 8,
+    reloadFailingSince: null,
+    state: 'fresh',
+    staleMs: 0,
+    observeStaleMs: 10_000,
+    haltsOnStale: true,
+    staleForMs: 0,
+  }];
+  const changed = await source.publishChanged(
+    'automation_config_mirror_health',
+    51_000,
+  );
+  assert.equal(changed.cursor, '2');
+  assert.equal(emitted, 2);
+});

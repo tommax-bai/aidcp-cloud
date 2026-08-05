@@ -102,7 +102,6 @@ test('A6 stale delivery clears old fresh entries and keeps source evidence', () 
       freshUntil: 150,
       value: {
         sourceService: 'automation',
-        asOf: 80,
         enabled: true,
         pollMs: 1_000,
         entries: [

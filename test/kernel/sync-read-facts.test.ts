@@ -7,7 +7,6 @@ test('gate payload validators reject malformed nested fields instead of acceptin
   assert.equal(
     isSyncReadFactPayload('automation_config_mirror_health', {
       sourceService: 'automation',
-      asOf: 1,
       enabled: true,
       pollMs: 1_000,
       entries: [{ mirrorKey: 'x', tier: 'gate', state: 'fresh' }],
@@ -98,7 +97,6 @@ test('runtime and shared payload validators enforce semantic count and identity 
   assert.equal(
     isSyncReadFactPayload('automation_config_mirror_health', {
       sourceService: 'automation',
-      asOf: 1,
       enabled: true,
       pollMs: 1_000,
       entries: [
@@ -184,7 +182,6 @@ test('complete well-formed gate payloads remain accepted', () => {
   assert.equal(
     isSyncReadFactPayload('automation_config_mirror_health', {
       sourceService: 'automation',
-      asOf: 10,
       enabled: true,
       pollMs: 1_000,
       entries: [
@@ -254,5 +251,38 @@ test('complete well-formed gate payloads remain accepted', () => {
     }),
     false,
     '零小时预热不是合法策略：它等于「刚加完就能评」，而那正是这道时序闸要挡的',
+  );
+});
+
+// change bound-event-outbox-growth：把「载荷里不许有时钟」钉成契约，而不是靠人记得。
+//
+// 背景：这条流的载荷曾带 `asOf: Date.now()`。载荷整份进摘要（syncReadPayloadDigest），
+// 于是「内容变没变」恒真 —— generation 每轮 +1、每轮写一条 sync_read.changed，
+// 在 dev/ol 共用的生产库上撑到 14 万行 / 45MB，占该表 99%，而载荷内容自始至终恒定。
+// 投递时刻由 envelope 的 asOf 承担，载荷里那份零消费方。
+test('automation health payload rejects an observation clock so change detection stays fact-driven', () => {
+  const facts = {
+    sourceService: 'automation' as const,
+    enabled: false,
+    pollMs: 0,
+    entries: [],
+  };
+  assert.equal(isSyncReadFactPayload('automation_config_mirror_health', facts), true);
+
+  // 多带一个「每次观测都会变、却不描述事实」的字段 ⇒ 穷举键当场判非法。
+  // 这道断言就是防复发的闸：把时钟塞回载荷 MUST NOT 还能通过校验。
+  assert.equal(
+    isSyncReadFactPayload('automation_config_mirror_health', {
+      ...facts,
+      asOf: 1_700_000_000_000,
+    }),
+    false,
+  );
+  assert.equal(
+    isSyncReadFactPayload('automation_config_mirror_health', {
+      ...facts,
+      observedSeq: 1,
+    }),
+    false,
   );
 });

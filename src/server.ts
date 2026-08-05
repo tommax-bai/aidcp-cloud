@@ -1612,9 +1612,13 @@ function createAutomationSyncReadSource(
       }),
       configMirrorHealth: () => {
         const health = configMirrorRefresher.health();
+        // ⚠️ 逐字段取，**MUST NOT 写成 `...health`**：那份面板投影带 `asOf`（观测时刻），
+        // 而同步读载荷 MUST NOT 携带它 —— 载荷整份进摘要，摘要里放时钟＝「变没变」恒真，
+        // 每轮观测都会多写一条 `sync_read.changed`（见 AutomationConfigMirrorHealthSnapshot 头注）。
         return {
           sourceService: 'automation',
-          ...health,
+          enabled: health.enabled,
+          pollMs: health.pollMs,
           entries: health.entries.filter(
             (entry) =>
               CONFIG_MIRRORS[
