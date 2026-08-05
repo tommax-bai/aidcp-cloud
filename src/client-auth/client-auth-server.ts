@@ -77,6 +77,12 @@ import type {
   FacebookPrimaryBrowseSurfaceWriteResult,
   FacebookRequestedOperationMode,
 } from '../config/facebook-operation-policy-store.js';
+import {
+  projectClientSlowStartCurve,
+  slowStartTotalDaysFor,
+  type ClientSlowStartCurve,
+  type FacebookSlowStartAuthoredCurve,
+} from './client-slow-start-curve.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SELECTED_PERSONA_BYTES = 32 * 1024;
@@ -100,6 +106,18 @@ export type EnvironmentCommentApprovalPolicyResult =
   | { ok: false; reason: 'invalid_mode' | 'environment_not_owned' | 'policy_unavailable' };
 
 export interface ClientFacebookOperationPolicyPort {
+  /**
+   * 当前生效的 Facebook 慢启动曲线（change sync-slow-start-curve-to-client）：**运营在后台写下的
+   * 那一份权威配置**，与配额 clamp 同源。同步只读、零 IO、永不抛。
+   *
+   * 属主未就绪（配置尚未从库里读起来）时返回 `null`——**这正是要的表达**：MUST NOT 在此回落
+   * 编译期默认曲线，那份默认很可能比运营当前所配更松，而它恰好就是本 change 要消灭的那张假表。
+   *
+   * **刻意做成必填方法而不是又一个可选 deps**：本仓已经吃过「拆进程后组装根漏接可选参数 ⇒
+   * 能力静默消失」的亏。必填让单体与派生 api 两个手写组装根在编译期就必须补上，
+   * 漏接线当场编译失败，而不是上线后安静地少一个字段。
+   */
+  slowStartAuthoredCurve(): FacebookSlowStartAuthoredCurve | null;
   getForEnv(envKey: string): Promise<FacebookOperationPolicyView | null>;
   getSlowStartProgressForEnv(
     envKey: string,
@@ -367,12 +385,41 @@ function sendJson(
   res.end(payload);
 }
 
+/**
+ * 未绑定账号 / 绑定冲突时的慢启动投影。**总天数由调用点传入权威值**
+ * （change sync-slow-start-curve-to-client）：这里原先内联 7，而 Facebook 的总天数早已是后台
+ * 可配的运行时策略（1–30 天）。同一个环境，绑定路径按配置报 10 天、未绑定路径按常量报 7 天，
+ * 与谎报状态同属不诚实——运营看到的「第 3/7 天」里那个 7 根本不是系统在用的那个数。
+ */
+/**
+ * 慢启动读与写后回读**共用**的曲线 / 总天数取用（change sync-slow-start-curve-to-client）。
+ *
+ * 两处各写一份的后果不是报错，而是「点一下开关，曲线表就消失了」——写后回执是客户端对该环境
+ * 慢启动状态的最后一次整体覆盖，它不带曲线，客户端就得把已经读到的曲线丢掉。
+ */
+function slowStartCurveFor(
+  platform: string | null,
+  policy: ClientFacebookOperationPolicyPort | undefined,
+): { curve: ClientSlowStartCurve | null; totalDays: number } {
+  let authored: FacebookSlowStartAuthoredCurve | null = null;
+  try {
+    authored = policy?.slowStartAuthoredCurve() ?? null;
+  } catch {
+    // 曲线取用 MUST NOT 连累这条读：曲线缺席在契约里是可表达的，慢启动真态读不到才是失败。
+    authored = null;
+  }
+  return {
+    curve: projectClientSlowStartCurve(platform, authored),
+    totalDays: slowStartTotalDaysFor(platform, authored),
+  };
+}
+
 function environmentOnlySlowStartView(
   slowStartSince: number | null,
   reason: 'binding_unknown' | 'binding_conflict',
+  totalDays: number,
   now = Date.now(),
 ): UiSlowStartPayload {
-  const totalDays = 7;
   if (slowStartSince == null) {
     return { state: 'off', totalDays, eligible: false, ineligibleReason: reason };
   }
@@ -2517,6 +2564,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendBindingFailure(res, stored.reason);
         return;
       }
+      const writtenCurve = slowStartCurveFor(stored.platform, deps.facebookOperationPolicy);
       let view: { slowStart: UiSlowStartPayload; dayQuotas?: Record<string, number> };
       if (stored.binding === 'bound') {
         const controllerView = await deps.slowStart.viewForAccount(stored.accountId);
@@ -2527,14 +2575,24 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         view = controllerView;
       } else {
         view = {
-          slowStart: environmentOnlySlowStartView(written.slowStartSince, stored.binding),
+          slowStart: environmentOnlySlowStartView(
+            written.slowStartSince,
+            stored.binding,
+            writtenCurve.totalDays,
+          ),
         };
       }
       // 回执带写后真态 + 生效后的当日上限。**不做「已保存 vs 已下发本机」二态**：慢启动的执行体
       // 就在云端 effectiveQuotas 内，provider 现读做对了 → PUT 200 = 本云端已生效。
       // 照抄一个不存在的状态同样是撒谎。（两者绑定：若把 provider 偷懒做成构造期读入，这句立刻变谎言。）
+      // 曲线同读路由一并回：客户端按回执整体覆盖该环境状态，这里不带就等于「点一下开关表就没了」。
       sendJson(res, 200, {
-        data: { envKey, slowStart: view.slowStart, ...(view.dayQuotas ? { dayQuotas: view.dayQuotas } : {}) },
+        data: {
+          envKey,
+          slowStart: view.slowStart,
+          ...(view.dayQuotas ? { dayQuotas: view.dayQuotas } : {}),
+          ...(writtenCurve.curve ? { curve: writtenCurve.curve } : {}),
+        },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;
@@ -2554,6 +2612,7 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         sendBindingFailure(res, stored.reason);
         return;
       }
+      const read = slowStartCurveFor(stored.platform, deps.facebookOperationPolicy);
       let view: { slowStart: UiSlowStartPayload; dayQuotas?: Record<string, number> };
       if (stored.binding === 'bound') {
         const controllerView = await deps.slowStart.viewForAccount(stored.accountId);
@@ -2563,11 +2622,19 @@ function createRequestHandler(deps: ClientAuthDeps, config: ClientAuthConfig) {
         }
         view = controllerView;
       } else {
-        view = { slowStart: environmentOnlySlowStartView(stored.slowStartSince, stored.binding) };
+        view = {
+          slowStart: environmentOnlySlowStartView(stored.slowStartSince, stored.binding, read.totalDays),
+        };
       }
       // 回包 MUST NOT 含 accountId（读路由不得开侧门泄露账号身份，与「非所有者 fail-closed」同口径）。
+      // 曲线只在 Facebook 环境且后台配置取得到时出现；缺席就整个不出现，绝不用编译默认冒充。
       sendJson(res, 200, {
-        data: { envKey, slowStart: view.slowStart, ...(view.dayQuotas ? { dayQuotas: view.dayQuotas } : {}) },
+        data: {
+          envKey,
+          slowStart: view.slowStart,
+          ...(view.dayQuotas ? { dayQuotas: view.dayQuotas } : {}),
+          ...(read.curve ? { curve: read.curve } : {}),
+        },
         meta: { requestId: randomUUID(), asOf: Date.now() },
       });
       return;

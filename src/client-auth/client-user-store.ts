@@ -99,6 +99,12 @@ export type EnvironmentSlowStartRecord =
   | {
       ok: true;
       envKey: string;
+      /**
+       * 环境自己的平台（change sync-slow-start-curve-to-client）。慢启动曲线只对 Facebook 存在，
+       * 而未绑定账号的环境**没有账号可问平台** —— 平台事实必须跟环境走，否则未绑定分支只能内联一个常量。
+       * 未登记平台的老环境为 null：调用方按「平台未确认」处置（不下发曲线），MUST NOT 回落某个平台。
+       */
+      platform: string | null;
       slowStartSince: number | null;
       binding: 'bound';
       accountId: string;
@@ -106,6 +112,7 @@ export type EnvironmentSlowStartRecord =
   | {
       ok: true;
       envKey: string;
+      platform: string | null;
       slowStartSince: number | null;
       binding: 'binding_unknown' | 'binding_conflict';
     }
@@ -1425,6 +1432,7 @@ export class ClientUserStore {
     try {
       const { rows } = await this.pool.query<{
         owned: boolean;
+        platform: string | null;
         slow_start_since: Date | null;
         bound_account: string | null;
         account_exists: boolean;
@@ -1434,6 +1442,7 @@ export class ClientUserStore {
         `SELECT
            EXISTS(SELECT 1 FROM client_env_scope s
                    WHERE s.user_id=$1 AND s.env_key=$2 AND s.source='admin') AS owned,
+           e.platform,
            e.slow_start_since,
            e.account_id AS bound_account,
            CASE WHEN e.account_id IS NOT NULL
@@ -1452,13 +1461,16 @@ export class ClientUserStore {
       const row = rows[0];
       if (!row?.owned) return { ok: false, reason: 'environment_not_owned' };
       const slowStartSince = row.slow_start_since ? row.slow_start_since.getTime() : null;
+      const platform = row.platform ?? null;
       if (row.contended || Number(row.duplicate_count) > 1) {
-        return { ok: true, envKey: key, slowStartSince, binding: 'binding_conflict' };
+        return { ok: true, envKey: key, platform, slowStartSince, binding: 'binding_conflict' };
       }
       if (!row.bound_account || !row.account_exists) {
-        return { ok: true, envKey: key, slowStartSince, binding: 'binding_unknown' };
+        return { ok: true, envKey: key, platform, slowStartSince, binding: 'binding_unknown' };
       }
-      return { ok: true, envKey: key, slowStartSince, binding: 'bound', accountId: row.bound_account };
+      return {
+        ok: true, envKey: key, platform, slowStartSince, binding: 'bound', accountId: row.bound_account,
+      };
     } catch (err) {
       if (isMissingTable(err)) return { ok: false, reason: 'binding_unavailable' };
       throw err;

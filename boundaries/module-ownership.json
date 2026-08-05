@@ -375,6 +375,11 @@
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"
   },
   {
+    "path": "src/client-auth/client-slow-start-curve.ts",
+    "layer": "api",
+    "note": "§4.7：客户身份与环境归属权威（7/7 api）"
+  },
+  {
     "path": "src/client-auth/client-user-store.ts",
     "layer": "api",
     "note": "§4.7：客户身份与环境归属权威（7/7 api）"

@@ -1644,7 +1644,7 @@ test('setEnvironmentSlowStart: ownership-scoped 环境单写，上海日起点�
       if (/UPDATE client_environments e/.test(sql)) return { rows: [{ env_key: 'fb-env' }], rowCount: 1 };
       if (/SELECT e\.env_key/.test(sql)) return { rows: [] };
       if (/AS owned/.test(sql)) return { rows: [{
-        owned: true, slow_start_since: new Date(aligned), bound_account: null,
+        owned: true, platform: 'facebook', slow_start_since: new Date(aligned), bound_account: null,
         account_exists: false, contended: false, duplicate_count: 0,
       }] };
       return { rows: [], rowCount: 0 };
@@ -1652,8 +1652,10 @@ test('setEnvironmentSlowStart: ownership-scoped 环境单写，上海日起点�
   } as unknown as pg.Pool;
   const store = new ClientUserStore({ schemaEnsurer: ensureCapabilitySchema, pool });
   const result = await store.setEnvironmentSlowStart('u1', 'fb-env', true, now);
+  // 平台随环境一并带出（change sync-slow-start-curve-to-client）：未绑定账号的环境同样要有平台事实，
+  // 否则慢启动曲线只能在「有账号可问平台」时才下发。
   assert.deepEqual(result, {
-    ok: true, envKey: 'fb-env', slowStartSince: aligned, binding: 'binding_unknown',
+    ok: true, envKey: 'fb-env', platform: 'facebook', slowStartSince: aligned, binding: 'binding_unknown',
   });
   const write = calls.find((call) => /UPDATE client_environments e/.test(call.sql))!;
   assert.equal((write.params?.[2] as Date).getTime(), aligned);

@@ -29,6 +29,7 @@ import {
   FACEBOOK_RULE_RUNTIME_DEFINITION_VERSION,
 } from '../src/kernel/facebook-rule-mode-types.js';
 import type { FacebookOperationPolicyView } from '../src/config/facebook-operation-policy-store.js';
+import type { FacebookSlowStartAuthoredCurve } from '../src/client-auth/client-slow-start-curve.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';
@@ -154,16 +155,22 @@ function makeFakeStore(): {
     },
     async getEnvironmentSlowStart(userId: string, envKey: string) {
       const key = (envKey ?? '').trim();
-      const owned = (scope.get(userId) ?? []).some((item) => item.envKey === key);
-      if (!key || !owned) return { ok: false as const, reason: 'environment_not_owned' as const };
+      const row = (scope.get(userId) ?? []).find((item) => item.envKey === key);
+      if (!key || !row) return { ok: false as const, reason: 'environment_not_owned' as const };
+      // 平台与 getOwnedEnvironment 同源：曲线下不下发按环境自己的平台判，未绑定环境也要有这个事实。
+      const platform = envPlatforms.has(key) ? envPlatforms.get(key)! : (row.platform ?? null);
       const since = slowStarts.get(key) ?? null;
       const bound = bindings.get(key);
-      if (!bound) return { ok: true as const, envKey: key, slowStartSince: since, binding: 'binding_unknown' as const };
+      if (!bound) {
+        return { ok: true as const, envKey: key, platform, slowStartSince: since, binding: 'binding_unknown' as const };
+      }
       const duplicates = [...bindings.values()].filter((accountId) => accountId === bound).length;
       if (duplicates > 1 || contendedAcrossCustomers(bound, userId)) {
-        return { ok: true as const, envKey: key, slowStartSince: since, binding: 'binding_conflict' as const };
+        return { ok: true as const, envKey: key, platform, slowStartSince: since, binding: 'binding_conflict' as const };
       }
-      return { ok: true as const, envKey: key, slowStartSince: since, binding: 'bound' as const, accountId: bound };
+      return {
+        ok: true as const, envKey: key, platform, slowStartSince: since, binding: 'bound' as const, accountId: bound,
+      };
     },
     async setEnvironmentSlowStart(userId: string, envKey: string, enabled: boolean, now: number) {
       const owned = (scope.get(userId) ?? []).some((item) => item.envKey === envKey);
@@ -2060,6 +2067,8 @@ function makeFacebookOperationPolicyDep(options: {
   initialMode?: 'persona' | 'rule' | 'consumption';
   slowStartActive?: boolean;
   bindingState?: 'bound' | 'unbound' | 'conflict';
+  /** 省略 = 后台已配好一份非默认曲线；显式 null = 策略未就绪（曲线取不到）。 */
+  authoredCurve?: FacebookSlowStartAuthoredCurve | null;
 } = {}) {
   const calls: Array<Record<string, unknown>> = [];
   let currentRevision = 7;
@@ -2243,8 +2252,32 @@ function makeFacebookOperationPolicyDep(options: {
         slowStartSince: input.enabled ? 1_700_000_000_000 : null,
       };
     },
+    slowStartAuthoredCurve() {
+      calls.push({ action: 'slow_start_authored_curve' });
+      return options.authoredCurve === undefined ? stubAuthoredCurve() : options.authoredCurve;
+    },
   };
   return { dep, calls };
+}
+
+/**
+ * 桩曲线：**刻意不等于出厂默认**（10 天、每格数字各不相同）。等于默认的桩验不出本 change 要修的东西
+ * ——客户端写死的那张表恰好就是出厂默认，用默认做桩会让「读了配置」与「压根没读」两种实现都通过。
+ */
+function stubAuthoredCurve(): FacebookSlowStartAuthoredCurve {
+  return {
+    totalDays: 10,
+    dailyCaps: Array.from({ length: 10 }, (_, index) => ({
+      day: index + 1,
+      view: 11 + index,
+      like: 1 + index,
+      comment: index,
+      follow: 2 + index,
+      publish: index % 2,
+      search: 3 + index,
+      joinGroup: index % 3,
+    })),
+  };
 }
 
 function makeLegacySlowStartPolicyDep(
@@ -2960,8 +2993,11 @@ test('慢启动写：{enabled:false} 只写环境，回执无「已保存/待下
       assert.equal(res.status, 200);
       assert.deepEqual(fx.slowStartWrites, [{ envKey: 'p1', enabled: false }]);
       const body = await res.json() as { data: Record<string, unknown> };
-      // data 仅 envKey / slowStart / dayQuotas——慢启动执行体在云端、写入成功即已生效，绝无「待下发边缘」态。
-      assert.deepEqual(Object.keys(body.data).sort(), ['dayQuotas', 'envKey', 'slowStart']);
+      // data 仅 envKey / slowStart / dayQuotas / curve——慢启动执行体在云端、写入成功即已生效，
+      // 绝无「待下发边缘」态。曲线随写后回读一并回（change sync-slow-start-curve-to-client）：
+      // 客户端按这份回执整体覆盖该环境状态，不带曲线就等于「点一下开关，曲线表就没了」。
+      // 这条断言守的是**不许再冒出表达「已保存 vs 已下发」的字段**，故仍用全集比较而非包含比较。
+      assert.deepEqual(Object.keys(body.data).sort(), ['curve', 'dayQuotas', 'envKey', 'slowStart']);
       const flat = JSON.stringify(body);
       for (const banned of ['saved', 'applied', 'edgeDelivery', 'enqueued', 'deferred', '待下发', '已保存', '待应用']) {
         assert.doesNotMatch(flat, new RegExp(banned), `回执绝不含二态措辞 ${banned}`);
@@ -3013,6 +3049,101 @@ test('慢启动读：未绑定环境保留配置态，不编造 binding/dayQuota
       assert.equal(views.length, 0, '没绑定 → 不取 controller（无账号可取）');
     },
   );
+});
+
+test('慢启动读：Facebook 环境回传后台当前配置的曲线与总天数（change sync-slow-start-curve-to-client）', async () => {
+  const fx = ownerOfP1();
+  fx.bindings.set('p1', ACCT_P1);
+  const { dep } = makeSlowStartDep();
+  const policy = makeFacebookOperationPolicyDep();
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      slowStart: dep,
+      facebookOperationPolicy: policy.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
+      assert.equal(res.status, 200);
+      const body = await res.json() as {
+        data: { curve?: { totalDays: number; days: Array<Record<string, number>> } };
+      };
+      const authored = stubAuthoredCurve();
+      assert.ok(body.data.curve, '后台配置取得到 ⇒ 必须下发曲线');
+      assert.equal(body.data.curve.totalDays, authored.totalDays);
+      assert.equal(body.data.curve.days.length, authored.totalDays, '行数跟随后台配的总天数，不是写死的 7');
+      assert.deepEqual(body.data.curve.days, authored.dailyCaps, '每一格逐格等于后台配置');
+      // FB 结构上做不了的动作不得出现（客户端会照单渲染成一列永远 0 的计划）。
+      for (const key of ['collect', 'comment_like', 'dm_reply']) {
+        assert.equal(key in body.data.curve.days[0]!, false, `曲线 MUST NOT 含 ${key}`);
+      }
+    },
+  );
+});
+
+test('慢启动读：未绑定账号的 Facebook 环境总天数取权威值而非内联 7', async () => {
+  const fx = ownerOfP1();
+  fx.slowStarts.set('p1', Date.now() - 2 * 86_400_000);
+  const { dep, views } = makeSlowStartDep();
+  const policy = makeFacebookOperationPolicyDep();
+  await withServer(
+    {
+      store: fx.store,
+      revocation: new TokenRevocationStore(),
+      rateLimiter: new LoginRateLimiter(),
+      slowStart: dep,
+      facebookOperationPolicy: policy.dep,
+    },
+    baseConfig(0),
+    async (base) => {
+      const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+      const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
+      assert.equal(res.status, 200);
+      const body = await res.json() as {
+        data: { slowStart: Record<string, unknown>; dayQuotas?: unknown; curve?: { totalDays: number } };
+      };
+      assert.equal(body.data.slowStart.totalDays, 10, '未绑定分支也必须报后台配的总天数');
+      assert.equal(body.data.slowStart.ineligibleReason, 'binding_unknown');
+      assert.equal('binding' in body.data.slowStart, false, '未绑定仍 MUST NOT 编造 binding');
+      assert.equal('dayQuotas' in body.data, false, '未绑定仍 MUST NOT 编造当日上限');
+      assert.equal(body.data.curve?.totalDays, 10);
+      assert.equal(views.length, 0);
+    },
+  );
+});
+
+test('慢启动读：非 Facebook 环境与策略未就绪都整个不带曲线，其余真态照常', async () => {
+  for (const scenario of [
+    { name: 'xhs', platform: 'xiaohongshu', policy: makeFacebookOperationPolicyDep() },
+    { name: 'policy_unready', platform: 'facebook', policy: makeFacebookOperationPolicyDep({ authoredCurve: null }) },
+  ]) {
+    const fx = ownerOfP1();
+    fx.envPlatforms.set('p1', scenario.platform);
+    fx.bindings.set('p1', ACCT_P1);
+    const { dep } = makeSlowStartDep();
+    await withServer(
+      {
+        store: fx.store,
+        revocation: new TokenRevocationStore(),
+        rateLimiter: new LoginRateLimiter(),
+        slowStart: dep,
+        facebookOperationPolicy: scenario.policy.dep,
+      },
+      baseConfig(0),
+      async (base) => {
+        const headers = await loggedIn(fx, {} as ClientAuthDeps, base);
+        const res = await fetch(`${base}/environments/p1/slow-start`, { headers });
+        assert.equal(res.status, 200, `${scenario.name}: 曲线缺席 MUST NOT 让这条读失败`);
+        const body = await res.json() as { data: { slowStart: unknown; curve?: unknown } };
+        assert.equal('curve' in body.data, false, `${scenario.name}: 缺席只有一种表达＝字段整个不出现`);
+        assert.ok(body.data.slowStart, `${scenario.name}: 其余慢启动真态照常返回`);
+      },
+    );
+  }
 });
 
 test('慢启动读：非所有者 fail-closed（403）且不泄露账号身份', async () => {

@@ -1023,6 +1023,20 @@ export class FacebookOperationPolicyStore {
       : null;
   }
 
+  /**
+   * 运营在后台写下的那份慢启动曲线（change sync-slow-start-curve-to-client），供客户端展示侧取用。
+   *
+   * 与 {@link slowStartRuntimePolicy} 只差一处、但很关键：**未就绪时返回 null，不回落编译默认**。
+   * 风控 clamp 那一路必须永远拿到一条曲线（宁可按编译默认压着跑，也不能没有上限）；展示侧恰恰相反——
+   * 把编译默认当成「运营配的」显示出去，正是本 change 要消灭的那张假表。
+   *
+   * 逐日上限原样取配置形状（只含该平台能配的动作），不补零、不扩成全动作表：补出来的项是系统
+   * 永远不会执行的计划。返回值来自 {@link getGlobal}，已是深拷贝，调用方改它不会污染缓存。
+   */
+  slowStartAuthoredCurve(): { totalDays: number; dailyCaps: FacebookSlowStartDailyCaps[] } | null {
+    return this.getGlobal()?.slowStart ?? null;
+  }
+
   slowStartRuntimePolicy(): FacebookSlowStartRuntimePolicy {
     const policy = this.globalPolicy
       ?? defaultGlobalPolicy(this.executionTarget ?? 'dev');

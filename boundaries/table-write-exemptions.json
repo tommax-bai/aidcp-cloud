@@ -2,7 +2,7 @@
   "seedTotal": 1,
   "seedUnplanned": 1,
   "frozenTotal": 0,
-  "recordedAt": "2026-08-04",
+  "recordedAt": "2026-08-05",
   "raises": [],
   "entries": [],
   "seedBasis": "decouple store schema+pgconfig cluster: frozenTotal 209->173"
