@@ -868,6 +868,12 @@ export class RoleDispatcher {
    * 存活探针 240s nudge × 车队规模刷屏。红线：节流 ≠ 不打——这道闸从边角升为主刹车，静默丢弃即撞红线。
    */
   private viewQuotaSuppressedCount = 0;
+  /**
+   * 本轮软暂停（巡视 / 本人昵称采集）已扣下的浏览命令数（change guard-excursion-stall）。
+   * 每次巡视开启置 0；命令下发口按此节流打印（首条 + 每 50 条），与配额休眠分支同形。
+   * 红线：本分支此前完全沉默，使「巡视挂死后浏览命令被吞」在日志上无痕——节流 ≠ 不打。
+   */
+  private browseSuspendedSuppressedCount = 0;
   /** 每账号当日自动续场计数（场数 + 累计浏览毫秒），按本地日界重置。 */
   private readonly dailyResume = new Map<string, { dayKey: string; sessions: number; browseMs: number }>();
   /** SessionMonitor 引用（供 excursion → pauseClock/resumeClock；setup 时捕获）。 */
@@ -2027,7 +2033,19 @@ export class RoleDispatcher {
       this.sessionContext.browseSuspended &&
       !this.isQuotaSleepBypass(command)
     ) {
-      return false; // 软暂停：丢弃 browse 命令（不入队、由 page.cards 续刷自然重来）
+      // 软暂停：丢弃 browse 命令（不入队、由 page.cards 续刷自然重来）。
+      // 🔴 红线（change guard-excursion-stall）：MUST NOT 无日志丢弃——本分支曾是四条丢弃分支里唯一沉默的
+      // 一条，于是 2026-08-05 巡视挂死后"此后一切浏览命令被吞"在日志上完全无痕，外观只是"这个号很安静"。
+      // 节流同配额休眠分支（首条 + 每 50 条），健康巡视一趟至多丢几条、不会刷屏。
+      this.browseSuspendedSuppressedCount += 1;
+      if (this.browseSuspendedSuppressedCount === 1 || this.browseSuspendedSuppressedCount % 50 === 0) {
+        const noteId = typeof command.params?.noteId === 'string' ? command.params.noteId : '-';
+        console.log(
+          `[RoleDispatcher] command.suppressed reason=browse_suspended action=${command.action} note=${noteId} `
+            + `account=${this.currentAccountId} suppressed=${this.browseSuspendedSuppressedCount}`,
+        );
+      }
+      return false;
     }
     if (this.commentInflight && !this.isQuotaSleepBypass(command)) {
       // 评论支线在途（change comment-approval-target-hold）：钉在待评论帖上，扣住一切会离页的 browse/互动命令
@@ -4269,10 +4287,13 @@ export class RoleDispatcher {
     this.commandUnsubscribers.push(
       // 通知巡视（excursion）起止 → 暂停/恢复会话时钟（change session-auto-resume-with-excursions）：
       // 巡视进行中延期时限/动作数/配额判定（不打断巡视），结束时把巡视耗时从单场时长扣除。
-      // 只暂停时限判定，**不冻空闲看门狗**（巡视上报自喂、卡死巡视由看门狗兜底）。token 用常量 'patrol'
+      // 只暂停时限判定，**不冻空闲看门狗**。但看门狗 MUST NOT 被当作巡视挂死的兜底（change guard-excursion-stall）：
+      // 巡视期它的恢复 nudge 会被下方软暂停闸扣住而无效，其放弃结束阈值又以「杀掉整场会话」为手段、且可被
+      // 任意边缘上报无限推后。巡视的兜底责任由 ExcursionResumer 自己的停滞判据承担。token 用常量 'patrol'
       //（gatekeeper 以 ctx.excursionActive 闸禁并发巡视，全程至多一个活动巡视，常量 token 天然正确）。
       this.eventBus.on('excursion.requested', () => {
         this.sessionMonitor?.pauseClock('patrol');
+        this.browseSuspendedSuppressedCount = 0; // 新一轮软暂停：抑制计数归零，节流键随之重置
         this.beginNotificationTask();
       }),
       this.eventBus.on('excursion.ended', () => {

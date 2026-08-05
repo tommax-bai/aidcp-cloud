@@ -60,13 +60,15 @@ export class NotificationTriage extends BaseRole {
       likes: home.likes,
       follows: home.follows,
     };
-    const givenUp: string[] = [];
+    const givenUp: NotificationCategory[] = [];
+    const givenUpDetail: string[] = [];
     for (const cat of PRIORITY) {
       if (counts[cat] <= 0) continue; // 已清零，跳过
       const attempts = this.ctx.getCategoryAttempts(cat);
       if (attempts >= this.maxAttempts) {
         // 到尝试上限仍有未读 → 诚实放弃该类（不再选它），继续看下一类
-        givenUp.push(`${cat}(未读${counts[cat]}，已尝试${attempts}次)`);
+        givenUp.push(cat);
+        givenUpDetail.push(`${cat}(未读${counts[cat]}，已尝试${attempts}次)`);
         continue;
       }
       const n = this.ctx.incrementCategoryAttempts(cat); // 记一次尝试（loop-to-zero 的有界兜底）
@@ -74,11 +76,17 @@ export class NotificationTriage extends BaseRole {
       this.emit('notification.category_selected', { category: cat, epoch, ts: Date.now() });
       return;
     }
-    // 无可挑：三栏全清零，或剩余未读都已到尝试上限被放弃
+    // 无可挑：三栏全清零，或剩余未读都已到尝试上限被放弃。
+    // givenUp 随事件带出（change guard-excursion-stall）：收尾侧据此把「真清零」与「诚实放弃」分成两个
+    // 可区分的原因值——此前二者压成同一个 triage_done，只有本角色的日志能区分，端到端看不出差别。
     if (givenUp.length > 0) {
-      this.log(`诚实放弃未清零分类：${givenUp.join('、')}（到尝试上限仍有未读，不空转、不假报已清）epoch=${epoch}`);
+      this.log(`诚实放弃未清零分类：${givenUpDetail.join('、')}（到尝试上限仍有未读，不空转、不假报已清）epoch=${epoch}`);
     }
     this.log(`三栏均已清零或放弃，分诊完成 epoch=${epoch}`);
-    this.emit('notification.triage_done', { epoch, ts: Date.now() });
+    this.emit('notification.triage_done', {
+      epoch,
+      ...(givenUp.length > 0 ? { givenUp } : {}),
+      ts: Date.now(),
+    });
   }
 }

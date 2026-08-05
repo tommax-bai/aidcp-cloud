@@ -548,7 +548,12 @@ export interface RoleEventMap {
   'notification.worthy': { items: NotificationItem[]; epoch: number; ts: number };
   'notification.all_seen': { epoch: number; ts: number };
   'notification.notified': { count: number; epoch: number; ts: number };
-  'notification.triage_done': { epoch: number; ts: number };
+  /**
+   * 分诊收敛出口。`givenUp` = 到每类尝试上限仍未清零、被**诚实放弃**的分类（change guard-excursion-stall）：
+   * 「三栏真清零」与「到上限诚实放弃」此前压成同一个事件、只有日志区分，收尾原因值因而不可区分。
+   * 可选字段，缺省 / 空数组 = 真清零。
+   */
+  'notification.triage_done': { epoch: number; givenUp?: NotificationCategory[]; ts: number };
   'excursion.ended': { epoch: number; reason: string; ts: number };
 }
 

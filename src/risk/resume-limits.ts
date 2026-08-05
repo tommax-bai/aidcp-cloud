@@ -40,6 +40,33 @@ export const IDLE_NUDGE_MIN_MS = 200_000;
 /** 看门狗阈值合理上限（毫秒，24h）：防误填。 */
 export const IDLE_MS_MAX = 24 * 3_600_000;
 
+/**
+ * 通知巡视「停滞」时限（毫秒，5min）—— change guard-excursion-stall。
+ *
+ * 计的是**距上一次巡视前进的间隔**，不是巡视总时长：巡视结构上限是 3 类 × 3 次尝试 = 9 轮、每轮含一次
+ * 边缘往返（评论类还含一次分类模型调用），要不误杀健康巡视，一个「总时长」上限得设到 27min 以上——
+ * 那个数字大到对挂死毫无兜底价值。停滞判据没有这个矛盾：健康巡视每轮都在前进、时限永不到点。
+ *
+ * 两条 lockstep 不变量（由 acceptance tripwire 断言，改值前先看断言）：
+ *  ① MUST >= `IDLE_NUDGE_MIN_MS`——健康巡视里存在一段不可压缩、期间零边缘上报的间隔（评论类的分类模型
+ *     调用，天花板 180s），低于它就会在一次合法模型判定中途注入自愈导航。`IDLE_NUDGE_MIN_MS` 已锚定该
+ *     天花板，直接拿它当机器可查的下界。
+ *  ② `本值 × (EXCURSION_STALL_MAX_RECOVERIES + 1)` MUST 远小于 `DEFAULT_IDLE_END_MS`——最坏停滞窗口必须
+ *     远早于会话级看门狗的放弃结束阈值，使巡视先自愈，而不是先被「杀掉整场会话」这个更粗的手段回收。
+ *
+ * 量级参考：健康巡视全程实测 5–20s，本值是它的 15–60 倍，健康轮次上不可能触发。
+ */
+export const EXCURSION_STALL_TIMEOUT_MS = 300_000;
+
+/**
+ * 通知巡视停滞的自愈预算（次）—— change guard-excursion-stall。
+ *
+ * 停滞时限到点 ⇒ 先花 1 次预算做**只读**重新对齐（重开通知首页、重读三栏计数）；预算耗尽仍无进展 ⇒
+ * 诚实收尾（解除浏览暂停 + 回信息流）。红线：**恢复预算 MUST 只由停滞消费**——健康巡视里的导航与
+ * 返回一次都不占；且自愈 MUST NOT 发分类栏点击（那是消费未读、无回滚的提交动作）。
+ */
+export const EXCURSION_STALL_MAX_RECOVERIES = 1;
+
 /** 一天的分钟数（活跃时段窗口默认止 = 全天）。 */
 export const MINUTES_PER_DAY = 1440;
 

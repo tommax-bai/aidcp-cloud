@@ -22,6 +22,7 @@ import { NotificationClassifier } from '../../src/agents/notification-classifier
 import { NotificationDeduper, notificationItemKey, stripRelativeTime } from '../../src/agents/notification-deduper.js';
 import { NotificationNotifier } from '../../src/agents/notification-notifier.js';
 import { ExcursionResumer } from '../../src/agents/excursion-resumer.js';
+import { EXCURSION_STALL_TIMEOUT_MS } from '../../src/risk/resume-limits.js';
 import type { Soul } from '../../src/kernel/soul-types.js';
 import type { NotificationItem } from '../../src/comm/protocol.js';
 
@@ -377,5 +378,208 @@ describe('通知巡视 — 端到端闭环（假边缘）', () => {
     assert.ok(commands.some((c) => c.action === 'browse_notification_comments'), '浏览过评论和@');
     assert.ok(commands.some((c) => c.action === 'notification_back_home'), '处理完返回过首页');
     d.endSession();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// change guard-excursion-stall：巡视停滞兜底
+//
+// 守的是「已上线但从未实装」的那条要求——巡视必须有一个基于时间的兜底。前三个显式终止入口覆盖了巡视
+// 所有**已声明的结束方式**，漏的是「巡视没有结束、也不会再结束」：一步「回执成功但语义走岔」不产生任何
+// 终止信号，浏览随即无限期挂起（2026-08-05 OL 实测）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 可推进的假定时器（不靠真实墙钟；同时记录每次排表时长，供「生产默认值真的接上了」断言）。 */
+class FakeTimers {
+  now = 0;
+  private seq = 1;
+  private readonly pending = new Map<number, { fn: () => void; at: number }>();
+  readonly scheduled: number[] = [];
+  readonly set = (fn: () => void, ms: number): unknown => {
+    const id = this.seq++;
+    this.pending.set(id, { fn, at: this.now + ms });
+    this.scheduled.push(ms);
+    return id;
+  };
+  readonly clear = (h: unknown): void => { this.pending.delete(h as number); };
+  /** 前进 ms 并触发到点回调（回调新排的表不在本次触发，下一次 advance 才可能到点）。 */
+  advance(ms: number): void {
+    this.now += ms;
+    for (const [id, t] of [...this.pending]) {
+      if (t.at <= this.now) { this.pending.delete(id); t.fn(); }
+    }
+  }
+  get pendingCount(): number { return this.pending.size; }
+}
+
+const STALL_MS = 300_000;
+
+/** 起一个装了假定时器的 resumer，并把巡视开起来（准入角色的同步 check-then-set 语义）。 */
+function armedResumer(overrides: { stallTimeoutMs?: number; maxStallRecoveries?: number } = {}) {
+  const bus = new EventBus();
+  const ctx = new SessionContext();
+  const timers = new FakeTimers();
+  const resumer = new ExcursionResumer(
+    {
+      ...opts(bus),
+      stallTimeoutMs: STALL_MS,
+      maxStallRecoveries: 1,
+      ...overrides,
+      setTimeoutFn: timers.set,
+      clearTimeoutFn: timers.clear,
+    },
+    ctx,
+  );
+  resumer.subscribe();
+  const openings: string[] = [];
+  const ended: { reason: string }[] = [];
+  let feed = 0;
+  bus.on('notification.opening', (p) => { openings.push(p.reason); });
+  bus.on('excursion.ended', (p) => { ended.push(p); });
+  bus.on('feed.entered', () => { feed++; });
+  ctx.beginExcursion(1);
+  ctx.setBrowseSuspended(true);
+  bus.emit('excursion.requested', { epoch: 1, ts: 0 });
+  return { bus, ctx, timers, resumer, openings, ended, feedCount: () => feed };
+}
+
+describe('通知巡视 — 停滞兜底（change guard-excursion-stall）', () => {
+  it('承重·复刻 2026-08-05 OL 事故：回执成功但走岔回信息流 → 先只读重新对齐、再诚实收尾、浏览恢复', () => {
+    const { bus, ctx, timers, openings, ended, feedCount } = armedResumer();
+
+    // 边缘把「返回通知首页」做成了「回信息流」：回执 ok:true + 上报 page.cards。
+    bus.emit('action.completed', { action: 'notification_back_home', ok: true, ts: 0 });
+
+    // **违规输入**：非巡视上报落在停滞窗口**中段**——它让停滞「看起来还活着」。
+    // 位置是关键：若把它算作巡视前进，时限会被推到 1.5×STALL_MS，下面这次到点就不会发生、用例即红。
+    timers.advance(STALL_MS / 2);
+    bus.emit('page.cards.arrived', { cards: [], ts: 0 });
+    timers.advance(STALL_MS / 2);
+    assert.deepEqual(openings, ['open'], '时限到点 MUST 先只读重新对齐（重开通知首页），而不是直接判失败');
+    assert.equal(ended.length, 0, '自愈阶段 MUST NOT 落终态');
+    assert.equal(ctx.excursionActive, true, '自愈阶段巡视仍在');
+    assert.equal(ctx.browseSuspended, true, '自愈阶段浏览仍暂停（还没收尾）');
+
+    // 自愈也落空：边缘继续只上报信息流卡片，巡视依旧毫无前进（同样落在窗口中段）。
+    timers.advance(STALL_MS / 2);
+    bus.emit('page.cards.arrived', { cards: [], ts: 0 });
+    timers.advance(STALL_MS / 2);
+
+    assert.equal(ended.length, 1, '预算耗尽 MUST 诚实收尾');
+    assert.ok(
+      ended[0].reason.startsWith('stalled_no_progress'),
+      `收尾原因须可区分于正常收尾，实得 ${ended[0].reason}`,
+    );
+    assert.equal(ctx.excursionActive, false, '巡视已结束');
+    assert.equal(ctx.browseSuspended, false, '浏览暂停已解除（不再无限期挂起）');
+    assert.equal(feedCount(), 1, '回到信息流');
+    assert.deepEqual(openings, ['open'], '自愈恰好 1 次：不是 0（跳过自愈直接判死），也不是 2（无限重发）');
+    assert.equal(timers.pendingCount, 0, '收尾即停表，不留残余计时器');
+  });
+
+  it('反向闸：持续前进的健康巡视不被误伤（零自愈、不强制收尾）', () => {
+    const { bus, ctx, timers, openings, ended } = armedResumer();
+    // 每次都在时限内喂一条真前进证据，逐条覆盖四类信号。
+    for (const feedProgress of [
+      () => bus.emit('notification.home.arrived', { comments: 1, likes: 0, follows: 0, ts: 0 }),
+      () => bus.emit('notification.category_selected', { category: 'comments', epoch: 1, ts: 0 }),
+      () => bus.emit('notification.items.arrived', { items: [], ts: 0 }),
+      () => bus.emit('action.completed', { action: 'browse_notification_comments', ok: true, ts: 0 }),
+    ]) {
+      timers.advance(STALL_MS - 1);
+      feedProgress();
+    }
+    timers.advance(STALL_MS - 1);
+    assert.deepEqual(openings, [], '健康巡视 MUST NOT 被注入自愈导航');
+    assert.deepEqual(ended, [], '健康巡视 MUST NOT 被强制收尾');
+    assert.equal(ctx.excursionActive, true);
+  });
+
+  it('自愈 MUST NOT 触发分类栏点击（提交点：消费未读、无回滚）', () => {
+    const { bus, timers } = armedResumer();
+    const browsed: string[] = [];
+    bus.on('notification.browse_category', (p) => { browsed.push(p.category); });
+    timers.advance(STALL_MS / 2);
+    bus.emit('page.cards.arrived', { cards: [], ts: 0 });
+    timers.advance(STALL_MS / 2);
+    assert.deepEqual(browsed, [], '自愈只重开通知首页，绝不由自愈路径直接点分类栏');
+  });
+
+  it('显式终止先到即停表：兜底 MUST NOT 在正常收尾后再开一次火', () => {
+    const { bus, ctx, timers, ended } = armedResumer();
+    bus.emit('notification.triage_done', { epoch: 1, ts: 0 });
+    assert.equal(ended.length, 1);
+    assert.equal(ended[0].reason, 'triage_done');
+    // 收尾即停表：角色实例跨会话复用，残留的表会在下一趟巡视里以陌生 epoch 开火（伪自愈 / 伪收尾）。
+    assert.equal(timers.pendingCount, 0, '显式终止收尾后 MUST NOT 留下计时器');
+    timers.advance(STALL_MS * 5);
+    assert.equal(ended.length, 1, '巡视已结束，计时器不得再收尾一次');
+    assert.equal(ctx.excursionActive, false);
+  });
+
+  it('计时器不跨场：unsubscribe 后推进时钟零事件（瞬时态绝不残留）', () => {
+    const { ctx, timers, resumer, openings, ended } = armedResumer();
+    resumer.unsubscribe();
+    assert.equal(timers.pendingCount, 0, 'unsubscribe MUST 清表');
+    ctx.beginExcursion(2); // 即便有个新巡视在跑，旧表也不该误触它
+    timers.advance(STALL_MS * 5);
+    assert.deepEqual(openings, []);
+    assert.deepEqual(ended, []);
+  });
+
+  it('生产默认值真的接上了：不注入时限时按 EXCURSION_STALL_TIMEOUT_MS 排表', () => {
+    const bus = new EventBus();
+    const ctx = new SessionContext();
+    const timers = new FakeTimers();
+    // 只注入定时器、**不**注入 stallTimeoutMs → 走生产默认。
+    new ExcursionResumer(
+      { ...opts(bus), setTimeoutFn: timers.set, clearTimeoutFn: timers.clear },
+      ctx,
+    ).subscribe();
+    ctx.beginExcursion(1);
+    bus.emit('excursion.requested', { epoch: 1, ts: 0 });
+    assert.deepEqual(timers.scheduled, [EXCURSION_STALL_TIMEOUT_MS]);
+  });
+});
+
+describe('通知巡视 — 收尾原因三态可区分（change guard-excursion-stall）', () => {
+  it('分诊到尝试上限诚实放弃时，triage_done MUST 带出被放弃的分类', () => {
+    const bus = new EventBus(); const ctx = new SessionContext();
+    ctx.beginExcursion(1);
+    new NotificationTriage({ ...opts(bus), maxAttemptsPerCategory: 1 }, ctx).subscribe();
+    const done: { givenUp?: string[] }[] = [];
+    bus.on('notification.triage_done', (p) => { done.push(p); });
+    // 第 1 轮：选中 comments（用掉唯一一次尝试）。第 2 轮：仍有未读但已到上限 → 诚实放弃。
+    bus.emit('notification.home.arrived', { comments: 2, likes: 0, follows: 0, ts: 0 });
+    bus.emit('notification.home.arrived', { comments: 2, likes: 0, follows: 0, ts: 0 });
+    assert.equal(done.length, 1);
+    assert.deepEqual(done[0].givenUp, ['comments'], '被放弃的分类须随事件带出，不能只留在日志里');
+  });
+
+  it('三态原因值互不相同：清零 / 诚实放弃 / 停滞兜底', () => {
+    const reasonFor = (emit: (bus: EventBus) => void): string => {
+      const { bus, ended } = armedResumer();
+      emit(bus);
+      assert.equal(ended.length, 1);
+      return ended[0].reason;
+    };
+    const cleared = reasonFor((bus) => bus.emit('notification.triage_done', { epoch: 1, ts: 0 }));
+    const gaveUp = reasonFor((bus) =>
+      bus.emit('notification.triage_done', { epoch: 1, givenUp: ['comments', 'likes'], ts: 0 }));
+
+    const stalled = (() => {
+      const { bus, timers, ended } = armedResumer();
+      timers.advance(STALL_MS / 2);
+      bus.emit('page.cards.arrived', { cards: [], ts: 0 }); // 违规输入落窗口中段
+      timers.advance(STALL_MS / 2); // 自愈
+      timers.advance(STALL_MS); // 收尾
+      assert.equal(ended.length, 1);
+      return ended[0].reason;
+    })();
+
+    assert.equal(cleared, 'triage_done');
+    assert.equal(gaveUp, 'triage_incomplete:comments,likes');
+    assert.ok(stalled.startsWith('stalled_no_progress'));
+    assert.equal(new Set([cleared, gaveUp, stalled]).size, 3, '三态 MUST NOT 压成一态');
   });
 });

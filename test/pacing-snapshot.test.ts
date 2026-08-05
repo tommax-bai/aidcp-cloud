@@ -11,7 +11,12 @@ import {
   maxFloorForOp,
   type PacingFloorProvider,
 } from '../src/risk/pacing.js';
-import { IDLE_NUDGE_MIN_MS } from '../src/risk/resume-limits.js';
+import {
+  IDLE_NUDGE_MIN_MS,
+  DEFAULT_IDLE_END_MS,
+  EXCURSION_STALL_TIMEOUT_MS,
+  EXCURSION_STALL_MAX_RECOVERIES,
+} from '../src/risk/resume-limits.js';
 import type { PacingOp, PacingFloorPayload } from '../src/comm/protocol.js';
 
 const builtinProvider: PacingFloorProvider = {
@@ -78,6 +83,26 @@ test('看门狗 lockstep 不变量（tripwire）：CAP_MS ≪ IDLE_NUDGE_MIN_MS 
   );
   // 结构性余量：CAP 应远小于（≤ 1/10）下限，避免叠加抖动后逼近。
   assert.ok(CAP_MS * 10 <= IDLE_NUDGE_MIN_MS, 'CAP_MS 应 ≤ IDLE_NUDGE_MIN_MS 的 1/10（结构性安全余量）');
+});
+
+test('巡视停滞 lockstep 不变量（tripwire）：模型天花板 < 停滞时限，最坏停滞窗口 ≪ idle-end', () => {
+  // ① 下界：健康巡视里有一段不可压缩、期间零边缘上报的间隔（评论类的分类模型调用，天花板 180s）。
+  //    停滞时限低于它 ⇒ 在一次合法模型判定中途注入自愈导航。IDLE_NUDGE_MIN_MS 已锚定该天花板，
+  //    直接拿它当机器可查的下界。
+  assert.ok(
+    EXCURSION_STALL_TIMEOUT_MS >= IDLE_NUDGE_MIN_MS,
+    `巡视停滞时限 EXCURSION_STALL_TIMEOUT_MS(${EXCURSION_STALL_TIMEOUT_MS}) 必须 ≥ IDLE_NUDGE_MIN_MS(${IDLE_NUDGE_MIN_MS})——` +
+      `后者已锚定单次模型调用天花板(180s)，低于它会在合法的分类模型调用中途注入自愈导航。`,
+  );
+  // ② 上界：最坏停滞窗口 = 时限 ×（自愈预算 + 1），必须远早于会话级看门狗的放弃结束阈值，
+  //    使巡视先自愈，而不是先被「杀掉整场会话」这个更粗的手段回收。取 1/4 作结构性余量。
+  const worstStallWindowMs = EXCURSION_STALL_TIMEOUT_MS * (EXCURSION_STALL_MAX_RECOVERIES + 1);
+  assert.ok(
+    worstStallWindowMs * 4 <= DEFAULT_IDLE_END_MS,
+    `最坏停滞窗口(${worstStallWindowMs}ms) 应 ≤ DEFAULT_IDLE_END_MS(${DEFAULT_IDLE_END_MS}) 的 1/4——` +
+      `否则巡视的自有兜底会被会话级看门狗抢先，恢复手段退化成杀掉整场会话。`,
+  );
+  assert.ok(EXCURSION_STALL_MAX_RECOVERIES >= 1, '自愈预算须 ≥ 1：结构性可恢复的失败 MUST 留自愈通道');
 });
 
 test('每 op 防呆下限 < 内置默认 min < 内置默认 max ≤ CAP（配置区间自洽）', () => {
