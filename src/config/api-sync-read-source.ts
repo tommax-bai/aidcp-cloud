@@ -320,7 +320,14 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
             : null,
           // 群评论时序策略随本条流下发：它落库时 bump 的就是 `content_schedule` 这个版本号，
           // 所以上面那个游标天然覆盖它，无需另加游标键。
-          facebookGroupCommentPolicy: this.facebookGroupCommentPolicy(),
+          //
+          // **逐字段挑，绝不把提供方给的对象原样发出去**：载荷校验器用的是「键必须刚好是这几个」，
+          // 而属主存储的视图另带 bounds / 冷却来源 / 更新元数据。TS 对**变量**不做多余属性检查，
+          // 所以两边类型都对、编译全绿，现形方式是消费方整条拒收 ⇒ 就绪度永不 ready ⇒
+          // 边-云端口不监听、边缘一台都连不上。2026-08-05 dev 上实测踩过一次。
+          facebookGroupCommentPolicy: pickGroupCommentPolicyFact(
+            this.facebookGroupCommentPolicy(),
+          ),
           accounts: accounts.rows.map((row) => ({
             accountId: row.account_id,
             autoEnabled: row.auto_enabled === true,
@@ -443,6 +450,25 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
       }
     }
   }
+}
+
+/**
+ * 把提供方给的策略视图收敛成载荷契约上的**那四个键**。
+ *
+ * 这不是防御性代码：载荷校验器判的是「键刚好是这几个」，而属主存储的视图另带
+ * bounds / 冷却来源 / 更新元数据。TS 对变量不做多余属性检查 ⇒ 两侧类型都对、编译全绿，
+ * 唯一现形方式是消费方整条拒收，而那在下游就是**边-云端口不监听**。
+ */
+function pickGroupCommentPolicyFact(
+  view: FacebookGroupCommentPolicyFact | null,
+): FacebookGroupCommentPolicyFact | null {
+  if (!view) return null;
+  return {
+    joinToFirstCommentHours: view.joinToFirstCommentHours,
+    sameGroupRecommentCooldownHours: view.sameGroupRecommentCooldownHours,
+    revision: view.revision,
+    source: view.source,
+  };
 }
 
 async function versionCursor(
