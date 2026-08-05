@@ -33,7 +33,7 @@ const EMPTY_PAYLOAD: Record<string, unknown> = {
     slowStartAnchors: [],
   },
   automation_account_projection: { accounts: [] },
-  content_schedule: { global: null, accounts: [] },
+  content_schedule: { global: null, accounts: [], facebookGroupCommentPolicy: null },
   hot_lead_config: {
     maxAgeHours: 48,
     velocityMin: 300,

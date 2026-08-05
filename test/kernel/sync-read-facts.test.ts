@@ -222,7 +222,37 @@ test('complete well-formed gate payloads remain accepted', () => {
           contentActiveMask: null,
         },
       ],
+      facebookGroupCommentPolicy: {
+        joinToFirstCommentHours: 72,
+        sameGroupRecommentCooldownHours: 72,
+        revision: 2,
+        source: 'db',
+      },
     }),
     true,
+  );
+  // 属主未就绪时整段是 null —— 消费方据此报具名不可用。
+  // 塞默认值顶替会让「策略还没同步过来」与「运营就是这么配的」变成同一件事。
+  assert.equal(
+    isSyncReadFactPayload('content_schedule', {
+      global: null,
+      accounts: [],
+      facebookGroupCommentPolicy: null,
+    }),
+    true,
+  );
+  assert.equal(
+    isSyncReadFactPayload('content_schedule', {
+      global: null,
+      accounts: [],
+      facebookGroupCommentPolicy: {
+        joinToFirstCommentHours: 0,
+        sameGroupRecommentCooldownHours: 72,
+        revision: 2,
+        source: 'db',
+      },
+    }),
+    false,
+    '零小时预热不是合法策略：它等于「刚加完就能评」，而那正是这道时序闸要挡的',
   );
 });

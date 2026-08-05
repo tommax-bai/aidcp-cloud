@@ -1572,6 +1572,10 @@ function createApiSyncReadSource(
         'facebookOperationPolicyStore',
         'api',
       ),
+    // 这一个**不 require**：存储缺席与存储未就绪在下游是同一种具名不可用（协调器报
+    // `facebook_group_comment_policy_unavailable`），发 null 即可，MUST NOT 因它抛整条快照。
+    // 与上面那条的差别在后果：基线缺席会让 FB 账号一条都跑不起来，时序策略缺席只挡评论那一格。
+    facebookGroupCommentPolicyStore: () => ctx.facebookGroupCommentPolicyStore ?? null,
   });
 }
 

@@ -120,10 +120,29 @@ export type AutomationAccountProjectionSnapshot = {
   }[];
 };
 
+/**
+ * 群评论时序策略（入群后首次评论等待 + 同群再评冷却）。
+ *
+ * **为什么挂在 `content_schedule` 这条流上**：这份策略落库时 bump 的 mirror key 本来就是
+ * `content_schedule`，单体里读它的闸也正是 `isStale('content_schedule')`——挂同一条流，
+ * 游标天然覆盖载荷，语义与单体逐位一致。挂别的流要另外把 `content_schedule` 塞进那条流的
+ * 游标键，开新流则要再手抄一遍流清单（本仓为「手抄流清单漂一条」付过一次代价）。
+ *
+ * **整体可为 null**：属主侧策略存储未就绪时 MUST 发 null，MUST NOT 塞默认值顶替——
+ * 顶替会让「策略还没同步过来」和「运营就是这么配的」在下游变成同一件事。
+ */
+export type FacebookGroupCommentPolicyFact = {
+  readonly joinToFirstCommentHours: number;
+  readonly sameGroupRecommentCooldownHours: number | null;
+  readonly revision: number | null;
+  readonly source: 'db' | 'legacy_env' | 'default';
+};
+
 export type ContentScheduleSnapshot = {
   readonly global: {
     readonly contentActiveMask: string | null;
   } | null;
+  readonly facebookGroupCommentPolicy: FacebookGroupCommentPolicyFact | null;
   readonly accounts: readonly {
     readonly accountId: string;
     readonly autoEnabled: boolean;
@@ -385,11 +404,12 @@ export function isSyncReadFactPayload<S extends SyncReadStream>(
     case 'content_schedule':
       return (
         isRecord(value) &&
-        hasExactKeys(value, ['global', 'accounts']) &&
+        hasExactKeys(value, ['global', 'accounts', 'facebookGroupCommentPolicy']) &&
         (value.global === null ||
           (isRecord(value.global) &&
             hasExactKeys(value.global, ['contentActiveMask']) &&
             isNullableString(value.global.contentActiveMask))) &&
+        isFacebookGroupCommentPolicyFact(value.facebookGroupCommentPolicy) &&
         Array.isArray(value.accounts) &&
         hasUniqueStrings(value.accounts, 'accountId') &&
         value.accounts.every(isContentScheduleAccount)
@@ -504,6 +524,28 @@ function isAutomationHealthEntry(value: unknown): boolean {
     isNonNegativeInteger(value.observeStaleMs) &&
     typeof value.haltsOnStale === 'boolean' &&
     isNonNegativeInteger(value.staleForMs)
+  );
+}
+
+function isFacebookGroupCommentPolicyFact(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isRecord(value)) return false;
+  return (
+    hasExactKeys(value, [
+      'joinToFirstCommentHours',
+      'sameGroupRecommentCooldownHours',
+      'revision',
+      'source',
+    ]) &&
+    isFiniteNumber(value.joinToFirstCommentHours) &&
+    value.joinToFirstCommentHours > 0 &&
+    (value.sameGroupRecommentCooldownHours === null ||
+      (isFiniteNumber(value.sameGroupRecommentCooldownHours) &&
+        value.sameGroupRecommentCooldownHours >= 0)) &&
+    (value.revision === null || isNonNegativeInteger(value.revision)) &&
+    (value.source === 'db' ||
+      value.source === 'legacy_env' ||
+      value.source === 'default')
   );
 }
 

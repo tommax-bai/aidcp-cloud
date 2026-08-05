@@ -16,6 +16,7 @@ import {
   type ClientEnvironmentAutomationSnapshot,
   type ContentScheduleSnapshot,
   type FacebookCommentConfigSnapshot,
+  type FacebookGroupCommentPolicyFact,
   type FacebookGroupJoinAutomationConfigSnapshot,
   type FacebookOperationPolicySnapshot,
   type FacebookSlowStartPolicySnapshot,
@@ -58,6 +59,15 @@ export interface ApiSyncReadSourceOptions {
    * 这种错配，且两边都不报错。一个口 = 一次刷新一次读，错配在结构上不成立。
    */
   facebookOperationPolicy(): Promise<FacebookOperationPolicySnapshot>;
+  /**
+   * 群评论时序策略的取用口（**必填、无默认**）。
+   *
+   * 同步取值：属主存储自己就是「启动期刷一次 + 写入后自刷」的内存形态，这里再 await 一次
+   * 只会引入「读到一半的写」。**未就绪时返回 null**，MUST NOT 在本文件塞 24 小时默认——
+   * 塞了就会让「策略还没同步过来」与「运营就是这么配的」在下游变成同一件事，
+   * 而下游那一步是真往群里发评论。
+   */
+  facebookGroupCommentPolicy(): FacebookGroupCommentPolicyFact | null;
 }
 
 export interface FacebookOperationPolicyBaselineStore {
@@ -74,12 +84,24 @@ export interface FacebookOperationPolicyBaselineStore {
   slowStartRuntimePolicy(): FacebookSlowStartPolicySnapshot;
 }
 
+export interface FacebookGroupCommentPolicyProjectionStore {
+  /** 未就绪时返回 null（存储自身语义），本层原样透出、不代它决定默认值。 */
+  get(): {
+    joinToFirstCommentHours: number;
+    sameGroupRecommentCooldownHours: number | null;
+    revision: number | null;
+    source: 'db' | 'legacy_env' | 'default';
+  } | null;
+}
+
 export interface ApiSyncReadCompositionOptions extends Omit<
   ApiSyncReadSourceOptions,
-  'facebookOperationPolicy'
+  'facebookOperationPolicy' | 'facebookGroupCommentPolicy'
 > {
   /** Late-bound because segA assigns the store after the API source is described. */
   facebookOperationPolicyStore(): FacebookOperationPolicyBaselineStore;
+  /** 同上：晚绑定。缺存储实例时发 null，与「存储在但未就绪」在下游是同一种具名不可用。 */
+  facebookGroupCommentPolicyStore(): FacebookGroupCommentPolicyProjectionStore | null;
 }
 
 /**
@@ -104,6 +126,16 @@ export function createApiSyncReadSnapshotSource(
         slowStart: store.slowStartRuntimePolicy(),
       };
     },
+    facebookGroupCommentPolicy: () => {
+      const view = options.facebookGroupCommentPolicyStore()?.get() ?? null;
+      if (!view) return null;
+      return {
+        joinToFirstCommentHours: view.joinToFirstCommentHours,
+        sameGroupRecommentCooldownHours: view.sameGroupRecommentCooldownHours,
+        revision: view.revision,
+        source: view.source,
+      };
+    },
   });
 }
 
@@ -112,12 +144,14 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
   private readonly pool: pg.Pool;
   private readonly parseSoul: (personaText: string) => SyncReadJson | null;
   private readonly facebookOperationPolicy: () => Promise<FacebookOperationPolicySnapshot>;
+  private readonly facebookGroupCommentPolicy: () => FacebookGroupCommentPolicyFact | null;
 
   constructor(options: ApiSyncReadSourceOptions) {
     this.executionTarget = options.executionTarget;
     this.pool = options.pool;
     this.parseSoul = options.parseSoul;
     this.facebookOperationPolicy = options.facebookOperationPolicy;
+    this.facebookGroupCommentPolicy = options.facebookGroupCommentPolicy;
   }
 
   async snapshot<S extends SyncReadStream>(
@@ -284,6 +318,9 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
           global: global.rows[0]
             ? { contentActiveMask: global.rows[0].content_active_mask ?? null }
             : null,
+          // 群评论时序策略随本条流下发：它落库时 bump 的就是 `content_schedule` 这个版本号，
+          // 所以上面那个游标天然覆盖它，无需另加游标键。
+          facebookGroupCommentPolicy: this.facebookGroupCommentPolicy(),
           accounts: accounts.rows.map((row) => ({
             accountId: row.account_id,
             autoEnabled: row.auto_enabled === true,

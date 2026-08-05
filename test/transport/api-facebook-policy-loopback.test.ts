@@ -91,6 +91,7 @@ async function withApiOwnerLoopback(
     executionTarget: 'dev',
     pool: fakePool(events),
     parseSoul: () => null,
+    facebookGroupCommentPolicyStore: () => null,
     facebookOperationPolicyStore: () => store,
   });
   const server = new InternalHttpServer();

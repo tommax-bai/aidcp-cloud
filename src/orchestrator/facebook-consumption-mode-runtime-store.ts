@@ -10,6 +10,7 @@ import {
 import {
   advanceFacebookConsumptionCounters,
   facebookConsumptionTargetIsDispatchable,
+  isDeferrableFacebookConsumptionObligation,
   sameFacebookConsumptionPolicySnapshot,
   validateFacebookConsumptionPolicy,
 } from './facebook-consumption-mode.js';
@@ -37,6 +38,16 @@ const ACTION_COLUMNS = `
   state, dispatch_phase, outcome, blocker, downstream_enabled,
   group_key, group_url, content_key, content_url, selection_strategy, target_evidence,
   owner_id, owner_expires_at, version, dispatched_at, settled_at, created_at, updated_at
+`;
+
+/**
+ * `isDeferrableFacebookConsumptionObligation()` 的 SQL 转写（判据的权威定义在那个纯函数上）。
+ * 两份 MUST 同步：这里放宽一分，被让位的就可能是一条在途的写。
+ */
+const DEFERRABLE_OBLIGATION_SQL = `
+  action_type <> 'like'
+  AND state IN ('waiting_target','waiting_gate')
+  AND dispatch_phase = 'not_started'
 `;
 
 const FACEBOOK_CONSUMPTION_RUNTIME_REQUIREMENT = {
@@ -110,6 +121,12 @@ const FACEBOOK_CONSUMPTION_RUNTIME_REQUIREMENT = {
     ])],
   ]),
   indexes: new Map([
+    // **名字是历史的，定义已换代（迁移 0111）**：这条唯一索引从「每账号至多一个未终结动作」
+    // 改成「每账号**每动作类型**至多一个未终结动作」。「同类至多一份」保住了原先对点赞的
+    // 全部保证，同时允许「等待中的评论义务」与「在途点赞」并存——跨类型互斥改由应用层的
+    // 槽位判据（`isDeferrableFacebookConsumptionObligation`）与「一次浏览至多一个边缘动作」负责。
+    // 名字**刻意不改**：这道启动期契约门按名字查索引，改名会让回滚到旧码的进程起不来，
+    // 而回滚正是部署安全序列的最后一步。
     ['uq_facebook_consumption_active_action', 'facebook_consumption_action'],
     ['idx_facebook_consumption_action_revision', 'facebook_consumption_action'],
     ['idx_facebook_consumption_result_source', 'facebook_consumption_action_result_fact'],
@@ -243,6 +260,15 @@ function evidenceFromDb(value: unknown): Record<string, unknown> | null {
 
 function iso(value: Date | string | null): string | null {
   return value == null ? null : new Date(value).toISOString();
+}
+
+/** 行级判据一律经纯函数，MUST NOT 在这里另写一遍三条件（写第二遍就会与 SQL 谓词各自漂）。 */
+function isDeferrableActionRow(row: ActionDbRow): boolean {
+  return isDeferrableFacebookConsumptionObligation({
+    actionType: row.action_type,
+    state: row.state,
+    dispatchPhase: row.dispatch_phase,
+  });
 }
 
 function actionFromDb(row: ActionDbRow): FacebookConsumptionActionView {
@@ -561,11 +587,32 @@ export class FacebookConsumptionModeRuntimeStore {
           accountId,
           input.policy.policyRevision,
         );
-        await client.query('COMMIT');
-        transactionOpen = false;
-        if (!existing) throw new Error('facebook_consumption_active_action_missing');
-        return { kind: 'action_active', action: actionFromDb(existing) };
+        if (!existing) {
+          await client.query('COMMIT');
+          transactionOpen = false;
+          throw new Error('facebook_consumption_active_action_missing');
+        }
+        if (!isDeferrableActionRow(existing)) {
+          await client.query('COMMIT');
+          transactionOpen = false;
+          return { kind: 'action_active', action: actionFromDb(existing) };
+        }
+        // 让位：指针置空、义务行保持非终态。上面那道账号级闸已经放过它了，
+        // 这里若还认指针，等待中的评论义务照样把点赞段冻死（本 change 的根因）。
+        await client.query(
+          `UPDATE facebook_consumption_progress
+              SET active_action_id=NULL, updated_at=now()
+            WHERE account_id=$1 AND execution_target=$2 AND policy_revision=$3
+              AND active_action_id=$4`,
+          [
+            accountId,
+            this.executionTarget,
+            input.policy.policyRevision,
+            progress.active_action_id,
+          ],
+        );
       }
+      const deferred = await this.selectAccountDeferredObligation(client, accountId);
 
       const inserted = await client.query(
         `INSERT INTO facebook_consumption_view_fact
@@ -589,7 +636,11 @@ export class FacebookConsumptionModeRuntimeStore {
       if (inserted.rowCount === 0) {
         await client.query('COMMIT');
         transactionOpen = false;
-        return { kind: 'duplicate', viewCount: currentCount };
+        return {
+          kind: 'duplicate',
+          viewCount: currentCount,
+          ...(deferred ? { deferredObligation: actionFromDb(deferred) } : {}),
+        };
       }
 
       const nextCount = currentCount + 1;
@@ -602,7 +653,11 @@ export class FacebookConsumptionModeRuntimeStore {
         );
         await client.query('COMMIT');
         transactionOpen = false;
-        return { kind: 'counted', viewCount: nextCount };
+        return {
+          kind: 'counted',
+          viewCount: nextCount,
+          ...(deferred ? { deferredObligation: actionFromDb(deferred) } : {}),
+        };
       }
 
       const action = await this.insertAction(client, {
@@ -1289,15 +1344,31 @@ export class FacebookConsumptionModeRuntimeStore {
             row.downstream_enabled === true && progress.revision_state === 'active',
         });
         if (transition.nextActionType) {
-          nextAction = await this.insertAction(client, {
-            accountId: input.accountId,
-            policyRevision: input.policyRevision,
-            snapshot: snapshotFromDb(row.policy_snapshot),
-            sequence: Number(progress.next_action_sequence),
-            actionType: transition.nextActionType,
-            triggerSourceDedupeKey: input.sourceDedupeKey,
-          });
-          if (!nextAction) throw new Error('facebook_consumption_next_action_conflict');
+          // 积压上限：同账号同策略号下同类义务至多一份。让位之后点赞段会继续跑，
+          // 于是「到点造义务」会反复到点；不设上限，一个长期评论不成的账号会积压出成百上千份。
+          // 合并 MUST 留痕：「悄悄少做一次」与「并入已有义务」在运维视角必须可分辨。
+          const standing = await this.selectNonTerminalActionOfType(
+            client,
+            input.accountId,
+            input.policyRevision,
+            transition.nextActionType,
+          );
+          if (standing) {
+            console.log(
+              `[facebook-consumption] obligation merged account=${input.accountId} type=${transition.nextActionType} `
+                + `into=${standing.action_id} state=${standing.state} blocker=${standing.blocker ?? '-'}`,
+            );
+          } else {
+            nextAction = await this.insertAction(client, {
+              accountId: input.accountId,
+              policyRevision: input.policyRevision,
+              snapshot: snapshotFromDb(row.policy_snapshot),
+              sequence: Number(progress.next_action_sequence),
+              actionType: transition.nextActionType,
+              triggerSourceDedupeKey: input.sourceDedupeKey,
+            });
+            if (!nextAction) throw new Error('facebook_consumption_next_action_conflict');
+          }
         }
         await client.query(
           `UPDATE facebook_consumption_progress
@@ -1520,9 +1591,30 @@ export class FacebookConsumptionModeRuntimeStore {
       `SELECT ${ACTION_COLUMNS}
          FROM facebook_consumption_action
         WHERE account_id=$1 AND execution_target=$2 AND state <> 'terminal'
+          AND NOT (${DEFERRABLE_OBLIGATION_SQL})
         ORDER BY created_at ASC
         LIMIT 1
         FOR UPDATE`,
+      [accountId, this.executionTarget],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  /**
+   * 让了位的下游义务（至多一份，见 `uq_facebook_consumption_obligation_per_type`）。
+   * 只读、不加锁：它不参与本事务的推进，仅供调用方决定要不要另行驱动。
+   */
+  private async selectAccountDeferredObligation(
+    client: pg.PoolClient,
+    accountId: string,
+  ): Promise<ActionDbRow | null> {
+    const result = await client.query<ActionDbRow>(
+      `SELECT ${ACTION_COLUMNS}
+         FROM facebook_consumption_action
+        WHERE account_id=$1 AND execution_target=$2 AND state <> 'terminal'
+          AND ${DEFERRABLE_OBLIGATION_SQL}
+        ORDER BY created_at ASC
+        LIMIT 1`,
       [accountId, this.executionTarget],
     );
     return result.rows[0] ?? null;
@@ -1533,9 +1625,30 @@ export class FacebookConsumptionModeRuntimeStore {
       `SELECT ${ACTION_COLUMNS}
          FROM facebook_consumption_action
         WHERE account_id=$1 AND execution_target=$2 AND state <> 'terminal'
+          AND NOT (${DEFERRABLE_OBLIGATION_SQL})
         ORDER BY created_at ASC
         LIMIT 1`,
       [accountId, this.executionTarget],
+    );
+    return result.rows[0] ?? null;
+  }
+
+  /** 同类型未终结义务（积压上限的判据）。 */
+  private async selectNonTerminalActionOfType(
+    client: pg.PoolClient,
+    accountId: string,
+    policyRevision: number,
+    actionType: FacebookConsumptionActionType,
+  ): Promise<ActionDbRow | null> {
+    const result = await client.query<ActionDbRow>(
+      `SELECT ${ACTION_COLUMNS}
+         FROM facebook_consumption_action
+        WHERE account_id=$1 AND execution_target=$2 AND policy_revision=$3
+          AND action_type=$4 AND state <> 'terminal'
+        ORDER BY created_at ASC
+        LIMIT 1
+        FOR UPDATE`,
+      [accountId, this.executionTarget, policyRevision, actionType],
     );
     return result.rows[0] ?? null;
   }

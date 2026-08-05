@@ -152,10 +152,13 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(
     !automation.includes('0110_facebook_global_policy_single_scope'),
   );
+  // 消费链的动作表是 automation 属主，故重定义其唯一索引的迁移只进 automation 组。
+  assert.ok(automation.includes('0111_facebook_consumption_obligation_per_type'));
+  assert.ok(!api.includes('0111_facebook_consumption_obligation_per_type'));
   // 每加一条迁移都要在这里同步抬。
   assert.equal(
     KNOWN_MAX_SCHEMA_VERSION,
-    '0110_facebook_global_policy_single_scope',
+    '0111_facebook_consumption_obligation_per_type',
   );
 });
 

@@ -86,13 +86,26 @@ function memoryDatabase(clock: () => number) {
     row.updated_at = new Date(clock());
     return row;
   };
-  const activeFor = (accountId: string, target: string) =>
+  // 让位判据的内存转写。生产判据的唯一定义处是 `isDeferrableFacebookConsumptionObligation()`；
+  // 这里三条件必须与它逐字一致，否则这套内存库会替生产码把「等待中的义务」当成占槽动作，
+  // 于是「整链冻死」在测试里长得和正常一模一样。
+  const isDeferrable = (row: MemoryAction) =>
+    row.action_type !== 'like'
+    && (row.state === 'waiting_target' || row.state === 'waiting_gate')
+    && row.dispatch_phase === 'not_started';
+  const nonTerminalFor = (accountId: string, target: string) =>
     [...actions.values()]
       .filter((row) =>
         row.account_id === accountId
         && row.execution_target === target
         && row.state !== 'terminal')
-      .sort((left, right) => left.created_at.getTime() - right.created_at.getTime())[0];
+      .sort((left, right) => left.created_at.getTime() - right.created_at.getTime());
+  /** 占槽动作 = 可下发 / 在途的那一个。 */
+  const activeFor = (accountId: string, target: string) =>
+    nonTerminalFor(accountId, target).filter((row) => !isDeferrable(row))[0];
+  /** 让了位的义务：唯一索引改按动作类型分之后，它可以与占槽动作并存。 */
+  const deferredFor = (accountId: string, target: string) =>
+    nonTerminalFor(accountId, target).filter(isDeferrable)[0];
   const parseJson = (value: unknown) =>
     value == null ? null : typeof value === 'string' ? JSON.parse(value) : value;
   const acquire = async () => {
@@ -223,7 +236,10 @@ function memoryDatabase(clock: () => number) {
       const actionType = String(params[6]) as MemoryAction['action_type'];
       const trigger = String(params[8]);
       const idempotency = String(params[7]);
-      const duplicate = activeFor(accountId, target)
+      // `uq_facebook_consumption_active_action`（迁移 0111 起按动作类型分）：
+      // 同账号同目标下，同一 action_type 至多一条未终结。
+      const duplicate = nonTerminalFor(accountId, target)
+        .find((row) => row.action_type === actionType)
         || [...actions.values()].find((row) =>
           row.account_id === accountId
           && row.execution_target === target
@@ -295,8 +311,23 @@ function memoryDatabase(clock: () => number) {
 
     if (sql.includes('FROM facebook_consumption_action')
       && sql.includes("state <> 'terminal'")
+      && sql.includes('account_id=$1')
+      && sql.includes('action_type=$4')) {
+      const row = nonTerminalFor(String(params[0]), String(params[1])).find((candidate) =>
+        candidate.policy_revision === Number(params[2])
+        && candidate.action_type === String(params[3]));
+      return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+    }
+
+    if (sql.includes('FROM facebook_consumption_action')
+      && sql.includes("state <> 'terminal'")
       && sql.includes('account_id=$1')) {
-      const row = activeFor(String(params[0]), String(params[1]));
+      // 生产 SQL 里 `NOT (...)` 取占槽动作、去掉 NOT 取让位义务；两条谓词文本只差这三个字符，
+      // 所以这里按 `AND NOT (` 分流，别按「含不含 action_type」分（那样两条会撞在一起）。
+      const deferredShape = !sql.includes('AND NOT (');
+      const row = deferredShape
+        ? deferredFor(String(params[0]), String(params[1]))
+        : activeFor(String(params[0]), String(params[1]));
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
     }
 
@@ -512,6 +543,21 @@ function memoryDatabase(clock: () => number) {
         rows.push(row);
       }
       return { rows, rowCount: rows.length };
+    }
+
+    if (sql.startsWith('UPDATE facebook_consumption_progress SET active_action_id=NULL')
+      && sql.includes('active_action_id=$4')) {
+      const row = progress.get(progressKey(
+        String(params[0]),
+        String(params[1]),
+        Number(params[2]),
+      ));
+      if (row && row.active_action_id === String(params[3])) {
+        row.active_action_id = null;
+        touch(row);
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
     }
 
     if (sql.startsWith('UPDATE facebook_consumption_progress SET active_action_id=NULL')
@@ -852,6 +898,98 @@ describe('FacebookConsumptionModeRuntimeStore durable state machine', () => {
       );
       assert.match(sql, /ORDER BY created_at ASC LIMIT 1 FOR UPDATE$/);
     }
+  });
+
+  it('lets browsing and likes continue while a downstream obligation waits, and keeps one obligation per type', async () => {
+    let now = 1_800_000_000_000;
+    const db = memoryDatabase(() => now);
+    const store = makeStore(db, 'dev', () => now);
+    await store.init();
+    const mode = new FacebookConsumptionMode(store);
+    const twoOneOne: FacebookConsumptionPolicySnapshot = {
+      viewsPerLike: 2,
+      confirmedLikesPerJoin: 1,
+      confirmedJoinsPerComment: 1,
+    };
+
+    assert.equal((await recordView(mode, 1, 1, twoOneOne)).kind, 'counted');
+    const firstLike = await recordView(mode, 1, 2, twoOneOne);
+    assert.equal(firstLike.kind, 'action_created');
+    if (firstLike.kind !== 'action_created') throw new Error('expected like action');
+
+    let like = await claim(store, firstLike.action, 'worker-like-1');
+    like = await dispatch(store, like, 'worker-like-1');
+    const settledLike = await mode.recordActionReceipt({
+      actionId: like.actionId,
+      accountId: like.accountId,
+      policyRevision: like.policyRevision,
+      sourceDedupeKey: 'like-receipt-1',
+      outcome: 'confirmed_new_like',
+      occurredAt: now + 1,
+      expectedContentKey: 'post-2',
+      expectedContentUrl: 'https://www.facebook.com/posts/2',
+    });
+    assert.equal(settledLike.kind, 'settled');
+    if (settledLike.kind !== 'settled') throw new Error('expected settled like');
+    const obligation = settledLike.nextAction!;
+    assert.equal(obligation.actionType, 'join');
+    assert.equal(obligation.state, 'waiting_target');
+    assert.equal(obligation.dispatchPhase, 'not_started');
+
+    // 本 change 的承重断言：等待中的义务在场时，浏览事实照记、点赞机会照到点。
+    // 旧行为在这两步上返回 `action_active`，于是点赞与加群跨重启永久停摆。
+    const counted = await recordView(mode, 1, 3, twoOneOne);
+    assert.equal(counted.kind, 'counted');
+    if (counted.kind !== 'counted') throw new Error('expected counted view');
+    assert.equal(counted.viewCount, 1);
+    assert.equal(
+      counted.deferredObligation?.actionId,
+      obligation.actionId,
+      'the obligation that yielded the slot must be reported back so it still gets driven',
+    );
+
+    const secondLike = await recordView(mode, 1, 4, twoOneOne);
+    assert.equal(secondLike.kind, 'action_created');
+    if (secondLike.kind !== 'action_created') throw new Error('expected second like action');
+    assert.equal(secondLike.action.actionType, 'like');
+    assert.equal(
+      (secondLike as { deferredObligation?: unknown }).deferredObligation,
+      undefined,
+      'a round that already produced an Edge-facing like MUST NOT also hand back the obligation',
+    );
+
+    const stillWaiting = await store.getAction(obligation.actionId);
+    assert.equal(stillWaiting?.state, 'waiting_target', 'yielding is not discarding');
+
+    // 在途的写照旧占槽：让位判据 MUST NOT 放行任何已派发的动作。
+    let second = await claim(store, secondLike.action, 'worker-like-2');
+    second = await dispatch(store, second, 'worker-like-2');
+    assert.equal((await recordView(mode, 1, 5, twoOneOne)).kind, 'action_active');
+
+    // 积压上限：第二次到点 MUST NOT 造出第二份同类义务。
+    const settledSecond = await mode.recordActionReceipt({
+      actionId: second.actionId,
+      accountId: second.accountId,
+      policyRevision: second.policyRevision,
+      sourceDedupeKey: 'like-receipt-2',
+      outcome: 'confirmed_new_like',
+      occurredAt: now + 2,
+      expectedContentKey: 'post-4',
+      expectedContentUrl: 'https://www.facebook.com/posts/4',
+    });
+    assert.equal(settledSecond.kind, 'settled');
+    if (settledSecond.kind !== 'settled') throw new Error('expected settled second like');
+    assert.equal(
+      settledSecond.nextAction,
+      null,
+      'a standing obligation of the same type absorbs the newly earned one',
+    );
+    const nonTerminal = await store.listActiveActions();
+    assert.deepEqual(
+      nonTerminal.filter((row) => row.actionType === 'join').map((row) => row.actionId),
+      [obligation.actionId],
+      'exactly one join obligation may stand at a time',
+    );
   });
 
   it('keeps exact URLs, upgrades same-key pending receipts, waits for targets, and advances only confirmed-new outcomes', async () => {
@@ -1200,6 +1338,21 @@ describe('FacebookConsumptionModeRuntimeStore durable state machine', () => {
 });
 
 describe('facebook consumption migration contract', () => {
+  it('redefines the active-action index per action type without renaming it', async () => {
+    const sql = await readFile(
+      new URL('../../migrations/0111_facebook_consumption_obligation_per_type.sql', import.meta.url),
+      'utf8',
+    );
+    // 名字不变是硬要求：启动期契约门按名字查索引，改名会让回滚到旧码的进程起不来。
+    assert.match(
+      sql,
+      /CREATE UNIQUE INDEX IF NOT EXISTS uq_facebook_consumption_active_action[\s\S]*\(account_id, execution_target, action_type\)[\s\S]*WHERE state <> 'terminal'/,
+    );
+    assert.match(sql, /DROP INDEX IF EXISTS uq_facebook_consumption_active_action/);
+    // 含 DROP INDEX ⇒ 只能标 contract。标成 expand 会绕过共库期那道「默认拒绝收缩」的闸。
+    assert.match(sql, /^-- aidcp:kind=contract$/m);
+  });
+
   it('persists exact content URLs and enforces one active action per account and target', async () => {
     const sql = await readFile(
       new URL('../../migrations/0102_facebook_consumption_runtime.sql', import.meta.url),

@@ -1,7 +1,9 @@
 import type {
   FacebookConsumptionActionReceiptInput,
+  FacebookConsumptionActionState,
   FacebookConsumptionActionTarget,
   FacebookConsumptionActionType,
+  FacebookConsumptionDispatchPhase,
   FacebookConsumptionConfirmedViewInput,
   FacebookConsumptionOutcome,
   FacebookConsumptionPolicySnapshot,
@@ -96,6 +98,34 @@ export function advanceFacebookConsumptionCounters(input: {
   }
 
   return { counters, nextActionType: null };
+}
+
+/**
+ * 「让位型义务」判据 —— 推进槽位的唯一定义处（SQL 侧那份谓词是它的机械转写）。
+ *
+ * 消费链本来是单槽的：`facebook_consumption_progress.active_action_id` 一旦非空，
+ * 新的浏览连事实都不记。评论义务停在等待态时，它后面的点赞与加群随之永久停摆
+ * （2026-08-05 生产实测 12 个账号，最早一个卡了一天多、零点赞）。
+ *
+ * 所以槽位重新定义为「当前唯一**可下发 / 在途**的动作」。三条同时成立才让位：
+ *  1. 非 like —— 点赞段正是被保护的那一段，不参与让位；
+ *  2. 处在等待态（等目标 / 等闸）；
+ *  3. **一次都没派发过** —— 这条是红线「提交点是最外层前置」的落点：
+ *     已 `dispatched` 的写一律照旧占槽，绝不允许在有在途写时再起新动作。
+ *
+ * 让位 ≠ 作废：义务行保持非终态，仍会被在途扫描（判据是 `state <> 'terminal'`、
+ * 不是槽位指针）扫到并继续推进。
+ */
+export function isDeferrableFacebookConsumptionObligation(action: {
+  actionType: FacebookConsumptionActionType;
+  state: FacebookConsumptionActionState;
+  dispatchPhase: FacebookConsumptionDispatchPhase;
+}): boolean {
+  return (
+    action.actionType !== 'like'
+    && (action.state === 'waiting_target' || action.state === 'waiting_gate')
+    && action.dispatchPhase === 'not_started'
+  );
 }
 
 export function facebookConsumptionTargetIsDispatchable(

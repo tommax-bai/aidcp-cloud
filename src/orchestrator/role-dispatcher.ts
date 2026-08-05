@@ -1353,6 +1353,19 @@ export class RoleDispatcher {
       occurredAt: payload.occurredAt,
     });
     if (applied.kind === 'counted' || applied.kind === 'duplicate') {
+      // 让了位的下游义务在这里继续推进——本轮没有点赞要发，驱动它不会与在途写抢浏览器。
+      // 驱动失败 MUST NOT 拖住浏览：义务是持久的，下一次浏览或在途扫描还会再来一次。
+      const deferred = applied.deferredObligation;
+      if (deferred && this.triggerFacebookConsumptionAction) {
+        try {
+          await this.triggerFacebookConsumptionAction(deferred);
+        } catch (err) {
+          console.warn(
+            `[facebook-consumption] deferred obligation drive failed action=${deferred.actionId} type=${deferred.actionType}:`,
+            err,
+          );
+        }
+      }
       this.continueAfterFacebookRuleView(payload.source, `consumption_view_${applied.kind}`);
       return;
     }

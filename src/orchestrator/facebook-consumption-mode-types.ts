@@ -124,9 +124,24 @@ export interface FacebookConsumptionRuntimeView {
   updatedAt: string;
 }
 
+/**
+ * `deferredObligation` = 本轮**让了位**的下游义务（等待目标 / 等待闸、一次都还没派发）。
+ *
+ * 它只出现在 `counted` / `duplicate` 上，**刻意不出现在 `action_created` 上**：本轮既然已经
+ * 造出一个面向边缘的点赞，就 MUST NOT 在同一轮再去驱动评论 / 加群——那两条走 edge-task 租约、
+ * 会打断浏览，与在途点赞叠在一起会让点赞回执落空。义务留到下一次浏览或在途扫描再推进。
+ */
 export type ApplyFacebookConsumptionViewResult =
-  | { kind: 'counted'; viewCount: number }
-  | { kind: 'duplicate'; viewCount: number }
+  | {
+      kind: 'counted';
+      viewCount: number;
+      deferredObligation?: FacebookConsumptionActionView;
+    }
+  | {
+      kind: 'duplicate';
+      viewCount: number;
+      deferredObligation?: FacebookConsumptionActionView;
+    }
   | { kind: 'action_active'; action: FacebookConsumptionActionView }
   | { kind: 'action_created'; action: FacebookConsumptionActionView }
   | { kind: 'policy_superseded' }

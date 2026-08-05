@@ -33,6 +33,8 @@ test('facebook comment sync-read preserves explicit-mode provenance and maps tem
     executionTarget: 'dev',
     // 本组用例不覆盖运营策略流；桩当场抛，避免「空表 + 零曲线」被误当成
     // 「这台机器没有 FB 环境、且没有任何逐日上限」。
+    // 本组用例不覆盖群评论时序策略：发 null，与属主未就绪时逐位一致。
+    facebookGroupCommentPolicy: () => null,
     facebookOperationPolicy: async () => {
       throw new Error('facebook_operation_policy_not_exercised_here');
     },

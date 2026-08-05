@@ -214,7 +214,7 @@ export const REQUIRED_SCHEMA_VERSION = '0109_content_schedule_hour_claim_env_key
  * 被 `AC-SCHEMA-DDL-OWNER-01/02` 当场拦下：运行时 DDL 是只减不增的棘轮，新增 DDL 的落点只能是
  * migrations/。**那道闸是对的** —— 绕过硬依赖的代价是把 schema 真相分散回运行期。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0110_facebook_global_policy_single_scope';
+export const KNOWN_MAX_SCHEMA_VERSION = '0111_facebook_consumption_obligation_per_type';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 
