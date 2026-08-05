@@ -145,6 +145,17 @@ export interface RolePromptProviderOptions {
   publishPreviewBuilders?: Record<string, (soul?: Soul) => string>;
   /** 图像角色的图片指令渲染闭包表。未注入 → 落到既有的「图像角色无文本 prompt」说明。 */
   imagePromptPreviewBuilders?: Record<string, () => string>;
+  /**
+   * change restore-panel-capability-wiring：**渲染器不在本进程时**的说明文案。
+   *
+   * 拆进程之后，浏览角色的渲染实例在自动化进程、发布 / 配图的渲染闭包表在内容进程。
+   * 不传它时，这三处缺席都会落到「该角色暂不支持预览」——那句话是**错的**：这些角色
+   * 明明支持预览，只是渲染器不在回答这个请求的进程里。运营据此会以为是产品限制，
+   * 而不是部署形态，于是这个缺口永远不会被报上来。
+   *
+   * 传了就用它替换那三处的文案；单体不传，逐字保持原样。
+   */
+  rendererElsewhereNote?: string;
 }
 
 const FALLBACK_NOTE = '该账号未绑定人设（运行会被诚实拒绝，no_persona）；此预览按示例人设渲染、仅供查看；实时数据为示例占位（线上调用时由系统填入真实值）。';
@@ -187,7 +198,12 @@ export function createRolePromptProvider(
       if (item.llmKind === 'image') {
         const buildImg = opts.imagePromptPreviewBuilders?.[roleId];
         if (!buildImg) {
-          return { roleId, prompt: null, available: false, note: '图像角色无文本 prompt（用全局图片模型）' };
+          return {
+            roleId,
+            prompt: null,
+            available: false,
+            note: opts.rendererElsewhereNote ?? '图像角色无文本 prompt（用全局图片模型）',
+          };
         }
         try {
           return {
@@ -211,7 +227,12 @@ export function createRolePromptProvider(
       const roleName = roleId.slice('browse:'.length);
       const inst = getBrowseRoles().find((r) => r.roleName === roleName);
       if (!inst || !hasPreview(inst)) {
-        return { roleId, prompt: null, available: false, note: '该角色暂不支持预览' };
+        return {
+          roleId,
+          prompt: null,
+          available: false,
+          note: opts.rendererElsewhereNote ?? '该角色暂不支持预览',
+        };
       }
       return safePreview(roleId, inst);
     }
@@ -219,7 +240,12 @@ export function createRolePromptProvider(
     // 可由账号口径传入真实人设替换示例人设。渲染抛错优雅降级、绝不连累发布闭环。
     const buildPreview = opts.publishPreviewBuilders?.[roleId];
     if (!buildPreview) {
-      return { roleId, prompt: null, available: false, note: '该角色暂不支持预览' };
+      return {
+        roleId,
+        prompt: null,
+        available: false,
+        note: opts.rendererElsewhereNote ?? '该角色暂不支持预览',
+      };
     }
     try {
       return { roleId, prompt: buildPreview(publishSoul), available: true, note: PUBLISH_PLACEHOLDER_NOTE };
