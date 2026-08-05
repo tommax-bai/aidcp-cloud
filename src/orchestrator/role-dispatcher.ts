@@ -262,6 +262,46 @@ const FACEBOOK_REELS_TERMINAL_SCROLL_REASONS = new Set([
  * 用尽后不再重开，交由滚动无目标分支诚实终止本场。
  */
 const FACEBOOK_REELS_REENTRY_MAX_PER_SESSION = 2;
+
+/** 会话启动闸的裁决结论（含放行）。抽成具名类型，是为了让下面那张分类表能被穷举检查。 */
+type SessionStartVerdict =
+  | 'ok'
+  | 'dispatch_inactive'
+  | 'platform_no_browse'
+  | 'needs_persona_setup'
+  | typeof PERSONA_UNAVAILABLE_REASON
+  | typeof CONFIG_MIRROR_STALE_REASON;
+
+/**
+ * 拒绝结论的**结构性分类**（change recheck-session-start-gate）。
+ *
+ * 判据是本仓那条：「同一步在重新加载后原样重来，有没有可能得到不同结果」——不是「看起来像不像临时问题」。
+ * 会变的那些 MUST NOT 落终态；不会变的才可以。
+ *
+ * 用穷举 Record 而不是一张 Set 字面量：日后新增一种裁决结论时，这里不分类就编译不过。
+ * 若写成 Set，新原因会默默落进「不可恢复」那一支、原样重演本 change 要消灭的缺陷——
+ * 本仓已有同形状前科（新增命令忘了进路由白名单，静默丢弃，类型系统一个字都不说）。
+ */
+const START_GATE_VERDICT_RECOVERABLE: Record<Exclude<SessionStartVerdict, 'ok'>, boolean> = {
+  // 人设可能正被自动补齐、或运营正在客户端里设 —— 重来会变。
+  // 这正是本 change 的起因：补人设与握手是同一事件的两条并行分支，读永远快于写落到副本。
+  needs_persona_setup: true,
+  // 只读副本会自己追上（失效信号中继 + 秒级兜底轮询）—— 重来会变。
+  [PERSONA_UNAVAILABLE_REASON]: true,
+  [CONFIG_MIRROR_STALE_REASON]: true,
+  // 该平台就是不具备浏览能力 —— 重来一万次也一样。真结构性，维持终态。
+  platform_no_browse: false,
+  // 运营的显式停机，不是「云端读早了」，且已有专门的恢复入口（面板显式启动）。
+  // 纳入复判等于让全局停机在任一连接上被自动解除，那是另一件事，不在本 change 的问题域内。
+  dispatch_inactive: false,
+};
+
+/**
+ * 复判退避节奏（ms）。首跳 2s 覆盖补人设竞态（dev 实测窗口 0.1~0.8s，两个数量级余量）；
+ * 末位是稳定间隔，到达后不再拉长，与既有那条周期性只读裁决链同量级。
+ */
+const START_GATE_RECHECK_BACKOFF_MS = [2_000, 5_000, 10_000, 30_000, 60_000] as const;
+
 /** 评论角色单次 LLM 硬 deadline；不沿用面向慢 thinking 角色的全局 180s。 */
 export const DEFAULT_COMMENT_LLM_TIMEOUT_MS = 30_000;
 /** 整条评论子链的安全兜底；局部 LLM / 人审超时应更早结束。 */
@@ -809,6 +849,18 @@ export class RoleDispatcher {
   private wakeTimer: unknown;
   /** 浏览额度休眠计时器句柄（minute/hour/day 窗口释放后重驱浏览；每连接私有、unref）。 */
   private viewQuotaSleepTimer: unknown;
+  /**
+   * 启动闸复判计时器句柄（change recheck-session-start-gate；每连接私有、unref）。
+   *
+   * 这条通道的「上限」是**资源上限而非时间上限**：每连接至多一个待触发的复判、跳与跳之间不累积状态、
+   * 连接一拆即解除。MUST NOT 给它补一个时间上限后落终态——那会原样重造本 change 要消灭的缺陷
+   *（运营在上限之后才补人设，账号照样静默不动，而且这次还带着「已经放弃了」的假象）。
+   */
+  private startGateRecheckTimer: unknown;
+  /** 复判退避进度下标（见 START_GATE_RECHECK_BACKOFF_MS）；解除武装时归零。 */
+  private startGateRecheckStep = 0;
+  /** 武装复判时那次拒绝的原因——放行回执要自证「此前被哪一个闸挡过」。 */
+  private startGateBlockedReason: Exclude<SessionStartVerdict, 'ok'> | undefined;
   private viewQuotaSleeping = false;
   /**
    * 本轮浏览额度休眠已扣下的命令数（change session-start-quota-honest-sleep）。
@@ -2785,6 +2837,11 @@ export class RoleDispatcher {
   private canStartSession(): boolean {
     const verdict = this.sessionStartVerdict();
     if (verdict === 'ok') return true;
+    // 可恢复类拒绝 MUST NOT 落终态（change recheck-session-start-gate）：就地武装复判通道。
+    // 武装点收口在这里、而不是逐个调用入口（hello / 浏览器状态转好 / 续场 / 面板），因为入口迟早会变成
+    // 第五个，逐入口武装必然漏掉新加的那个——本仓已有同形状前科。下面各分支的日志与回调**一字未改**：
+    // 首次被拒该说的照说，复判只负责「之后还认不认这个结论」。
+    if (START_GATE_VERDICT_RECOVERABLE[verdict]) this.armStartGateRecheck(verdict);
     // facebook-scheduled-comment 2.8：平台不具备 browse 能力（如 Facebook v1 只声明 'comment'）→ 诚实拒绝启动
     // xhs 浏览角色循环。判在人设闸之前，避免 FB 账号被误判 needs_persona_setup。不复用 onSessionRejected
     //（那会硬编码按「未绑人设」拒绝并误报）；FB 账号不浏览是正常预期、非事故，只 console.warn。
@@ -2833,13 +2890,7 @@ export class RoleDispatcher {
    * 它若直接复用带副作用的 `canStartSession()`，未绑人设 / 无 browse 能力的账号就会**每分钟**刷一行告警、并
    * **每分钟触发一次「会话被拒」回调**——一个只读方法不该有这种脉冲。
    */
-  private sessionStartVerdict():
-    | 'ok'
-    | 'dispatch_inactive'
-    | 'platform_no_browse'
-    | 'needs_persona_setup'
-    | typeof PERSONA_UNAVAILABLE_REASON
-    | typeof CONFIG_MIRROR_STALE_REASON {
+  private sessionStartVerdict(): SessionStartVerdict {
     if (!this.isDispatchActive()) return 'dispatch_inactive';
     if (this.accountPlatform && !isOrchestrationCapabilitySupported(this.accountPlatform, 'browse')) {
       return 'platform_no_browse';
@@ -2902,6 +2953,93 @@ export class RoleDispatcher {
     if (this.sessionActive) this.redriveBrowse();
   }
 
+  // ── 启动闸复判通道（change recheck-session-start-gate）──────────────────────────────
+  //
+  // 为什么要有这条通道：启动闸原先是**一次性判决**——握手那一刻判一次，判到「未绑人设」就短路，
+  // 此后没有任何东西会再判一次，该连接整个生命周期停手。而「自动补人设」与「握手开工」是同一个事件
+  //（环境绑定账号）触发的两条并行分支：一条往接口域库写人设，一条读本进程的只读副本，读永远快于写落到
+  // 副本。于是**每个新账号的第一次接入必然踩中**，不是偶发（dev 实测 4/4，写入与被拒相差 0.1~0.8 秒）。
+  //
+  // 单体时代靠接口侧「绑定成功 → 就地开跑」的回调自愈；云端三等分后接口进程拿不到自动化段的句柄，
+  // 那条线断了。本通道不需要任何跨进程通信：**答案自己会变好，只是没人再问一遍。**
+
+  /**
+   * 武装复判。已武装 → 直接返回：不重复武装、不重置退避进度（否则一个反复调用启动闸的账号会把节奏
+   * 永远钉在首跳 2s 上）。
+   */
+  private armStartGateRecheck(reason: Exclude<SessionStartVerdict, 'ok'>): void {
+    this.startGateBlockedReason = reason;
+    if (this.startGateRecheckTimer !== undefined) return;
+    this.scheduleStartGateRecheck();
+  }
+
+  /** 排下一跳，并把退避推进一格（到末位后稳定不再拉长）。 */
+  private scheduleStartGateRecheck(): void {
+    const idx = Math.min(this.startGateRecheckStep, START_GATE_RECHECK_BACKOFF_MS.length - 1);
+    this.startGateRecheckStep = idx + 1;
+    this.startGateRecheckTimer = this.setTimeoutFn(() => {
+      this.startGateRecheckTimer = undefined;
+      this.onStartGateRecheckElapsed();
+    }, START_GATE_RECHECK_BACKOFF_MS[idx]!);
+    (this.startGateRecheckTimer as { unref?: () => void } | undefined)?.unref?.();
+  }
+
+  /**
+   * 解除武装。**连接拆除必经此处**——一个活过连接的复判会对着一条已断开的连接起会话、发命令，
+   * 那比原缺陷更坏。故调用点包含会话结束流程的最前段（早于「本来就不活跃即返回」的短路）。
+   */
+  private cancelStartGateRecheck(): void {
+    if (this.startGateRecheckTimer !== undefined) {
+      this.clearTimeoutFn(this.startGateRecheckTimer);
+      this.startGateRecheckTimer = undefined;
+    }
+    this.startGateRecheckStep = 0;
+    this.startGateBlockedReason = undefined;
+  }
+
+  /**
+   * 复判到点。
+   *
+   * 红线：这一跳 MUST 走**纯判据**（sessionStartVerdict），MUST NOT 走带副作用的 canStartSession——
+   * 否则一条每分钟一跳的通道会把「首次被拒」那条一次性告警变成每分钟一次的脉冲，并让「会话被拒」回调
+   * 被重复计数。既有代码为这件事专门拆过一次纯判据，本通道 MUST NOT 把它撤回去。
+   */
+  private onStartGateRecheckElapsed(): void {
+    if (this.sessionActive) return void this.cancelStartGateRecheck(); // 别的路径已把会话起来了
+    const blockedBy = this.startGateBlockedReason;
+    const verdict = this.sessionStartVerdict(); // 纯判据：不打日志、不发回调、无 I/O
+    if (verdict !== 'ok') {
+      if (!START_GATE_VERDICT_RECOVERABLE[verdict]) {
+        // 可恢复 → 结构性（如平台能力被改判）：如实记一次终态并收摊，绝不继续空转。
+        console.warn(
+          `[RoleDispatcher] 账号 ${this.currentAccountId} 启动闸复判转为结构性拒绝（${blockedBy ?? '-'} → ${verdict}）→ 停止复判`,
+        );
+        this.cancelStartGateRecheck();
+        return;
+      }
+      this.startGateBlockedReason = verdict; // 原因可在可恢复类之间迁移（如副本陈旧 → 确认未绑）
+      this.scheduleStartGateRecheck(); // 静默排下一跳
+      return;
+    }
+    // 闸已放行。浏览器缺席 / 不在可活跃时段各有自己的恢复路径（浏览器状态事件 / 窗口唤醒计时器），
+    // 本通道只负责启动闸；撞上这两条就静默继续等——MUST NOT 让重启会话方法每跳打一行，那又是脉冲。
+    if (this.browserState === 'absent' || !this.isWithinActiveWeek(this.clock())) {
+      this.scheduleStartGateRecheck();
+      return;
+    }
+    this.startOnPersonaBound(); // 起会话 + 补一条重驱，唤醒已上报页面内容、正在干等命令的边端
+    if (!this.sessionActive) {
+      this.scheduleStartGateRecheck(); // 仍未起来（防御性）→ 按退避继续等，不谎称已恢复
+      return;
+    }
+    // 放行回执必须自证是复判救回来的：沿用普通启动回执，档案里就再也看不出竞态发生过，
+    // 而那正是这次能定位到根因的唯一线索来源。
+    console.log(
+      `[RoleDispatcher] 账号 ${this.currentAccountId} 此前被启动闸挡住（${blockedBy ?? '-'}）→ 复判放行并就地开跑（无需边缘重连）`,
+    );
+    this.cancelStartGateRecheck();
+  }
+
   /**
    * 单次浏览会话的初始互动预算：从全局单场上限提供者读（热加载，对所有账号生效），缺省回落写死默认。
    * 返回新拷贝（live budget 会被逐项扣减）。供初始化与会话重置复用，避免口径漂移。
@@ -2942,6 +3080,7 @@ export class RoleDispatcher {
     this.setupEdgeEventSubscriptions();
     this.pinFacebookPrimarySurface();
     this.sessionActive = true;
+    this.cancelStartGateRecheck(); // 会话真起来了 → 复判使命完成
     this.sessionStartedAt = this.clock();
     this.reelsReentryCount = 0; // 重开次数按**场**计（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。
     // 按当前账号刷新单场预算 + 快照（热加载：会话开始即取最新配置）。
@@ -3087,6 +3226,7 @@ export class RoleDispatcher {
     this.setupEdgeEventSubscriptions();
     this.pinFacebookPrimarySurface();
     this.sessionActive = true;
+    this.cancelStartGateRecheck(); // 会话真起来了 → 复判使命完成
     this.sessionStartedAt = this.clock();
     this.reelsReentryCount = 0; // 重开次数按**场**计（见 FACEBOOK_REELS_REENTRY_MAX_PER_SESSION）。
     // 会话启动现问一次 view 配额（change session-start-quota-honest-sleep）：被拒即当场休眠。
@@ -3118,6 +3258,10 @@ export class RoleDispatcher {
     // 「可活跃时间」结束的正常路径会经 armRestTimer→续场拒签 重排唤醒，故此处清掉是安全的）。
     this.cancelRestTimer();
     this.cancelWakeTimer();
+    // 启动闸复判也在此解除，且 MUST 排在下面「本来就不活跃即返回」那一行**之前**——
+    // 连接拆除走的正是这条路（会话可能从未激活）。漏在短路之后，计时器就会活过连接，
+    // 到点对着一条已断开的连接起会话、发命令；那比本 change 要修的原缺陷更坏。
+    this.cancelStartGateRecheck();
     this.cancelViewQuotaSleep(false);
     this.settlePendingMandatoryCommentAsUnknown(`session_ended:${reason ?? 'manual'}`);
     this.reconcileFacebookRuleBatchOnSessionBoundary(`session_ended:${reason ?? 'manual'}`);
