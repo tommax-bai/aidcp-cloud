@@ -669,7 +669,12 @@ export type SetCredentialResult =
 /** PUT /api/config/model 结果（探活/厂商校验可失败，绝不假成功）。 */
 export type SetModelResult =
   | { ok: true; view: ModelConfigView }
-  | { ok: false; reason: 'model_invalid' | 'provider_key_missing' | 'unknown_provider' };
+  | {
+      ok: false;
+      // change restore-panel-capability-wiring：probe_unavailable = 没能探活（通道不可用），
+      // 与「模型不合法」「密钥缺失」「厂商未知」三者逐一可分。绝不因为没能检查就放行写入。
+      reason: 'model_invalid' | 'provider_key_missing' | 'unknown_provider' | 'probe_unavailable';
+    };
 
 export interface PanelModelConfig {
   getView(): Promise<ModelConfigView>;
@@ -759,6 +764,9 @@ export type RoleConfigSetResult =
         | 'temperature_out_of_range'
         | 'model_invalid'
         | 'provider_key_missing'
+        // change restore-panel-capability-wiring：**没能探活**（跨进程探活通道不可用），
+        // 既非模型不合法、也非密钥缺失。压进 model_invalid 会让运营去改一个本来正确的模型名。
+        | 'probe_unavailable'
         | 'thinking_mode_invalid';
     };
 
@@ -813,6 +821,8 @@ export type CategoryConfigSetResult =
         | 'category_not_configurable'
         | 'model_invalid'
         | 'provider_key_missing'
+        // change restore-panel-capability-wiring：同 RoleConfigSetResult，「没能探活」独立成因。
+        | 'probe_unavailable'
         | 'thinking_mode_invalid';
     };
 

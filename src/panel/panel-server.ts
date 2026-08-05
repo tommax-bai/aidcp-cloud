@@ -28,6 +28,8 @@ import type {
   PanelConfigMirrorHealthResponse,
   PanelEvidenceState,
   PanelPublishInFlightEvidence,
+  RoleConfigSetResult,
+  CategoryConfigSetResult,
 } from './types.js';
 import { startPanelWs, type PanelWsHandle } from './panel-ws.js';
 import type { PublishApprovalPayload } from '../feishu/index.js';
@@ -173,6 +175,30 @@ function invalidConfigMirrorServices(): PanelConfigMirrorHealthResponse {
       { sourceService: 'automation', asOf: null, deliveryState: 'invalid', entries: [] },
     ],
   };
+}
+
+/**
+ * 角色 / 分类写结果 → HTTP 状态（change restore-panel-capability-wiring）。
+ *
+ * 析出成纯函数是有意的：这里是**三态不得压成一态**的落点，而三态压扁的写法（一个三元表达式）
+ * 读起来和正确写法几乎一样。纯函数才能被喂进违规输入直接断言——闸恒真通过就没人能证明它还在。
+ *
+ * - 404：目标不存在（角色 / 分类名未知）。
+ * - 503：**后端没能检查**（探活通道不可用）。它不是输入错误，前端 MUST NOT 提示去改模型名。
+ * - 400：其余全是输入 / 校验问题（模型不合法、密钥缺失、不可配、温度越界、思考模式非法）。
+ */
+export function roleWriteStatus(reason: Exclude<RoleConfigSetResult, { ok: true }>['reason']): number {
+  if (reason === 'unknown_role') return 404;
+  if (reason === 'probe_unavailable') return 503;
+  return 400;
+}
+
+export function categoryWriteStatus(
+  reason: Exclude<CategoryConfigSetResult, { ok: true }>['reason'],
+): number {
+  if (reason === 'unknown_category') return 404;
+  if (reason === 'probe_unavailable') return 503;
+  return 400;
 }
 
 function readEdgePresenceEvidence(deps: PanelDeps, now: number): {
@@ -2774,8 +2800,9 @@ function createRequestHandler(
         }
         const result = await deps.modelConfig.setModel(patch, verified.payload.sub);
         if (!result.ok) {
-          // 厂商未知 / 模型探活失败 / 该厂商密钥缺失：诚实 400，绝不落库、绝不假成功
-          sendJson(res, 400, { error: result.reason });
+          // 厂商未知 / 模型探活失败 / 该厂商密钥缺失：诚实 400，绝不落库、绝不假成功。
+          // probe_unavailable 是**后端没能检查**（拆进程后探活要跨到内容进程），不是输入错误 ⇒ 503。
+          sendJson(res, result.reason === 'probe_unavailable' ? 503 : 400, { error: result.reason });
           return;
         }
         sendJson(res, 200, result.view);
@@ -2895,7 +2922,7 @@ function createRequestHandler(
       const result = await deps.roleConfig.setRoleConfig(roleId, patch, verified.payload.sub);
       if (!result.ok) {
         // unknown_role→404；其余校验/探活失败→400（绝不落库、绝不假成功）
-        sendJson(res, result.reason === 'unknown_role' ? 404 : 400, { error: result.reason });
+        sendJson(res, roleWriteStatus(result.reason), { error: result.reason });
         return;
       }
       sendJson(res, 200, result.view);
@@ -2965,7 +2992,7 @@ function createRequestHandler(
       );
       if (!result.ok) {
         // unknown_category→404；其余（不可配 / 探活失败）→400（绝不落库、绝不假成功）
-        sendJson(res, result.reason === 'unknown_category' ? 404 : 400, { error: result.reason });
+        sendJson(res, categoryWriteStatus(result.reason), { error: result.reason });
         return;
       }
       sendJson(res, 200, result.view);

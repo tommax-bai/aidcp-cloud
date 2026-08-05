@@ -85,7 +85,10 @@ export function createCategoryConfigPanel(deps: CategoryConfigFacadeDeps): Panel
       if (wantsModel) {
         const probe = await deps.probeModel(prov, (patch.model as string).trim());
         if (!probe.ok) {
-          return { ok: false, reason: probe.reason === 'provider_key_missing' ? 'provider_key_missing' : 'model_invalid' };
+          // 三态各自出口，与角色外观同口径：MUST NOT 把「密钥缺失」「没能探活」折进 model_invalid。
+          if (probe.reason === 'provider_key_missing') return { ok: false, reason: 'provider_key_missing' };
+          if (probe.reason === 'probe_unavailable') return { ok: false, reason: 'probe_unavailable' };
+          return { ok: false, reason: 'model_invalid' };
         }
       }
       await deps.store.set(

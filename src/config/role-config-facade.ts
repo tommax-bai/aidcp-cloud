@@ -30,8 +30,16 @@ import type {
  * 改动前：探活抛错，外观按 `instanceof ProviderKeyMissingError` 在本文件里分类。那条 instanceof
  * 逼 api 属主的外观 import content 属主的错误类。现在分类挪到组合根（它本来就持有厂商客户端），
  * 端口只回结果。**两种原因仍逐一可分**，对外 reason 串（provider_key_missing / model_invalid）逐字不变。
+ *
+ * 第三态 `probe_unavailable`（change restore-panel-capability-wiring）：**没能探活**，既不是
+ * 「模型不合法」也不是「密钥缺失」。拆进程后探活要跨到内容进程，通道不通是常态可恢复故障；
+ * 把它折进 `model_unavailable` 会让运营看到「模型名不合法」——那是编出来的判决，而且会让人
+ * 去改一个本来正确的模型名。三态 MUST 端到端保持可分：**MUST NOT 因为没能检查就放行写入**，
+ * 也 MUST NOT 因为没能检查就说输入错了。
  */
-export type ModelProbeResult = { ok: true } | { ok: false; reason: 'provider_key_missing' | 'model_unavailable' };
+export type ModelProbeResult =
+  | { ok: true }
+  | { ok: false; reason: 'provider_key_missing' | 'model_unavailable' | 'probe_unavailable' };
 
 export interface RoleConfigFacadeDeps {
   store: RoleConfigStore;
@@ -165,8 +173,11 @@ export function createRoleConfigPanel(deps: RoleConfigFacadeDeps): PanelRoleConf
       if (wantsModel) {
         const probe = await deps.probeModel(provider, (patch.model as string).trim());
         if (!probe.ok) {
-          // 该厂商密钥缺失 → 可区分原因（让前端提示去配密钥并重启）；否则模型名无效。
-          return { ok: false, reason: probe.reason === 'provider_key_missing' ? 'provider_key_missing' : 'model_invalid' };
+          // 三态各自出口：密钥缺失 → 去配密钥；没能探活 → 后端通道问题、别改模型名；否则模型名无效。
+          // MUST NOT 把前两者折进 model_invalid（那会把可恢复故障说成用户输入错误）。
+          if (probe.reason === 'provider_key_missing') return { ok: false, reason: 'provider_key_missing' };
+          if (probe.reason === 'probe_unavailable') return { ok: false, reason: 'probe_unavailable' };
+          return { ok: false, reason: 'model_invalid' };
         }
       }
 
