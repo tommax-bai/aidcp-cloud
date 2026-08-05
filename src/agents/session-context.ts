@@ -7,6 +7,18 @@ export interface ExcursionState {
   phase: 'idle' | 'requested' | 'suspended' | 'opening' | 'ended';
   /** 每类「清理尝试」次数（loop-to-zero 的有界兜底）：到上限仍有未读 → 诚实放弃该类、不空转、不假报已清。 */
   categoryAttempts: Map<NotificationCategory, number>;
+  /**
+   * 本趟巡视**云端自己点名**正在看的那一栏（change route-notification-items-by-category）。
+   * 分诊选中某类时单点写入（`notification.category_selected` 的唯一发出者就是分诊），巡视开始 / 结束清空。
+   *
+   * 为什么这一格必须存在：到达的通知条目**不带栏位身份**——「赞和收藏」/「新增关注」两栏在清未读回执之外
+   * 顺带回传的发送者条目（喂通知联系人名册用）与「评论和@」栏抽取的评论项，走的是同一条上报通道。
+   * 云端此前无条件把它们当评论抽取结果跑评论管线，实际拦住的只有分类器里一条按正文文案写的正则。
+   * 而「现在在看哪一栏」本就是云端自己的决定，记在这里即可定性到达的批次——**不需要执行端多报一个字段，
+   * 不改协议，对任何版本的执行端立即生效**。
+   * `null` = 本趟尚未选中任何分类（三态里的「不知道」，MUST NOT 当成「是评论栏」）。
+   */
+  selectedCategory: NotificationCategory | null;
 }
 
 /**
@@ -70,7 +82,7 @@ export class SessionContext {
   static readonly SELF_CAPTURE_TIMEOUT_MS = 20_000;
 
   private static freshExcursion(): ExcursionState {
-    return { active: false, epoch: null, phase: 'idle', categoryAttempts: new Map() };
+    return { active: false, epoch: null, phase: 'idle', categoryAttempts: new Map(), selectedCategory: null };
   }
 
   get sourcePageType(): 'feed' | 'search' { return this._sourcePageType; }
@@ -179,11 +191,18 @@ export class SessionContext {
   get excursion(): Readonly<ExcursionState> { return this._excursion; }
   get excursionActive(): boolean { return this._excursion.active; }
   get excursionEpoch(): number | null { return this._excursion.epoch; }
+  /**
+   * 本趟巡视当前选中的分类（`null` = 尚未选中）。到达的通知条目靠它定性——
+   * 这是云端**自己点名**的事实，不经执行端往返。见 `ExcursionState.selectedCategory`。
+   */
+  get excursionSelectedCategory(): NotificationCategory | null { return this._excursion.selectedCategory; }
   get browseSuspended(): boolean { return this._browseSuspended; }
 
   /** 准入通过：开一次巡视（同步 check-then-set，准入角色须同步调用）。 */
   beginExcursion(epoch: number): void {
-    this._excursion = { active: true, epoch, phase: 'requested', categoryAttempts: new Map() };
+    this._excursion = {
+      active: true, epoch, phase: 'requested', categoryAttempts: new Map(), selectedCategory: null,
+    };
   }
   setExcursionPhase(phase: ExcursionState['phase']): void { this._excursion.phase = phase; }
   /**
@@ -192,7 +211,7 @@ export class SessionContext {
    * （change notification-clear-to-zero：真有新消息就处理，不因处理过而拒绝）；notifiedItemKeys 仍跨巡视保留（见上）。
    */
   endExcursion(): void {
-    this._excursion = { active: false, epoch: null, phase: 'idle', categoryAttempts: new Map() };
+    this._excursion = SessionContext.freshExcursion();
     this._browseSuspended = false;
   }
   /** 本趟该分类已尝试清理的次数（loop-to-zero 有界兜底用）。 */
@@ -202,6 +221,14 @@ export class SessionContext {
     const n = (this._excursion.categoryAttempts.get(cat) ?? 0) + 1;
     this._excursion.categoryAttempts.set(cat, n);
     return n;
+  }
+  /**
+   * 记下本趟巡视**云端自己点名**要看的那一栏（唯一写入口，由分诊在选中时调）。
+   * 非巡视期不写：巡视外的杂散选择不该给一个不存在的巡视定性。
+   */
+  noteCategorySelected(cat: NotificationCategory): void {
+    if (!this._excursion.active) return;
+    this._excursion.selectedCategory = cat;
   }
 
   setBrowseSuspended(b: boolean): void { this._browseSuspended = b; }

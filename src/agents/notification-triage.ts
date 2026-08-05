@@ -72,6 +72,10 @@ export class NotificationTriage extends BaseRole {
         continue;
       }
       const n = this.ctx.incrementCategoryAttempts(cat); // 记一次尝试（loop-to-zero 的有界兜底）
+      // 本角色是 `notification.category_selected` 的**唯一**发出者 ⇒ 这里就是「本趟在看哪一栏」的单写点
+      // （change route-notification-items-by-category）。MUST 写在 emit 之前：下游浏览角色在同一次 emit
+      // 链里就会发出该类的浏览命令，条目回来时这一格必须已是新值。
+      this.ctx.noteCategorySelected(cat);
       this.log(`选中分类 ${cat}（未读 ${counts[cat]}，第 ${n}/${this.maxAttempts} 次清理）epoch=${epoch}`);
       this.emit('notification.category_selected', { category: cat, epoch, ts: Date.now() });
       return;
