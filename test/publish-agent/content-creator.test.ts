@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { ContentCreatorRole } from '../../src/publish-agent/roles/content-creator.js';
 import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
 import type { PipelineFields, TriggerInput, ScoutDecision } from '../../src/publish-agent/types.js';
+import { BODY_LENGTH_BANDS, BODY_LENGTH_TOLERANCE } from '../../src/publish-agent/body-length-band.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };
@@ -200,5 +201,73 @@ describe('ContentCreatorRole', () => {
     assert.equal(ctx.get('createdContent'), undefined);
     // 应该重试 3 次（初始1次 + retry 2次）
     assert.equal(callCount, 3);
+  });
+
+  // —— 5.3b 正文长度确定性闸 ——
+  // 在此之前区间只活在 prompt 一行文案里，云端一个字都不数；唯一数字数的 content_too_long
+  // 要等到发布指令下发前才响——图已生成、人已审过。
+
+  const XHS_BAND = BODY_LENGTH_BANDS.xiaohongshu!;
+  const XHS_SLACK = Math.round((XHS_BAND.max - XHS_BAND.min) * BODY_LENGTH_TOLERANCE);
+
+  async function runCreator(bodies: string[]) {
+    const prompts: string[] = [];
+    const fakeLlm = {
+      chat: async (messages: Array<{ content: string }>) => {
+        prompts.push(messages.map((m) => m.content).join('\n'));
+        const body = bodies[Math.min(prompts.length - 1, bodies.length - 1)]!;
+        return JSON.stringify({ title: '标题', content: body, tone: 'casual', style: {} });
+      },
+      complete: async () => '',
+    };
+    const role = new ContentCreatorRole({ llmClient: fakeLlm as any, clock, logger: silentLogger });
+    const ctx = new PipelineContext<PipelineFields>();
+    ctx.write('trigger', makeTriggerInput());
+    role.register(ctx);
+    ctx.write('scoutDecision', makeScoutDecision(true));
+    await new Promise(r => setTimeout(r, 50));
+    return { prompts, content: ctx.get('createdContent') };
+  }
+
+  test('正文合区间 → 只生成一次，绝不多烧一次模型调用', async () => {
+    const { prompts, content } = await runCreator(['字'.repeat(XHS_BAND.min + 20)]);
+    assert.equal(prompts.length, 1);
+    assert.equal(content?.content.length, XHS_BAND.min + 20);
+  });
+
+  test('略越界（容差内）→ 采用，不重写：超几个字就重掷骰子等于给几乎每一篇多烧一次调用', async () => {
+    const near = '字'.repeat(XHS_BAND.max + XHS_SLACK);
+    const { prompts, content } = await runCreator([near]);
+    assert.equal(prompts.length, 1, '容差内不得触发重写');
+    assert.equal(content?.content, near);
+  });
+
+  test('越出容差 → 带纠正说明重写一次，且说明里必须点名实测字数与目标区间', async () => {
+    const tooShort = '字'.repeat(XHS_BAND.min - XHS_SLACK - 50);
+    const good = '字'.repeat(XHS_BAND.min + 20);
+    const { prompts, content } = await runCreator([tooShort, good]);
+
+    assert.equal(prompts.length, 2, '应重写一次');
+    assert.ok(!prompts[0]!.includes('【重写要求】'), '首次生成不带纠正说明');
+    assert.match(prompts[1]!, /【重写要求】/);
+    assert.match(prompts[1]!, new RegExp(`实测 ${tooShort.length} 字`));
+    assert.match(prompts[1]!, new RegExp(`${XHS_BAND.min}-${XHS_BAND.max} 字`));
+    assert.equal(content?.content, good, '合区间的重写稿应被采用');
+  });
+
+  test('重写有界：第二稿仍离谱也不再重写，取偏离较小的一稿', async () => {
+    const first = '字'.repeat(XHS_BAND.max + 200); // 偏离 200
+    const second = '字'.repeat(XHS_BAND.max + 400); // 偏离 400
+    const { prompts, content } = await runCreator([first, second]);
+
+    assert.equal(prompts.length, 2, '重写有界：只重写一次');
+    assert.equal(content?.content, first, '应保留偏离较小的那一稿');
+  });
+
+  test('两稿都离谱也 MUST NOT 截断、MUST NOT 中止管线——区间是质量目标不是物理约束', async () => {
+    const long = '字'.repeat(XHS_BAND.max + 300);
+    const { content } = await runCreator([long]);
+    assert.ok(content, '不得因长度越界而废掉整篇稿子');
+    assert.equal(content.content.length, long.length, '不得截断：截出来的是残句，还会把「模型没听话」伪装成正常');
   });
 });

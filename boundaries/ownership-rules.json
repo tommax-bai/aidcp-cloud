@@ -149,6 +149,7 @@
     { "path": "src/publish-agent/draft-image-remove.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
     { "path": "src/publish-agent/schedule-policy.ts", "layer": "api", "basis": "§4.6.3：台账与审批段 7 文件之一" },
     { "path": "src/publish-agent/roles/approval-gatekeeper.ts", "layer": "content", "basis": "§4.6.3：生成候选段（2026-07-25 修正——按本节自述机械判据「引 ../llm/ 即生成段」，且不写 publish_log/授权记录）" },
+    { "path": "src/publish-agent/body-length-band.ts", "layer": "content", "basis": "§4.6.3：生成候选段。正文长度区间表 + 判定纯函数，由 prompts.ts（生成 prompt 里那行长度要求）与 roles/content-creator.ts（生成后的确定性校验）共同消费，两者同属 content；§4.6.3 的三条机械判据全不命中 api/automation（零 SQL、不写 publish_log 或授权记录、不引 ../comm/）。**未抬入 kernel 是有意的**：消费方只有 content 一域，跨域共用尚未发生。由 change fb-publish-fill-deadline 5.3b 新增" },
     { "path": "src/publish-agent/publish-approval-store.ts", "layer": "api", "basis": "§4.6.3 的机械 import 指纹判据第三条（『直接写 publish_log 或授权记录即为台账与审批段』）：本文件是 publish_approval_decision 的唯一持久写者，而 §4.6.3 正文另有直接点名『授权事实由新建的 publish_approval_decision（aidcp-api 单写）承担』。由 change publish-approval-signal-to-database 新增" },
     { "path": "src/publish-agent/publish-approval-outlet.ts", "layer": "api", "basis": "§4.6.3 同上：五个审批入口收敛到这里写同一条授权记录，属台账与审批段。由 change publish-approval-signal-to-database 新增" },
     { "path": "src/publish-agent/publish-approval-api.ts", "layer": "api", "basis": "§4.6.3 同上：授权的窄内部接口，按未来 HTTP 形状写死、阶段 4 提取 aidcp-api 时把进程内适配器换成 HTTP 客户端。由 change publish-approval-signal-to-database 新增" },

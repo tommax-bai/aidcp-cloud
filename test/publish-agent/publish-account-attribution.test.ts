@@ -70,7 +70,17 @@ describe('publish explicit account attribution (AC)', () => {
     ctxB.write('scoutDecision', scout);
     await new Promise((r) => setTimeout(r, 50));
 
-    assert.deepEqual(seen.slice().sort(), ['acct-A', 'acct-B'], '两轮各带各账号，绝无 default/串账');
+    // 正文长度确定性闸（change fb-publish-fill-deadline 5.3b）会对离谱长度带纠正说明重写一次，
+    // 而本 mock 的正文只有 1 个字 ⇒ 每轮不止一次调用。本用例的红线是「**每次**模型调用都带当轮账号」，
+    // 所以断言要把重写那一次也覆盖进去，而不是把调用数掰回 1（那等于让红线绕开新增的调用点）。
+    assert.ok(seen.length >= 2, '两轮至少各一次调用');
+    assert.equal(seen.filter((id) => id === undefined).length, 0, '绝无 default / 缺账号的调用');
+    assert.deepEqual([...new Set(seen)].sort(), ['acct-A', 'acct-B'], '只出现这两个账号，绝无串账');
+    assert.equal(
+      seen.filter((id) => id === 'acct-A').length,
+      seen.filter((id) => id === 'acct-B').length,
+      '两轮调用次数对称——不对称说明某一轮的调用被记到了另一轮账上',
+    );
   });
 
   test('PostProcessor.rewrite 显式收到当轮账号（非角色调用点覆盖）', async () => {

@@ -24,6 +24,9 @@ import { categorySafetyInstruction, formatContentVisualCategoryBrief } from './c
 import type { Soul } from '../kernel/soul-types.js';
 import { writingLanguageInstruction } from '../kernel/writing-language.js';
 import { buildContentVisualExcerpt, buildCoverCardCopyPrompt } from '../kernel/cover-card-copy-prompt.js';
+// 正文长度区间：prompt 里那行「全文 X-Y 字」与确定性校验器读同一张表
+// （见 body-length-band.ts 的「唯一事实源」注释）。两处各写一份数字＝改一处另一处照旧，且零报错。
+import { describeBodyLengthBand } from './body-length-band.js';
 
 // 封面文字卡文案构建与有界正文摘录（纯物）已抬入 kernel（src/kernel/cover-card-copy-prompt.ts，
 // change decouple-behavior-class-ports）；此处等值再导出，既有导入方无感、行为逐字不变。
@@ -405,7 +408,7 @@ function buildFacebookCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigg
     recent,
     '',
     '【写作要求】',
-    '- 全文 100-350 字（Facebook 最佳阅读区间）。',
+    `- 全文 ${describeBodyLengthBand('facebook')} 字（Facebook 最佳阅读区间）。`,
     '- 开头直接进入观点、观察或具体场景；保留账号语气，不写营销话术、外链、@ 或话题标签。',
     '- 只使用素材中确有依据的事实，不伪造亲历、数据、人物或结果。',
     '- 避免模板化的总分总、编号排比、空泛总结和 AI 客套话。',
@@ -494,7 +497,7 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
     encouraged,
     '',
     '【内容结构】',
-    '- 全文 200-500 字（小红书最佳阅读区间）。',
+    `- 全文 ${describeBodyLengthBand('xiaohongshu')} 字（小红书最佳阅读区间）。`,
     '- 不要总分总，允许散漫叙述。',
     '- 开头直接抛观点或问题，不要铺垫。',
     '- 必须包含具体细节（从下面给的概念/点赞内容里提取真实信息）。',
@@ -527,7 +530,7 @@ export function buildCreatorPrompt(scoutDecision: ScoutDecision, trigger: Trigge
     '',
     '【输出要求】',
     '严格只输出一个 JSON 对象，不要任何额外文字或代码块围栏。格式如下：',
-    '{"title": "小红书标题18字内可带1个emoji", "content": "正文200-500字", "tone": "professional|casual|technical|narrative", "style": {"type": "踩坑记录|对比分析|趋势观察|读后感"}}',
+    `{"title": "小红书标题18字内可带1个emoji", "content": "正文${describeBodyLengthBand('xiaohongshu')}字", "tone": "professional|casual|technical|narrative", "style": {"type": "踩坑记录|对比分析|趋势观察|读后感"}}`,
     '⚠️ 标题硬上限 18 字（含标点/空格/英文字母各算 1 字，emoji 算 1 字），超过 20 字小红书会拒绝发布——务必精炼、不要写省略号、不要堆砌。',
     '⚠️ 不要输出 tags/话题字段——话题由独立角色依定稿正文另行生成（change split-topic-roles）。',
     '',
