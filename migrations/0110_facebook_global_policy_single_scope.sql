@@ -9,7 +9,7 @@
 -- aidcp:objects=constraint:facebook_operation_global_policy_audit_execution_target_check
 -- aidcp:objects=constraint:facebook_group_comment_policy_execution_target_check
 -- aidcp:objects=constraint:facebook_group_comment_policy_audit_execution_target_check
--- aidcp:objects=constraint:facebook_environment_slow_start_completion_execution_target_check
+-- aidcp:objects=constraint:facebook_env_slow_start_completion_scope_check
 --
 -- change unify-facebook-global-policy-across-targets（第一段：expand 切读）。
 --
@@ -68,10 +68,17 @@ ALTER TABLE facebook_group_comment_policy_audit
   ADD CONSTRAINT facebook_group_comment_policy_audit_execution_target_check
     CHECK (execution_target IN ('dev', 'ol', 'all'));
 
+-- ⚠️ 这张表的约束名**被 PostgreSQL 截断过**：自动名 `<表>_<列>_check` 拼出来是 65 字节，
+-- 超过 63 字节的标识符上限，实际落库的是 `..._completi_execution_target_check`（表名那一段被切）。
+-- 只按拼写全名 DROP IF EXISTS 不会命中它——而且**不报错**：老约束原样留着，新约束以另一个
+-- （同样被截断的）名字并存，于是写 'all' 时被老约束拒绝。2026-08-05 dev 上就是这样失败一次的。
+-- 故这里两个名字都 DROP，并给新约束一个短到不会被截断的名字。
+ALTER TABLE facebook_environment_slow_start_completion
+  DROP CONSTRAINT IF EXISTS facebook_environment_slow_start_completi_execution_target_check;
 ALTER TABLE facebook_environment_slow_start_completion
   DROP CONSTRAINT IF EXISTS facebook_environment_slow_start_completion_execution_target_check;
 ALTER TABLE facebook_environment_slow_start_completion
-  ADD CONSTRAINT facebook_environment_slow_start_completion_execution_target_check
+  ADD CONSTRAINT facebook_env_slow_start_completion_scope_check
     CHECK (execution_target IN ('dev', 'ol', 'all'));
 
 -- ── 2. 主策略：写入合并行 ────────────────────────────────────────────────────
