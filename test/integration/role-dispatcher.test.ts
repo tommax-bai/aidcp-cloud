@@ -728,6 +728,58 @@ describe('RoleDispatcher Integration', () => {
     assert.equal(recover, undefined, `join_group 失败不应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
   });
 
+  // ─── 返回成功后的自驱动续刷（change rescan-after-successful-back）────────────
+  //
+  // 为什么这两条必须存在：决策环只被「新一批卡片到达」推进。Native 迁移后小红书的返回只回动作
+  // 回执、不再随附卡片（Facebook 侧仍带），于是每看完一条笔记就停在原地，直到分钟量级的空闲兜底
+  // 把它踢一下 —— 每一层回执都成功，只是慢，外部观察不到异常。dev 实测里唯一能让循环前进的路径
+  // 反而是**返回失败**（失败有兜底滚动），判据整个反了。规格那条要求本就写着
+  // 「MUST NOT 仅依赖 edge 主动重报 page.cards」，这两条锁的就是它缺的那条腿。
+
+  it('action.completed back ok=true → 主动续扫（rescan_after_back），不靠空闲兜底推进', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"verdict":"skip","reason":"x"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    commands.length = 0;
+    dispatcher.bus.emit('action.completed', { action: 'back', ok: true, reason: 'list_ready', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 原因名逐字断言、不用 includes：它是日志与回执里唯一能把「续扫」和「失败兜底」分开的东西，
+    // 写错等于两条路径在档案里合流，事后再也分不出循环是被哪条推动的。
+    const rescans = commands.filter(
+      (c) => c.action === 'scroll' && String(c.reason ?? '') === 'rescan_after_back',
+    );
+    assert.equal(
+      rescans.length,
+      1,
+      `返回成功后应恰好下发一次 rescan_after_back，实际=${JSON.stringify(commands)}`,
+    );
+    const recover = commands.find((c) => String(c.reason ?? '').includes('recover_after_back_failed'));
+    assert.equal(recover, undefined, '返回成功 MUST NOT 同时触发失败兜底');
+  });
+
+  it('action.completed back ok=false → 仍走失败兜底，且不发 rescan_after_back（两条路径互斥）', async () => {
+    const commands: EdgeCommand[] = [];
+    const llm = createMockLlm(['{"verdict":"skip","reason":"x"}']);
+    const dispatcher = new RoleDispatcher({ soul: mockSoul, llm, sendCommand: (cmd) => commands.push(cmd) });
+    dispatcher.setup();
+    dispatcher.startSession();
+
+    commands.length = 0;
+    dispatcher.bus.emit('action.completed', { action: 'back', ok: false, reason: 'list_not_confirmed', ts: Date.now() });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const recover = commands.find(
+      (c) => c.action === 'scroll' && String(c.reason ?? '').includes('recover_after_back_failed'),
+    );
+    assert.ok(recover, `返回失败仍应下发兜底 scroll，实际=${JSON.stringify(commands)}`);
+    const rescan = commands.find((c) => String(c.reason ?? '') === 'rescan_after_back');
+    assert.equal(rescan, undefined, '返回失败 MUST NOT 被记成一次正常续扫');
+  });
+
   it('facebook: 搜索失败恢复 scroll 也携带拟人停留 dwellMs', async () => {
     const commands: EdgeCommand[] = [];
     const llm = createMockLlm([]);

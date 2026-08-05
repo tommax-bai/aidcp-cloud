@@ -5038,6 +5038,26 @@ export class RoleDispatcher {
           // 成功 / 不可重试 / 重试用尽 / 重发被丢弃：清理重试上下文。
           this.interactionRetry.delete(payload.action);
         }
+        // 返回成功 → 主动续扫（已上线要求 browse-loop-resilience「cloud 在 back 成功后必须自驱动续刷」，
+        // 从未实装）。决策环只被「新一批卡片到达」推进；而 Native 迁移后小红书的返回只回动作回执、
+        // 不再随附卡片（Facebook 侧仍带）。两条腿同时缺失的后果不是报错，是**每看完一条笔记就停在原地**，
+        // 直到分钟量级的空闲兜底把它踢一下 —— 每一层回执都成功，只是慢，外部观察不到异常。
+        // 那条要求当初就写着「MUST NOT 仅依赖 edge 主动重报 page.cards」，此处即是它缺的那条腿。
+        //
+        // 三类不发，各有各的推进路径：
+        //  · 会话已结束 —— 向一个不存在的会话下发命令没有意义（`sessionActive` 判掉）；
+        //  · 浏览暂停期（通知巡视进行中）—— 由发命令统一出口扣住，此处不重复判断；那道闸现在有具名
+        //    丢弃日志，「暂停期真被扣住」是可核对的事实，不是这里假设出来的；
+        //  · 就地读平台 —— 那类平台的「离开当前内容」本就用滚动代替返回，根本不产生返回回执。
+        //
+        // `return` 不只是提前退出：它是「同一条返回回执 MUST NOT 同时触发续扫与失败兜底」这条互斥的
+        // **结构**保证。靠 `ok === true` 与下面 `ok === false` 天然互斥当然也成立，但那是两处条件恰好
+        // 对上，而不是一处结构挡住 —— 后者才经得起下面那段条件日后被改动。
+        if (payload.action === 'back' && payload.ok === true && this.sessionActive) {
+          console.log('[RoleDispatcher] back 成功 → 主动续扫（rescan_after_back）');
+          this.sendScrollCommand('rescan_after_back');
+          return;
+        }
         const noRecoverScroll =
           payload.action === 'scroll' ||
           payload.action === 'follow' ||
