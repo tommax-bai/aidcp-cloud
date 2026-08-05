@@ -192,9 +192,23 @@ export interface WsServerOptions {
   onEdgeRegistered?: (session: EdgeSession) => void;
   /** Cloud 内部同步出站闸；返回 false 时命中 0，绝不把删除环境的自动化命令推到 Edge。 */
   canPushToEdge?: (env: Envelope, edgeId: string) => boolean;
+  /**
+   * 关停时等边缘完成关闭握手的上限（ms），到点强制掐断。默认 {@link EDGE_CLOSE_GRACE_MS}。
+   * 生产上别调它——这个口子是给测试用的，好让「装死的对端」那条用例不必真等满默认时限。
+   */
+  closeGraceMs?: number;
 }
 
 let sessionSeq = 0;
+
+/**
+ * 关停时等边缘完成关闭握手的上限，到点强制掐断。
+ *
+ * 取 5 秒的理由是两头夹的：下界要显著大于一个正常关闭来回（同城 ECS 上是毫秒级，5 秒已经远超
+ * 「网络慢」的量级）；上界必须显著小于进程管理器的停止超时（systemd 默认 90 秒），否则兜底还
+ * 没到点，整组就先被强杀了 —— 那样这道兜底等于不存在。
+ */
+const EDGE_CLOSE_GRACE_MS = 5_000;
 
 /** 已登记的边缘连接 */
 interface EdgeConn {
@@ -224,6 +238,7 @@ export class EdgeCloudServer implements EdgePusher {
   private readonly onCloseCb?: (session: EdgeSession) => void;
   private readonly onEdgeRegisteredCb?: (session: EdgeSession) => void;
   private readonly canPushToEdge?: (env: Envelope, edgeId: string) => boolean;
+  private readonly closeGraceMs: number;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: WsServerOptions) {
@@ -237,6 +252,7 @@ export class EdgeCloudServer implements EdgePusher {
     this.onCloseCb = options.onClose;
     this.onEdgeRegisteredCb = options.onEdgeRegistered;
     this.canPushToEdge = options.canPushToEdge;
+    this.closeGraceMs = options.closeGraceMs ?? EDGE_CLOSE_GRACE_MS;
   }
 
   /** 启动监听 */
@@ -259,15 +275,56 @@ export class EdgeCloudServer implements EdgePusher {
     this.heartbeatTimer.unref?.();
   }
 
-  /** 关闭服务端 */
+  /**
+   * 关闭服务端。
+   *
+   * ## MUST 主动断开在线连接 —— 只调 `wss.close()` 会无界挂起
+   *
+   * `ws` 的 `close()` 只做「不再接受新连接」，**已经建立的连接它一条都不碰**，然后去等内部
+   * HTTP 服务端把所有连接收干净才回调。而边缘客户端只会持续心跳、不会主动下线 ——
+   * 于是那个回调**永远不触发**。
+   *
+   * 现象很难倒推回这里：关停日志停在「开始」上，既没有完成也没有失败，进程管理器吃满停止
+   * 超时上限后整组强杀。dev 2026-08-05 一小时内四次、次次 90 秒 SIGKILL，而被打断的关停
+   * 后面还挂着「用量缓冲最后一次提交」「委托任务泵收敛」「写者锁归还」——它们一次都没跑。
+   *
+   * 遍历 `wss.clients` 而**不是** `this.edges`：后者只收录完成 hello 之后的连接，而一条刚连上
+   * 还没 hello 的 socket 同样会把 `close()` 拖住 —— 它不在 `edges` 里，只在 `wss.clients` 里。
+   */
   close(): Promise<void> {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
     }
-    return new Promise((resolve, reject) => {
-      if (!this.wss) return resolve();
-      this.wss.close((err) => (err ? reject(err) : resolve()));
+    const wss = this.wss;
+    if (!wss) return Promise.resolve();
+    // 幂等：先摘引用。重复调用走上面那条 resolve，不会再断一次连、也不会再起一个兜底表。
+    this.wss = undefined;
+    return new Promise<void>((resolve, reject) => {
+      let forceTimer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (err?: Error | null): void => {
+        if (forceTimer) {
+          clearTimeout(forceTimer);
+          forceTimer = undefined;
+        }
+        if (err) reject(err);
+        else resolve();
+      };
+      wss.close(settle);
+      for (const client of wss.clients) {
+        // 1001 = going away。给的是「服务端下线」而不是异常码：边缘据此走正常重连，
+        // 不会把一次计划内重启记成异常掉线、更不该因此进受限恢复路径。
+        if (client.readyState === WebSocket.OPEN) client.close(1001, 'server_shutting_down');
+      }
+      // 有界兜底：关闭握手是一个来回，正常情况是毫秒级。到点还没关掉的那条基本是装死，
+      // 强制掐断，绝不让单条连接把整个关停重新变回无界等待。
+      //
+      // **这张表故意不 unref()**：它只活最多 EDGE_CLOSE_GRACE_MS、且一旦 close 回调到达就被清掉。
+      // unref 掉的话，当它是事件循环里最后一个句柄时进程会直接退出 —— 兜底没跑、close 没 resolve、
+      // 「关停完成」那行日志与显式退出码都不会出现，等于把刚修好的可观测性又还回去了。
+      forceTimer = setTimeout(() => {
+        for (const client of wss.clients) client.terminate();
+      }, this.closeGraceMs);
     });
   }
 
