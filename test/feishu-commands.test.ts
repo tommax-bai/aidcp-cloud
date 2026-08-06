@@ -9,12 +9,12 @@ import {
   resolvePublishApprovalRequestId,
   matchAccountByNickname,
   type CommandActions,
-} from '../src/feishu/commands.js';
+} from '@api/feishu/commands.js';
 import {
   operatorCommandId,
   parseOperatorCommandId,
-} from '../src/kernel/operator-command-port.js';
-import { DelegatedTaskServiceError } from '../src/kernel/delegated-task-types.js';
+} from '@kernel/kernel/operator-command-port.js';
+import { DelegatedTaskServiceError } from '@kernel/kernel/delegated-task-types.js';
 
 test('splitCommandBatch: 只在已支持 slash 命令边界拆 ASCII/全角分号', () => {
   assert.deepEqual(
@@ -223,7 +223,7 @@ test('CommandRouter: publish-test 发送审批卡片', async () => {
     sendApprovalCard: async (_chatId: string, card: unknown) => {
       sent.push(JSON.stringify(card));
     },
-  } as unknown as import('../src/feishu/messenger.js').FeishuMessenger;
+  } as unknown as import('@api/feishu/messenger.js').FeishuMessenger;
   const router = new CommandRouter(
     {
       ...makeActions().actions,
@@ -264,7 +264,7 @@ test('CommandRouter: publish-test 使用显式 requestId', async () => {
     sendApprovalCard: async (_chatId: string, card: unknown) => {
       sent.push(JSON.stringify(card));
     },
-  } as unknown as import('../src/feishu/messenger.js').FeishuMessenger;
+  } as unknown as import('@api/feishu/messenger.js').FeishuMessenger;
   const router = new CommandRouter(makeActions().actions, messenger);
   const res = await router.handle('/publish-test req-fixed', { chatId: 'oc_chat' });
   assert.equal(res.ok, true);

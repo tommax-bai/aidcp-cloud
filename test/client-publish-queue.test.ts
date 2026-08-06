@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import {
   projectClientPublishQueue,
   projectClientPublishQueueCancelReceipt,
-} from '../src/client-auth/client-publish-queue.js';
-import type { DelegatedTask } from '../src/delegated-task/types.js';
+} from '@api/client-auth/client-publish-queue.js';
+import type { DelegatedTask } from '@automation/delegated-task/types.js';
 import type {
   PublishJourneyView,
   PublishLifecycleProjection,
   PublishStageView,
-} from '../src/panel/publish-stage-lifecycle.js';
+} from '@api/panel/publish-stage-lifecycle.js';
 
 function task(overrides: Partial<DelegatedTask> = {}): DelegatedTask {
   return {

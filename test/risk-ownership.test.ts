@@ -11,13 +11,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PgRiskStore } from '../src/risk/pg-risk-store.js';
-import { RiskControllerRegistry } from '../src/risk/risk-controller-registry.js';
-import { RiskStateNotOwnedError } from '../src/risk/ownership.js';
-import { ConnectionRuntimeRegistry } from '../src/orchestrator/connection-runtime.js';
-import type { EdgeSession } from '../src/comm/ws-server.js';
-import type { SchemaEnsurer } from '../src/kernel/schema-capability-contract.js';
-import type { RiskState, RiskStore } from '../src/risk/types.js';
+import { PgRiskStore } from '@automation/risk/pg-risk-store.js';
+import { RiskControllerRegistry } from '@automation/risk/risk-controller-registry.js';
+import { RiskStateNotOwnedError } from '@automation/risk/ownership.js';
+import { ConnectionRuntimeRegistry } from '@automation/orchestrator/connection-runtime.js';
+import type { EdgeSession } from '@automation/comm/ws-server.js';
+import type { SchemaEnsurer } from '@kernel/kernel/schema-capability-contract.js';
+import type { RiskState, RiskStore } from '@automation/risk/types.js';
 
 const silent = { log() {}, warn() {}, error() {} };
 const readySchemaEnsurer: SchemaEnsurer = async () => 'ready';

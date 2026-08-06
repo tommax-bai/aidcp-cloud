@@ -1,9 +1,9 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { NotificationContactStore, notificationDedupKey } from '../src/cache/notification-contact-store.js';
-import type { NotificationItem } from '../src/comm/protocol.js';
+import { NotificationContactStore, notificationDedupKey } from '@api/cache/notification-contact-store.js';
+import type { NotificationItem } from '@automation/comm/protocol.js';
 
 /**
  * change notification-contact-registry：去重键（红线：同人不同评论不撞键丢失）+ appendEvents 写入逻辑

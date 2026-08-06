@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import {
   PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
   type PanelEventDelivery,
-} from '../src/kernel/panel-event-delivery-port.js';
-import { PanelEventFanout } from '../src/panel/panel-event-fanout.js';
+} from '@kernel/kernel/panel-event-delivery-port.js';
+import { PanelEventFanout } from '@api/panel/panel-event-fanout.js';
 
 const DELIVERY: PanelEventDelivery = {
   contractVersion: PANEL_EVENT_DELIVERY_CONTRACT_VERSION,

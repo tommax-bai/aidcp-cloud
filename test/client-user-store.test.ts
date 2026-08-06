@@ -1,5 +1,5 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import pg from 'pg';
@@ -8,9 +8,9 @@ import {
   ClientUserStore,
   createEnvironmentHandshakeAuthority,
   normalizeEnvironmentProxyAuthority,
-} from '../src/client-auth/client-user-store.js';
-import { shanghaiDayStartMs } from '../src/time/shanghai-day.js';
-import type { ClientEnvAutomationReader } from '../src/kernel/client-env-automation-types.js';
+} from '@api/client-auth/client-user-store.js';
+import { shanghaiDayStartMs } from '@kernel/time/shanghai-day.js';
+import type { ClientEnvAutomationReader } from '@kernel/kernel/client-env-automation-types.js';
 
 /**
  * client-user-env-picker：`listAllEnvironments` 的**映射逻辑**单测（行 → ClientEnvironmentView）。

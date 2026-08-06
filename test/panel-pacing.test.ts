@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startPanelApi } from '../src/panel/panel-server.js';
-import { parsePanelUsers } from '../src/panel/auth.js';
+import { startPanelApi } from '@api/panel/panel-server.js';
+import { parsePanelUsers } from '@api/panel/auth.js';
 import type {
   PanelConfig,
   PanelDeps,
@@ -9,8 +9,8 @@ import type {
   PacingConfigCatalogView,
   PacingConfigSetResult,
   PacingConfigPatchInput,
-} from '../src/panel/types.js';
-import { BUILTIN_FLOOR, PACING_OPS } from '../src/risk/pacing.js';
+} from '@api/panel/types.js';
+import { BUILTIN_FLOOR, PACING_OPS } from '@automation/risk/pacing.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 

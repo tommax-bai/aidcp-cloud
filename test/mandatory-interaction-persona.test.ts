@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSoulFromYaml, serializeSoul } from '../src/soul/index.js';
-import type { Soul } from '../src/kernel/soul-types.js';
+import { loadSoulFromYaml, serializeSoul } from '@api/soul/index.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const baseSoul: Soul = {
   identity: { name: 'Minh Anh', role: 'người tìm việc', background: 'Tìm việc tại Việt Nam', tone: 'thân thiện' },

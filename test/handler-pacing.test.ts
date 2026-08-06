@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DefaultMessageHandler } from '../src/comm/index.js';
-import type { AnchorStore } from '../src/comm/handler.js';
-import type { EdgeSession } from '../src/comm/ws-server.js';
-import { makeEnvelope, type WelcomePayload } from '../src/comm/index.js';
-import { SimplePlanner } from '../src/planner/index.js';
-import type { LlmClient } from '../src/llm/index.js';
-import { EventBus } from '../src/event-bus/index.js';
-import { BUILTIN_FLOOR, PACING_OPS, type PacingFloorProvider } from '../src/risk/pacing.js';
-import type { PacingOp, PacingFloorPayload } from '../src/comm/protocol.js';
+import { DefaultMessageHandler } from '@automation/comm/index.js';
+import type { AnchorStore } from '@automation/comm/handler.js';
+import type { EdgeSession } from '@automation/comm/ws-server.js';
+import { makeEnvelope, type WelcomePayload } from '@automation/comm/index.js';
+import { SimplePlanner } from '@automation/planner/index.js';
+import type { LlmClient } from '@content/llm/index.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { BUILTIN_FLOOR, PACING_OPS, type PacingFloorProvider } from '@automation/risk/pacing.js';
+import type { PacingOp, PacingFloorPayload } from '@automation/comm/protocol.js';
 
 /** 最小 AnchorStore 桩（onHello 不触及）。 */
 const noopStore: AnchorStore = {

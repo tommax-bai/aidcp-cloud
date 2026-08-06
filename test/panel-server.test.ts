@@ -1,24 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
-import { startPanelApi } from '../src/panel/panel-server.js';
-import { parsePanelUsers } from '../src/panel/auth.js';
-import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
-import type { PanelAccount, PanelStoreReader } from '../src/panel/panel-store.js';
-import { RiskController } from '../src/risk/index.js';
-import { TokenRevocationStore } from '../src/panel/revocation.js';
-import { FacebookPublishMediaError } from '../src/publish-agent/facebook-publish-media-store.js';
-import { isFacebookPublishMediaError } from '../src/kernel/facebook-publish-media-types.js';
+import { startPanelApi } from '@api/panel/panel-server.js';
+import { parsePanelUsers } from '@api/panel/auth.js';
+import type { PanelConfig, PanelDeps } from '@api/panel/types.js';
+import type { PanelAccount, PanelStoreReader } from '@api/panel/panel-store.js';
+import { RiskController } from '@automation/risk/index.js';
+import { TokenRevocationStore } from '@api/panel/revocation.js';
+import { FacebookPublishMediaError } from '@content/publish-agent/facebook-publish-media-store.js';
+import { isFacebookPublishMediaError } from '@kernel/kernel/facebook-publish-media-types.js';
 import {
   FACEBOOK_RULE_DEFINITION_ID,
   FACEBOOK_RULE_DEFINITION_VERSION,
   FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
   FACEBOOK_RULE_VIEW_THRESHOLD,
-} from '../src/kernel/facebook-rule-mode-types.js';
+} from '@kernel/kernel/facebook-rule-mode-types.js';
 import type {
   FacebookOperationGlobalPolicyView,
-} from '../src/config/facebook-operation-policy-store.js';
-import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
+} from '@api/config/facebook-operation-policy-store.js';
+import { MemoryDelegatedTaskStore } from '@automation/delegated-task/store.js';
 
 /**
  * 把一个真 `RiskController` 包成 kernel 的只读投影端口（change cloud-coupling-phase5 P5-1）。
@@ -32,7 +32,7 @@ function riskReadFromControllers(get: (accountId: string) => RiskController) {
     slowStartView: async (accountId: string) => get(accountId).slowStartView(),
   };
 }
-import { DelegatedTaskService } from '../src/delegated-task/service.js';
+import { DelegatedTaskService } from '@automation/delegated-task/service.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RiskController, coldStartDailyCap, deriveWindowQuotas } from '../src/risk/index.js';
+import { RiskController, coldStartDailyCap, deriveWindowQuotas } from '@automation/risk/index.js';
 import type {
   AccountNurtureProvider,
   ActionQuota,
@@ -8,8 +8,8 @@ import type {
   RiskState,
   RiskStatus,
   WindowQuotas,
-} from '../src/risk/index.js';
-import { shanghaiDayStartMs } from '../src/time/shanghai-day.js';
+} from '@automation/risk/index.js';
+import { shanghaiDayStartMs } from '@kernel/time/shanghai-day.js';
 
 // change account-level-slow-start：账号级慢启动（accounts.slow_start_since 非 NULL = 开且为起点）。
 // 本文件锁 Phase 0 的六条不变量：同源同格 / 单调性 / 热加载现读 / 平台诚实 / 两路径不合成 / 全局停用闸。

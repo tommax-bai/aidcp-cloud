@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startPanelApi } from '../src/panel/panel-server.js';
-import { parsePanelUsers } from '../src/panel/auth.js';
-import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
-import type { GroupRoute, SetGroupRouteResult } from '../src/cache/group-route-store.js';
+import { startPanelApi } from '@api/panel/panel-server.js';
+import { parsePanelUsers } from '@api/panel/auth.js';
+import type { PanelConfig, PanelDeps } from '@api/panel/types.js';
+import type { GroupRoute, SetGroupRouteResult } from '@automation/cache/group-route-store.js';
 
 /**
  * change feishu-per-team-notification-routing：面板路由配置 API 契约

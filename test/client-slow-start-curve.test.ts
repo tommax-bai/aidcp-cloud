@@ -5,8 +5,8 @@ import {
   projectClientSlowStartCurve,
   slowStartTotalDaysFor,
   type FacebookSlowStartAuthoredCurve,
-} from '../src/client-auth/client-slow-start-curve.js';
-import { SLOW_START_TOTAL_DAYS } from '../src/risk/risk-controller.js';
+} from '@api/client-auth/client-slow-start-curve.js';
+import { SLOW_START_TOTAL_DAYS } from '@automation/risk/risk-controller.js';
 
 function authored(totalDays: number, rows = totalDays): FacebookSlowStartAuthoredCurve {
   return {

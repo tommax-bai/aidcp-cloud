@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BaseRole } from '../src/agents/base-role.js';
-import { EventBus } from '../src/event-bus/index.js';
-import { loadSoulFromYaml, type Soul } from '../src/soul/index.js';
-import type { RoleName } from '../src/event-bus/types.js';
+import { BaseRole } from '@automation/agents/base-role.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { loadSoulFromYaml, type Soul } from '@api/soul/index.js';
+import type { RoleName } from '@automation/event-bus/types.js';
 
 const soulYaml = (name: string) => `
 identity:

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { StructuredNotificationCommand } from '../src/kernel/api-direct-port.js';
+import type { StructuredNotificationCommand } from '@kernel/kernel/api-direct-port.js';
 import {
   StructuredNotificationDelivery,
   type StructuredNotificationDeliveryDeps,
-} from '../src/feishu/structured-notification-delivery.js';
+} from '@api/feishu/structured-notification-delivery.js';
 
 function fixture(overrides: Partial<StructuredNotificationDeliveryDeps> = {}) {
   const sent: Array<{ kind: string; chatId: string; value: unknown }> = [];

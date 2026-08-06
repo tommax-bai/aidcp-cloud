@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePublishedHoursAgo, heatVelocity, evaluateHotLead } from '../src/hot-lead/heat-velocity.js';
-import { DEFAULT_HOT_LEAD_GATE_CONFIG, type HotLeadGateConfig } from '../src/kernel/hot-lead-gate-config.js';
+import { parsePublishedHoursAgo, heatVelocity, evaluateHotLead } from '@automation/hot-lead/heat-velocity.js';
+import { DEFAULT_HOT_LEAD_GATE_CONFIG, type HotLeadGateConfig } from '@kernel/kernel/hot-lead-gate-config.js';
 
 const observedAt = Date.parse('2026-07-21T07:30:00.000Z'); // Shanghai 15:30
 

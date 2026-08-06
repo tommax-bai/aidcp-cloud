@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHotLeadConfigPanel } from '../src/config/hot-lead-config-facade.js';
-import { DEFAULT_HOT_LEAD_GATE_CONFIG } from '../src/kernel/hot-lead-gate-config.js';
-import type { HotLeadConfigStore, HotLeadConfigRow } from '../src/config/hot-lead-config-store.js';
+import { createHotLeadConfigPanel } from '@api/config/hot-lead-config-facade.js';
+import { DEFAULT_HOT_LEAD_GATE_CONFIG } from '@kernel/kernel/hot-lead-gate-config.js';
+import type { HotLeadConfigStore, HotLeadConfigRow } from '@api/config/hot-lead-config-store.js';
 
 /** 内存 store 桩：实现 facade 用到的 getGateConfig/getRow/set，语义仿 PG 实现（覆盖优先、逐项回落默认）。 */
 class StubStore {

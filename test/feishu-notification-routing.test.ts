@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { resolveChatIdForAccount, resolveCardTarget } from '../src/feishu/chat-target.js';
-import { GroupRouteStore } from '../src/cache/group-route-store.js';
-import { CommandRouter, type CommandActions } from '../src/feishu/commands.js';
+import { resolveChatIdForAccount, resolveCardTarget } from '@api/feishu/chat-target.js';
+import { GroupRouteStore } from '@automation/cache/group-route-store.js';
+import { CommandRouter, type CommandActions } from '@api/feishu/commands.js';
 
 /**
  * change feishu-per-team-notification-routing：

@@ -8,11 +8,11 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher } from '../src/orchestrator/role-dispatcher.js';
-import type { EdgeCommand } from '../src/orchestrator/role-dispatcher.js';
-import type { PlatformId } from '../src/platform/index.js';
-import { EventBus } from '../src/event-bus/index.js';
-import type { Soul } from '../src/kernel/soul-types.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import type { EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import type { PlatformId } from '@automation/platform/index.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },

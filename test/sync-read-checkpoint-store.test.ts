@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type pg from 'pg';
 
-import { createApiSyncReadConsumerCheckpointStore } from '../src/config/api-sync-read-checkpoint-store.js';
-import { syncReadPayloadDigest, type SyncReadConsumerCheckpoint } from '../src/kernel/sync-read-snapshot.js';
-import { createAutomationSyncReadConsumerCheckpointStore } from '../src/transport/automation-sync-read-checkpoint-store.js';
+import { createApiSyncReadConsumerCheckpointStore } from '@api/config/api-sync-read-checkpoint-store.js';
+import { syncReadPayloadDigest, type SyncReadConsumerCheckpoint } from '@kernel/kernel/sync-read-snapshot.js';
+import { createAutomationSyncReadConsumerCheckpointStore } from '@automation/transport/automation-sync-read-checkpoint-store.js';
 
 interface Call {
   sql: string;

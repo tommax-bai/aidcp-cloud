@@ -13,12 +13,12 @@ import {
   SCHEDULED_AUTOMATION_ACTIONS,
   scheduledAutomationDeclarationsForPlatform,
   identityCaptureStrategyForPlatform,
-} from '../src/platform/index.js';
+} from '@automation/platform/index.js';
 import {
   NEW_ACCOUNT_AUTOMATION_SEED_ACTOR,
   newAccountAutomationDefaultsFor,
-} from '../src/kernel/scheduled-automation-catalog.js';
-import type { NoteScopedAction, PlatformRegistryEntry } from '../src/platform/index.js';
+} from '@kernel/kernel/scheduled-automation-catalog.js';
+import type { NoteScopedAction, PlatformRegistryEntry } from '@automation/platform/index.js';
 
 const NOTE_SCOPED_ACTIONS: NoteScopedAction[] = [
   'read_content',

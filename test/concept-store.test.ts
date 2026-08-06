@@ -1,8 +1,8 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { CONCEPT_SCHEMA_SQL, ConceptStore } from '../src/cache/concept-store.js';
+import { CONCEPT_SCHEMA_SQL, ConceptStore } from '@content/cache/concept-store.js';
 
 interface QueryCall {
   sql: string;

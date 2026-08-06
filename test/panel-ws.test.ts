@@ -3,19 +3,19 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
-import { EventBus } from '../src/event-bus/index.js';
+import { EventBus } from '@automation/event-bus/index.js';
 import {
   PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
-} from '../src/kernel/panel-event-delivery-port.js';
-import { PanelEventFanout } from '../src/panel/panel-event-fanout.js';
+} from '@kernel/kernel/panel-event-delivery-port.js';
+import { PanelEventFanout } from '@api/panel/panel-event-fanout.js';
 import {
   startPanelWs,
   serializePanelFrame,
   backpressureDecision,
   PANEL_WS_MAX_SLOW_STRIKES,
-} from '../src/panel/panel-ws.js';
-import { signJwt } from '../src/panel/jwt.js';
-import { TokenRevocationStore } from '../src/panel/revocation.js';
+} from '@api/panel/panel-ws.js';
+import { signJwt } from '@api/panel/jwt.js';
+import { TokenRevocationStore } from '@api/panel/revocation.js';
 
 const silent = { log() {}, warn() {} };
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

@@ -6,12 +6,12 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startPanelApi } from '../src/panel/panel-server.js';
-import { parsePanelUsers } from '../src/panel/auth.js';
-import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
-import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
-import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
-import { DelegatedTaskService } from '../src/delegated-task/service.js';
+import { startPanelApi } from '@api/panel/panel-server.js';
+import { parsePanelUsers } from '@api/panel/auth.js';
+import type { PanelConfig, PanelDeps } from '@api/panel/types.js';
+import type { CuratedPanelRow } from '@content/cache/curated-content-store.js';
+import { MemoryDelegatedTaskStore } from '@automation/delegated-task/store.js';
+import { DelegatedTaskService } from '@automation/delegated-task/service.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 

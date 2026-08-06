@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../src/event-bus/index.js';
-import { HotLeadDetector, type FireAutoContactArgs } from '../src/hot-lead/hot-lead-detector.js';
-import type { NoteDetailData } from '../src/kernel/note-detail.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { HotLeadDetector, type FireAutoContactArgs } from '@automation/hot-lead/hot-lead-detector.js';
+import type { NoteDetailData } from '@kernel/kernel/note-detail.js';
 
 function detail(over: Partial<NoteDetailData> = {}): NoteDetailData {
   return { noteId: 'n1', title: '一篇很火的帖', content: 'body', likeCount: 5000, collectCount: 100, publishedAtText: '2小时前', ...over };

@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import type { SchemaEnsurer } from '../src/kernel/schema-capability-contract.js';
+import type { SchemaEnsurer } from '@kernel/kernel/schema-capability-contract.js';
 import {
   RISK_SCHEMA_SQL,
   PgRiskStore,
   PgRiskCounterOutboxStore,
   pgRiskConfigFromEnv,
-} from '../src/risk/index.js';
+} from '@automation/risk/index.js';
 
 const readySchemaEnsurer: SchemaEnsurer = async () => 'ready';
 

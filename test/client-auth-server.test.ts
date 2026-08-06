@@ -1,35 +1,35 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startClientAuthApi } from '../src/client-auth/client-auth-server.js';
+import { startClientAuthApi } from '@api/client-auth/client-auth-server.js';
 import type {
   ClientAuthConfig,
   ClientAuthDeps,
   ClientEnvironmentRiskRecoveryOutcome,
-} from '../src/client-auth/client-auth-server.js';
+} from '@api/client-auth/client-auth-server.js';
 import type {
   ClientUserStore,
   ClientEnvScopeRow,
   ClientOffboardView,
   EnvironmentProxyAuthorityRecord,
   EnvironmentProxyAuthorityValue,
-} from '../src/client-auth/client-user-store.js';
-import { LoginRateLimiter } from '../src/client-auth/rate-limiter.js';
-import { TokenRevocationStore } from '../src/panel/revocation.js';
-import { verifyJwt } from '../src/panel/jwt.js';
-import { MemoryDelegatedTaskStore } from '../src/delegated-task/store.js';
-import { DelegatedTaskService } from '../src/delegated-task/service.js';
-import type { CuratedPanelRow } from '../src/cache/curated-content-store.js';
-import { CuratedContentUnavailableError } from '../src/cache/curated-content-store.js';
-import type { UiDailyUsagePayload, UiSlowStartPayload } from '../src/comm/protocol.js';
-import type { PendingPublishPreview } from '../src/publish-agent/publish-log-store.js';
-import type { DraftRefinementJob } from '../src/publish-agent/draft-refinement.js';
-import type { ClientEnvironmentScheduleView } from '../src/client-auth/client-environment-schedule.js';
+} from '@api/client-auth/client-user-store.js';
+import { LoginRateLimiter } from '@api/client-auth/rate-limiter.js';
+import { TokenRevocationStore } from '@api/panel/revocation.js';
+import { verifyJwt } from '@api/panel/jwt.js';
+import { MemoryDelegatedTaskStore } from '@automation/delegated-task/store.js';
+import { DelegatedTaskService } from '@automation/delegated-task/service.js';
+import type { CuratedPanelRow } from '@content/cache/curated-content-store.js';
+import { CuratedContentUnavailableError } from '@content/cache/curated-content-store.js';
+import type { UiDailyUsagePayload, UiSlowStartPayload } from '@automation/comm/protocol.js';
+import type { PendingPublishPreview } from '@api/publish-agent/publish-log-store.js';
+import type { DraftRefinementJob } from '@content/publish-agent/draft-refinement.js';
+import type { ClientEnvironmentScheduleView } from '@api/client-auth/client-environment-schedule.js';
 import {
   FACEBOOK_RULE_RUNTIME_DEFINITION_ID,
   FACEBOOK_RULE_RUNTIME_DEFINITION_VERSION,
-} from '../src/kernel/facebook-rule-mode-types.js';
-import type { FacebookOperationPolicyView } from '../src/config/facebook-operation-policy-store.js';
-import type { FacebookSlowStartAuthoredCurve } from '../src/client-auth/client-slow-start-curve.js';
+} from '@kernel/kernel/facebook-rule-mode-types.js';
+import type { FacebookOperationPolicyView } from '@api/config/facebook-operation-policy-store.js';
+import type { FacebookSlowStartAuthoredCurve } from '@api/client-auth/client-slow-start-curve.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const CLIENT_SECRET = 'client-secret-xyz';

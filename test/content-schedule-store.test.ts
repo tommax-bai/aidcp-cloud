@@ -1,10 +1,10 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { CONTENT_SCHEDULE_SCHEMA_SQL, ContentScheduleStore } from '../src/config/content-schedule-store.js';
+import { CONTENT_SCHEDULE_SCHEMA_SQL, ContentScheduleStore } from '@api/config/content-schedule-store.js';
 import { fakeSchemaProbe } from './fixtures/schema-probe.js';
-import { SCHEDULED_AUTOMATION_CATALOG_READER } from '../src/platform/index.js';
+import { SCHEDULED_AUTOMATION_CATALOG_READER } from '@automation/platform/index.js';
 
 /** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */
 const schemaProbe = fakeSchemaProbe(CONTENT_SCHEDULE_SCHEMA_SQL);

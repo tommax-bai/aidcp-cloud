@@ -8,10 +8,10 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { startPanelApi } from '../src/panel/panel-server.js';
-import { parsePanelUsers } from '../src/panel/auth.js';
-import type { PanelConfig, PanelDeps } from '../src/panel/types.js';
-import type { HostStandbyDecisionRecord } from '../src/kernel/host-standby-decision-port.js';
+import { startPanelApi } from '@api/panel/panel-server.js';
+import { parsePanelUsers } from '@api/panel/auth.js';
+import type { PanelConfig, PanelDeps } from '@api/panel/types.js';
+import type { HostStandbyDecisionRecord } from '@kernel/kernel/host-standby-decision-port.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const now = 1_700_000_000_000;

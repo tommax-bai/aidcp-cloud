@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SimplePlanner, parsePlanSteps } from '../src/planner/index.js';
-import type { LlmClient } from '../src/llm/index.js';
+import { SimplePlanner, parsePlanSteps } from '@automation/planner/index.js';
+import type { LlmClient } from '@content/llm/index.js';
 
 test('规则命中：点赞 → 单步 click', async () => {
   const planner = new SimplePlanner();

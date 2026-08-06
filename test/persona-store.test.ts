@@ -1,9 +1,9 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { PersonaStore, createPersonaResolver, PERSONA_CONFIG_SCHEMA_SQL } from '../src/config/persona-store.js';
-import { FirstPostOnboardingStore, FIRST_POST_ONBOARDING_SCHEMA_SQL } from '../src/onboarding/first-post-onboarding-store.js';
+import { PersonaStore, createPersonaResolver, PERSONA_CONFIG_SCHEMA_SQL } from '@api/config/persona-store.js';
+import { FirstPostOnboardingStore, FIRST_POST_ONBOARDING_SCHEMA_SQL } from '@api/onboarding/first-post-onboarding-store.js';
 import { fakeSchemaProbe } from './fixtures/schema-probe.js';
 
 /** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */

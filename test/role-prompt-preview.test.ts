@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRolePromptProvider } from '../src/config/role-prompt-preview.js';
-import { ROLE_CATALOG } from '../src/config/role-catalog.js';
-import { STATIC_ROLE_PROMPT_PREVIEWS } from '../src/config/static-role-prompt-previews.js';
-import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '../src/publish-agent/prompts-preview.js';
-import type { PreviewableRole, RolePromptProviderOptions } from '../src/config/role-prompt-preview.js';
-import type { BaseRole } from '../src/agents/base-role.js';
-import { CommentSearchTermGenerator, type RoleLlmLike } from '../src/agents/comment-search-term-generator.js';
-import { CommentTargetPicker } from '../src/agents/comment-target-picker.js';
-import type { Soul } from '../src/kernel/soul-types.js';
+import { createRolePromptProvider } from '@api/config/role-prompt-preview.js';
+import { ROLE_CATALOG } from '@api/config/role-catalog.js';
+import { STATIC_ROLE_PROMPT_PREVIEWS } from '@api/config/static-role-prompt-previews.js';
+import { PUBLISH_PREVIEW_BUILDERS, IMAGE_PROMPT_PREVIEW_BUILDERS } from '@content/publish-agent/prompts-preview.js';
+import type { PreviewableRole, RolePromptProviderOptions } from '@api/config/role-prompt-preview.js';
+import type { BaseRole } from '@automation/agents/base-role.js';
+import { CommentSearchTermGenerator, type RoleLlmLike } from '@automation/agents/comment-search-term-generator.js';
+import { CommentTargetPicker } from '@automation/agents/comment-target-picker.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 /**
  * P4-7：预览提供方现在按注入的渲染闭包表工作。本包装恒注入**同一对表对象引用**——

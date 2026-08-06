@@ -4,8 +4,8 @@ import { posix } from 'node:path';
 import {
   buildCommentApprovalRequestId,
   sanitizeApprovalRequestSegment,
-} from '../src/agents/comment-approval-request-id.js';
-import { getApprovalSignalPath } from '../src/feishu/ws-receiver.js';
+} from '@automation/agents/comment-approval-request-id.js';
+import { getApprovalSignalPath } from '@api/feishu/ws-receiver.js';
 
 // 面板 web 审批路由的 requestId 白名单（panel-server.ts:1085），与信号落盘安全同源。
 const PANEL_WHITELIST = /^[A-Za-z0-9_-]+$/;

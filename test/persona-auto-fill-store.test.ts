@@ -1,8 +1,8 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { PersonaAutoFillStore, PERSONA_AUTO_FILL_SCHEMA_SQL } from '../src/config/persona-auto-fill-store.js';
+import { PersonaAutoFillStore, PERSONA_AUTO_FILL_SCHEMA_SQL } from '@api/config/persona-auto-fill-store.js';
 
 const SELECTED_SOUL = `identity:\n  name: "模板"\n  role: "分享者"\n  background: "关注生活"\n  tone: "自然"\nwriting_language: "zh-CN"\ninterests:\n  primary:\n    - "生活"\n  secondary: []\n  seed_keywords:\n    - "生活"\n`;
 const runRow = {

@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DefaultMessageHandler } from '../src/comm/index.js';
-import { normalizeActionCompletedAction } from '../src/comm/handler.js';
-import type { AnchorStore } from '../src/comm/handler.js';
-import type { EdgeSession } from '../src/comm/ws-server.js';
-import { makeEnvelope, type RemoteAnchor } from '../src/comm/index.js';
-import { SimplePlanner } from '../src/planner/index.js';
-import type { LlmClient } from '../src/llm/index.js';
-import { EventBus } from '../src/event-bus/index.js';
-import { AccountStateManager } from '../src/account-state.js';
+import { DefaultMessageHandler } from '@automation/comm/index.js';
+import { normalizeActionCompletedAction } from '@automation/comm/handler.js';
+import type { AnchorStore } from '@automation/comm/handler.js';
+import type { EdgeSession } from '@automation/comm/ws-server.js';
+import { makeEnvelope, type RemoteAnchor } from '@automation/comm/index.js';
+import { SimplePlanner } from '@automation/planner/index.js';
+import type { LlmClient } from '@content/llm/index.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { AccountStateManager } from '@api/account-state.js';
 
 /** 内存版 AnchorStore：复刻反污染晋升语义，供 handler 单测 */
 function memStore(): AnchorStore & { main: Map<string, RemoteAnchor>; staging: Map<string, number> } {

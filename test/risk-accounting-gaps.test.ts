@@ -7,22 +7,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { DefaultMessageHandler, type AnchorStore } from '../src/comm/handler.js';
-import { makeEnvelope, type NoteDetailPayload } from '../src/comm/protocol.js';
-import type { EdgeSession } from '../src/comm/ws-server.js';
-import { EventBus } from '../src/event-bus/index.js';
-import { SimplePlanner } from '../src/planner/index.js';
-import type { LlmClient } from '../src/llm/qwen.js';
-import { RiskAccounting } from '../src/risk/risk-accounting.js';
-import { RiskController } from '../src/risk/risk-controller.js';
-import { PgRiskCounterOutboxStore } from '../src/risk/risk-counter-outbox-store.js';
+import { DefaultMessageHandler, type AnchorStore } from '@automation/comm/handler.js';
+import { makeEnvelope, type NoteDetailPayload } from '@automation/comm/protocol.js';
+import type { EdgeSession } from '@automation/comm/ws-server.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { SimplePlanner } from '@automation/planner/index.js';
+import type { LlmClient } from '@content/llm/qwen.js';
+import { RiskAccounting } from '@automation/risk/risk-accounting.js';
+import { RiskController } from '@automation/risk/risk-controller.js';
+import { PgRiskCounterOutboxStore } from '@automation/risk/risk-counter-outbox-store.js';
 import type {
   RiskCounterOutbox,
   RiskCounterOutboxBacklog,
   RiskCounterOutboxClaim,
   RiskCounterOutboxEnqueueInput,
-} from '../src/risk/risk-counter-outbox-store.js';
-import type { RiskAction, RiskStore } from '../src/risk/types.js';
+} from '@automation/risk/risk-counter-outbox-store.js';
+import type { RiskAction, RiskStore } from '@automation/risk/types.js';
 
 const silent = { log() {}, warn() {}, error() {} };
 

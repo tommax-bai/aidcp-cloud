@@ -1,11 +1,11 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import {
   APPROVAL_POLICY_SCHEMA_SQL,
   ApprovalPolicyStore,
-} from '../src/config/approval-policy-store.js';
+} from '@api/config/approval-policy-store.js';
 
 function fakePool(handler: (sql: string, params: unknown[]) => { rows: any[]; rowCount?: number }) {
   const calls: Array<{ sql: string; params: unknown[] }> = [];

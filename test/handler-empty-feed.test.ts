@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DefaultMessageHandler, type AnchorStore } from '../src/comm/handler.js';
-import { makeEnvelope } from '../src/comm/protocol.js';
-import type { EdgeSession } from '../src/comm/ws-server.js';
-import { EventBus } from '../src/event-bus/index.js';
-import { SimplePlanner } from '../src/planner/index.js';
-import type { LlmClient } from '../src/llm/qwen.js';
+import { DefaultMessageHandler, type AnchorStore } from '@automation/comm/handler.js';
+import { makeEnvelope } from '@automation/comm/protocol.js';
+import type { EdgeSession } from '@automation/comm/ws-server.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { SimplePlanner } from '@automation/planner/index.js';
+import type { LlmClient } from '@content/llm/qwen.js';
 
 const cache = {
   get: async () => null,

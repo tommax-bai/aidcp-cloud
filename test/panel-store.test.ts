@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { PgPanelStore } from '../src/panel/panel-store.js';
-import { PgPanelAutomationRead } from '../src/risk/panel-automation-read.js';
-import type { PanelAutomationReader } from '../src/kernel/panel-automation-types.js';
+import { PgPanelStore } from '@api/panel/panel-store.js';
+import { PgPanelAutomationRead } from '@automation/risk/panel-automation-read.js';
+import type { PanelAutomationReader } from '@kernel/kernel/panel-automation-types.js';
 
 /** 用注入 fake pool 测面板自己（api 属主：accounts / publish_log）的行映射逻辑，不依赖真 PG。 */
 function poolReturning(rows: unknown[]): pg.Pool {

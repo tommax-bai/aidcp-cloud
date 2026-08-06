@@ -1,10 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../src/event-bus/index.js';
-import { SessionMonitorRole } from '../src/agents/session-monitor-role.js';
-import { RoleDispatcher } from '../src/orchestrator/role-dispatcher.js';
-import { DEFAULT_SESSION_DURATION_MS, type SessionLimitProvider } from '../src/risk/session-limits.js';
-import type { Soul } from '../src/kernel/soul-types.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { SessionMonitorRole } from '@automation/agents/session-monitor-role.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import { DEFAULT_SESSION_DURATION_MS, type SessionLimitProvider } from '@automation/risk/session-limits.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },

@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { segmentPromptByPersona } from '../src/config/role-prompt-preview.js';
-import { EventBus } from '../src/event-bus/index.js';
-import { ContentEvaluator } from '../src/agents/content-evaluator.js';
-import { CuratedNoteEvaluator } from '../src/agents/curated-note-evaluator.js';
-import { SessionContext } from '../src/agents/session-context.js';
-import type { Soul } from '../src/kernel/soul-types.js';
+import { segmentPromptByPersona } from '@api/config/role-prompt-preview.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { ContentEvaluator } from '@automation/agents/content-evaluator.js';
+import { CuratedNoteEvaluator } from '@automation/agents/curated-note-evaluator.js';
+import { SessionContext } from '@automation/agents/session-context.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

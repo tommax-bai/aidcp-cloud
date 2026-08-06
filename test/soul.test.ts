@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSoul, loadSoulFromYaml, parseYaml, serializeSoul } from '../src/soul/index.js';
-import { resolveLikeAffinity } from '../src/kernel/like-affinity.js';
+import { loadSoul, loadSoulFromYaml, parseYaml, serializeSoul } from '@api/soul/index.js';
+import { resolveLikeAffinity } from '@kernel/kernel/like-affinity.js';
 
 test('loadSoul 从 soul.yaml 装载完整人设', () => {
   const soul = loadSoul();

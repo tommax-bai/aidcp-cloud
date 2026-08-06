@@ -1,8 +1,8 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { ACCOUNTS_SCHEMA_SQL, PgAccountStore } from '../src/account-store.js';
+import { ACCOUNTS_SCHEMA_SQL, PgAccountStore } from '@api/account-store.js';
 import { fakeSchemaProbe } from './fixtures/schema-probe.js';
 
 /** 假 pool 的 schema 探测应答：存储 init() 现在只探测、不建表（change cloud-schema-migration-executor 第 5 节）。 */

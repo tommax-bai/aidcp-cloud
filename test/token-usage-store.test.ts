@@ -1,8 +1,8 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { inferBillingProvider, TokenUsageStore, TOKEN_USAGE_SCHEMA_SQL } from '../src/metrics/token-usage-store.js';
+import { inferBillingProvider, TokenUsageStore, TOKEN_USAGE_SCHEMA_SQL } from '@content/metrics/token-usage-store.js';
 
 test('schema keeps provider dimension and billing-derived price snapshots', () => {
   assert.match(TOKEN_USAGE_SCHEMA_SQL, /provider\s+TEXT\s+NOT NULL DEFAULT 'unknown'/);
