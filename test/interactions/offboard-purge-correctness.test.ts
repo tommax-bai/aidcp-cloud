@@ -8,8 +8,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
-import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
+import { PgInteractionApiWrites } from '@api/interactions/interaction-api-writes.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
 
 const NOW = 1_784_044_900_000;
 

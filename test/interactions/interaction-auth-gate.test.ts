@@ -10,13 +10,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool, PoolClient } from 'pg';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { PgInteractionAuthGate } from '../../src/interactions/interaction-auth-gate.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { PgInteractionAuthGate } from '@api/interactions/interaction-auth-gate.js';
 import type {
   InteractionAuthGate,
   InteractionAuthWriteAuthorization,
-} from '../../src/kernel/interaction-auth-gate-types.js';
-import type { InteractionAuthStatusPayload } from '../../src/kernel/interaction-types.js';
+} from '@kernel/kernel/interaction-auth-gate-types.js';
+import type { InteractionAuthStatusPayload } from '@kernel/kernel/interaction-types.js';
 import { INTERACTION_TEST_EXECUTION_TARGET } from '../helpers/interaction-store-test-deps.js';
 
 const AUTH_PAYLOAD: InteractionAuthStatusPayload = {

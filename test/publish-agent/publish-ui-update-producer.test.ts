@@ -4,11 +4,11 @@ import type {
   PendingPublishPreview,
   PublishUiUpdateCommandInput,
   PublishUiUpdateCommandPort,
-} from '../../src/kernel/api-direct-port.js';
+} from '@kernel/kernel/api-direct-port.js';
 import {
   createPublishUiUpdateProducer,
   PublishUiUpdateProducerError,
-} from '../../src/publish-agent/publish-ui-update-producer.js';
+} from '@api/publish-agent/publish-ui-update-producer.js';
 
 const preview: PendingPublishPreview = {
   id: 41,

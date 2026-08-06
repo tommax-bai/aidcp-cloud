@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PublishDispatchTriggerError } from '../../src/kernel/publish-approval-contract.js';
-import { PublishApprovalOutboxRelay } from '../../src/publish-agent/publish-approval-outbox-relay.js';
+import { PublishDispatchTriggerError } from '@kernel/kernel/publish-approval-contract.js';
+import { PublishApprovalOutboxRelay } from '@api/publish-agent/publish-approval-outbox-relay.js';
 
 test('PublishApproved outbox relay: 仅在 trigger 明确 queued/duplicate 后 ack，失败保持 durable pending', async () => {
   const command = {

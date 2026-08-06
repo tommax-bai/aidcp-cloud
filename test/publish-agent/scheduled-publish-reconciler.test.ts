@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { ScheduledPublishReconciler } from '../../src/publish-agent/scheduled-publish-reconciler.js';
-import type { ScheduledPublishRecord } from '../../src/publish-agent/publish-log-store.js';
+import { ScheduledPublishReconciler } from '@automation/publish-agent/scheduled-publish-reconciler.js';
+import type { ScheduledPublishRecord } from '@api/publish-agent/publish-log-store.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 const NOW = 1_800_000_000_000;

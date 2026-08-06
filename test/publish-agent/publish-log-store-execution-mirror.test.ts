@@ -9,9 +9,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
-import type { PublishRecord } from '../../src/publish-agent/types.js';
-import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
+import { PublishLogStore } from '@api/publish-agent/publish-log-store.js';
+import type { PublishRecord } from '@content/publish-agent/types.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '@automation/schema/schema-capability.js';
 
 interface Call {
   sql: string;

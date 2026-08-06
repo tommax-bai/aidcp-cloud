@@ -1,10 +1,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ImagePromptComposerRole } from '../../src/publish-agent/roles/image-prompt-composer.js';
-import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import { REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/reference-image-guidance.js';
-import type { PipelineFields, ImageSetPlan, ImageTheme, ImageCategory, TriggerInput, CoverCardPlan } from '../../src/publish-agent/types.js';
-import type { ReferenceVisualAnalysis } from '../../src/kernel/visual-reference-types.js';
+import { ImagePromptComposerRole } from '@content/publish-agent/roles/image-prompt-composer.js';
+import { PipelineContext } from '@content/publish-agent/pipeline-context.js';
+import { REFERENCE_IMAGE_MAX_COUNT } from '@content/publish-agent/reference-image-guidance.js';
+import type { PipelineFields, ImageSetPlan, ImageTheme, ImageCategory, TriggerInput, CoverCardPlan } from '@content/publish-agent/types.js';
+import type { ReferenceVisualAnalysis } from '@kernel/kernel/visual-reference-types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };

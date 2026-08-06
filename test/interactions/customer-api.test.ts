@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { test } from 'node:test';
-import type { ClientUserStore } from '../../src/client-auth/client-user-store.js';
-import { InteractionCustomerApi, interactionTestDataResetEnabled } from '../../src/interactions/interaction-customer-api.js';
-import type { InteractionStore, ListQuery } from '../../src/interactions/interaction-store.js';
-import type { InteractionSendOrchestrator } from '../../src/interactions/send-orchestrator.js';
-import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
-import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { ReplyJobView } from '../../src/kernel/interaction-types.js';
+import type { ClientUserStore } from '@api/client-auth/client-user-store.js';
+import { InteractionCustomerApi, interactionTestDataResetEnabled } from '@api/interactions/interaction-customer-api.js';
+import type { InteractionStore, ListQuery } from '@automation/interactions/interaction-store.js';
+import type { InteractionSendOrchestrator } from '@automation/interactions/send-orchestrator.js';
+import type { ReplyConfigStore } from '@api/interactions/reply-config-store.js';
+import type { ReplyWorkflow } from '@automation/interactions/reply-workflow.js';
+import type { ReplyJobView } from '@kernel/kernel/interaction-types.js';
 
 const job: ReplyJobView = {
   id: 'job-a', inboundMessageId: 'message-a', state: 'ignored', version: 2, matchedRuleId: null,

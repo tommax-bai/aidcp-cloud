@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type pg from 'pg';
-import type { InteractionAuditEventRecord } from '../../src/kernel/interaction-audit-outbox.js';
-import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
+import type { InteractionAuditEventRecord } from '@kernel/kernel/interaction-audit-outbox.js';
+import { PgInteractionApiWrites } from '@api/interactions/interaction-api-writes.js';
 
 const AUDIT: InteractionAuditEventRecord = {
   eventId: 'audit-owner-1',

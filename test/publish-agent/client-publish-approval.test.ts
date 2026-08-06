@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import {
   createClientPublishApprovalHandler,
   type ClientPublishApprovalDeps,
-} from '../../src/publish-agent/client-publish-approval.js';
-import type { DispatchDraft, EditDraftResult } from '../../src/publish-agent/publish-log-store.js';
-import type { PublishMetadata } from '../../src/publish-agent/types.js';
+} from '@api/publish-agent/client-publish-approval.js';
+import type { DispatchDraft, EditDraftResult } from '@api/publish-agent/publish-log-store.js';
+import type { PublishMetadata } from '@content/publish-agent/types.js';
 
 const NOW = Date.parse('2026-07-18T10:00:00+08:00');
 const SCHEDULED_AT = NOW + 2 * 60 * 60 * 1000;

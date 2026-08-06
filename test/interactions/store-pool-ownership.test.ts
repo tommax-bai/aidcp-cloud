@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
-import { ReplyConfigScopeStore } from '../../src/interactions/reply-config-scope-store.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { ReplyConfigStore } from '@api/interactions/reply-config-store.js';
+import { ReplyConfigScopeStore } from '@api/interactions/reply-config-scope-store.js';
 
 /**
  * Block③ L3 回归：互动域三个 store 接组合根注入的 **automation 属主池**后，

@@ -9,8 +9,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { PgInteractionApiWrites } from '@api/interactions/interaction-api-writes.js';
 
 /** Step A 清的 automation 表（绑定行 interaction_auth_state 已挪到 Step C，与翻 purged 同事务）。 */
 const AUTOMATION_TABLES = [

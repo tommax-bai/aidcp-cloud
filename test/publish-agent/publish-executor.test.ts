@@ -9,12 +9,12 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { PublishExecutorRole } from '../../src/publish-agent/roles/publish-executor.js';
+import { PublishExecutorRole } from '@content/publish-agent/roles/publish-executor.js';
 // change feishu-contract-seam：角色只交出结构化数据；测试在下发口本地重建飞书卡（与旧「角色内构卡」逐字等价），保留原有卡结构断言。
-import { buildPublishApprovalCard, buildCommandResultCard } from '../../src/feishu/cards.js';
-import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import { REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/reference-image-guidance.js';
-import type { PipelineFields, AssembledContent, GateDecision, TitleSelection } from '../../src/publish-agent/types.js';
+import { buildPublishApprovalCard, buildCommandResultCard } from '@api/feishu/cards.js';
+import { PipelineContext } from '@content/publish-agent/pipeline-context.js';
+import { REFERENCE_IMAGE_MAX_COUNT } from '@content/publish-agent/reference-image-guidance.js';
+import type { PipelineFields, AssembledContent, GateDecision, TitleSelection } from '@content/publish-agent/types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };

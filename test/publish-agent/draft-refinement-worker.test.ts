@@ -1,8 +1,8 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { DispatchDraft, RefineDraftPatch } from '../../src/publish-agent/publish-log-store.js';
-import type { DraftRefinementJob, DraftRefinementScope } from '../../src/publish-agent/draft-refinement.js';
-import { DraftRefinementWorker } from '../../src/publish-agent/draft-refinement-worker.js';
+import type { DispatchDraft, RefineDraftPatch } from '@api/publish-agent/publish-log-store.js';
+import type { DraftRefinementJob, DraftRefinementScope } from '@content/publish-agent/draft-refinement.js';
+import { DraftRefinementWorker } from '@content/publish-agent/draft-refinement-worker.js';
 
 const draft: DispatchDraft = {
   recordId: 17,

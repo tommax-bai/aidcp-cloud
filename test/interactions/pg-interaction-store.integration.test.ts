@@ -2,23 +2,23 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import pg from 'pg';
-import type { Envelope } from '../../src/comm/protocol.js';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
-import { PgInteractionAuthGate } from '../../src/interactions/interaction-auth-gate.js';
+import type { Envelope } from '@automation/comm/protocol.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { PgInteractionApiWrites } from '@api/interactions/interaction-api-writes.js';
+import { PgInteractionAuthGate } from '@api/interactions/interaction-auth-gate.js';
 import {
   INTERACTION_TEST_EXECUTION_TARGET,
   drainInteractionAuditRelay,
   interactionAccountPlatform,
 } from '../helpers/interaction-store-test-deps.js';
-import { InteractionInboxService } from '../../src/interactions/interaction-inbox-service.js';
-import { InteractionMetrics } from '../../src/interactions/metrics.js';
-import { ReplyAiService } from '../../src/interactions/reply-ai.js';
-import { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
-import { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
-import { InteractionSendOrchestrator, replyIdempotencyKey } from '../../src/interactions/send-orchestrator.js';
-import type { InteractionReplyResultPayload, InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
+import { InteractionInboxService } from '@automation/interactions/interaction-inbox-service.js';
+import { InteractionMetrics } from '@automation/interactions/metrics.js';
+import { ReplyAiService } from '@content/interactions/reply-ai.js';
+import { ReplyConfigStore } from '@api/interactions/reply-config-store.js';
+import { ReplyWorkflow } from '@automation/interactions/reply-workflow.js';
+import { parseSyncBatchPayload } from '@automation/interactions/contract.js';
+import { InteractionSendOrchestrator, replyIdempotencyKey } from '@automation/interactions/send-orchestrator.js';
+import type { InteractionReplyResultPayload, InteractionSyncBatchPayload } from '@kernel/kernel/interaction-types.js';
 import { INTERACTION_URL_ENV, resolveIntegrationDatabase } from '../helpers/pg-test-database-guard.js';
 
 /**

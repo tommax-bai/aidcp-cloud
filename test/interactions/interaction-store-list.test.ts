@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
 import {
   INTERACTION_TEST_EXECUTION_TARGET,
   allowAllAuthGate,
 } from '../helpers/interaction-store-test-deps.js';
-import type { InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
+import type { InteractionSyncBatchPayload } from '@kernel/kernel/interaction-types.js';
 
 test('pending list filter expands to all actionable reply job states', async () => {
   let capturedSql = '';

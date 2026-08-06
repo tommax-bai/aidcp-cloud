@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import type { LlmClient } from '../../src/llm/index.js';
-import { buildInteractionReplyPrompt, ReplyAiService } from '../../src/interactions/reply-ai.js';
-import type { InteractionStore } from '../../src/interactions/interaction-store.js';
-import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
-import { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
+import type { LlmClient } from '@content/llm/index.js';
+import { buildInteractionReplyPrompt, ReplyAiService } from '@content/interactions/reply-ai.js';
+import type { InteractionStore } from '@automation/interactions/interaction-store.js';
+import type { ReplyConfigStore } from '@api/interactions/reply-config-store.js';
+import { ReplyWorkflow } from '@automation/interactions/reply-workflow.js';
 import {
   isReplyPolicy,
   isReplyProfile,
   isReplyRule,
   isReplyTemplate,
   normalizeReplyProfile,
-} from '../../src/interactions/reply-config.js';
+} from '@api/interactions/reply-config.js';
 // 纯函数段已迁入 kernel（change cloud-coupling-p3-8）；断言体一行未改。
 import {
   forcedHumanRisk,
@@ -20,8 +20,8 @@ import {
   renderReplyTemplate,
   validateFinalReplyText,
   validateReplyConfig,
-} from '../../src/kernel/interaction-reply-contract.js';
-import type { MinimalInbound, PolisherInput, ReplyConfigSnapshot, ReplyProfile, ReplyRule, ReplyTemplate, RiskReviewerInput, ScopedJobContext } from '../../src/kernel/interaction-types.js';
+} from '@kernel/kernel/interaction-reply-contract.js';
+import type { MinimalInbound, PolisherInput, ReplyConfigSnapshot, ReplyProfile, ReplyRule, ReplyTemplate, RiskReviewerInput, ScopedJobContext } from '@kernel/kernel/interaction-types.js';
 
 const now = 1784044800000;
 const inbound: MinimalInbound = {

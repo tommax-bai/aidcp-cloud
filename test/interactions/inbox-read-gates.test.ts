@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { EdgePusher } from '../../src/comm/ws-server.js';
-import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
-import type { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { InteractionInboxService } from '../../src/interactions/interaction-inbox-service.js';
-import { InteractionMetrics } from '../../src/interactions/metrics.js';
-import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import { InteractionSendOrchestrator } from '../../src/interactions/send-orchestrator.js';
-import type { InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
+import type { EdgePusher } from '@automation/comm/ws-server.js';
+import type { ReplyConfigStore } from '@api/interactions/reply-config-store.js';
+import type { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { InteractionInboxService } from '@automation/interactions/interaction-inbox-service.js';
+import { InteractionMetrics } from '@automation/interactions/metrics.js';
+import type { ReplyWorkflow } from '@automation/interactions/reply-workflow.js';
+import { InteractionSendOrchestrator } from '@automation/interactions/send-orchestrator.js';
+import type { InteractionSyncBatchPayload } from '@kernel/kernel/interaction-types.js';
 
 const auth = {
   envKey: 'env-a', accountId: 'acct-a', platform: 'wechat_channels' as const, status: 'active' as const,

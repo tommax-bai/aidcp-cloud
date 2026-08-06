@@ -1,18 +1,18 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import {
   FacebookPublishMediaStore,
   FacebookPublishMediaError,
-} from '../../src/publish-agent/facebook-publish-media-store.js';
+} from '@content/publish-agent/facebook-publish-media-store.js';
 import {
   facebookPublishMediaErrorCode,
   facebookPublishMediaReasonFromCode,
   isFacebookPublishMediaError,
-} from '../../src/kernel/facebook-publish-media-types.js';
-import type { ObjectStore } from '../../src/storage/object-store.js';
-import type { PlatformId, AccountPlatformReader } from '../../src/kernel/platform-types.js';
+} from '@kernel/kernel/facebook-publish-media-types.js';
+import type { ObjectStore } from '@content/storage/object-store.js';
+import type { PlatformId, AccountPlatformReader } from '@kernel/kernel/platform-types.js';
 
 test('素材池错误：跨进程裸对象仍认得出；code 可还原 reason，还原不出返回 null 而非默认值', () => {
   const err = new FacebookPublishMediaError('object_store_unavailable');

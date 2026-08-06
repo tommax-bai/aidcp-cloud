@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { test } from 'node:test';
-import { InteractionScopeInternalApi } from '../../src/interactions/interaction-scope-internal-api.js';
-import type { ReplyConfigResolver } from '../../src/interactions/reply-config-resolver.js';
-import type { ReplyConfigScopeStore } from '../../src/interactions/reply-config-scope-store.js';
-import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { InteractionChannel, ReplyConfigScopeHead, ReplyConfigSnapshot, ReplyProfile } from '../../src/kernel/interaction-types.js';
+import { InteractionScopeInternalApi } from '@api/interactions/interaction-scope-internal-api.js';
+import type { ReplyConfigResolver } from '@api/interactions/reply-config-resolver.js';
+import type { ReplyConfigScopeStore } from '@api/interactions/reply-config-scope-store.js';
+import type { ReplyWorkflow } from '@automation/interactions/reply-workflow.js';
+import type { InteractionChannel, ReplyConfigScopeHead, ReplyConfigSnapshot, ReplyProfile } from '@kernel/kernel/interaction-types.js';
 
 const source = { type: 'group' as const, groupLabel: '华东组' };
 const head: ReplyConfigScopeHead = {

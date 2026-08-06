@@ -1,14 +1,14 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { VisionChatMessage, VisionLlmClient } from '../../src/llm/vision.js';
+import type { VisionChatMessage, VisionLlmClient } from '@content/llm/vision.js';
 import {
   buildVisualReferenceSetPrompt,
   buildVisualReferenceSpecialistPrompt,
   createVisualReferenceAnalyzer,
   normalizeReferenceVisualAnalysis,
   visualAnalysisCacheKey,
-} from '../../src/publish-agent/visual-reference-analyzer.js';
-import type { ReferenceVisualAnalysis } from '../../src/kernel/visual-reference-types.js';
+} from '@content/publish-agent/visual-reference-analyzer.js';
+import type { ReferenceVisualAnalysis } from '@kernel/kernel/visual-reference-types.js';
 
 const images = [
   { index: 4, sourceUrl: 'https://img.test/photo.jpg', capturedAt: 100 },

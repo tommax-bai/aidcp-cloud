@@ -6,16 +6,16 @@ import type {
   ReconcileActiveOffboardSnapshotInput,
   RecordMaterializationReceiptInput,
   RecordMaterializationReceiptOutcome,
-} from '../../src/kernel/api-direct-port.js';
-import type { OffboardProjection } from '../../src/kernel/client-env-automation-types.js';
+} from '@kernel/kernel/api-direct-port.js';
+import type { OffboardProjection } from '@kernel/kernel/client-env-automation-types.js';
 import type {
   MaterializeEnvironmentOffboardInput,
   MaterializeEnvironmentOffboardOutcome,
-} from '../../src/kernel/offboard-materialization-types.js';
+} from '@kernel/kernel/offboard-materialization-types.js';
 import {
   AutomationOffboardAdmissionReconciler,
   OffboardAdmissionReconcileIncompleteError,
-} from '../../src/interactions/offboard-admission-reconciler.js';
+} from '@automation/interactions/offboard-admission-reconciler.js';
 
 const ACTIVE: OffboardProjection = {
   offboardId: 'active-offboard',

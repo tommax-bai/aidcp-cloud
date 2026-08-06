@@ -12,9 +12,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { INTERACTION_PLATFORM } from '../../src/kernel/interaction-types.js';
-import type { PlatformId } from '../../src/kernel/platform-types.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { INTERACTION_PLATFORM } from '@kernel/kernel/interaction-types.js';
+import type { PlatformId } from '@kernel/kernel/platform-types.js';
 
 /** 本域池：认运行控制行的读写；**任何提到 accounts 的 SQL 都当场炸**（复刻拆库后 PG 的报错）。 */
 function automationPool(controlRows: Record<string, unknown>[]) {

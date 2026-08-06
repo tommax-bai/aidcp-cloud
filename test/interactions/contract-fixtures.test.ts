@@ -1,24 +1,24 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { DefaultMessageHandler, makeEnvelope, parseEnvelope } from '../../src/comm/index.js';
-import type { AnchorStore } from '../../src/comm/handler.js';
-import type { EdgeSession } from '../../src/comm/ws-server.js';
-import { EventBus } from '../../src/event-bus/index.js';
-import { SimplePlanner } from '../../src/planner/index.js';
+import { DefaultMessageHandler, makeEnvelope, parseEnvelope } from '@automation/comm/index.js';
+import type { AnchorStore } from '@automation/comm/handler.js';
+import type { EdgeSession } from '@automation/comm/ws-server.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { SimplePlanner } from '@automation/planner/index.js';
 import {
   parseAuthStatusPayload,
   parseOffboardResultPayload,
   parseReplyReconcileResultPayload,
   parseReplyResultPayload,
   parseSyncBatchPayload,
-} from '../../src/interactions/contract.js';
+} from '@automation/interactions/contract.js';
 import type {
   InteractionAuthStatusPayload,
   InteractionReplyResultPayload,
   InteractionSyncAckPayload,
   InteractionSyncBatchPayload,
-} from '../../src/kernel/interaction-types.js';
+} from '@kernel/kernel/interaction-types.js';
 
 const fixtureRoot = new URL('../fixtures/wechat-channels-interaction/v1/ws/', import.meta.url);
 

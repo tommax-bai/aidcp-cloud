@@ -6,9 +6,9 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { PublishDispatcher, type DispatchNotice } from '../../src/publish-agent/publish-dispatcher.js';
-import type { DispatchDraft } from '../../src/publish-agent/publish-log-store.js';
-import { EdgeTaskLeaseError } from '../../src/comm/edge-task-lease-client.js';
+import { PublishDispatcher, type DispatchNotice } from '@automation/publish-agent/publish-dispatcher.js';
+import type { DispatchDraft } from '@api/publish-agent/publish-log-store.js';
+import { EdgeTaskLeaseError } from '@automation/comm/edge-task-lease-client.js';
 
 const silentLogger = { log() {}, warn() {}, error() {} };
 

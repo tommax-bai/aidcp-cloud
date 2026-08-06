@@ -1,13 +1,13 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { ImageGeneratorRole, type ImageGeneratorDeps } from '../../src/publish-agent/roles/image-generator.js';
-import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import type { PipelineFields, ImagePlan, TriggerInput, CoverCardCopy } from '../../src/publish-agent/types.js';
-import type { ImageResult } from '../../src/publish-agent/image-provider.js';
-import type { ObjectStore, PutOptions, PutResult } from '../../src/storage/object-store.js';
-import type { TextCardRenderer, TextCardRenderResult, TextCardSourceStyle } from '../../src/render/text-card.js';
-import type { VisualFidelityAuditor } from '../../src/publish-agent/visual-fidelity-auditor.js';
-import type { VisualAuditAttempt } from '../../src/kernel/visual-reference-types.js';
+import { ImageGeneratorRole, type ImageGeneratorDeps } from '@content/publish-agent/roles/image-generator.js';
+import { PipelineContext } from '@content/publish-agent/pipeline-context.js';
+import type { PipelineFields, ImagePlan, TriggerInput, CoverCardCopy } from '@content/publish-agent/types.js';
+import type { ImageResult } from '@content/publish-agent/image-provider.js';
+import type { ObjectStore, PutOptions, PutResult } from '@content/storage/object-store.js';
+import type { TextCardRenderer, TextCardRenderResult, TextCardSourceStyle } from '@content/render/text-card.js';
+import type { VisualFidelityAuditor } from '@content/publish-agent/visual-fidelity-auditor.js';
+import type { VisualAuditAttempt } from '@kernel/kernel/visual-reference-types.js';
 
 const clock = () => 1700000000000;
 const silentLogger = { log() {}, warn() {}, error() {} };

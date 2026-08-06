@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { Envelope } from '../../src/comm/protocol.js';
-import type { EdgePusher } from '../../src/comm/ws-server.js';
-import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
-import type { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { InteractionMetrics } from '../../src/interactions/metrics.js';
-import { InteractionSendOrchestrator, replyIdempotencyKey } from '../../src/interactions/send-orchestrator.js';
-import { interactionWritesAllowed } from '../../src/interactions/schema-capability.js';
-import { DEFAULT_REPLY_POLICY, type ReplyConfigSnapshot, type RuntimeControls, type ScopedJobContext } from '../../src/kernel/interaction-types.js';
+import type { Envelope } from '@automation/comm/protocol.js';
+import type { EdgePusher } from '@automation/comm/ws-server.js';
+import type { ReplyConfigStore } from '@api/interactions/reply-config-store.js';
+import type { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { InteractionMetrics } from '@automation/interactions/metrics.js';
+import { InteractionSendOrchestrator, replyIdempotencyKey } from '@automation/interactions/send-orchestrator.js';
+import { interactionWritesAllowed } from '@automation/interactions/schema-capability.js';
+import { DEFAULT_REPLY_POLICY, type ReplyConfigSnapshot, type RuntimeControls, type ScopedJobContext } from '@kernel/kernel/interaction-types.js';
 
 const now = 1784044810000;
 

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {
   deriveTextCardSourceStyle,
   strengthenTextCardSourceStyle,
-} from '../../src/publish-agent/text-card-source-style.js';
-import type { ReferenceVisualAnalysis, VisualFrameSpec } from '../../src/kernel/visual-reference-types.js';
+} from '@content/publish-agent/text-card-source-style.js';
+import type { ReferenceVisualAnalysis, VisualFrameSpec } from '@kernel/kernel/visual-reference-types.js';
 
 const analysis: ReferenceVisualAnalysis = {
   status: 'analyzed',

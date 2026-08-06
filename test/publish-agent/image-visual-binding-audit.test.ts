@@ -1,11 +1,11 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ImageGeneratorRole } from '../../src/publish-agent/roles/image-generator.js';
-import { PipelineContext } from '../../src/publish-agent/pipeline-context.js';
-import type { PipelineFields, ImagePlan, TriggerInput } from '../../src/publish-agent/types.js';
-import type { ImageGenerateOptions, ImageResult } from '../../src/publish-agent/image-provider.js';
-import type { VisualAuditAttempt, VisualReferenceBinding } from '../../src/kernel/visual-reference-types.js';
-import type { VisualAuditInput } from '../../src/publish-agent/visual-fidelity-auditor.js';
+import { ImageGeneratorRole } from '@content/publish-agent/roles/image-generator.js';
+import { PipelineContext } from '@content/publish-agent/pipeline-context.js';
+import type { PipelineFields, ImagePlan, TriggerInput } from '@content/publish-agent/types.js';
+import type { ImageGenerateOptions, ImageResult } from '@content/publish-agent/image-provider.js';
+import type { VisualAuditAttempt, VisualReferenceBinding } from '@kernel/kernel/visual-reference-types.js';
+import type { VisualAuditInput } from '@content/publish-agent/visual-fidelity-auditor.js';
 
 const clock = () => 1700000000000;
 const logger = { log() {}, warn() {}, error() {} };

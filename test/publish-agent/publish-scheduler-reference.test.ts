@@ -5,9 +5,9 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { PublishScheduler, REFERENCE_BODY_MAX_LEN, REFERENCE_IMAGE_MAX_COUNT } from '../../src/publish-agent/publish-scheduler.js';
-import type { PublishSchedulerDeps, ReferenceNote } from '../../src/publish-agent/publish-scheduler.js';
-import type { TriggerInput } from '../../src/publish-agent/types.js';
+import { PublishScheduler, REFERENCE_BODY_MAX_LEN, REFERENCE_IMAGE_MAX_COUNT } from '@automation/publish-agent/publish-scheduler.js';
+import type { PublishSchedulerDeps, ReferenceNote } from '@automation/publish-agent/publish-scheduler.js';
+import type { TriggerInput } from '@content/publish-agent/types.js';
 
 const T = 1700000000000;
 const silent = { log() {}, warn() {}, error() {} };

@@ -4,17 +4,17 @@ import assert from 'node:assert/strict';
 import {
   normalizeCuratedReferenceImages,
   type TextCardTranscription,
-} from '../../src/cache/curated-content-store.js';
+} from '@content/cache/curated-content-store.js';
 import {
   mergeBodyWithTextCardTranscription,
   normalizeTextCardTranscription,
-} from '../../src/kernel/text-card-transcription.js';
-import type { VisionCallOpts, VisionChatMessage, VisionLlmClient } from '../../src/llm/vision.js';
-import type { CoverFormSensor } from '../../src/publish-agent/cover-form-sensor.js';
+} from '@kernel/kernel/text-card-transcription.js';
+import type { VisionCallOpts, VisionChatMessage, VisionLlmClient } from '@content/llm/vision.js';
+import type { CoverFormSensor } from '@content/publish-agent/cover-form-sensor.js';
 import {
   createTextCardTranscriber,
   textCardTranscriptionAnchor,
-} from '../../src/publish-agent/text-card-transcriber.js';
+} from '@content/publish-agent/text-card-transcriber.js';
 
 const NOW = 1_700_000_000_000;
 const rawImages = [0, 1, 2].map((index) => ({ index: index + 10, url: `https://img.test/${index}.jpg` }));

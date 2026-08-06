@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { test } from 'node:test';
-import { InteractionInternalApi } from '../../src/interactions/interaction-internal-api.js';
-import type { InteractionStore } from '../../src/interactions/interaction-store.js';
-import type { ReplyConfigStore } from '../../src/interactions/reply-config-store.js';
-import type { ReplyWorkflow } from '../../src/interactions/reply-workflow.js';
-import type { ReplyConfigSnapshot } from '../../src/kernel/interaction-types.js';
+import { InteractionInternalApi } from '@api/interactions/interaction-internal-api.js';
+import type { InteractionStore } from '@automation/interactions/interaction-store.js';
+import type { ReplyConfigStore } from '@api/interactions/reply-config-store.js';
+import type { ReplyWorkflow } from '@automation/interactions/reply-workflow.js';
+import type { ReplyConfigSnapshot } from '@kernel/kernel/interaction-types.js';
 
 test('runtime-control CAS reports online delivery separately from persisted success', async () => {
   let updates = 0;

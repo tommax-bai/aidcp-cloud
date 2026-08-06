@@ -9,14 +9,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool, PoolClient } from 'pg';
-import type { InteractionAuthStatusPayload } from '../../src/kernel/interaction-types.js';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
+import type { InteractionAuthStatusPayload } from '@kernel/kernel/interaction-types.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { InteractionApiWrites } from '@api/interactions/interaction-api-writes.js';
 import {
   INTERACTION_AUDIT_OUTBOX_TOPIC,
   decodeInteractionAuditEvent,
   type InteractionAuditEventRecord,
-} from '../../src/kernel/interaction-audit-outbox.js';
+} from '@kernel/kernel/interaction-audit-outbox.js';
 import {
   INTERACTION_TEST_EXECUTION_TARGET,
   allowAllAuthGate,

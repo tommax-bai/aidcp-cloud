@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
-import { hasUserRejectionEvidence, type PublishMetadata } from '../../src/publish-agent/types.js';
-import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
+import { PublishLogStore } from '@api/publish-agent/publish-log-store.js';
+import { hasUserRejectionEvidence, type PublishMetadata } from '@content/publish-agent/types.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '@automation/schema/schema-capability.js';
 
 test('candidate snapshot rejection evidence is true only for the durable explicit marker', () => {
   const evidenced = { approvalDecision: { kind: 'user_rejected', decidedAt: 1 } } as PublishMetadata;

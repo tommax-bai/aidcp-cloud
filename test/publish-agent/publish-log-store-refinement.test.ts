@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
-import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
+import { PublishLogStore } from '@api/publish-agent/publish-log-store.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '@automation/schema/schema-capability.js';
 
 const metadata = {
   topics: ['旧话题'], visibility: 'public', mode: 'immediate', publishTime: null,

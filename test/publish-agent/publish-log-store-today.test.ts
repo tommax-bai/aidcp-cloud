@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import { PublishLogStore } from '../../src/publish-agent/publish-log-store.js';
-import { ensureCapabilitySchema, probeSchemaShape } from '../../src/schema/schema-capability.js';
+import { PublishLogStore } from '@api/publish-agent/publish-log-store.js';
+import { ensureCapabilitySchema, probeSchemaShape } from '@automation/schema/schema-capability.js';
 
 test('countPublishedTodayForAccount: 今日发布数按 Asia/Shanghai 自然日过滤', async () => {
   const seen: Array<{ sql: string; params: unknown[] }> = [];
