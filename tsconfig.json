@@ -13,9 +13,13 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "outDir": "dist",
-    "rootDir": "."
+    "baseUrl": ".",
+    "paths": {
+      "@api/*": ["../aidcp-api/src/*", "../../aidcp-api/src/*"],
+      "@automation/*": ["../aidcp-automation/src/*", "../../aidcp-automation/src/*"],
+      "@content/*": ["../aidcp-content/src/*", "../../aidcp-content/src/*"],
+      "@kernel/*": ["../aidcp-kernel/src/*", "../../aidcp-kernel/src/*"]
+    }
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", "dist"]
