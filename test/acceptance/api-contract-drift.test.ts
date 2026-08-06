@@ -20,11 +20,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import type * as Wire from '../../src/comm/protocol.js';
-import type * as PublishContract from '../../src/api-contracts/publish-approval-wire.js';
-import type * as UsageContract from '../../src/api-contracts/ui-usage-wire.js';
-import type * as NotificationContract from '../../src/api-contracts/notification-wire.js';
-import type * as CaptchaPort from '../../src/panel/captcha-assist-port.js';
+import type * as Wire from '@automation/comm/protocol.js';
+import type * as PublishContract from '@api/api-contracts/publish-approval-wire.js';
+import type * as UsageContract from '@api/api-contracts/ui-usage-wire.js';
+import type * as NotificationContract from '@api/api-contracts/notification-wire.js';
+import type * as CaptchaPort from '@api/panel/captcha-assist-port.js';
 
 /**
  * 精确同形判据：必填/可选、多字段/少字段、联集成员增删、字面量取值变化，全部会把结果翻成 `false`。

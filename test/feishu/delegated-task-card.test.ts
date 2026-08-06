@@ -5,10 +5,10 @@ import {
   buildDelegatedTaskProgressCard,
   handleDelegatedTaskCardAction,
   parseDelegatedTaskCardAction,
-} from '../../src/feishu/delegated-task-card.js';
-import { DelegatedTaskService } from '../../src/delegated-task/service.js';
-import { MemoryDelegatedTaskStore } from '../../src/delegated-task/store.js';
-import { DelegatedTaskServiceError, type DelegatedTaskServicePort } from '../../src/kernel/delegated-task-types.js';
+} from '@api/feishu/delegated-task-card.js';
+import { DelegatedTaskService } from '@automation/delegated-task/service.js';
+import { MemoryDelegatedTaskStore } from '@automation/delegated-task/store.js';
+import { DelegatedTaskServiceError, type DelegatedTaskServicePort } from '@kernel/kernel/delegated-task-types.js';
 
 const TASK_ID = '11111111-1111-4111-8111-111111111111';
 

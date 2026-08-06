@@ -7,11 +7,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
-import { isWithinActiveWindow } from '../../src/risk/resume-limits.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { ResumeConfigProvider } from '../../src/risk/resume-limits.js';
-import type { RiskStatus } from '../../src/risk/types.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import { isWithinActiveWindow } from '@automation/risk/resume-limits.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { ResumeConfigProvider } from '@automation/risk/resume-limits.js';
+import type { RiskStatus } from '@automation/risk/types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'B', role: 'r', background: 'b', tone: 't' },

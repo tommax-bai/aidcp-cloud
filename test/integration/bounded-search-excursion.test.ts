@@ -7,11 +7,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
-import type { EdgeCommand, VisibleCard } from '../../src/orchestrator/role-dispatcher.js';
-import { SessionContext } from '../../src/agents/session-context.js';
-import { SEARCH_HOME_RETURN_AFTER } from '../../src/agents/search-scroller.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import type { EdgeCommand, VisibleCard } from '@automation/orchestrator/role-dispatcher.js';
+import { SessionContext } from '@automation/agents/session-context.js';
+import { SEARCH_HOME_RETURN_AFTER } from '@automation/agents/search-scroller.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

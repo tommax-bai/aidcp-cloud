@@ -1,12 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
+import { RoleDispatcher, type EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
 import type {
   FacebookConsumptionActionReceiptInput,
   FacebookConsumptionActionView,
-} from '../../src/orchestrator/facebook-consumption-mode-types.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import { InteractionGuard } from '../../src/risk/interaction-guard.js';
+} from '@automation/orchestrator/facebook-consumption-mode-types.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import { InteractionGuard } from '@automation/risk/interaction-guard.js';
 
 const soul: Soul = {
   identity: { name: 'Consumption Account', role: 'operator', background: 'test', tone: 'neutral' },

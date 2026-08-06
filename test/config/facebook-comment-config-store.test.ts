@@ -1,8 +1,8 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { FacebookCommentConfigStore } from '../../src/config/facebook-comment-config-store.js';
+import { FacebookCommentConfigStore } from '@api/config/facebook-comment-config-store.js';
 
 /** fake pool：可配 accounts 存在性 + RETURNING 行；记录调用。 */
 function fakePool(opts: { accountExists?: boolean; returning?: unknown } = {}): {

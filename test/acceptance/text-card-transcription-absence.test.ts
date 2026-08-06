@@ -15,15 +15,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CuratedNoteEvaluator } from '../../src/agents/curated-note-evaluator.js';
-import { EventBus } from '../../src/event-bus/index.js';
-import type { CuratedObservation } from '../../src/kernel/curated-content-types.js';
-import type { NoteDetailData } from '../../src/kernel/note-detail.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { CuratedNoteEvaluator } from '@automation/agents/curated-note-evaluator.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import type { CuratedObservation } from '@kernel/kernel/curated-content-types.js';
+import type { NoteDetailData } from '@kernel/kernel/note-detail.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 import type {
   TextCardTranscriber,
   TextCardTranscriberCapability,
-} from '../../src/kernel/text-card-transcriber-port.js';
+} from '@kernel/kernel/text-card-transcriber-port.js';
 
 const AC_TCT3_SOUL: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

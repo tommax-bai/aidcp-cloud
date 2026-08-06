@@ -14,12 +14,19 @@
  */
 
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { PG_OWNERS } from '../../src/kernel/pg-owner-connection-resolver.js';
-import { loadMigrationFiles } from '../../src/schema/migration-files.js';
-import { loadMigrationOwnerScopes } from '../../src/schema/migration-owners.js';
-import { versionOf } from '../../src/schema/migration-plan.js';
+import { PG_OWNERS } from '@kernel/kernel/pg-owner-connection-resolver.js';
+import { loadMigrationFiles } from '@automation/schema/migration-files.js';
+import {
+  LEGACY_OWNER_OVERRIDES_NAME,
+  loadLegacyOwnerOverrides,
+  loadMigrationOwnerScopes,
+  loadTableOwnership,
+} from '@automation/schema/migration-owners.js';
+import { versionOf } from '@automation/schema/migration-plan.js';
 import {
   auditExecutability,
   readExecutabilityDebt,
@@ -29,8 +36,19 @@ import {
   type ExecutabilityInput,
 } from './helpers/migration-executability.js';
 
+/**
+ * 事实源仓（本仓）的冻结记录根：loader 代码已按属主别名从派生仓装载，但整图判据的**数据**
+ * 必须仍是本仓的全量 migrations/ 与 boundaries/ —— 派生仓只持子集，模块相对的默认路径
+ * 会悄悄换成那边的目录。三个 loader 的文档都写明「仓外消费方 MUST 显式传路径」，此处照办。
+ */
+const FACT_SOURCE_ROOT = join(fileURLToPath(import.meta.url), '..', '..', '..');
+
 async function realInput(): Promise<{ input: ExecutabilityInput[]; knownTables: Set<string> }> {
-  const { index, files, tableOwners, overrides } = await loadMigrationOwnerScopes(() => loadMigrationFiles());
+  const { index, files, tableOwners, overrides } = await loadMigrationOwnerScopes(
+    () => loadMigrationFiles(join(FACT_SOURCE_ROOT, 'migrations')),
+    () => loadTableOwnership(join(FACT_SOURCE_ROOT, 'boundaries', 'table-ownership.json')),
+    () => loadLegacyOwnerOverrides(join(FACT_SOURCE_ROOT, 'migrations', LEGACY_OWNER_OVERRIDES_NAME)),
+  );
   // 整图判据只在**事实源仓**成立：派生仓只持本属主的账本范围子集，在那儿跑会把「另一家的建表迁移
   // 不在本目录里」全部报成缺失。这里显式判失败而不是静默跳过——一道会自己关掉的闸比没有闸更坏。
   const onDisk = new Set(files.map((f) => versionOf(f.name)));

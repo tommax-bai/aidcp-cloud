@@ -5,9 +5,9 @@ import {
   type EdgeCommand,
   type MandatoryCommentOutcomeNoticeInput,
   type ViewQuotaDecision,
-} from '../../src/orchestrator/role-dispatcher.js';
-import type { CommentDonePayload, MandatoryInteractionContext } from '../../src/event-bus/types.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+} from '@automation/orchestrator/role-dispatcher.js';
+import type { CommentDonePayload, MandatoryInteractionContext } from '@automation/event-bus/types.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'Tianxing Bai', role: 'người tìm việc', background: 'Tìm việc tại Việt Nam', tone: 'thân thiện' },

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type pg from 'pg';
 
-import { ApiSyncReadSnapshotSource } from '../../src/config/api-sync-read-source.js';
-import { isSyncReadFactPayload } from '../../src/kernel/sync-read-facts.js';
+import { ApiSyncReadSnapshotSource } from '@api/config/api-sync-read-source.js';
+import { isSyncReadFactPayload } from '@kernel/kernel/sync-read-facts.js';
 
 /**
  * 属主存储的策略视图**比载荷契约宽**（另带 bounds / 冷却来源 / 更新元数据）。

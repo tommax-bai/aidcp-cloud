@@ -1,9 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import { ActionCooldownGate } from '../../src/risk/action-cooldown.js';
-import type { MandatoryInteractionContext } from '../../src/event-bus/types.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { RoleDispatcher, type EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import { ActionCooldownGate } from '@automation/risk/action-cooldown.js';
+import type { MandatoryInteractionContext } from '@automation/event-bus/types.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'Tianxing Bai', role: 'người tìm việc', background: 'Tìm việc tại Việt Nam', tone: 'thân thiện' },

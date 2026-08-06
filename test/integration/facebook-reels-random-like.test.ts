@@ -4,10 +4,10 @@ import {
   FACEBOOK_REELS_LIKE_PROBABILITY,
   RoleDispatcher,
   type EdgeCommand,
-} from '../../src/orchestrator/role-dispatcher.js';
-import { ActionCooldownGate } from '../../src/risk/action-cooldown.js';
-import { InteractionGuard } from '../../src/risk/interaction-guard.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+} from '@automation/orchestrator/role-dispatcher.js';
+import { ActionCooldownGate } from '@automation/risk/action-cooldown.js';
+import { InteractionGuard } from '@automation/risk/interaction-guard.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'Reel Test', role: 'viewer', background: 'test', tone: 'plain' },

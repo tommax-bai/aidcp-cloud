@@ -14,9 +14,9 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { ResumeConfigProvider } from '../../src/risk/resume-limits.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { ResumeConfigProvider } from '@automation/risk/resume-limits.js';
 
 const mockSoul: Soul = {
   identity: { name: 'B', role: 'r', background: 'b', tone: 't' },

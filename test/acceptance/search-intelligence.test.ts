@@ -12,15 +12,15 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { SearchEvaluator } from '../../src/agents/search-evaluator.js';
-import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
-import type { EdgeCommand, ConceptStorePort } from '../../src/orchestrator/role-dispatcher.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { SearchEvaluator } from '@automation/agents/search-evaluator.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import type { EdgeCommand, ConceptStorePort } from '@automation/orchestrator/role-dispatcher.js';
 import { contentRoleFactories } from '../helpers/role-factories.js';
-import { SessionContext } from '../../src/agents/session-context.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { SearchApprovedPayload, SearchSkippedPayload } from '../../src/event-bus/types.js';
-import type { ConceptPool } from '../../src/kernel/concept-pool.js';
+import { SessionContext } from '@automation/agents/session-context.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { SearchApprovedPayload, SearchSkippedPayload } from '@automation/event-bus/types.js';
+import type { ConceptPool } from '@kernel/kernel/concept-pool.js';
 
 const mockSoul: Soul = {
   identity: { name: '小林', role: 'AI工程师', background: '技术博主', tone: '友好' },

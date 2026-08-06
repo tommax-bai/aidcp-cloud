@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DataGateway, gatewayModeFromEnv } from '../../src/gateway/data-gateway.js';
-import type { CuratedContentReader } from '../../src/kernel/curated-content-types.js';
-import type { DelegatedTaskCommandPort } from '../../src/kernel/operator-command-port.js';
-import type { InteractionStoreReaderPort } from '../../src/kernel/interaction-types.js';
+import { DataGateway, gatewayModeFromEnv } from '@api/gateway/data-gateway.js';
+import type { CuratedContentReader } from '@kernel/kernel/curated-content-types.js';
+import type { DelegatedTaskCommandPort } from '@kernel/kernel/operator-command-port.js';
+import type { InteractionStoreReaderPort } from '@kernel/kernel/interaction-types.js';
 
 // 桩：只需引用同一性，方法体不被调用。
 const curatedLocal = { tag: 'curated-local' } as unknown as CuratedContentReader;

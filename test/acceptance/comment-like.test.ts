@@ -9,14 +9,14 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RiskController } from '../../src/risk/risk-controller.js';
-import { EventBus } from '../../src/event-bus/index.js';
-import { CommentLikeAppraiser } from '../../src/agents/comment-like-appraiser.js';
-import { overlapsAny } from '../../src/agents/comment-de-ai-flavor.js';
-import { topicKeysFromTitle } from '../../src/cache/valuable-comment-store.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { NoteData } from '../../src/agents/content-curator-role.js';
-import type { CommentCandidate } from '../../src/comm/protocol.js';
+import { RiskController } from '@automation/risk/risk-controller.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { CommentLikeAppraiser } from '@automation/agents/comment-like-appraiser.js';
+import { overlapsAny } from '@automation/agents/comment-de-ai-flavor.js';
+import { topicKeysFromTitle } from '@automation/cache/valuable-comment-store.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { NoteData } from '@automation/agents/content-curator-role.js';
+import type { CommentCandidate } from '@automation/comm/protocol.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

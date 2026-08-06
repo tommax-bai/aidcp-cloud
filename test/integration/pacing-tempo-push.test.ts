@@ -10,11 +10,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import { edgeCommandToEnvelope } from '../../src/comm/command-bridge.js';
-import { EventBus } from '../../src/event-bus/index.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { RiskStatus, RiskQuotaLevel } from '../../src/risk/types.js';
+import { RoleDispatcher, type EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import { edgeCommandToEnvelope } from '@automation/comm/command-bridge.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { RiskStatus, RiskQuotaLevel } from '@automation/risk/types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },

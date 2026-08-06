@@ -4,8 +4,8 @@ import {
   RoleDispatcher,
   resolveFacebookPrimarySurfacePin,
   type EdgeCommand,
-} from '../../src/orchestrator/role-dispatcher.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+} from '@automation/orchestrator/role-dispatcher.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'Test', role: 'tester', background: 'test', tone: 'plain' },

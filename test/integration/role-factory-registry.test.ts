@@ -7,12 +7,12 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
-import type { ConceptStorePort, RoleFactoryRegistry } from '../../src/orchestrator/role-dispatcher.js';
-import type { RoleName } from '../../src/event-bus/types.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import type { ConceptStorePort, RoleFactoryRegistry } from '@automation/orchestrator/role-dispatcher.js';
+import type { RoleName } from '@automation/event-bus/types.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 import { contentRoleFactories } from '../helpers/role-factories.js';
-import { ContentPortError } from '../../src/kernel/content-port-error.js';
+import { ContentPortError } from '@kernel/kernel/content-port-error.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

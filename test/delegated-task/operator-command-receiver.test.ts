@@ -7,14 +7,14 @@ import {
   OperatorCommandIdInvalidError,
   OperatorCommandResultUnknownError,
   type DelegatedTaskServiceSource,
-} from '../../src/delegated-task/operator-command-receiver.js';
-import { InMemoryOperatorCommandLedger } from '../../src/delegated-task/operator-command-ledger.js';
-import { operatorCommandId } from '../../src/kernel/operator-command-port.js';
+} from '@automation/delegated-task/operator-command-receiver.js';
+import { InMemoryOperatorCommandLedger } from '@automation/delegated-task/operator-command-ledger.js';
+import { operatorCommandId } from '@kernel/kernel/operator-command-port.js';
 import {
   DelegatedTaskServiceError,
   type DelegatedTask,
   type DelegatedTaskConfirmationSummary,
-} from '../../src/kernel/delegated-task-types.js';
+} from '@kernel/kernel/delegated-task-types.js';
 
 const KEY = operatorCommandId({
   kind: 'delegated_task_text',

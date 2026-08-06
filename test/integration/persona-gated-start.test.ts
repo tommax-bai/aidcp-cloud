@@ -4,9 +4,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { PersonaBinding } from '../../src/kernel/persona-binding.js';
+import { RoleDispatcher, type EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { PersonaBinding } from '@kernel/kernel/persona-binding.js';
 
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },

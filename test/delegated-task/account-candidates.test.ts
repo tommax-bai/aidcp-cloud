@@ -4,8 +4,8 @@ import { test } from 'node:test';
 import {
   listDelegatedAccountCandidates,
   type DelegatedAccountDirectoryReader,
-} from '../../src/delegated-task/account-candidates.js';
-import type { AccountDirectoryRow } from '../../src/kernel/account-projection-types.js';
+} from '@automation/delegated-task/account-candidates.js';
+import type { AccountDirectoryRow } from '@kernel/kernel/account-projection-types.js';
 
 function reader(rows: readonly AccountDirectoryRow[]): DelegatedAccountDirectoryReader {
   return { listAccountDirectory: async () => rows };

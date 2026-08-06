@@ -9,22 +9,22 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { SessionContext } from '../../src/agents/session-context.js';
-import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
-import type { EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import { NotificationGatekeeper } from '../../src/agents/notification-gatekeeper.js';
-import { BrowseSuspender } from '../../src/agents/browse-suspender.js';
-import { NotificationTriage } from '../../src/agents/notification-triage.js';
-import { NotificationCommentBrowser } from '../../src/agents/notification-comment-browser.js';
-import { NotificationLikeBrowser } from '../../src/agents/notification-like-browser.js';
-import { NotificationClassifier, routeNotificationBatch } from '../../src/agents/notification-classifier.js';
-import { NotificationDeduper, notificationItemKey, stripRelativeTime } from '../../src/agents/notification-deduper.js';
-import { NotificationNotifier } from '../../src/agents/notification-notifier.js';
-import { ExcursionResumer } from '../../src/agents/excursion-resumer.js';
-import { EXCURSION_STALL_TIMEOUT_MS } from '../../src/risk/resume-limits.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { NotificationItem } from '../../src/comm/protocol.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { SessionContext } from '@automation/agents/session-context.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import type { EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import { NotificationGatekeeper } from '@automation/agents/notification-gatekeeper.js';
+import { BrowseSuspender } from '@automation/agents/browse-suspender.js';
+import { NotificationTriage } from '@automation/agents/notification-triage.js';
+import { NotificationCommentBrowser } from '@automation/agents/notification-comment-browser.js';
+import { NotificationLikeBrowser } from '@automation/agents/notification-like-browser.js';
+import { NotificationClassifier, routeNotificationBatch } from '@automation/agents/notification-classifier.js';
+import { NotificationDeduper, notificationItemKey, stripRelativeTime } from '@automation/agents/notification-deduper.js';
+import { NotificationNotifier } from '@automation/agents/notification-notifier.js';
+import { ExcursionResumer } from '@automation/agents/excursion-resumer.js';
+import { EXCURSION_STALL_TIMEOUT_MS } from '@automation/risk/resume-limits.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { NotificationItem } from '@automation/comm/protocol.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

@@ -6,35 +6,35 @@
  */
 
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import {
   MirrorVersionStore,
   writeWithMirrorBump,
-} from '../../src/config/mirror-version-store.js';
+} from '@api/config/mirror-version-store.js';
 import {
   ConfigMirrorBumpRelay,
   OutboxMirrorVersionBumper,
-} from '../../src/config/mirror-bump-outbox.js';
+} from '@automation/config/mirror-bump-outbox.js';
 import {
   PgConfigMirrorBumpSink,
   UnavailableConfigMirrorBumpSink,
-} from '../../src/config/mirror-bump-sink.js';
-import type { ConfigMirrorBumpSink } from '../../src/kernel/config-mirror-bump-types.js';
-import { ConfigMirrorRefresher, resolveMirrorPollMs } from '../../src/config/mirror-refresher.js';
-import { CONFIG_MIRRORS, CONFIG_MIRROR_KEYS } from '../../src/config/mirror-registry.js';
+} from '@api/config/mirror-bump-sink.js';
+import type { ConfigMirrorBumpSink } from '@kernel/kernel/config-mirror-bump-types.js';
+import { ConfigMirrorRefresher, resolveMirrorPollMs } from '@api/config/mirror-refresher.js';
+import { CONFIG_MIRRORS, CONFIG_MIRROR_KEYS } from '@api/config/mirror-registry.js';
 import {
   installConfigMirrorFreshnessSource,
   mirrorStateOf,
-} from '../../src/config-mirror-freshness.js';
-import { QUOTA_CONFIG_SCHEMA_SQL, QuotaConfigStore } from '../../src/config/quota-config-store.js';
-import { PERSONA_CONFIG_SCHEMA_SQL, PersonaStore } from '../../src/config/persona-store.js';
+} from '@api/config-mirror-freshness.js';
+import { QUOTA_CONFIG_SCHEMA_SQL, QuotaConfigStore } from '@automation/config/quota-config-store.js';
+import { PERSONA_CONFIG_SCHEMA_SQL, PersonaStore } from '@api/config/persona-store.js';
 import { fakeSchemaProbe } from '../fixtures/schema-probe.js';
-import { deriveWindowQuotas } from '../../src/risk/quotas.js';
-import { staleGateMirrors, shouldHaltNewPlatformActions } from '../../src/config/mirror-stop-work.js';
-import { createQuotaConfigPanel } from '../../src/config/quota-config-facade.js';
-import { RISK_ACTIONS, RISK_QUOTA_LEVELS } from '../../src/risk/types.js';
+import { deriveWindowQuotas } from '@automation/risk/quotas.js';
+import { staleGateMirrors, shouldHaltNewPlatformActions } from '@api/config/mirror-stop-work.js';
+import { createQuotaConfigPanel } from '@automation/config/quota-config-facade.js';
+import { RISK_ACTIONS, RISK_QUOTA_LEVELS } from '@automation/risk/types.js';
 
 /**
  * 假 pool 的 schema 探测应答：两个存储的 init() 现在只探测、不建表

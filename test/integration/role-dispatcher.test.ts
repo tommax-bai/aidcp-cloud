@@ -6,11 +6,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher } from '../../src/orchestrator/role-dispatcher.js';
-import type { EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import { SEARCH_THRESHOLD } from '../../src/agents/feed-scroller.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { EventBus } from '../../src/event-bus/index.js';
+import { RoleDispatcher } from '@automation/orchestrator/role-dispatcher.js';
+import type { EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import { SEARCH_THRESHOLD } from '@automation/agents/feed-scroller.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { EventBus } from '@automation/event-bus/index.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

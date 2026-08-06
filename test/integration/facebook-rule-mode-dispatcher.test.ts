@@ -1,12 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { RoleDispatcher, type EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 import {
   facebookRuleRoundIncludesJoin,
   type FacebookRuleActionState,
   type FacebookRuleModeBatchView,
-} from '../../src/kernel/facebook-rule-mode-types.js';
+} from '@kernel/kernel/facebook-rule-mode-types.js';
 
 const soul: Soul = {
   identity: { name: 'Rule Account', role: 'operator', background: 'test', tone: 'neutral' },

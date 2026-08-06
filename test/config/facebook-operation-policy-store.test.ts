@@ -1,11 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import type { SchemaProber } from '../../src/kernel/schema-capability-contract.js';
-import type { MirrorVersionBumper } from '../../src/config/mirror-version-store.js';
-import { FacebookOperationPolicyStore } from '../../src/config/facebook-operation-policy-store.js';
-import { isSyncReadFactPayload } from '../../src/kernel/sync-read-facts.js';
-import { RISK_ACTIONS } from '../../src/kernel/risk-contract.js';
+import type { SchemaProber } from '@kernel/kernel/schema-capability-contract.js';
+import type { MirrorVersionBumper } from '@api/config/mirror-version-store.js';
+import { FacebookOperationPolicyStore } from '@api/config/facebook-operation-policy-store.js';
+import { isSyncReadFactPayload } from '@kernel/kernel/sync-read-facts.js';
+import { RISK_ACTIONS } from '@kernel/kernel/risk-contract.js';
 
 interface PolicyRow {
   env_key: string;

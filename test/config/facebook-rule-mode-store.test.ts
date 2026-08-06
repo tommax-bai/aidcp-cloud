@@ -7,14 +7,14 @@ import {
   FACEBOOK_RULE_JOIN_EVERY_N_ROUNDS,
   FACEBOOK_RULE_VIEW_THRESHOLD,
   FacebookRuleModeStore,
-} from '../../src/config/facebook-rule-mode-store.js';
+} from '@api/config/facebook-rule-mode-store.js';
 import {
   FACEBOOK_RULE_LEGACY_DEFINITION_ID,
   FACEBOOK_RULE_LEGACY_DEFINITION_VERSION,
   type FacebookRuleRuntimePolicy,
-} from '../../src/kernel/facebook-rule-mode-types.js';
-import { FacebookRuleModeRuntimeStore } from '../../src/orchestrator/facebook-rule-mode-runtime-store.js';
-import type { SchemaProber } from '../../src/kernel/schema-capability-contract.js';
+} from '@kernel/kernel/facebook-rule-mode-types.js';
+import { FacebookRuleModeRuntimeStore } from '@automation/orchestrator/facebook-rule-mode-runtime-store.js';
+import type { SchemaProber } from '@kernel/kernel/schema-capability-contract.js';
 
 interface ProgressRow {
   accountId: string;

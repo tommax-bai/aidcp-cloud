@@ -8,10 +8,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mergeBodyWithTextCardTranscription } from '../../src/kernel/text-card-transcription.js';
-import { OpenAiCompatVisionClient } from '../../src/llm/vision.js';
-import { buildCardSetPrompt } from '../../src/publish-agent/prompts.js';
-import { createTextCardTranscriber } from '../../src/publish-agent/text-card-transcriber.js';
+import { mergeBodyWithTextCardTranscription } from '@kernel/kernel/text-card-transcription.js';
+import { OpenAiCompatVisionClient } from '@content/llm/vision.js';
+import { buildCardSetPrompt } from '@content/publish-agent/prompts.js';
+import { createTextCardTranscriber } from '@content/publish-agent/text-card-transcriber.js';
 
 test('AC-TCT-1：所选视觉厂商缺密钥时不跨厂商兜底、不编正文、主路径可诚实继续', async () => {
   let fetchCalls = 0;

@@ -8,14 +8,14 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPersonaResolver } from '../../src/config/persona-store.js';
-import { createPersonaPanel } from '../../src/config/persona-facade.js';
-import type { PersonaStore } from '../../src/config/persona-store.js';
-import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import { PublishScheduler, type PublishSchedulerDeps } from '../../src/publish-agent/publish-scheduler.js';
-import { CommentScheduler, type CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
-import { EventBus } from '../../src/event-bus/index.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { createPersonaResolver } from '@api/config/persona-store.js';
+import { createPersonaPanel } from '@api/config/persona-facade.js';
+import type { PersonaStore } from '@api/config/persona-store.js';
+import { RoleDispatcher, type EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import { PublishScheduler, type PublishSchedulerDeps } from '@automation/publish-agent/publish-scheduler.js';
+import { CommentScheduler, type CommentSchedulerDeps } from '@automation/comment-agent/comment-scheduler.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soulYaml = `
 identity:

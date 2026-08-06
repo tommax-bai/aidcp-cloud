@@ -9,20 +9,20 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoleDispatcher, type EdgeCommand } from '../../src/orchestrator/role-dispatcher.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { RoleDispatcher, type EdgeCommand } from '@automation/orchestrator/role-dispatcher.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 import {
   installConfigMirrorFreshnessSource,
   type ConfigMirrorKey,
   type MirrorReadState,
-} from '../../src/config-mirror-freshness.js';
-import { AccountStateManager } from '../../src/account-state.js';
-import type { AccountRecord, AccountStore } from '../../src/account-store.js';
-import { UiSnapshotService } from '../../src/comm/ui-snapshot.js';
-import { AccountPersonaService } from '../../src/config/account-persona-service.js';
-import { allowsTransportWhenGateUnknown, hasStaleGateMirror, platformActionHalt } from '../../src/config/mirror-stop-work.js';
-import { isMirrorStale, noteMirrorStaleRefusal } from '../../src/config-mirror-freshness.js';
-import type { ConfigMirrorGatePort } from '../../src/kernel/config-mirror-bump-types.js';
+} from '@api/config-mirror-freshness.js';
+import { AccountStateManager } from '@api/account-state.js';
+import type { AccountRecord, AccountStore } from '@api/account-store.js';
+import { UiSnapshotService } from '@automation/comm/ui-snapshot.js';
+import { AccountPersonaService } from '@api/config/account-persona-service.js';
+import { allowsTransportWhenGateUnknown, hasStaleGateMirror, platformActionHalt } from '@api/config/mirror-stop-work.js';
+import { isMirrorStale, noteMirrorStaleRefusal } from '@api/config-mirror-freshness.js';
+import type { ConfigMirrorGatePort } from '@kernel/kernel/config-mirror-bump-types.js';
 
 /** 与 src/server.ts 组合根逐字等价的停手闸适配器（P4-2：判定仍在同一个 api 事实源上）。 */
 const configMirrorGate: ConfigMirrorGatePort = {
@@ -31,8 +31,8 @@ const configMirrorGate: ConfigMirrorGatePort = {
   platformActionHalt: (context) => platformActionHalt(context),
   noteStaleRefusal: (mirrorKey, context) => noteMirrorStaleRefusal(mirrorKey, context),
 };
-import { automationOperationDescriptorFor } from '../../src/comm/operation-registry.js';
-import { RiskController } from '../../src/risk/risk-controller.js';
+import { automationOperationDescriptorFor } from '@automation/comm/operation-registry.js';
+import { RiskController } from '@automation/risk/risk-controller.js';
 
 const mockSoul: Soul = {
   identity: { name: 'T', role: 'r', background: 'b', tone: 't' },

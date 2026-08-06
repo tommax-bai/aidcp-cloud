@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
-import type { SchemaProber } from '../../src/kernel/schema-capability-contract.js';
-import { FacebookGroupCommentPolicyStore } from '../../src/config/facebook-group-comment-policy-store.js';
+import type { SchemaProber } from '@kernel/kernel/schema-capability-contract.js';
+import { FacebookGroupCommentPolicyStore } from '@api/config/facebook-group-comment-policy-store.js';
 
 interface Row {
   join_to_first_comment_hours: number;

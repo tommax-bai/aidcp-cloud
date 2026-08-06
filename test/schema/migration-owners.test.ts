@@ -17,9 +17,10 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-import { PG_OWNERS, type PgOwner } from '../../src/kernel/pg-owner-connection-resolver.js';
-import { loadMigrationFiles } from '../../src/schema/migration-files.js';
+import { PG_OWNERS, type PgOwner } from '@kernel/kernel/pg-owner-connection-resolver.js';
+import { loadMigrationFiles } from '@automation/schema/migration-files.js';
 import {
   EMPTY_LEGACY_OWNER_OVERRIDES,
   LEDGER_MIGRATION_VERSION,
@@ -28,13 +29,14 @@ import {
   executionVersionsForOwner,
   loadLegacyOwnerOverrides,
   loadMigrationOwnerScopes,
+  loadTableOwnership,
   recordOnlyVersionsForOwners,
   scopeDeclarationsToOwners,
   versionsForOwner,
   type LegacyOwnerOverrides,
-} from '../../src/schema/migration-owners.js';
-import { declaredObjects } from '../../src/schema/schema-inspect.js';
-import { versionOf, type MigrationFile } from '../../src/schema/migration-plan.js';
+} from '@automation/schema/migration-owners.js';
+import { declaredObjects } from '@automation/schema/schema-inspect.js';
+import { versionOf, type MigrationFile } from '@automation/schema/migration-plan.js';
 
 function file(name: string, header: string): MigrationFile {
   return { name, content: `-- aidcp:kind=expand\n${header}\n`, checksum: name };
@@ -55,9 +57,21 @@ const owners = new Map<string, PgOwner>([
   ['token_usage', 'content'],
 ]);
 
-/** 真语料的名册与迁移目录（多处用到，读一次） */
+/**
+ * 真语料的名册与迁移目录（多处用到，读一次）。
+ * loader 代码按属主别名从派生仓装载，但真语料 MUST 仍是本仓（事实源）的全量 migrations/ 与
+ * boundaries/ —— loader 的模块相对默认路径会悄悄换成派生仓的属主子集（61/115 条），
+ * 「并集 = 全部迁移」「名册与目录对得上」就静默降级成对子集的弱主张。
+ * 三个 loader 的文档都写明「仓外消费方 MUST 显式传路径」，此处照办。
+ */
+const FACT_SOURCE_ROOT = path.join(fileURLToPath(import.meta.url), '..', '..', '..');
+
 async function realScopes() {
-  return loadMigrationOwnerScopes(() => loadMigrationFiles());
+  return loadMigrationOwnerScopes(
+    () => loadMigrationFiles(path.join(FACT_SOURCE_ROOT, 'migrations')),
+    () => loadTableOwnership(path.join(FACT_SOURCE_ROOT, 'boundaries', 'table-ownership.json')),
+    () => loadLegacyOwnerOverrides(path.join(FACT_SOURCE_ROOT, 'migrations', LEGACY_OWNER_OVERRIDES_NAME)),
+  );
 }
 
 test('账本范围：头声明的表 → 边界清单的属主；跨属主迁移进每个相关属主的范围', () => {

@@ -13,12 +13,12 @@ import {
   INTERACTION_AUDIT_OUTBOX_TOPIC,
   INTERACTION_AUDIT_RELAY_CONSUMER,
   decodeInteractionAuditEvent,
-} from '../../src/kernel/interaction-audit-outbox.js';
-import type { InteractionAuthGate } from '../../src/kernel/interaction-auth-gate-types.js';
-import { INTERACTION_PLATFORM } from '../../src/kernel/interaction-types.js';
-import type { AccountPlatformReader } from '../../src/kernel/platform-types.js';
-import { InteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
-import { OutboxConsumer } from '../../src/transport/event-outbox.js';
+} from '@kernel/kernel/interaction-audit-outbox.js';
+import type { InteractionAuthGate } from '@kernel/kernel/interaction-auth-gate-types.js';
+import { INTERACTION_PLATFORM } from '@kernel/kernel/interaction-types.js';
+import type { AccountPlatformReader } from '@kernel/kernel/platform-types.js';
+import { InteractionApiWrites } from '@api/interactions/interaction-api-writes.js';
+import { OutboxConsumer } from '@automation/transport/event-outbox.js';
 
 /** 集成测试统一用 dev target（真库通道本就只对 aidcp_test* 专用库生效）。 */
 export const INTERACTION_TEST_EXECUTION_TARGET = 'dev' as const;

@@ -1,11 +1,11 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import {
   FIRST_POST_ONBOARDING_SCHEMA_SQL,
   FirstPostOnboardingStore,
-} from '../../src/onboarding/first-post-onboarding-store.js';
+} from '@api/onboarding/first-post-onboarding-store.js';
 
 test('首作状态使用账号级唯一行，并以条件 UPDATE 防止重复 claim/陈旧回写', async () => {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
