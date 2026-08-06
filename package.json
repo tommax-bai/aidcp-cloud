@@ -15,9 +15,6 @@
     "migrate": "tsx --env-file=.env scripts/migrate.ts",
     "boundaries:refresh": "tsx test/acceptance/helpers/boundary-record.ts refresh",
     "boundaries:census": "tsx test/acceptance/helpers/boundary-record.ts census",
-    "composition-root:census": "tsx test/acceptance/helpers/composition-root-4a-census.ts --report",
-    "composition-root:refresh-ledger": "tsx test/acceptance/helpers/composition-root-4a-census.ts --refresh-ledger",
-    "composition-root:require-empty": "tsx test/acceptance/helpers/composition-root-4a-census.ts --require-empty",
     "start": "tsx --env-file=.env src/server.ts",
     "trigger:like": "tsx src/cli/trigger-like.ts",
     "test:feishu": "tsx --env-file=.env src/cli/test-feishu.ts"

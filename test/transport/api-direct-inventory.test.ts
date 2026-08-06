@@ -7,12 +7,156 @@ import {
   API_DIRECT_TOKEN_ENV,
   AUTOMATION_COMMAND_TOKEN_ENV,
   CONTENT_COMMAND_TOKEN_ENV,
+  type ApiDirectPortGroup,
 } from '@kernel/kernel/api-direct-port.js';
 import { API_DIRECT_ROUTE_INVENTORY } from '@automation/transport/api-direct-http.js';
-import {
-  deriveSurface,
-  SURFACE_BINDINGS,
-} from '../acceptance/helpers/composition-root-4a-census.js';
+
+import { ownedSourcePath } from '../helpers/sibling-repos.js';
+
+/**
+ * 事实源翻转后（invert-split-fact-source，最终口袋裁定）：本文件不再依赖单体 4a census helper
+ * （已随单体退休；单体侧的组装根 census 之家 = automation 仓自己的 4a census helper +
+ * composition-root-4a-mode-wiring / automation-root-readiness-ledger，api 仓的
+ * served-route-inventory / api-composition-root 用例）。方法真值直接取 kernel 的 21 组 / 59 槽
+ * 名册 —— 名册↔接口的链条仍然闭合：接口新增方法会先撞 transport 侧的
+ * `satisfies Record<keyof Port, string>`（automation 仓编译期），路由↔名册的相等由上面第一条
+ * 用例钉住。传输源文件按属主读 automation 仓的现役副本。
+ */
+interface TransportBinding {
+  transportFile: string;
+  routesConstant: string;
+  registerFunction: string;
+  clientClass: string;
+}
+
+const TRANSPORT_BINDINGS = {
+  accountRoster: {
+    transportFile: 'transport/api-account-authority-http.ts',
+    routesConstant: 'ACCOUNT_ROSTER_ROUTES',
+    registerFunction: 'registerAccountRosterRoutes',
+    clientClass: 'AccountRosterHttpClient',
+  },
+  accountOwnership: {
+    transportFile: 'transport/api-account-authority-http.ts',
+    routesConstant: 'ACCOUNT_OWNERSHIP_ROUTES',
+    registerFunction: 'registerAccountOwnershipRoutes',
+    clientClass: 'AccountOwnershipHttpClient',
+  },
+  accountRuntime: {
+    transportFile: 'transport/api-account-authority-http.ts',
+    routesConstant: 'ACCOUNT_RUNTIME_ROUTES',
+    registerFunction: 'registerAccountRuntimeRoutes',
+    clientClass: 'AccountRuntimeHttpClient',
+  },
+  publishLog: {
+    transportFile: 'transport/api-publish-interaction-http.ts',
+    routesConstant: 'AUTOMATION_PUBLISH_LOG_ROUTES',
+    registerFunction: 'registerAutomationPublishLogRoutes',
+    clientClass: 'AutomationPublishLogHttpClient',
+  },
+  edgePublish: {
+    transportFile: 'transport/api-publish-interaction-http.ts',
+    routesConstant: 'EDGE_PUBLISH_COMMAND_ROUTES',
+    registerFunction: 'registerEdgePublishCommandRoutes',
+    clientClass: 'EdgePublishCommandHttpClient',
+  },
+  interactionAuth: {
+    transportFile: 'transport/api-publish-interaction-http.ts',
+    routesConstant: 'INTERACTION_AUTH_ROUTES',
+    registerFunction: 'registerInteractionAuthRoutes',
+    clientClass: 'InteractionAuthHttpClient',
+  },
+  interactionApiWrites: {
+    transportFile: 'transport/api-publish-interaction-http.ts',
+    routesConstant: 'INTERACTION_API_WRITES_ROUTES',
+    registerFunction: 'registerInteractionApiWritesRoutes',
+    clientClass: 'InteractionApiWritesHttpClient',
+  },
+  replyConfig: {
+    transportFile: 'transport/api-publish-interaction-http.ts',
+    routesConstant: 'REPLY_CONFIG_RESOLVER_ROUTES',
+    registerFunction: 'registerReplyConfigResolverRoutes',
+    clientClass: 'ReplyConfigResolverHttpClient',
+  },
+  accountPersona: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'ACCOUNT_PERSONA_ROUTES',
+    registerFunction: 'registerAccountPersonaRoutes',
+    clientClass: 'AccountPersonaHttpClient',
+  },
+  environmentHandshake: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'ENVIRONMENT_HANDSHAKE_ROUTES',
+    registerFunction: 'registerEnvironmentHandshakeRoutes',
+    clientClass: 'EnvironmentHandshakeHttpClient',
+  },
+  commentApprovalPolicy: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'COMMENT_APPROVAL_POLICY_ROUTES',
+    registerFunction: 'registerCommentApprovalPolicyRoutes',
+    clientClass: 'CommentApprovalPolicyHttpClient',
+  },
+  scheduleFeedback: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'SCHEDULE_FEEDBACK_ROUTES',
+    registerFunction: 'registerScheduleFeedbackRoutes',
+    clientClass: 'ScheduleFeedbackHttpClient',
+  },
+  notificationContacts: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'NOTIFICATION_CONTACTS_ROUTES',
+    registerFunction: 'registerNotificationContactsRoutes',
+    clientClass: 'NotificationContactsHttpClient',
+  },
+  firstPostProgress: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'FIRST_POST_PROGRESS_ROUTES',
+    registerFunction: 'registerFirstPostProgressRoutes',
+    clientClass: 'FirstPostProgressHttpClient',
+  },
+  automationConfigCommands: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'AUTOMATION_CONFIG_COMMANDS_ROUTES',
+    registerFunction: 'registerAutomationConfigCommandsRoutes',
+    clientClass: 'AutomationConfigCommandsHttpClient',
+  },
+  offboardAdmissionLedger: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'OFFBOARD_ADMISSION_LEDGER_ROUTES',
+    registerFunction: 'registerOffboardAdmissionLedgerRoutes',
+    clientClass: 'OffboardAdmissionLedgerHttpClient',
+  },
+  notificationDelivery: {
+    transportFile: 'transport/api-aux-authority-http.ts',
+    routesConstant: 'STRUCTURED_NOTIFICATION_ROUTES',
+    registerFunction: 'registerStructuredNotificationRoutes',
+    clientClass: 'StructuredNotificationHttpClient',
+  },
+  edgeResumeCommand: {
+    transportFile: 'transport/paired-command-http.ts',
+    routesConstant: 'EDGE_RESUME_COMMAND_ROUTES',
+    registerFunction: 'registerEdgeResumeCommandRoutes',
+    clientClass: 'EdgeResumeCommandHttpClient',
+  },
+  facebookScopeCommands: {
+    transportFile: 'transport/paired-command-http.ts',
+    routesConstant: 'FACEBOOK_SCOPE_COMMAND_ROUTES',
+    registerFunction: 'registerFacebookScopeCommandRoutes',
+    clientClass: 'FacebookScopeCommandHttpClient',
+  },
+  publishUiUpdateCommand: {
+    transportFile: 'transport/paired-command-http.ts',
+    routesConstant: 'PUBLISH_UI_UPDATE_COMMAND_ROUTES',
+    registerFunction: 'registerPublishUiUpdateCommandRoutes',
+    clientClass: 'PublishUiUpdateCommandHttpClient',
+  },
+  personaGenerator: {
+    transportFile: 'transport/paired-command-http.ts',
+    routesConstant: 'PERSONA_GENERATOR_COMMAND_ROUTES',
+    registerFunction: 'registerPersonaGeneratorCommandRoutes',
+    clientClass: 'PersonaGeneratorCommandHttpClient',
+  },
+} as const satisfies Record<ApiDirectPortGroup, TransportBinding>;
 
 type ClientFailureKind = 'read_unavailable' | 'write_result_unknown';
 
@@ -208,10 +352,6 @@ test('4a owner directions retain three distinct token configuration names', () =
 });
 
 test('4a 59-slot error coverage table binds every route to shared guards and translators', async () => {
-  const derived = await deriveSurface();
-  const methodsById = new Map(
-    derived.groups.map((group) => [group.id, group.methods] as const),
-  );
   const sourceFiles = new Map<string, ts.SourceFile>();
   const coverage: Array<{
     group: string;
@@ -222,11 +362,12 @@ test('4a 59-slot error coverage table binds every route to shared guards and tra
     transportFailure: ClientFailureKind;
   }> = [];
 
-  for (const binding of SURFACE_BINDINGS) {
+  for (const group of Object.keys(TRANSPORT_BINDINGS) as ApiDirectPortGroup[]) {
+    const binding = TRANSPORT_BINDINGS[group];
     let sourceFile = sourceFiles.get(binding.transportFile);
     if (!sourceFile) {
       const source = await readFile(
-        new URL(`../../${binding.transportFile}`, import.meta.url),
+        ownedSourcePath('automation', binding.transportFile),
         'utf8',
       );
       sourceFile = ts.createSourceFile(
@@ -238,8 +379,7 @@ test('4a 59-slot error coverage table binds every route to shared guards and tra
       );
       sourceFiles.set(binding.transportFile, sourceFile);
     }
-    const methods = methodsById.get(binding.id);
-    assert.ok(methods, `${binding.id} must exist in the kernel inventory`);
+    const methods = API_DIRECT_PORT_INVENTORY[group];
     for (const method of methods) {
       const route = routeGuardCoverage(
         sourceFile,
@@ -254,7 +394,7 @@ test('4a 59-slot error coverage table binds every route to shared guards and tra
       );
       assert.ok(transportFailure, `${binding.clientClass}.${method} must use a shared translator`);
       coverage.push({
-        group: binding.id,
+        group,
         method,
         bearer: route.bearer,
         versionAndTarget: route.versionAndTarget,

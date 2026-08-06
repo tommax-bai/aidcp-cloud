@@ -11,20 +11,42 @@
  * 摘要常量同时钉在派生接口服务仓的同名用例里 —— 任一侧漂移，一侧当场红。
  */
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { PERSONA_SOUL_CODEC } from '../../src/agents/persona-soul-codec.js';
-import {
-  parsePersonaSoulValue,
-  parsePersonaSoulYaml,
-  parseSyncReadPersonaSoul,
-} from '../../src/kernel/persona-soul-parse.js';
-import { syncReadPayloadDigest } from '../../src/kernel/sync-read-snapshot.js';
+import { PERSONA_SOUL_CODEC } from '@content/agents/persona-soul-codec.js';
+import { parseSyncReadPersonaSoul } from '@kernel/kernel/persona-soul-parse.js';
+import { syncReadPayloadDigest } from '@kernel/kernel/sync-read-snapshot.js';
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+import { derivedCompositionRoots, siblingRepoRoot } from '../helpers/sibling-repos.js';
+
+/**
+ * 事实源翻转后（invert-split-fact-source，双实例判例）：content 仓的编解码器在**它自己的宇宙**里
+ * 经包说明符解析 kernel —— 即 content 仓 node_modules 里装的 aidcp-kernel dist。按引用断言
+ * 必须装载**同一份**模块实例，否则「kernel 源码那份 ≠ content 装到的那份」会被误读成第二实现。
+ * realpath 是必要的：Node 按 realpath 缓存 ESM 模块，路径带 symlink 时会拿到第二个实例。
+ */
+async function contentKernelPersonaParse(): Promise<{
+  parsePersonaSoulValue: unknown;
+  parsePersonaSoulYaml: unknown;
+}> {
+  const dist = realpathSync(
+    join(
+      siblingRepoRoot('aidcp-content'),
+      'node_modules',
+      'aidcp-kernel',
+      'dist',
+      'kernel',
+      'persona-soul-parse.js',
+    ),
+  );
+  return (await import(pathToFileURL(dist).href)) as {
+    parsePersonaSoulValue: unknown;
+    parsePersonaSoulYaml: unknown;
+  };
+}
 
 /**
  * 摘要基准人设：**刻意带上 api 段自管的三个字段**（engagement_rules /
@@ -69,9 +91,10 @@ const REFERENCE_PERSONA = [
 const REFERENCE_PAYLOAD_DIGEST =
   'sha256:4656ea2c31b128c69cf172718b36061c05dbe1e92380072d9b541691ab971b07';
 
-test('AC-PERSONA-PARSE-01 内容段编解码器的解析两方法就是 kernel 那一份（按引用）', () => {
-  assert.equal(PERSONA_SOUL_CODEC.parseValue, parsePersonaSoulValue);
-  assert.equal(PERSONA_SOUL_CODEC.parseYaml, parsePersonaSoulYaml);
+test('AC-PERSONA-PARSE-01 内容段编解码器的解析两方法就是 kernel 那一份（按引用，content 运行时宇宙）', async () => {
+  const kernelAsContentResolvesIt = await contentKernelPersonaParse();
+  assert.equal(PERSONA_SOUL_CODEC.parseValue, kernelAsContentResolvesIt.parsePersonaSoulValue);
+  assert.equal(PERSONA_SOUL_CODEC.parseYaml, kernelAsContentResolvesIt.parsePersonaSoulYaml);
 });
 
 test('AC-PERSONA-PARSE-02 同步读取值口只认人设闭子集，api 段自管字段一律不进载荷', () => {
@@ -104,15 +127,19 @@ test('AC-PERSONA-PARSE-04 载荷摘要钉死（跨仓同值）', () => {
 });
 
 test('AC-PERSONA-PARSE-05 组装根 MUST 按引用注入，MUST NOT 就地再写一份', () => {
-  const source = readFileSync(join(REPO_ROOT, 'src', 'server.ts'), 'utf8');
+  // 现役落点：account_persona 流的属主是 api，注入点在 api 仓的组装根（5.6 派生根并集判例）。
+  const apiRoot = readFileSync(join(siblingRepoRoot('aidcp-api'), 'src', 'server.ts'), 'utf8');
   assert.match(
-    source,
+    apiRoot,
     /parseSoul:\s*parseSyncReadPersonaSoul,/,
-    '单体组装根必须直接把 kernel 那一份传下去',
+    'api 组装根必须直接把 kernel 那一份传下去',
   );
-  assert.doesNotMatch(
-    source,
-    /parseSoul:\s*(?:\(|async|function)/,
-    '组装根里出现就地实现的 parseSoul —— 那正是两侧分叉的形态',
-  );
+  // 负向面扫全部派生组装根：任何一个根就地再写一份 parseSoul，就是当初分叉的形态。
+  for (const root of derivedCompositionRoots()) {
+    assert.doesNotMatch(
+      readFileSync(root.path, 'utf8'),
+      /parseSoul:\s*(?:\(|async|function)/,
+      `${root.label} 里出现就地实现的 parseSoul —— 那正是两侧分叉的形态`,
+    );
+  }
 });

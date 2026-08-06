@@ -13,7 +13,7 @@
 // silently reading an empty tree would be the exact silent-false-success this
 // codebase red-lines.
 
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -54,4 +54,30 @@ export function ownedSourcePath(owner: OwnerLayer, srcRelPath: string): string {
 /** Absolute path of a sibling repo's migrations directory (union loaders enumerate all three). */
 export function ownedMigrationsDir(repo: BusinessRepo): string {
   return join(siblingRepoRoot(repo), 'migrations');
+}
+
+/**
+ * The union of the three business repos' composition roots — the derived-universe
+ * replacement for reads of the monolith's `src/server.ts` (invert-split-fact-source 5.6
+ * precedent). Per repo that is: `src/server.ts`, `src/index.ts`, plus the repo-private
+ * top-level `src/<svc>-*.ts` composition/runtime files (e.g. automation-*.ts). These are
+ * hand-written per repo and never synced, so "the machine wires X" claims must be asserted
+ * against this union, not any single file.
+ */
+export function derivedCompositionRoots(): Array<{ repo: BusinessRepo; label: string; path: string }> {
+  const roots: Array<{ repo: BusinessRepo; label: string; path: string }> = [];
+  for (const repo of BUSINESS_REPOS) {
+    const svc = repo.replace(/^aidcp-/, '');
+    const srcDir = join(siblingRepoRoot(repo), 'src');
+    for (const name of readdirSync(srcDir).sort()) {
+      if (!name.endsWith('.ts')) continue;
+      if (name === 'server.ts' || name === 'index.ts' || name.startsWith(`${svc}-`)) {
+        roots.push({ repo, label: `${repo}/src/${name}`, path: join(srcDir, name) });
+      }
+    }
+  }
+  if (roots.length === 0) {
+    throw new Error('derived_composition_roots_empty: no composition roots found in any sibling repo');
+  }
+  return roots;
 }

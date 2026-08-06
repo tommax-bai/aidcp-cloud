@@ -1,13 +1,69 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 // aidcp:test-owner=cloud
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
 import {
   SYNC_READ_STREAM_DEFINITIONS,
   type SyncReadStream,
-} from '../../src/kernel/sync-read-snapshot.js';
-import { readJson, repoPath } from './helpers/boundary-scan.js';
+} from '@kernel/kernel/sync-read-snapshot.js';
+import { readJson } from './helpers/boundary-scan.js';
+import { ownedSourcePath, siblingRepoRoot, type OwnerLayer } from '../helpers/sibling-repos.js';
+
+/**
+ * 事实源翻转后（invert-split-fact-source 5.3/5.6）本清点的读法：
+ *   - 清点记录本身（boundaries/sync-read-inventory.json）与文件级归属表仍读本仓冻结副本；
+ *   - 源码证据改读**属主仓的现役文件**（经归属表解析），成员的「仍被调用」证据改在
+ *     四个兄弟仓 src/ 的并集图上找 —— 单体 src/server.ts 的调用点已不存在，
+ *     并集图正是「整台机器还在同步消费这个面」在拆分宇宙里的对应物。
+ */
+const OWNER_LAYERS = new Set<OwnerLayer>(['api', 'automation', 'content', 'kernel']);
+const OWNERSHIP: Map<string, string> = new Map(
+  readJson<Array<{ path: string; layer: string }>>('boundaries/module-ownership.json').map(
+    (entry) => [entry.path, entry.layer],
+  ),
+);
+
+/** 属主仓里该文件的现役路径。组装根（layer=composition）没有单一现役文件，调用方须走并集。 */
+function ownedDataPath(monolithRel: string): string | null {
+  const layer = OWNERSHIP.get(monolithRel);
+  assert.ok(layer, `${monolithRel} 不在冻结归属表里：清点记录与归属表漂移，先修记录`);
+  if (layer === 'composition') return null;
+  assert.ok(OWNER_LAYERS.has(layer as OwnerLayer), `${monolithRel} 的属主层 ${layer} 无仓可解析`);
+  return ownedSourcePath(layer as OwnerLayer, monolithRel.replace(/^src\//, ''));
+}
+
+function readOwnedData(monolithRel: string): string {
+  const path = ownedDataPath(monolithRel);
+  assert.ok(path, `${monolithRel} 是单体组装根，没有单一现役文件 —— 该断言必须走并集图`);
+  return readFileSync(path, 'utf8');
+}
+
+/** 四个兄弟仓 src/ 的并集图（惰性读一次）。 */
+let unionCache: Array<{ label: string; content: string }> | null = null;
+function unionSourceFiles(): Array<{ label: string; content: string }> {
+  if (unionCache) return unionCache;
+  const out: Array<{ label: string; content: string }> = [];
+  for (const repo of ['aidcp-api', 'aidcp-automation', 'aidcp-content', 'aidcp-kernel']) {
+    const root = join(siblingRepoRoot(repo), 'src');
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir).sort()) {
+        const full = join(dir, name);
+        if (statSync(full).isDirectory()) {
+          if (name === 'node_modules' || name === 'dist') continue;
+          walk(full);
+        } else if (name.endsWith('.ts')) {
+          out.push({ label: `${repo}${full.slice(join(root, '..').length)}`, content: readFileSync(full, 'utf8') });
+        }
+      }
+    };
+    walk(root);
+  }
+  assert.ok(out.length > 0, 'union source graph is empty — sibling checkouts missing?');
+  unionCache = out;
+  return out;
+}
 
 interface InventoryMember {
   symbol: string;
@@ -139,22 +195,41 @@ test('all remote snapshot streams are registered exactly once with matching owne
   }
 });
 
-test('registered synchronous members still exist at their source and current call sites', () => {
+/**
+ * 拆分后按裁定退休的成员：单体组装根曾就地声明的 `PersonaResolver.resolvePersona`，
+ * 在四仓并集图上既无声明也无调用（人设查询面拆分后 = PersonaStore.getForAccount/bindingFor
+ * + kernel parseSyncReadPersonaSoul，由 AC-PERSONA-PARSE-* 与 api 仓同步读用例看守）。
+ * 反向钉死：它若在并集图上重新出现，本清单必须重审 —— 不许静默放行。
+ */
+const RETIRED_MEMBER_METHODS = new Set(['resolvePersona']);
+
+test('registered synchronous members still exist at their source and in the union graph', () => {
   const missing: string[] = [];
+  const union = unionSourceFiles();
   for (const item of inventory.items) {
     for (const member of item.members) {
-      const declaration = readFileSync(repoPath(member.sourceFile), 'utf8');
       const declarationPattern = new RegExp(`\\b${escapeRegExp(member.method)}\\s*(?:\\?|!)?\\s*\\(`);
       const callPattern = new RegExp(`\\b${escapeRegExp(member.method)}\\s*(?:\\?\\.|!)?\\s*\\(`);
-      if (!declarationPattern.test(declaration)) {
+      if (RETIRED_MEMBER_METHODS.has(member.method)) {
+        const reappeared = union.filter(
+          (f) => declarationPattern.test(f.content) || callPattern.test(f.content),
+        );
+        assert.deepEqual(
+          reappeared.map((f) => f.label),
+          [],
+          `${item.id} ${member.symbol} 已按裁定退休（单体死亡时随之消失），却在并集图上重新出现 —— 先重审清点记录`,
+        );
+        continue;
+      }
+      const declPath = ownedDataPath(member.sourceFile);
+      const declared = declPath
+        ? declarationPattern.test(readFileSync(declPath, 'utf8'))
+        : union.some((f) => declarationPattern.test(f.content));
+      if (!declared) {
         missing.push(`${item.id} declaration ${member.symbol} in ${member.sourceFile}`);
       }
-      if (
-        !member.callSiteFiles.some((file) =>
-          callPattern.test(readFileSync(repoPath(file), 'utf8')),
-        )
-      ) {
-        missing.push(`${item.id} call site ${member.symbol} in ${member.callSiteFiles.join(',')}`);
+      if (!union.some((f) => callPattern.test(f.content))) {
+        missing.push(`${item.id} call site ${member.symbol} (union graph)`);
       }
     }
   }
@@ -197,10 +272,50 @@ test('snapshot members are read-only and A3 excludes the 4a resume command', () 
   assert.equal(registeredReads.has('resumeEdgesForAccount'), false);
 });
 
+/**
+ * 单体组装根（file=src/server.ts）上的清点策略按裁定退休：它们观测的宇宙 —— 「一份组装根里、
+ * 消费段直接对另一属主的存储收发同步调用」 —— 随单体一起消失了。拆分后同步跨属主读在结构上
+ * 不可达：消费仓里根本 import 不到对方的存储类（各仓 typecheck / 边界门禁当场拦），
+ * 现役的跨进程面由 kernel 的流注册表（上面那条 parity 用例钉着）与各仓自己的组装根用例看守
+ * （api：api-sync-read-refresh-margin / mirror-bump-wiring；automation：automation-root-readiness-ledger
+ * 与镜像用例）。留下的两条策略观测的是仍然活着的跨仓面（api 面板契约 ↔ automation 实现、
+ * api 存储 ↔ kernel 目录读者），继续在属主仓的现役文件上执行。
+ * 下面的集合相等断言保证退休名单**恰好**等于组装根策略：新策略若锚在现役文件上，绝不会被顺带跳过。
+ */
+const RETIRED_MONOLITH_ROOT_POLICIES = [
+  'A1-content-schedule-injection',
+  'A3-api-edge-resolution',
+  'A4-api-in-flight',
+  'A5-api-captcha',
+  'A6-api-automation-health',
+  'B1-automation-persona',
+  'B2-automation-client-environment',
+  'B3-local-freshness-imports',
+  'B4-automation-account-store',
+  'B4-automation-account-state',
+  'B5-content-schedule',
+  'B5-hot-lead',
+  'B5-facebook-comment',
+  'B5-facebook-group-join',
+] as const;
+
+test('retired census policies are exactly the monolith-root ones, nothing else is skipped', () => {
+  assert.deepEqual(
+    inventory.censusPolicies
+      .filter((policy) => policy.file === 'src/server.ts')
+      .map((policy) => policy.id)
+      .sort(),
+    [...RETIRED_MONOLITH_ROOT_POLICIES].sort(),
+    '退休名单 MUST 恰好等于「锚在单体组装根上」的策略集合；任何锚在现役文件上的策略都必须真跑',
+  );
+});
+
 test('source-derived cross-owner synchronous census has no unregistered member', () => {
   const unregistered: string[] = [];
   const unresolved: string[] = [];
+  const retired = new Set<string>(RETIRED_MONOLITH_ROOT_POLICIES);
   for (const policy of inventory.censusPolicies) {
+    if (retired.has(policy.id)) continue;
     const registered = new Set(
       inventory.items
         .filter((item) => policy.inventoryIds.includes(item.id))
@@ -242,7 +357,7 @@ test('census scanner self-test rejects a newly inserted read-shaped receiver met
 });
 
 function observePolicy(policy: CensusPolicy): string[] {
-  const fullSource = readFileSync(repoPath(policy.file), 'utf8');
+  const fullSource = readOwnedData(policy.file);
   const source = slicePolicyRegion(fullSource, policy);
   if (policy.mode === 'named_imports') {
     const names = (policy.modulePatterns ?? []).flatMap((modulePattern) =>
@@ -260,7 +375,7 @@ function observePolicy(policy: CensusPolicy): string[] {
   if (!policy.receiverPattern || !policy.sourceFile) {
     throw new Error('receiverPattern and sourceFile are required');
   }
-  const ownerSource = readFileSync(repoPath(policy.sourceFile), 'utf8');
+  const ownerSource = readOwnedData(policy.sourceFile);
   const methods = scanReceiverMethodNames(source, policy.receiverPattern)
     .filter((method) => READ_SHAPED_METHOD.test(method))
     .filter((method) => methodIsSynchronous(ownerSource, method));
