@@ -20,7 +20,7 @@
  *
  * 连接串**只从环境变量读**，本文件与其测试里不出现任何真实口令 / token（示例一律用占位符）。
  */
-import { DEFAULT_PG_CONFIG } from '../../src/kernel/pg-config.js';
+import { DEFAULT_PG_CONFIG } from '@kernel/kernel/pg-config.js';
 
 /** 显式测试通道开关。由 `npm run test:pg` 设置；不设即整组 skip。 */
 export const PG_CHANNEL_ENV = 'AIDCP_PG_INTEGRATION';

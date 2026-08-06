@@ -15,7 +15,7 @@
  * 想验「库里缺东西时存储 fail-closed」的用例，不要用本 helper —— 直接让探测返回空行即可。
  */
 
-import { mergeCreatedObjects } from '../../src/schema/ddl-objects.js';
+import { mergeCreatedObjects } from '@automation/schema/ddl-objects.js';
 
 export interface ProbeRows {
   rows: Record<string, unknown>[];

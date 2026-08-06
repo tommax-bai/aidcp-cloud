@@ -19,9 +19,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { PG_OWNERS } from '@kernel/kernel/pg-owner-connection-resolver.js';
-import { loadMigrationFiles } from '@automation/schema/migration-files.js';
 import {
-  LEGACY_OWNER_OVERRIDES_NAME,
   loadLegacyOwnerOverrides,
   loadMigrationOwnerScopes,
   loadTableOwnership,
@@ -35,29 +33,38 @@ import {
   violationKey,
   type ExecutabilityInput,
 } from './helpers/migration-executability.js';
+import {
+  unionLegacyOwnerOverridesPath,
+  unionMigrationFiles,
+} from '../helpers/migration-union.js';
 
 /**
- * 事实源仓（本仓）的冻结记录根：loader 代码已按属主别名从派生仓装载，但整图判据的**数据**
- * 必须仍是本仓的全量 migrations/ 与 boundaries/ —— 派生仓只持子集，模块相对的默认路径
- * 会悄悄换成那边的目录。三个 loader 的文档都写明「仓外消费方 MUST 显式传路径」，此处照办。
+ * 冻结记录根：`boundaries/` 的表归属清单仍读本仓的冻结副本（它们在 5.4 之后存续）。
+ * 迁移语料**不再**读本仓——事实源翻转后（invert-split-fact-source 5.3）整图语料 = 三个派生仓
+ * migrations/ 的并集（unionMigrationFiles：显式枚举三仓目录、文件名去重、同名必须逐字节一致），
+ * 历史属主名册同理（unionLegacyOwnerOverridesPath：三仓副本必须逐字节一致）。
+ * 曾经的坑：loader 的模块相对默认路径会悄悄换成 automation 单仓的 61 条子集，
+ * 整图判据静默降级成对子集的弱主张——所以下面的「冻结集合逐条在盘」断言必须留着：
+ * 它证明喂进判据的确是全集（任何单仓子集都会当场缺一批冻结版本）。
  */
 const FACT_SOURCE_ROOT = join(fileURLToPath(import.meta.url), '..', '..', '..');
 
 async function realInput(): Promise<{ input: ExecutabilityInput[]; knownTables: Set<string> }> {
   const { index, files, tableOwners, overrides } = await loadMigrationOwnerScopes(
-    () => loadMigrationFiles(join(FACT_SOURCE_ROOT, 'migrations')),
+    () => unionMigrationFiles(),
     () => loadTableOwnership(join(FACT_SOURCE_ROOT, 'boundaries', 'table-ownership.json')),
-    () => loadLegacyOwnerOverrides(join(FACT_SOURCE_ROOT, 'migrations', LEGACY_OWNER_OVERRIDES_NAME)),
+    async () => loadLegacyOwnerOverrides(await unionLegacyOwnerOverridesPath()),
   );
-  // 整图判据只在**事实源仓**成立：派生仓只持本属主的账本范围子集，在那儿跑会把「另一家的建表迁移
-  // 不在本目录里」全部报成缺失。这里显式判失败而不是静默跳过——一道会自己关掉的闸比没有闸更坏。
+  // 整图判据只对**全集**成立：单仓只持本属主的账本范围子集，对子集跑会把「另一家的建表迁移
+  // 不在本目录里」全部报成缺失；反过来喂进子集时这里当场红。显式判失败而不是静默跳过——
+  // 一道会自己关掉（或自己缩水）的闸比没有闸更坏。
   const onDisk = new Set(files.map((f) => versionOf(f.name)));
   const absent = overrides.frozenVersions.filter((v) => !onDisk.has(v));
   assert.deepEqual(
     absent.slice(0, 5),
     [],
-    `本仓的 migrations/ 缺 ${absent.length} 条冻结集合内的迁移，说明这里只持某个属主的子集：` +
-      '整图可执行性判据只能在事实源仓 aidcp-cloud 跑。',
+    `迁移并集缺 ${absent.length} 条冻结集合内的迁移：喂进判据的不是三仓并集、而是某个子集。` +
+      '整图可执行性判据 MUST 对 aidcp-api / aidcp-automation / aidcp-content 三仓并集跑。',
   );
   const input = files.map((f) => {
     const version = versionOf(f.name);

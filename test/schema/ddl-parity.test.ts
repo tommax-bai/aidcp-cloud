@@ -17,8 +17,10 @@ import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { mergeCreatedObjects, type CreatedObjects } from '../../src/schema/ddl-objects.js';
-import { repoRoot } from '../../src/schema/ddl-scan.js';
+import { mergeCreatedObjects, type CreatedObjects } from '@automation/schema/ddl-objects.js';
+
+import { unionMigrationFiles } from '../helpers/migration-union.js';
+import { siblingRepoRoot } from '../helpers/sibling-repos.js';
 
 /** design.md F3 列出的 24 张「只由存储自建」的表。 */
 const SELF_CREATED_TABLES = [
@@ -61,18 +63,28 @@ async function collect(dir: string, ext: string, out: string[] = []): Promise<st
   return out;
 }
 
-async function objectsOf(dir: string, ext: string): Promise<CreatedObjects> {
-  const files = (await collect(dir, ext)).sort();
-  const sources = await Promise.all(files.map((f) => readFile(f, 'utf8')));
-  return mergeCreatedObjects(sources);
-}
+/**
+ * 事实源翻转后（invert-split-fact-source 5.3）的扫描面：
+ *   - src 侧 = 四个属主仓 src/ 的并集（原单体 src/ 含 kernel 段，故 kernel 仓也在内；
+ *     各仓手写组装根一并入扫——组装根里出现迁移目录没有的 DDL 同样是「新库缺对象」）；
+ *   - migrations 侧 = 三个业务仓 migrations/ 的并集（unionMigrationFiles，
+ *     文件名去重 + 校验和一致断言）。
+ * 断言方向仍是单向包含：src 会建出的对象 MUST 都能在迁移并集里找到。
+ */
+const SRC_UNION_REPOS = ['aidcp-api', 'aidcp-automation', 'aidcp-content', 'aidcp-kernel'] as const;
 
 let cached: { src: CreatedObjects; migrations: CreatedObjects } | undefined;
 async function both() {
   if (!cached) {
+    const srcSources: string[] = [];
+    for (const repo of SRC_UNION_REPOS) {
+      const dir = path.join(siblingRepoRoot(repo), 'src');
+      const files = (await collect(dir, '.ts')).sort();
+      srcSources.push(...(await Promise.all(files.map((f) => readFile(f, 'utf8')))));
+    }
     cached = {
-      src: await objectsOf(path.join(repoRoot(), 'src'), '.ts'),
-      migrations: await objectsOf(path.join(repoRoot(), 'migrations'), '.sql'),
+      src: mergeCreatedObjects(srcSources),
+      migrations: mergeCreatedObjects((await unionMigrationFiles()).map((f) => f.content)),
     };
   }
   return cached;

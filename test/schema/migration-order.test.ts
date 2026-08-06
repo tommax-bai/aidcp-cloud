@@ -3,6 +3,9 @@
  * aidcp:test-owner=cloud
  * 零数据库依赖。
  *
+ * 事实源翻转后（invert-split-fact-source 5.3）：被检对象是三个派生仓 migrations/ 的**并集**
+ * （执行器在属主 URL 未设时跑的正是同一批文件），不是本仓冻结副本，也不是任何单仓子集。
+ *
  * 为什么单独一条：`ddl-parity.test.ts` 比的是**对象集合**，对顺序完全无感，所以「补齐迁移的编号
  * 排在后续 ALTER 它们的历史迁移之后」这种缺陷它永远发现不了——而那正是空库拉起会当场炸掉的形态，
  * 且只会在部署现场被发现（dev/ol 的表早被存储自建好了，走的是 baseline 记账、根本不跑 up）。
@@ -11,12 +14,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { loadMigrationFiles } from '../../src/schema/migration-files.js';
-import { findOrderDefects } from '../../src/schema/migration-order.js';
-import { versionOf } from '../../src/schema/migration-plan.js';
+import { findOrderDefects } from '@automation/schema/migration-order.js';
+import { versionOf } from '@automation/schema/migration-plan.js';
+
+import { unionMigrationFiles } from '../helpers/migration-union.js';
 
 test('空库按复合序拉起：没有任何迁移引用尚未建出的表', async () => {
-  const files = await loadMigrationFiles(); // 已按复合序排好
+  const files = await unionMigrationFiles(); // 已按复合序排好
   const defects = findOrderDefects(files);
   assert.deepEqual(
     defects.map((d) => `${d.version} → ${d.table}`),
@@ -28,7 +32,7 @@ test('空库按复合序拉起：没有任何迁移引用尚未建出的表', as
 });
 
 test('基线建表迁移 MUST 排在第一位（历史迁移会 ALTER 它们）', async () => {
-  const files = await loadMigrationFiles();
+  const files = await unionMigrationFiles();
   assert.ok(files.length > 0);
   assert.equal(
     versionOf(files[0].name),

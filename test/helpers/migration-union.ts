@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { loadMigrationFiles, checksumOf } from '@automation/schema/migration-files.js';
+import { LEGACY_OWNER_OVERRIDES_NAME } from '@automation/schema/migration-owners.js';
 import { compareVersions, versionOf, type MigrationFile } from '@automation/schema/migration-plan.js';
 
 import { BUSINESS_REPOS, ownedMigrationsDir } from './sibling-repos.js';
@@ -79,4 +80,41 @@ export async function readMigration(name: string): Promise<string> {
     }
   }
   return first!.content;
+}
+
+/**
+ * Path of the (single) legacy owner-overrides roster. The roster rides along with every
+ * repo's migrations/ (each executor reads its own copy), so the union contract is stricter
+ * than for *.sql files: ALL three repos MUST carry it and all copies MUST agree
+ * byte-for-byte. A missing copy means that repo's executor lost its roster — failing here
+ * is cheaper than discovering it on that repo's next empty-database boot.
+ */
+export async function unionLegacyOwnerOverridesPath(): Promise<string> {
+  const found: { repo: string; path: string; checksum: string }[] = [];
+  const missing: string[] = [];
+  for (const repo of BUSINESS_REPOS) {
+    const candidate = join(ownedMigrationsDir(repo), LEGACY_OWNER_OVERRIDES_NAME);
+    if (!existsSync(candidate)) {
+      missing.push(repo);
+      continue;
+    }
+    found.push({ repo, path: candidate, checksum: checksumOf(await readFile(candidate, 'utf8')) });
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `legacy_owner_overrides_missing ${LEGACY_OWNER_OVERRIDES_NAME} absent in: ${missing.join(', ')}. ` +
+        'Every derived repo executes migrations against the shared roster; a repo without it ' +
+        'cannot resolve the 13 historical execution scopes.',
+    );
+  }
+  const [first, ...rest] = found;
+  for (const other of rest) {
+    if (other.checksum !== first!.checksum) {
+      throw new Error(
+        `legacy_owner_overrides_divergent ${first!.repo} and ${other.repo} disagree on ` +
+          `${LEGACY_OWNER_OVERRIDES_NAME}. Reconcile before trusting any owner-scope assertion.`,
+      );
+    }
+  }
+  return first!.path;
 }
