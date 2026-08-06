@@ -759,7 +759,7 @@ export function expandOwnership(
  * （定稿 §12 与本 change 任务 3.5）。
  *
  *   - 任何层 MAY → `kernel`；
- *   - `composition` MAY → 任何层；
+ *   - `composition` MAY → 任何层（包含 composition 内部的组合根拆分）；
  *   - 同层内部恒允许；
  *   - 任何层 MUST NOT → `composition`：组合根不可被反向导入，**无豁免通道**；
  *   - `kernel` MUST NOT → 其它任一层：内核层不得反向依赖业务层，**无豁免通道**；
@@ -768,10 +768,10 @@ export function expandOwnership(
 export type EdgeVerdict = 'allowed' | 'exemptable' | 'forbidden';
 
 export function classifyEdge(from: Layer, to: Layer): EdgeVerdict {
+  if (from === 'composition') return 'allowed';
   if (to === 'composition') return 'forbidden';
   if (from === 'kernel') return to === 'kernel' ? 'allowed' : 'forbidden';
   if (to === 'kernel') return 'allowed';
-  if (from === 'composition') return 'allowed';
   if (from === to) return 'allowed';
   return 'exemptable';
 }
