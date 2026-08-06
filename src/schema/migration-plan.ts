@@ -88,6 +88,20 @@ export interface MigrationHeader {
   rawKind?: string;
   objects: MigrationObject[];
   /**
+   * `-- aidcp:retires=` 声明的**本条迁移移除的对象**（收缩迁移专用，语法与 `objects` 同形）。
+   *
+   * 为什么需要它：对象声明是**全目录取并集**的，而校验和一经落账就不许再改
+   * （`migration_checksum_mismatch` 整批拒绝）。于是一条 contract 迁移删掉某个**由更早迁移声明过**
+   * 的对象后，那条旧声明永远留在磁盘上，`verify` 会把它算成「缺失」——而缺失清单是
+   * `baseline` 唯一的准入闸，于是新建属主库会被一条假缺失永久拒之门外，且操作者按
+   * 「缺失就补跑迁移」的口径补多少次都不会变空。
+   *
+   * 这一行让收缩迁移**显式说出自己移除了什么**，把该对象从期望集里减掉。它 MUST NOT 由 SQL 文本
+   * 推断（与 `objects` 同理：推断不全就是假阴性），也 MUST NOT 用「改旧文件的头」来代替
+   * （那会改校验和）。同一对象若被更晚的迁移重新声明，则以更晚者为准、重新计入期望集。
+   */
+  retires: MigrationObject[];
+  /**
    * `-- aidcp:owner=<owner>[,<owner>]` 声明的**执行范围**（原样字符串，此处不校验取值）。
    *
    * 本文件刻意不校验：属主枚举住在 kernel，而本模块 MUST 保持零依赖以便脱库单测。
@@ -110,6 +124,7 @@ export interface MigrationObject {
 
 const KIND_LINE = /^[ \t]*--[ \t]*aidcp:kind[ \t]*=[ \t]*([A-Za-z_]+)[ \t]*$/gm;
 const OBJECTS_LINE = /^[ \t]*--[ \t]*aidcp:objects[ \t]*=[ \t]*(.+)$/gm;
+const RETIRES_LINE = /^[ \t]*--[ \t]*aidcp:retires[ \t]*=[ \t]*(.+)$/gm;
 /** `-- aidcp:owner=` 允许写空值（声明「哪个库都不执行」），故值段是 `(.*)` 而非 `(.+)`。 */
 const OWNER_LINE = /^[ \t]*--[ \t]*aidcp:owner[ \t]*=[ \t]*(.*)$/gm;
 
@@ -118,19 +133,13 @@ const OWNER_LINE = /^[ \t]*--[ \t]*aidcp:owner[ \t]*=[ \t]*(.*)$/gm;
  * `-- aidcp:objects=` 可写多行，取并集（长清单便于分行维护）。
  * 对象声明只从头注释来，MUST NOT 由 SQL 文本推断（推断不全 = 假阴性 = 假装验证通过）。
  */
-export function parseMigrationHeader(content: string): MigrationHeader {
-  KIND_LINE.lastIndex = 0;
-  OBJECTS_LINE.lastIndex = 0;
-  OWNER_LINE.lastIndex = 0;
-  const kindMatch = KIND_LINE.exec(content);
-  const rawKind = kindMatch?.[1];
-  const kind: MigrationKind | undefined =
-    rawKind === 'expand' || rawKind === 'contract' ? rawKind : undefined;
-
-  const objects: MigrationObject[] = [];
+/** 抽出一类对象声明行（`objects` / `retires` 同一套 token 语法），多行取并集、去重保序。 */
+function collectObjectLines(pattern: RegExp, content: string): MigrationObject[] {
+  pattern.lastIndex = 0;
+  const out: MigrationObject[] = [];
   const seen = new Set<string>();
   let m: RegExpExecArray | null;
-  while ((m = OBJECTS_LINE.exec(content)) !== null) {
+  while ((m = pattern.exec(content)) !== null) {
     for (const raw of m[1].split(',')) {
       const token = raw.trim();
       if (!token) continue;
@@ -143,9 +152,22 @@ export function parseMigrationHeader(content: string): MigrationHeader {
       const key = `${type}:${name}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      objects.push({ type, name });
+      out.push({ type, name });
     }
   }
+  return out;
+}
+
+export function parseMigrationHeader(content: string): MigrationHeader {
+  KIND_LINE.lastIndex = 0;
+  OWNER_LINE.lastIndex = 0;
+  const kindMatch = KIND_LINE.exec(content);
+  const rawKind = kindMatch?.[1];
+  const kind: MigrationKind | undefined =
+    rawKind === 'expand' || rawKind === 'contract' ? rawKind : undefined;
+
+  const objects = collectObjectLines(OBJECTS_LINE, content);
+  const retires = collectObjectLines(RETIRES_LINE, content);
 
   // 执行范围头：多行取并集（与 objects 同形），去重后保序。写了几行都算「声明过」。
   let owners: string[] | undefined;
@@ -159,7 +181,7 @@ export function parseMigrationHeader(content: string): MigrationHeader {
     }
   }
 
-  return { kind, rawKind, objects, owners };
+  return { kind, rawKind, objects, retires, owners };
 }
 
 export function planMigrations(files: MigrationFile[], ledger: LedgerRow[]): MigrationPlan {

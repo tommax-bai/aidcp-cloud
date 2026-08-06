@@ -165,8 +165,12 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(!apiExec.includes('0112_panel_hardening_indexes_automation'));
   assert.ok(contentExec.includes('0113_panel_hardening_indexes_content'));
   assert.ok(!automationExec.includes('0113_panel_hardening_indexes_content'));
+  // 同三张表的收缩段（删分行列 + 换单例主键）同样只进 api 组：属主没变，变的只是维度没了。
+  assert.ok(api.includes('0114_facebook_global_policy_collapse_target'));
+  assert.ok(!automation.includes('0114_facebook_global_policy_collapse_target'));
+  assert.ok(apiExec.includes('0114_facebook_global_policy_collapse_target'));
   // 每加一条迁移都要在这里同步抬。
-  assert.equal(KNOWN_MAX_SCHEMA_VERSION, '0113_panel_hardening_indexes_content');
+  assert.equal(KNOWN_MAX_SCHEMA_VERSION, '0114_facebook_global_policy_collapse_target');
 });
 
 test('0085 keeps runtime owner generations durable, target-scoped and payload-free', async () => {

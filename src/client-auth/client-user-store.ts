@@ -72,7 +72,6 @@ import type {
   HandshakeEnvironmentObservation,
 } from '../kernel/api-direct-port.js';
 import { parseDeploymentTarget, type DeploymentTarget } from '../deployment-target.js';
-import { FACEBOOK_GLOBAL_POLICY_SCOPE } from '../config/facebook-global-policy-scope.js';
 
 const { Pool } = pg;
 
@@ -1259,7 +1258,7 @@ export class ClientUserStore {
                e.slow_start_since,
                (SELECT c.completed_at
                   FROM facebook_environment_slow_start_completion c
-                 WHERE c.env_key=e.env_key AND c.execution_target=$1)
+                 WHERE c.env_key=e.env_key)
                  AS slow_start_completed_at,
                (SELECT count(DISTINCT s.user_id)
                   FROM client_env_scope s
@@ -1269,7 +1268,6 @@ export class ClientUserStore {
            AND COALESCE(e.lifecycle_state, 'active') = 'active'
            AND lower(btrim(COALESCE(e.platform, ''))) IN ('facebook', 'fb')
          ORDER BY e.account_id, e.env_key`,
-      [FACEBOOK_GLOBAL_POLICY_SCOPE],
     );
     const grouped = new Map<string, {
       envKey: string;
@@ -1501,7 +1499,7 @@ export class ClientUserStore {
                   WHEN $3::timestamptz IS NULL THEN NULL
                   WHEN EXISTS(
                     SELECT 1 FROM facebook_environment_slow_start_completion c
-                     WHERE c.env_key=e.env_key AND c.execution_target=$4
+                     WHERE c.env_key=e.env_key
                   ) THEN $3
                   ELSE COALESCE(e.slow_start_since,$3)
                 END,
@@ -1511,17 +1509,13 @@ export class ClientUserStore {
             AND EXISTS(SELECT 1 FROM client_env_scope s
                         WHERE s.user_id=$1 AND s.env_key=e.env_key AND s.source='admin')
         RETURNING e.env_key`,
-            [userId, key, value, FACEBOOK_GLOBAL_POLICY_SCOPE],
+            [userId, key, value],
           );
           if (enabled && (written.rowCount ?? written.rows.length) > 0) {
             await q.query(
               `DELETE FROM facebook_environment_slow_start_completion c
-                WHERE c.env_key=$1
-                  AND EXISTS(
-                    SELECT 1 FROM facebook_environment_slow_start_completion current
-                     WHERE current.env_key=$1 AND current.execution_target=$2
-                  )`,
-              [key, FACEBOOK_GLOBAL_POLICY_SCOPE],
+                WHERE c.env_key=$1`,
+              [key],
             );
           }
           return written;
@@ -1558,7 +1552,6 @@ export class ClientUserStore {
                       WHEN $2 AND EXISTS(
                         SELECT 1 FROM facebook_environment_slow_start_completion c
                          WHERE c.env_key=client_environments.env_key
-                           AND c.execution_target=$4
                       ) THEN $3
                       WHEN $2 THEN COALESCE(slow_start_since, $3)
                       ELSE NULL
@@ -1569,17 +1562,13 @@ export class ClientUserStore {
                 AND lifecycle_state='active'
                 AND platform='facebook'
           RETURNING slow_start_since`,
-            [key, enabled, value, FACEBOOK_GLOBAL_POLICY_SCOPE],
+            [key, enabled, value],
           );
           if (enabled && written.rows[0]) {
             await q.query(
               `DELETE FROM facebook_environment_slow_start_completion c
-                WHERE c.env_key=$1
-                  AND EXISTS(
-                    SELECT 1 FROM facebook_environment_slow_start_completion current
-                     WHERE current.env_key=$1 AND current.execution_target=$2
-                  )`,
-              [key, FACEBOOK_GLOBAL_POLICY_SCOPE],
+                WHERE c.env_key=$1`,
+              [key],
             );
           }
           return written;
@@ -2127,9 +2116,7 @@ export class ClientUserStore {
             `SELECT rule_views_per_like,rule_join_every_n_rounds,
                     consumption_views_per_like,consumption_confirmed_likes_per_join,
                     consumption_confirmed_joins_per_comment
-               FROM facebook_operation_global_policy
-              WHERE execution_target=$1`,
-            [FACEBOOK_GLOBAL_POLICY_SCOPE],
+               FROM facebook_operation_global_policy`,
           );
           const global = globalResult.rows[0];
           if (!global) {

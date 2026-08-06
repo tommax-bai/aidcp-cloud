@@ -625,11 +625,6 @@
     "note": "§4.6.8：25 文件归 api，5 个限频配置文件例外（另 3 个门面已在定稿 §4.6.8 判 automation，翻转与 P2-1 同批落，见控制仓耦合处置清单）"
   },
   {
-    "path": "src/config/facebook-global-policy-scope.ts",
-    "layer": "api",
-    "note": "change unify-facebook-global-policy-across-targets：Facebook 全局运营策略与冷启动完成事实收成跨目标唯一一份后的行作用域键。三个 api 属主写口（策略存储 / 群评论策略存储 / 客户环境存储）与 api 属主的同步读快照源都从这一处取；各写一份字面量的现形方式不是报错，而是某一处仍去读合并那刻起就冻结的旧行、且逐格看起来都正常。纯常量、零 import、零 SQL / HTTP / 活状态；不进 kernel 是因为它是 api 属主表的行键约定、不是跨域共享契约"
-  },
-  {
     "path": "src/config/facebook-group-comment-policy-store.ts",
     "layer": "api",
     "note": "change add-configurable-facebook-consumption-mode：目标环境的入群后首次评论等待与审计是 api 配置权威；运行时只消费其 target-scoped 投影"

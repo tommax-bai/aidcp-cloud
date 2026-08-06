@@ -9,7 +9,6 @@ import { normalizePlatformId } from '../kernel/platform-types.js';
 import type { ActionQuota } from '../kernel/risk-contract.js';
 import type { DeploymentTarget } from '../deployment-target.js';
 import { shanghaiDayStartMs } from '../time/shanghai-day.js';
-import { FACEBOOK_GLOBAL_POLICY_SCOPE } from './facebook-global-policy-scope.js';
 import type { MirrorVersionBumper } from './mirror-version-store.js';
 import {
   cloneFacebookReelCadence,
@@ -330,7 +329,6 @@ interface LockedEnvironmentDbRow {
 }
 
 interface GlobalOperationPolicyDbRow {
-  execution_target: DeploymentTarget;
   persona_reel_views_per_like: number | string;
   persona_reel_views_per_follow: number | string;
   slow_start_reel_views_per_like: number | string;
@@ -411,7 +409,7 @@ const OPERATION_POLICY_REQUIREMENT = {
       'created_at',
     ])],
     ['facebook_operation_global_policy', new Set([
-      'execution_target',
+      'singleton',
       'persona_reel_views_per_like',
       'persona_reel_views_per_follow',
       'slow_start_reel_views_per_like',
@@ -444,7 +442,6 @@ const OPERATION_POLICY_REQUIREMENT = {
     ])],
     ['facebook_environment_slow_start_completion', new Set([
       'env_key',
-      'execution_target',
       'completed_at',
     ])],
   ]),
@@ -464,10 +461,6 @@ const OPERATION_POLICY_REQUIREMENT = {
     [
       'idx_facebook_operation_global_policy_audit_target_revision',
       'facebook_operation_global_policy_audit',
-    ],
-    [
-      'idx_facebook_environment_slow_start_completion_target',
-      'facebook_environment_slow_start_completion',
     ],
   ]),
 };
@@ -977,7 +970,7 @@ export class FacebookOperationPolicyStore {
       ),
       this.executionTarget
         ? this.pool.query<GlobalOperationPolicyDbRow>(
-            `SELECT execution_target,persona_reel_views_per_like,
+            `SELECT persona_reel_views_per_like,
                     persona_reel_views_per_follow,slow_start_reel_views_per_like,
                     slow_start_reel_views_per_follow,
                     rule_reel_views_per_follow,consumption_reel_views_per_follow,
@@ -985,9 +978,7 @@ export class FacebookOperationPolicyStore {
                     consumption_views_per_like,consumption_confirmed_likes_per_join,
                     consumption_confirmed_joins_per_comment,slow_start_total_days,
                     slow_start_daily_caps,revision,updated_at,updated_by
-               FROM facebook_operation_global_policy
-              WHERE execution_target=$1`,
-            [FACEBOOK_GLOBAL_POLICY_SCOPE],
+               FROM facebook_operation_global_policy`,
           )
         : Promise.resolve({ rows: [] as GlobalOperationPolicyDbRow[] }),
     ]);
@@ -1241,7 +1232,7 @@ export class FacebookOperationPolicyStore {
     try {
       await client.query('BEGIN');
       const currentResult = await client.query<GlobalOperationPolicyDbRow>(
-        `SELECT execution_target,persona_reel_views_per_like,
+        `SELECT persona_reel_views_per_like,
                 persona_reel_views_per_follow,slow_start_reel_views_per_like,
                 slow_start_reel_views_per_follow,
                 rule_reel_views_per_follow,consumption_reel_views_per_follow,
@@ -1250,9 +1241,7 @@ export class FacebookOperationPolicyStore {
                 consumption_confirmed_joins_per_comment,slow_start_total_days,
                 slow_start_daily_caps,revision,updated_at,updated_by
            FROM facebook_operation_global_policy
-          WHERE execution_target=$1
           FOR UPDATE`,
-        [FACEBOOK_GLOBAL_POLICY_SCOPE],
       );
       const currentRow = currentResult.rows[0];
       if (!currentRow) {
@@ -1277,24 +1266,23 @@ export class FacebookOperationPolicyStore {
       const nextRevision = current.revision + 1;
       const writtenResult = await client.query<GlobalOperationPolicyDbRow>(
         `UPDATE facebook_operation_global_policy
-            SET persona_reel_views_per_like=$2,
-                persona_reel_views_per_follow=$3,
-                slow_start_reel_views_per_like=$4,
-                slow_start_reel_views_per_follow=$5,
-                rule_reel_views_per_follow=$6,
-                consumption_reel_views_per_follow=$7,
-                rule_views_per_like=$8,
-                rule_join_every_n_rounds=$9,
-                consumption_views_per_like=$10,
-                consumption_confirmed_likes_per_join=$11,
-                consumption_confirmed_joins_per_comment=$12,
-                slow_start_total_days=$13,
-                slow_start_daily_caps=$14::jsonb,
-                revision=$15,
+            SET persona_reel_views_per_like=$1,
+                persona_reel_views_per_follow=$2,
+                slow_start_reel_views_per_like=$3,
+                slow_start_reel_views_per_follow=$4,
+                rule_reel_views_per_follow=$5,
+                consumption_reel_views_per_follow=$6,
+                rule_views_per_like=$7,
+                rule_join_every_n_rounds=$8,
+                consumption_views_per_like=$9,
+                consumption_confirmed_likes_per_join=$10,
+                consumption_confirmed_joins_per_comment=$11,
+                slow_start_total_days=$12,
+                slow_start_daily_caps=$13::jsonb,
+                revision=$14,
                 updated_at=now(),
-                updated_by=$16
-          WHERE execution_target=$1
-          RETURNING execution_target,persona_reel_views_per_like,
+                updated_by=$15
+          RETURNING persona_reel_views_per_like,
                     persona_reel_views_per_follow,slow_start_reel_views_per_like,
                     slow_start_reel_views_per_follow,
                     rule_reel_views_per_follow,consumption_reel_views_per_follow,
@@ -1303,7 +1291,6 @@ export class FacebookOperationPolicyStore {
                     consumption_confirmed_joins_per_comment,slow_start_total_days,
                     slow_start_daily_caps,revision,updated_at,updated_by`,
         [
-          FACEBOOK_GLOBAL_POLICY_SCOPE,
           input.reels.persona.viewsPerLike,
           input.reels.persona.viewsPerFollow,
           input.reels.slowStart.viewsPerLike,
@@ -1324,12 +1311,15 @@ export class FacebookOperationPolicyStore {
       const next = this.globalFromRow(writtenResult.rows[0]);
       const actorInfo = actorParts(actor);
       await client.query(
+        // 审计表上的 execution_target 是**保留的追溯字段**（change collapse-facebook-global-policy-target-column）：
+        // 主表的分行维度已删，这里留着的是「合并之前各目标各是什么」唯一的留存处，历史行一行不改。
+        // 新行恒为合并后的那一个作用域值，与既有 UNIQUE (execution_target, new_revision) 一起
+        // 给出「每个 revision 至多一条审计」。它 MUST NOT 被当成还能选行的键重新用起来。
         `INSERT INTO facebook_operation_global_policy_audit
            (execution_target,prior_revision,new_revision,before_policy,after_policy,
             actor_class,actor_id,request_id,reason,created_at)
-         VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,now())`,
+         VALUES ('all',$1,$2,$3::jsonb,$4::jsonb,$5,$6,$7,$8,now())`,
         [
-          FACEBOOK_GLOBAL_POLICY_SCOPE,
           current.revision,
           next.revision,
           JSON.stringify(this.globalAuditSnapshot(current)),
@@ -1787,17 +1777,17 @@ export class FacebookOperationPolicyStore {
       if (input.completed) {
         await client.query(
           `INSERT INTO facebook_environment_slow_start_completion
-             (env_key,execution_target,completed_at)
-           VALUES ($1,$2,now())
-           ON CONFLICT (env_key,execution_target)
+             (env_key,completed_at)
+           VALUES ($1,now())
+           ON CONFLICT (env_key)
            DO UPDATE SET completed_at=EXCLUDED.completed_at`,
-          [key, FACEBOOK_GLOBAL_POLICY_SCOPE],
+          [key],
         );
       } else {
         await client.query(
           `DELETE FROM facebook_environment_slow_start_completion
-            WHERE env_key=$1 AND execution_target=$2`,
-          [key, FACEBOOK_GLOBAL_POLICY_SCOPE],
+            WHERE env_key=$1`,
+          [key],
         );
       }
 
@@ -2499,7 +2489,7 @@ export class FacebookOperationPolicyStore {
               e.slow_start_since,
               (SELECT c.completed_at
                  FROM facebook_environment_slow_start_completion c
-                WHERE c.env_key=e.env_key AND c.execution_target=$2)
+                WHERE c.env_key=e.env_key)
                 AS slow_start_completed_at,
               CASE WHEN e.account_id IS NULL THEN 0
                    ELSE (SELECT count(*) FROM client_environments e2
@@ -2513,7 +2503,7 @@ export class FacebookOperationPolicyStore {
         WHERE e.env_key=$1
           AND COALESCE(e.lifecycle_state,'active')='active'
         FOR UPDATE OF e`,
-      [envKey, FACEBOOK_GLOBAL_POLICY_SCOPE],
+      [envKey],
     );
     return rows[0] ?? null;
   }
@@ -2599,7 +2589,8 @@ export class FacebookOperationPolicyStore {
     return {
       // **这个字段现在表示「你正在通过哪个目标的接口读这份配置」，不再表示「这份配置属于谁」**
       // （change unify-facebook-global-policy-across-targets）：策略已收成跨目标唯一一份，
-      // 行键是 FACEBOOK_GLOBAL_POLICY_SCOPE。这里 MUST NOT 回传行上的作用域键——
+      // 而 collapse-facebook-global-policy-target-column 之后表上连分行键都不存在了：
+      // 这一格是**接口自述**，MUST NOT 试图由行上任何字段推出来——
       // 管理后台对该字段有 `['dev','ol']` 硬闸，回一个它不认识的值不是报错，是整页打不开。
       // 前端据此显示的标签必须写成「当前连接」而非「配置归属」，并与「本页对全部运行目标
       // 同时生效」的明示并排出现；只改这里而不改标签，会把旧误解原样保留下来。
@@ -2674,14 +2665,14 @@ export class FacebookOperationPolicyStore {
     if (!this.executionTarget) return;
     await client.query(
       `INSERT INTO facebook_environment_slow_start_completion
-         (env_key,execution_target,completed_at)
-       SELECT e.env_key,$1,now()
+         (env_key,completed_at)
+       SELECT e.env_key,now()
          FROM client_environments e
         WHERE e.slow_start_since IS NOT NULL
           AND lower(btrim(COALESCE(e.platform,''))) IN ('facebook','fb')
-          AND now() >= e.slow_start_since + ($2 * interval '1 day')
-       ON CONFLICT (env_key,execution_target) DO NOTHING`,
-      [FACEBOOK_GLOBAL_POLICY_SCOPE, totalDays],
+          AND now() >= e.slow_start_since + ($1 * interval '1 day')
+       ON CONFLICT (env_key) DO NOTHING`,
+      [totalDays],
     );
   }
 
@@ -2692,7 +2683,7 @@ export class FacebookOperationPolicyStore {
               e.slow_start_since,
               (SELECT c.completed_at
                  FROM facebook_environment_slow_start_completion c
-                WHERE c.env_key=e.env_key AND c.execution_target=$2)
+                WHERE c.env_key=e.env_key)
                 AS slow_start_completed_at,
               (SELECT COALESCE(
                         NULLIF(btrim(a.operator_alias), ''),
@@ -2716,7 +2707,7 @@ export class FacebookOperationPolicyStore {
          FROM client_environments e
         WHERE e.env_key=$1
           AND COALESCE(e.lifecycle_state,'active')='active'`,
-      [envKey, FACEBOOK_GLOBAL_POLICY_SCOPE],
+      [envKey],
     );
     return rows[0] ?? null;
   }

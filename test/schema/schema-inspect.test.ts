@@ -12,11 +12,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { declaredObjects, diffSchema, type ActualSchema } from '../../src/schema/schema-inspect.js';
+import { declaredObjects, diffSchema, retiredObjects, type ActualSchema } from '../../src/schema/schema-inspect.js';
 import type { MigrationFile } from '../../src/schema/migration-plan.js';
 
-function file(name: string, objects: string[]): MigrationFile {
-  const content = `-- aidcp:kind=expand\n-- aidcp:objects=${objects.join(',')}\nSELECT 1;\n`;
+function file(name: string, objects: string[], retires: string[] = []): MigrationFile {
+  const retireLine = retires.length > 0 ? `-- aidcp:retires=${retires.join(',')}\n` : '';
+  const content = `-- aidcp:kind=expand\n-- aidcp:objects=${objects.join(',')}\n${retireLine}SELECT 1;\n`;
   return { name, content, checksum: `sum:${name}` };
 }
 
@@ -90,4 +91,71 @@ test('约束背后的索引不算多余（PK / UNIQUE 会自动生成索引名�
     }),
   );
   assert.deepEqual(report.extra, []);
+});
+
+
+/**
+ * 收缩迁移会真的把对象删掉，而**旧文件的头改不得**（校验和一经落账，改动即
+ * `migration_checksum_mismatch` 整批拒绝）。于是那条旧声明永远留在磁盘上：
+ * 不减掉它，`verify` 从此挂着一串假缺失，而缺失清单是 `baseline` 唯一的准入闸 ——
+ * 新建属主库会被永久拒绝，且「缺失就补跑迁移」补多少次都不会变空。
+ */
+test('aidcp:retires 把被收缩迁移删掉的对象从期望集里减掉', () => {
+  const files = [
+    file('0001_a.sql', ['table:foo', 'constraint:foo_target_check', 'index:idx_foo_target']),
+    file('0002_b.sql', [], ['constraint:foo_target_check', 'index:idx_foo_target']),
+  ];
+  const report = diffSchema(declaredObjects(files), actual({ tables: new Set(['foo']) }));
+  assert.deepEqual(report.missing, [], '已被显式移除的对象 MUST NOT 再算成缺失');
+});
+
+test('没写 aidcp:retires 时行为一字不变（被删对象照旧报缺失）', () => {
+  const files = [
+    file('0001_a.sql', ['table:foo', 'constraint:foo_target_check']),
+    file('0002_b.sql', []),
+  ];
+  const report = diffSchema(declaredObjects(files), actual({ tables: new Set(['foo']) }));
+  assert.deepEqual(
+    report.missing.map((m) => `${m.type}:${m.name}@${m.version}`),
+    ['constraint:foo_target_check@0001_a'],
+    '这道闸只对显式声明过移除的对象放行，MUST NOT 变成「凡是缺的都算合理」',
+  );
+});
+
+test('移除之后又被更晚的迁移重新声明，则重新计入期望集', () => {
+  const files = [
+    file('0001_a.sql', ['table:foo', 'index:idx_foo']),
+    file('0002_b.sql', [], ['index:idx_foo']),
+    file('0003_c.sql', ['index:idx_foo']),
+  ];
+  const report = diffSchema(declaredObjects(files), actual({ tables: new Set(['foo']) }));
+  assert.deepEqual(
+    report.missing.map((m) => `${m.type}:${m.name}@${m.version}`),
+    ['index:idx_foo@0001_a', 'index:idx_foo@0003_c'],
+    '判定按复合序取最晚一次表态，MUST NOT 是「被移除过就永远不再检查」；'
+      + '重新计入之后，声明过它的每一条迁移照旧各报一行（与本模块既有的重复声明行为一致）',
+  );
+});
+
+test('判定只看版本序，不看调用方传进来的文件顺序', () => {
+  const ordered = [
+    file('0001_a.sql', ['table:foo', 'index:idx_foo']),
+    file('0002_b.sql', [], ['index:idx_foo']),
+  ];
+  const shuffled = [ordered[1], ordered[0]];
+  assert.deepEqual(
+    diffSchema(declaredObjects(shuffled), actual({ tables: new Set(['foo']) })).missing,
+    diffSchema(declaredObjects(ordered), actual({ tables: new Set(['foo']) })).missing,
+  );
+});
+
+test('retiredObjects 逐条报出被移除的对象与移除它的版本', () => {
+  const files = [
+    file('0001_a.sql', ['table:foo', 'index:idx_foo']),
+    file('0002_b.sql', [], ['index:idx_foo']),
+  ];
+  assert.deepEqual(
+    retiredObjects(files).map((o) => `${o.type}:${o.name}@${o.version}`),
+    ['index:idx_foo@0002_b'],
+  );
 });

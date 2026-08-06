@@ -63,6 +63,21 @@
 - 只声明 `table` / `column` / `index` 三类。**约束名不机械登记**：PG 对列级 `CHECK` / `UNIQUE`
   会自动生成名字，逐条登记只会制造噪声而不是事实。确需守住的具名约束由 SQL 合同测试
   （范式见 `test/interactions/migration-contract.test.ts`）承担。
+- **收缩迁移删掉一个「更早迁移声明过」的对象时，MUST 用 `-- aidcp:retires=` 把它说出来**
+  （语法与 `objects` 同形，多行取并集）：
+
+  ```
+  -- aidcp:kind=contract
+  -- aidcp:retires=constraint:foo_target_check,index:idx_foo_target
+  ```
+
+  理由是这一条：对象声明是**全目录取并集**的，而旧文件的头改不得（校验和一经落账，
+  改动即 `migration_checksum_mismatch` 整批拒绝）。那条旧声明因此永远留在磁盘上，
+  `verify` 会把被删对象算成**缺失**——而缺失清单是 `baseline` 唯一的准入闸，
+  新建属主库会被一条假缺失永久拒之门外，且按「缺失就补跑迁移」补多少次都不会变空。
+  判定按复合序取最晚一次表态：同一对象被更晚的迁移重新声明，则重新计入期望集。
+  `retires` 写错名字不会报错、只会白减一个，故仓内用例断言每条 `retires` 都命中过一条真实声明。
+  带 `retires` 的文件属人判声明，`generate-migration-headers.ts --rewrite` 一律跳过它们。
 - 历史 60 个文件的头声明由一次性工具 `scripts/generate-migration-headers.ts` 生成后签入。
   该工具按复合序模拟整条序列、维护「当前活着的对象」集合，被后续文件 `DROP` / `RENAME` 掉的对象
   不会留在任何头声明里（否则 `verify` 必然报一堆假缺失）。**它是一次性 bootstrap，不是运行时推断**。

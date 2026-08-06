@@ -251,8 +251,14 @@ async function main(): Promise<void> {
     const existing = parseMigrationHeader(file.content);
     const hasHeader = Boolean(existing.kind) && /aidcp:objects=/.test(file.content);
     if (hasHeader && !rewrite) continue;
-    if (hasHeader && (frozen.has(version) || existing.owners !== undefined)) {
-      skipped.push(`${version}（${frozen.has(version) ? '已入账本的冻结集合' : '带 -- aidcp:owner= 头的人判声明'}）`);
+    // `-- aidcp:retires=` 同属人判声明：它说的是「这条收缩迁移删掉了哪个更早声明过的对象」，
+    // 而本生成器只按复合序推「活着的对象」、写不出这一行。重写等于把它悄悄删掉，
+    // 于是被删对象重新进入期望集，`verify` 挂回一串假缺失。故带 retires 的文件一律跳过。
+    const humanAuthored = existing.owners !== undefined || existing.retires.length > 0;
+    if (hasHeader && (frozen.has(version) || humanAuthored)) {
+      skipped.push(
+        `${version}（${frozen.has(version) ? '已入账本的冻结集合' : '带 -- aidcp:owner= / -- aidcp:retires= 头的人判声明'}）`,
+      );
       continue;
     }
 

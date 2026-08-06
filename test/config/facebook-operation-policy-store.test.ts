@@ -6,7 +6,6 @@ import type { MirrorVersionBumper } from '../../src/config/mirror-version-store.
 import { FacebookOperationPolicyStore } from '../../src/config/facebook-operation-policy-store.js';
 import { isSyncReadFactPayload } from '../../src/kernel/sync-read-facts.js';
 import { RISK_ACTIONS } from '../../src/kernel/risk-contract.js';
-import { FACEBOOK_GLOBAL_POLICY_SCOPE } from '../../src/config/facebook-global-policy-scope.js';
 
 interface PolicyRow {
   env_key: string;
@@ -24,7 +23,7 @@ interface PolicyRow {
 }
 
 interface GlobalPolicyRow {
-  execution_target: 'dev' | 'ol' | 'all';
+  singleton: boolean;
   persona_reel_views_per_like: number;
   persona_reel_views_per_follow: number;
   slow_start_reel_views_per_like: number;
@@ -95,7 +94,7 @@ function readySchema(withGlobal = false): SchemaProber {
       'facebook_primary_browse_surface_policy_audit.reason',
       'facebook_primary_browse_surface_policy_audit.created_at',
       ...(withGlobal ? [
-        'facebook_operation_global_policy.execution_target',
+        'facebook_operation_global_policy.singleton',
         'facebook_operation_global_policy.persona_reel_views_per_like',
         'facebook_operation_global_policy.persona_reel_views_per_follow',
         'facebook_operation_global_policy.slow_start_reel_views_per_like',
@@ -124,7 +123,6 @@ function readySchema(withGlobal = false): SchemaProber {
         'facebook_operation_global_policy_audit.reason',
         'facebook_operation_global_policy_audit.created_at',
         'facebook_environment_slow_start_completion.env_key',
-        'facebook_environment_slow_start_completion.execution_target',
         'facebook_environment_slow_start_completion.completed_at',
       ] : []),
     ]),
@@ -134,7 +132,6 @@ function readySchema(withGlobal = false): SchemaProber {
       'idx_facebook_primary_browse_surface_audit_env_revision',
       ...(withGlobal ? [
         'idx_facebook_operation_global_policy_audit_target_revision',
-        'idx_facebook_environment_slow_start_completion_target',
       ] : []),
     ]),
   });
@@ -186,9 +183,8 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
   );
   let surfaceAudits: unknown[][] = [];
   let globalRow: GlobalPolicyRow = {
-    // 合并后存储按 FACEBOOK_GLOBAL_POLICY_SCOPE 选行，不再按部署目标；
-    // 这里照旧播种成部署目标就会重现 change 前的行为，用例会以 policy_missing 报错。
-    execution_target: FACEBOOK_GLOBAL_POLICY_SCOPE as GlobalPolicyRow['execution_target'],
+    // 收缩之后表上没有任何选行维度了：单例主键使第二行插不进去，读路径直取那一行。
+    singleton: true,
     persona_reel_views_per_like: 4,
     persona_reel_views_per_follow: 10,
     slow_start_reel_views_per_like: 15,
@@ -227,34 +223,31 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
 
   const query = async (text: string, params: unknown[] = []) => {
     const sql = text.replace(/\s+/g, ' ').trim();
-    if (sql.startsWith('SELECT execution_target,persona_reel_views_per_like')) {
-      const matchesTarget = params.length === 0
-        || String(params[0]) === globalRow.execution_target;
-      return {
-        rows: matchesTarget ? [{ ...globalRow }] : [],
-        rowCount: matchesTarget ? 1 : 0,
-      };
+    if (sql.startsWith('SELECT persona_reel_views_per_like')) {
+      // 收缩之后这条读**不带任何参数**：一旦有人把选行键加回来，这里会当场断言失败，
+      // 而不是悄悄退化成「按某个键选行、选不中就当没有策略」。
+      assert.deepEqual(params, [], '全局策略读 MUST NOT 再带任何选行参数');
+      return { rows: [{ ...globalRow }], rowCount: 1 };
     }
     if (sql.startsWith('UPDATE facebook_operation_global_policy')) {
       globalRow = {
         ...globalRow,
-        execution_target: String(params[0]) as GlobalPolicyRow['execution_target'],
-        persona_reel_views_per_like: Number(params[1]),
-        persona_reel_views_per_follow: Number(params[2]),
-        slow_start_reel_views_per_like: Number(params[3]),
-        slow_start_reel_views_per_follow: Number(params[4]),
-        rule_reel_views_per_follow: Number(params[5]),
-        consumption_reel_views_per_follow: Number(params[6]),
-        rule_views_per_like: Number(params[7]),
-        rule_join_every_n_rounds: Number(params[8]),
-        consumption_views_per_like: Number(params[9]),
-        consumption_confirmed_likes_per_join: Number(params[10]),
-        consumption_confirmed_joins_per_comment: Number(params[11]),
-        slow_start_total_days: Number(params[12]),
-        slow_start_daily_caps: JSON.parse(String(params[13])),
-        revision: Number(params[14]),
+        persona_reel_views_per_like: Number(params[0]),
+        persona_reel_views_per_follow: Number(params[1]),
+        slow_start_reel_views_per_like: Number(params[2]),
+        slow_start_reel_views_per_follow: Number(params[3]),
+        rule_reel_views_per_follow: Number(params[4]),
+        consumption_reel_views_per_follow: Number(params[5]),
+        rule_views_per_like: Number(params[6]),
+        rule_join_every_n_rounds: Number(params[7]),
+        consumption_views_per_like: Number(params[8]),
+        consumption_confirmed_likes_per_join: Number(params[9]),
+        consumption_confirmed_joins_per_comment: Number(params[10]),
+        slow_start_total_days: Number(params[11]),
+        slow_start_daily_caps: JSON.parse(String(params[12])),
+        revision: Number(params[13]),
         updated_at: new Date(),
-        updated_by: String(params[15]),
+        updated_by: String(params[14]),
       };
       return { rows: [{ ...globalRow }], rowCount: 1 };
     }
@@ -714,10 +707,7 @@ describe('FacebookOperationPolicyStore', () => {
     );
     assert.equal(db.globalAudits.length, 1);
     assert.equal(db.audits.length, 3, 'two direct writes plus one propagated audit');
-    assert.deepEqual(db.graduationMarks, [
-      [FACEBOOK_GLOBAL_POLICY_SCOPE, 7],
-      [FACEBOOK_GLOBAL_POLICY_SCOPE, 14],
-    ]);
+    assert.deepEqual(db.graduationMarks, [[7], [14]]);
     assert.deepEqual(db.bumps.slice(-3), [
       'content_schedule',
       // 批 E-2 步骤 2：运营基线自己的同步读游标靠它推进。少了它，

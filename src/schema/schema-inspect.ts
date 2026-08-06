@@ -8,7 +8,7 @@
  * 比较逻辑是纯函数（本文件不 import pg），实测对象由调用方注入，便于脱库单测。
  */
 
-import { parseMigrationHeader, versionOf, type MigrationFile, type MigrationObject, type MigrationObjectType } from './migration-plan.js';
+import { compareVersions, parseMigrationHeader, versionOf, type MigrationFile, type MigrationObject, type MigrationObjectType } from './migration-plan.js';
 import { readTableColumns, type SchemaQueryable } from './pg-catalog.js';
 
 export type { SchemaQueryable };
@@ -39,12 +39,67 @@ export interface VerifyReport {
   declaredObjectCount: number;
 }
 
-/** 从全部迁移文件抽出对象声明（附来源版本）。 */
+/**
+ * 从全部迁移文件抽出**当前仍应存在**的对象声明（附来源版本）。
+ *
+ * 声明是全目录取并集的，但收缩迁移会真的把对象删掉。旧文件的头改不得（校验和一经落账，
+ * 改动即 `migration_checksum_mismatch` 整批拒绝），所以由收缩迁移自己用 `-- aidcp:retires=`
+ * 把它移除的对象说出来，这里按**复合序**判定最终归属：
+ *
+ *   期望存在 ⟺ 声明它的最晚版本 > 移除它的最晚版本（没被移除过则恒成立）。
+ *
+ * 不这么减的后果不是报错，而是 `verify` 从此挂着一串**假缺失**：而缺失清单是 `baseline`
+ * 唯一的准入闸，新建属主库会被永久拒绝，且「缺失就补跑迁移」补多少次都不会变空。
+ *
+ * 判定只用版本序、不用入参顺序 —— 调用方传进来的文件是否排过序不该改变结论。
+ */
 export function declaredObjects(files: MigrationFile[]): DeclaredObject[] {
-  const out: DeclaredObject[] = [];
+  const all: DeclaredObject[] = [];
+  const lastDeclared = new Map<string, string>();
+  const lastRetired = new Map<string, string>();
+
+  const keep = (map: Map<string, string>, key: string, version: string): void => {
+    const prev = map.get(key);
+    if (prev === undefined || compareVersions(version, prev) > 0) map.set(key, version);
+  };
+
   for (const file of files) {
     const version = versionOf(file.name);
-    for (const obj of parseMigrationHeader(file.content).objects) {
+    const header = parseMigrationHeader(file.content);
+    for (const obj of header.objects) {
+      keep(lastDeclared, `${obj.type}:${obj.name}`, version);
+      all.push({ ...obj, version });
+    }
+    for (const obj of header.retires) {
+      keep(lastRetired, `${obj.type}:${obj.name}`, version);
+    }
+  }
+
+  if (lastRetired.size === 0) return all;
+  return all.filter((d) => {
+    const key = `${d.type}:${d.name}`;
+    const retired = lastRetired.get(key);
+    if (retired === undefined) return true;
+    return compareVersions(lastDeclared.get(key) ?? '', retired) > 0;
+  });
+}
+
+/**
+ * 被收缩迁移移除、且此后没有再被声明过的对象。
+ *
+ * 用途是**守住这条机制本身**：`retires` 写错一个名字不会报错，只会让期望集少减一个、
+ * `verify` 继续挂着那条假缺失；而写对了却没人核对，也无从发现「这条 retires 其实没有对应声明」。
+ * 仓内用例据此断言每条 `retires` 都命中过一条真实声明。
+ */
+export function retiredObjects(files: MigrationFile[]): DeclaredObject[] {
+  const out: DeclaredObject[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    const version = versionOf(file.name);
+    for (const obj of parseMigrationHeader(file.content).retires) {
+      const key = `${obj.type}:${obj.name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       out.push({ ...obj, version });
     }
   }

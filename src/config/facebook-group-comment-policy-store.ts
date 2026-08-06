@@ -6,7 +6,6 @@ import {
   type SchemaProber,
 } from '../kernel/schema-capability-contract.js';
 import type { MirrorVersionBumper } from './mirror-version-store.js';
-import { FACEBOOK_GLOBAL_POLICY_SCOPE } from './facebook-global-policy-scope.js';
 
 const { Pool } = pg;
 
@@ -35,7 +34,6 @@ export type FacebookGroupCommentPolicyWriteResult =
     };
 
 interface GroupCommentPolicyDbRow {
-  execution_target: 'dev' | 'ol';
   join_to_first_comment_hours: number | string;
   revision: number | string;
   updated_at: Date | string;
@@ -45,7 +43,7 @@ interface GroupCommentPolicyDbRow {
 const GROUP_COMMENT_POLICY_REQUIREMENT = {
   tables: new Map([
     ['facebook_group_comment_policy', new Set([
-      'execution_target',
+      'singleton',
       'join_to_first_comment_hours',
       'revision',
       'updated_at',
@@ -82,7 +80,7 @@ export interface FacebookGroupCommentPolicyStoreOptions {
   password?: string;
   /**
    * **本存储不再有 `executionTarget`**（change unify-facebook-global-policy-across-targets）。
-   * 这份策略已收成跨运行目标唯一一份，行键取 {@link FACEBOOK_GLOBAL_POLICY_SCOPE}。
+   * 这份策略已收成跨运行目标唯一一份，且表上已无分行维度（单例主键，第二行插不进去）。
    * 刻意**删掉**这个入参而不是留着不用：留着会让下一个人以为这里还能按目标分，
    * 而唯一拦着他的只是一个约定；删掉则任何仍在传它的组装根当场编译失败。
    */
@@ -174,10 +172,8 @@ export class FacebookGroupCommentPolicyStore {
 
   async refreshFromAuthority(): Promise<void> {
     const { rows } = await this.pool.query<GroupCommentPolicyDbRow>(
-      `SELECT execution_target,join_to_first_comment_hours,revision,updated_at,updated_by
-         FROM facebook_group_comment_policy
-        WHERE execution_target=$1`,
-      [FACEBOOK_GLOBAL_POLICY_SCOPE],
+      `SELECT join_to_first_comment_hours,revision,updated_at,updated_by
+         FROM facebook_group_comment_policy`,
     );
     this.row = rows[0] ?? null;
   }
@@ -255,11 +251,9 @@ export class FacebookGroupCommentPolicyStore {
     try {
       await client.query('BEGIN');
       const currentResult = await client.query<GroupCommentPolicyDbRow>(
-        `SELECT execution_target,join_to_first_comment_hours,revision,updated_at,updated_by
+        `SELECT join_to_first_comment_hours,revision,updated_at,updated_by
            FROM facebook_group_comment_policy
-          WHERE execution_target=$1
           FOR UPDATE`,
-        [FACEBOOK_GLOBAL_POLICY_SCOPE],
       );
       const current = currentResult.rows[0];
       const currentRevision = current ? Number(current.revision) : 0;
@@ -276,14 +270,12 @@ export class FacebookGroupCommentPolicyStore {
       const written = current
         ? await client.query<GroupCommentPolicyDbRow>(
             `UPDATE facebook_group_comment_policy
-                SET join_to_first_comment_hours=$2,
-                    revision=$3,
+                SET join_to_first_comment_hours=$1,
+                    revision=$2,
                     updated_at=now(),
-                    updated_by=$4
-              WHERE execution_target=$1
-              RETURNING execution_target,join_to_first_comment_hours,revision,updated_at,updated_by`,
+                    updated_by=$3
+              RETURNING join_to_first_comment_hours,revision,updated_at,updated_by`,
             [
-              FACEBOOK_GLOBAL_POLICY_SCOPE,
               input.joinToFirstCommentHours,
               newRevision,
               actor,
@@ -291,11 +283,10 @@ export class FacebookGroupCommentPolicyStore {
           )
         : await client.query<GroupCommentPolicyDbRow>(
             `INSERT INTO facebook_group_comment_policy
-               (execution_target,join_to_first_comment_hours,revision,updated_at,updated_by)
-             VALUES ($1,$2,$3,now(),$4)
-             RETURNING execution_target,join_to_first_comment_hours,revision,updated_at,updated_by`,
+               (join_to_first_comment_hours,revision,updated_at,updated_by)
+             VALUES ($1,$2,now(),$3)
+             RETURNING join_to_first_comment_hours,revision,updated_at,updated_by`,
             [
-              FACEBOOK_GLOBAL_POLICY_SCOPE,
               input.joinToFirstCommentHours,
               newRevision,
               actor,
@@ -303,12 +294,15 @@ export class FacebookGroupCommentPolicyStore {
           );
       const actorInfo = actorParts(actor);
       await client.query(
+        // 审计表上的 execution_target 是**保留的追溯字段**（change collapse-facebook-global-policy-target-column）：
+        // 主表的分行维度已删，这里留着的是「合并之前各目标各是什么」唯一的留存处，历史行一行不改。
+        // 新行恒为合并后的那一个作用域值，与既有 UNIQUE (execution_target, new_revision) 一起
+        // 给出「每个 revision 至多一条审计」。它 MUST NOT 被当成还能选行的键重新用起来。
         `INSERT INTO facebook_group_comment_policy_audit
            (execution_target,prior_revision,new_revision,before_policy,after_policy,
             actor_class,actor_id,request_id,reason,created_at)
-         VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,now())`,
+         VALUES ('all',$1,$2,$3::jsonb,$4::jsonb,$5,$6,$7,$8,now())`,
         [
-          FACEBOOK_GLOBAL_POLICY_SCOPE,
           currentRevision,
           newRevision,
           current

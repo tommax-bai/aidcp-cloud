@@ -5,7 +5,6 @@ import type { SchemaProber } from '../../src/kernel/schema-capability-contract.j
 import { FacebookGroupCommentPolicyStore } from '../../src/config/facebook-group-comment-policy-store.js';
 
 interface Row {
-  execution_target: 'dev' | 'ol';
   join_to_first_comment_hours: number;
   revision: number;
   updated_at: Date;
@@ -15,7 +14,7 @@ interface Row {
 const readySchema: SchemaProber = async (_pool, tables) => ({
   tables: new Set(tables),
   columns: new Set([
-    'facebook_group_comment_policy.execution_target',
+    'facebook_group_comment_policy.singleton',
     'facebook_group_comment_policy.join_to_first_comment_hours',
     'facebook_group_comment_policy.revision',
     'facebook_group_comment_policy.updated_at',
@@ -36,15 +35,18 @@ const readySchema: SchemaProber = async (_pool, tables) => ({
 });
 
 function database() {
-  let rows = new Map<'dev' | 'ol', Row>();
+  // 收缩之后这张表在库层面就只有一行（单例主键），假库照此建模：
+  // 仍留一个 Map 会让用例在一个「其实插得进第二行」的世界里通过。
+  let row: Row | null = null;
   let audits: unknown[][] = [];
   let auditFailure = false;
   let lockTail = Promise.resolve();
 
   const query = async (text: string, params: unknown[] = []) => {
     const sql = text.replace(/\s+/g, ' ').trim();
-    if (sql.startsWith('SELECT execution_target,join_to_first_comment_hours')) {
-      const row = rows.get(params[0] as 'dev' | 'ol');
+    if (sql.startsWith('SELECT join_to_first_comment_hours')) {
+      // 读 MUST NOT 再带任何选行参数；带了就说明分行维度被改名留了下来。
+      assert.deepEqual(params, [], '群评论策略读 MUST NOT 再带任何选行参数');
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
     }
     if (sql.startsWith('INSERT INTO facebook_group_comment_policy_audit')) {
@@ -56,14 +58,12 @@ function database() {
       sql.startsWith('INSERT INTO facebook_group_comment_policy')
       || sql.startsWith('UPDATE facebook_group_comment_policy')
     ) {
-      const row: Row = {
-        execution_target: params[0] as 'dev' | 'ol',
-        join_to_first_comment_hours: Number(params[1]),
-        revision: Number(params[2]),
+      row = {
+        join_to_first_comment_hours: Number(params[0]),
+        revision: Number(params[1]),
         updated_at: new Date(),
-        updated_by: String(params[3]),
+        updated_by: String(params[2]),
       };
-      rows.set(row.execution_target, row);
       return { rows: [row], rowCount: 1 };
     }
     throw new Error(`unhandled query: ${sql}`);
@@ -73,7 +73,7 @@ function database() {
     query,
     connect: async () => {
       let unlock: (() => void) | null = null;
-      let snapshot: { rows: Map<'dev' | 'ol', Row>; audits: unknown[][] } | null = null;
+      let snapshot: { row: Row | null; audits: unknown[][] } | null = null;
       return {
         query: async (text: string, params?: unknown[]) => {
           const sql = text.replace(/\s+/g, ' ').trim();
@@ -84,8 +84,8 @@ function database() {
             await prior;
             unlock = release;
             snapshot = {
-              rows: new Map([...rows].map(([key, row]) => [key, { ...row }])),
-              audits: audits.map((row) => [...row]),
+              row: row ? { ...row } : null,
+              audits: audits.map((entry) => [...entry]),
             };
             return { rows: [], rowCount: 0 };
           }
@@ -97,7 +97,7 @@ function database() {
           }
           if (sql === 'ROLLBACK') {
             if (snapshot) {
-              rows = snapshot.rows;
+              row = snapshot.row;
               audits = snapshot.audits;
             }
             unlock?.();
@@ -114,7 +114,7 @@ function database() {
 
   return {
     pool,
-    get rows() { return rows; },
+    get row() { return row; },
     get audits() { return audits; },
     failAudit() { auditFailure = true; },
   };
@@ -151,28 +151,29 @@ describe('FacebookGroupCommentPolicyStore', () => {
     assert.equal(fallback.get()?.source, 'default');
   });
 
-  it('uses target-scoped CAS and write-after-read truth', async () => {
+  it('uses single-row CAS and write-after-read truth', async () => {
     const db = database();
-    const dev = new FacebookGroupCommentPolicyStore({
+    // 三个进程共用同一份唯一策略：一个写、另外两个在自己刷新之前仍看着旧值。
+    const writer = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
       schemaProber: readySchema,
     });
-    const ol = new FacebookGroupCommentPolicyStore({
+    const bystander = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
       schemaProber: readySchema,
     });
-    const staleDev = new FacebookGroupCommentPolicyStore({
+    const staleWriter = new FacebookGroupCommentPolicyStore({
       pool: db.pool,
       schemaProber: readySchema,
     });
-    await dev.init();
-    await ol.init();
-    await staleDev.init();
-    const written = await dev.write(
+    await writer.init();
+    await bystander.init();
+    await staleWriter.init();
+    const written = await writer.write(
       {
         expectedRevision: 0,
         joinToFirstCommentHours: 12,
-        requestId: 'request-dev',
+        requestId: 'request-writer',
       },
       'panel:alice',
     );
@@ -182,9 +183,10 @@ describe('FacebookGroupCommentPolicyStore', () => {
       assert.equal(written.view.revision, 1);
       assert.equal(written.view.joinToFirstCommentHours, 12);
     }
-    assert.equal(ol.get()?.revision, null);
+    // 旁观进程在自己刷新之前仍是旧值 —— 这是缓存滞后，不再是「另一行」。
+    assert.equal(bystander.get()?.revision, null);
 
-    const stale = await staleDev.write(
+    const stale = await staleWriter.write(
       {
         expectedRevision: 0,
         joinToFirstCommentHours: 18,
@@ -231,7 +233,7 @@ describe('FacebookGroupCommentPolicyStore', () => {
       ),
       /audit failed/,
     );
-    assert.equal(db.rows.size, 0);
+    assert.equal(db.row, null, '审计写失败必须把那一行策略一起回滚掉');
     assert.equal(db.audits.length, 0);
   });
 });

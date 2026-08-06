@@ -31,8 +31,14 @@ import { compareVersions } from './migration-plan.js';
  * 副作用（有意，登记于此）：REQUIRED 抬到 0076 之后，序上低于它的 `0075_event_outbox_topic_cursor`
  * 也被顺带纳入「缺了就算 behind」——那条迁移本身仍不是硬依赖（只被非 monolith 模式的消费者用），
  * 只是复合序的结果。部署时两条一起跑即可，warn 模式下缺任一条也只是响亮提示、不拒绝启动。
+ *
+ * 注：change collapse-facebook-global-policy-target-column 的 `0114` 是**真依赖**，故一并抬到它。
+ * 那条收缩把三张 Facebook 策略表的分行列删掉、给两张策略表换上单例主键，而切读后的存储探测
+ * 直接要求 `singleton` 这一列：迁移没跑就启动新构建，两个策略存储会以 degraded 起来、
+ * 后台那两格返 503，而这正是契约门该当场说清的那类「迁移没跑但存储也不再自建」。
+ * 与 0112/0113 只抬 KNOWN_MAX 的处理不同——那两条是幂等空转，这一条真的改了 schema。
  */
-export const REQUIRED_SCHEMA_VERSION = '0109_content_schedule_hour_claim_env_key_optional';
+export const REQUIRED_SCHEMA_VERSION = '0114_facebook_global_policy_collapse_target';
 
 /**
  * 本构建认识的最高迁移版本 id，等于本构建 `migrations/` 目录里的最大版本。
@@ -221,8 +227,11 @@ export const REQUIRED_SCHEMA_VERSION = '0109_content_schedule_hour_claim_env_key
  * dev / ol 上索引早已存在
  * ⇒ 幂等空转、零 DDL 变化，**故只抬 KNOWN_MAX、不抬 REQUIRED**：抬 REQUIRED 会让两个既有环境
  * 在跑 `migrate up` 之前一路判 behind，而它们的 schema 本来就是对的。
+ *
+ * 注：`0114_facebook_global_policy_collapse_target`（change collapse-facebook-global-policy-target-column）
+ * 是收缩：删列 + 换单例主键。它与 REQUIRED 一起抬，理由见上。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0113_panel_hardening_indexes_content';
+export const KNOWN_MAX_SCHEMA_VERSION = '0114_facebook_global_policy_collapse_target';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

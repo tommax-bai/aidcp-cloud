@@ -8,7 +8,6 @@ import {
 } from '../kernel/facebook-comment-config-types.js';
 import type { FacebookOperationPolicyBaseProjection } from '../kernel/facebook-operation-policy-resolution.js';
 import type { ConfigMirrorKey } from '../kernel/config-mirror-bump-types.js';
-import { FACEBOOK_GLOBAL_POLICY_SCOPE } from './facebook-global-policy-scope.js';
 import {
   makeSyncReadFactEnvelope,
   type AccountPersonaSnapshot,
@@ -239,11 +238,10 @@ export class ApiSyncReadSnapshotSource implements SyncReadOwnerSnapshotSource {
           `SELECT e.env_key,e.lifecycle_state,e.account_id,e.slow_start_since,
                   (SELECT c.completed_at
                      FROM facebook_environment_slow_start_completion c
-                    WHERE c.env_key=e.env_key AND c.execution_target=$1)
+                    WHERE c.env_key=e.env_key)
                     AS slow_start_completed_at
              FROM client_environments e
             ORDER BY env_key`,
-          [FACEBOOK_GLOBAL_POLICY_SCOPE],
         );
         const value = projectClientEnvironmentAutomationSnapshot(rows);
         return { cursor, value } as {
