@@ -72,6 +72,7 @@
       "src/kernel/publish-status-types.ts",
       "src/kernel/risk-read-types.ts",
       "src/kernel/panel-automation-types.ts",
+      "src/kernel/host-standby-decision-port.ts",
       "src/kernel/client-env-automation-types.ts",
       "src/kernel/interaction-audit-outbox.ts",
       "src/kernel/interaction-auth-gate-types.ts",

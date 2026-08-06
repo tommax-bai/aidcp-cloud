@@ -23,6 +23,7 @@ export const PANEL_CAPABILITY_KEYS = [
   'interactionInternalApi',
   'interactionPermissions',
   'revocation',
+  'hostStandbyDecisions',
   'edgePresenceEvidence',
   'publishDispatcher',
   'publishInFlightEvidence',

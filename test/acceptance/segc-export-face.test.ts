@@ -16,7 +16,8 @@ import { test } from 'node:test';
 import { deriveSegCExportFace } from './helpers/segc-export-face.js';
 
 /**
- * 2026-08-01 实测的自动化段导出面。字典序，41 条。
+ * 实测的自动化段导出面。字典序，42 条（2026-08-06：change report-host-standby-decisions
+ * 新增 `hostStandbyDecisions`，已在派生仓的判据清单里逐条裁定）。
  *
  * 逐条裁定在 `aidcp-automation/src/automation-segc-export-disposition.ts`；
  * 本仓只钉「有哪些」，不钉「怎么处置」——处置是人读出来的，本仓没有那个上下文。
@@ -36,6 +37,7 @@ const SEGC_EXPORT_FACE = [
   'dispatchActivityForPanel',
   'edgeServer',
   'handlePublishDraftImageRemove',
+  'hostStandbyDecisions',
   'interactionCustomerApi',
   'interactionInternalApi',
   'interactionOffboarding',

@@ -44,7 +44,7 @@ import {
  * 增删消息类型时：① 改 protocol.ts ② 同步本对象 ③ 同步边缘对照测试。
  */
 const ALL_MESSAGE_TYPES: Record<MessageType, true> = {
-  hello: true, welcome: true, 'browser.status': true,
+  hello: true, welcome: true, 'browser.status': true, 'standby.decision': true,
   'ui.snapshot': true,
   'plan.request': true, 'plan.response': true,
   'select.request': true, 'select.response': true,
@@ -92,8 +92,8 @@ describe('AC-PROTO 协议契约一致性（cloud）', () => {
     assert.equal(PROTOCOL_VERSION, 2);
   });
 
-  it('AC-PROTO-02 消息类型总数为 95（增删消息须同步冻结契约 + 本断言）', () => {
-    assert.equal(ALL_TYPES.length, 95);
+  it('AC-PROTO-02 消息类型总数为 96（增删消息须同步冻结契约 + 本断言）', () => {
+    assert.equal(ALL_TYPES.length, 96);
   });
 
   it('AC-PROTO-03 每个消息类型都能构造合法信封且版本一致', () => {

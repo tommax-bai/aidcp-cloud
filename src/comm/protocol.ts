@@ -24,6 +24,14 @@ export const SEARCH_ACTIVITY_RECEIPT_CAPABILITY = 'search_activity_receipt_v1';
 export const IDENTITY_READ_CURRENT_CAPABILITY = 'identity_read_current_v1';
 export const IDENTITY_READ_SELF_PROFILE_CAPABILITY = 'identity_read_self_profile_v1';
 
+/**
+ * 宿主层（桌面外壳）把每一次「让不让出浏览器槽位」的判决作为只读遥测回执给云端。
+ *
+ * 灰度**只能**靠这个能力位：客户端会被从源码重新编译装机而**不抬版本号**，
+ * 版本号认不出运营机上装的是哪份代码。
+ */
+export const HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY = 'host_standby_decision_telemetry_v1';
+
 export type SearchPurpose = 'discovery' | 'task_targeting' | 'operator';
 export type SearchScope = 'global' | 'container';
 export type SearchOutcome = 'results_ready' | 'no_results' | 'failed_after_submit' | 'not_submitted';
@@ -34,6 +42,7 @@ export type MessageType =
   | 'hello' // edge → cloud：边缘上线，声明能力/会话
   | 'welcome' // cloud → edge：握手确认
   | 'browser.status' // edge → cloud：同一连接内浏览器 absent/ready 真态变化
+  | 'standby.decision' // edge → cloud：宿主层槽位让位判决的只读回执（遥测；云端 MUST NOT 据此否决）
   // —— 自动化运行投影（cloud → edge）；客户数据字段仅供旧客户端兼容 ——
   | 'ui.snapshot' // 新客户端仅接收浏览器待机等自动化控制投影；今日用量、人物、草稿、审批、发布等客户数据经 customer-auth HTTP 拉取
   // —— 任务规划 ——
@@ -183,6 +192,38 @@ export interface BrowserStatusPayload {
   state: BrowserState;
   /** 诊断来源，不参与 Cloud 会话状态判定。 */
   reason?: string;
+}
+
+/** 宿主层就「让不让出浏览器槽位」作出的判决结果。 */
+export type StandbyVerdict = 'yielded' | 'refused';
+
+/**
+ * 宿主层（桌面外壳）一次让位判决的事实回执（change report-host-standby-decisions）。
+ *
+ * **为什么不复用 `browser.status`**：那条只接受 `absent | ready` 两个取值，且 Cloud 在状态未变化时
+ * 直接返回——让位被拒时浏览器始终是 `ready`、状态永不变化，整条消息连同诊断字段会被静默丢弃。
+ *
+ * **只读遥测**：Cloud SHALL 只留存与呈现，MUST NOT 据此参与或否决槽位裁决。槽位不跨机器、
+ * 环境绑死本机分身，调度权在宿主层；向上可见是宿主层持有决策权的**对价**，不是审批权。
+ *
+ * 载荷 MUST 只承载事实，MUST NOT 出现任何表达「Cloud 应当如何处置」的字段——
+ * 遥测一旦携带诉求，就会在下一轮被读成协商。
+ */
+export interface StandbyDecisionPayload {
+  /** yielded = 已让出槽位；refused = 本可让位却被宿主层拒绝。 */
+  verdict: StandbyVerdict;
+  /** 具名原因：拒绝时为宿主层的具名拒绝原因（如 min_hold / publish_inflight）；让位时恒 'ok'。 */
+  reason: string;
+  /** 连续拒绝次数（同因累加、换因复位）；让位时为 0。 */
+  refusedCount: number;
+  /** 本段连续拒绝的首次时刻（epoch ms）；无连续拒绝时省略。 */
+  refusedSince?: number;
+  /** 该判决所针对的那条待机提示的标识 = 提示的 `generatedAt`（epoch ms）。缺它则连续拒绝无法归因。 */
+  hintGeneratedAt: number;
+  /** 判决作出时刻（epoch ms）。 */
+  decidedAt: number;
+  /** 宿主层对该环境的本地标识；供运营定位「哪台机器上的哪个环境」。机器标签由 `hello` 已带，此处不重复。 */
+  envId?: string;
 }
 
 /**
@@ -1919,6 +1960,7 @@ export interface PayloadMap {
   hello: HelloPayload;
   welcome: WelcomePayload;
   'browser.status': BrowserStatusPayload;
+  'standby.decision': StandbyDecisionPayload;
   'ui.snapshot': UiSnapshotPayload;
   'plan.request': PlanRequestPayload;
   'plan.response': PlanResponsePayload;

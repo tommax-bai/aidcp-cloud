@@ -2184,6 +2184,35 @@ function createRequestHandler(
       sendJson(res, 200, await deps.panelStore.likeRate());
       return;
     }
+    /**
+     * 宿主层让位判决的当前态（change report-host-standby-decisions）。
+     *
+     * 这是本 change 的验收面：运营在**另一处**据此看出「某台机器上某个环境卡住了」——
+     * 之前这件事只有坐在那台机器前的人看得见，而车队是跨机器的（2026-08-05 真机故障的形状：
+     * 一个环境连续 32 分钟拒绝让位、锁死一个浏览器槽位，运营侧零证据）。
+     *
+     * **只读**：本端点没有、也 MUST NOT 有任何写侧对应物。云端 MUST NOT 据此下发强制让位
+     * 或禁止让位的指令——槽位不跨机器，调度权在宿主层。
+     *
+     * `stuck` 是就地算出来的呈现字段（拒绝 + 连续 ≥2 次），不回写、不参与任何裁决。
+     * `ageMs` 用云端收下的时刻算：边缘时钟不可信，用它判陈旧会得到负数。
+     */
+    if (method === 'GET' && url === '/api/host-standby-decisions') {
+      if (!deps.hostStandbyDecisions) {
+        // 「读不到」MUST NOT 被呈现成「没有环境卡住」——那正是本 change 要消灭的那种等价。
+        sendJson(res, 503, { error: 'host_standby_decisions_unavailable' });
+        return;
+      }
+      const asOf = Date.now();
+      const decisions = (await deps.hostStandbyDecisions.listHostStandbyDecisions()).map((row) => ({
+        ...row,
+        ageMs: Math.max(0, asOf - row.receivedAt),
+        refusedForMs: row.refusedSince === null ? null : Math.max(0, asOf - row.refusedSince),
+        stuck: row.verdict === 'refused' && row.refusedCount >= 2,
+      }));
+      sendJson(res, 200, { decisions, asOf });
+      return;
+    }
     // 告警只读流（V1 task 9.5）：默认仅未解决；?includeResolved=1 含已解决。
     if (method === 'GET' && url === '/api/alerts') {
       const query = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');

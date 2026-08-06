@@ -11,6 +11,7 @@
 // 风控最终状态只由 automation 的 RiskController 单写，面板同步直调在拆进程后物理上不成立。
 import type { RiskCommandPort } from '../kernel/risk-command-types.js';
 import type { RiskReadPort } from '../kernel/risk-read-types.js';
+import type { HostStandbyDecisionReader } from '../kernel/host-standby-decision-port.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 // GroupRoute / SetGroupRouteResult 已抬入 kernel（纯载荷，any→kernel 恒允许），不再经 automation 桶 cache/index；
 // BotChatStore 系 api 同层直连（无需豁免）；精选类型已提进 kernel（无需豁免）。
@@ -182,6 +183,16 @@ export interface PanelDeps {
   };
   /** 令牌撤销黑名单（change console-cloud-panel-hardening #26）；未注入则登出/撤销不生效（向后兼容）。 */
   revocation?: TokenRevocationStore;
+  /**
+   * 宿主层让位判决遥测的**只读**取用（change report-host-standby-decisions）。
+   *
+   * 运营据此在另一处看出「某台机器上某个环境卡住了」——本地留痕只服务坐在那台机器前的人，
+   * 而车队是跨机器的。未注入 ⇒ 对应端点回 503：「读不到」MUST NOT 被呈现成「没有环境卡住」。
+   *
+   * ⚠️ **只读**：它 MUST NOT 被接进任何下发决策路径（待机提示产出、命令下发、风控裁决）。
+   * 槽位不跨机器，调度权在宿主层；可见性是宿主层持有决策权的对价，不是审批权。
+   */
+  hostStandbyDecisions?: HostStandbyDecisionReader;
   publishLogStore: PublishLogStore;
   botChatStore: BotChatStore;
   eventBus: EventFanoutPort;

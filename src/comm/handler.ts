@@ -15,8 +15,10 @@ import {
   CLIENT_CORE_BROWSER_EXECUTOR_CAPABILITY,
   CLIENT_DATA_PLANE_AUTOMATION_ENGINE_CAPABILITY,
   SEARCH_ACTIVITY_RECEIPT_CAPABILITY,
+  HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY,
   makeEnvelope,
   type Envelope,
+  type StandbyDecisionPayload,
   type SelectRequestPayload,
   type PlanRequestPayload,
   type AnchorGetPayload,
@@ -79,6 +81,7 @@ import { isWritingLanguage } from '../kernel/writing-language.js';
 import type { WritingLanguage } from '../kernel/soul-types.js';
 import type { PacingSnapshotPayload } from './protocol.js';
 import type { AccountPausePort } from '../kernel/account-pause-port.js';
+import type { HostStandbyDecisionStore } from './host-standby-decision-store.js';
 import type { ConfigMirrorGatePort } from '../kernel/config-mirror-bump-types.js';
 import {
   parseAuthStatusPayload,
@@ -198,6 +201,16 @@ export interface HandlerDeps {
   commandSequencer?: Pick<CommandSequencer, 'onResult'>;
   /** task.acquired/released 关联器；未注入时回执仅忽略，兼容纯协议测试。 */
   edgeTaskLeases?: Pick<EdgeTaskLeaseClient, 'onAcquired' | 'onReleased'>;
+  /**
+   * 宿主层让位判决遥测的持有方（change report-host-standby-decisions）。
+   *
+   * **注入与否决定要不要在握手里协商这条能力**：未注入 ⇒ welcome 不回该能力位 ⇒ 边缘不上报。
+   * 这样「云端没有消费方」就不会长成「边缘一直在发、没人接」那种静默黑洞。
+   *
+   * 类型只声明**写侧一个方法**：这是遥测的入口，读侧（面板）走 kernel 的只读端口。
+   * 消费方 MUST NOT 出现在任何下发决策路径上——可见性不是否决权。
+   */
+  hostStandbyDecisions?: Pick<HostStandbyDecisionStore, 'record'>;
   // ── multi-account-node-support：按连接多租户路由 ─────────────────────────
   /**
    * 该连接的私有事件总线（缺省 → 回落 eventBus，单租户向后兼容）。入站事件发到此总线，
@@ -329,6 +342,40 @@ export function buildSelectionPrompt(goal: string, elements: RemoteElement[]): s
 /** 非空、非数组的普通对象判定（用于收窄 action.completed 的 observation 独立见证包）。 */
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * 校验并归一一条宿主层让位判决回执（change report-host-standby-decisions）。
+ *
+ * 只认字段形状，不做任何语义判断——载荷是**事实**，云端的职责到「收下并如实留存」为止。
+ * 不合法即返回 null（调用方回一条具名 error），MUST NOT 半填一条记录当成收到了。
+ */
+export function parseStandbyDecisionPayload(raw: unknown): StandbyDecisionPayload | null {
+  if (!isRecord(raw)) return null;
+  const verdict = raw.verdict;
+  if (verdict !== 'yielded' && verdict !== 'refused') return null;
+  const reason = typeof raw.reason === 'string' ? raw.reason.trim() : '';
+  if (!reason) return null;
+  const refusedCount = nonNegativeIntOrNull(raw.refusedCount);
+  const hintGeneratedAt = nonNegativeIntOrNull(raw.hintGeneratedAt);
+  const decidedAt = nonNegativeIntOrNull(raw.decidedAt);
+  if (refusedCount === null || hintGeneratedAt === null || decidedAt === null) return null;
+  const refusedSince = nonNegativeIntOrNull(raw.refusedSince);
+  const envId = typeof raw.envId === 'string' && raw.envId.trim() ? raw.envId.trim() : undefined;
+  return {
+    verdict,
+    reason,
+    refusedCount,
+    ...(refusedSince === null ? {} : { refusedSince }),
+    hintGeneratedAt,
+    decidedAt,
+    ...(envId ? { envId } : {}),
+  };
+}
+
+function nonNegativeIntOrNull(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
 }
 
 /** 从模型输出解析整数编号 */
@@ -528,6 +575,35 @@ export class DefaultMessageHandler implements MessageHandler {
           reason: typeof payload.reason === 'string' ? payload.reason : undefined,
           ts: this.clock(),
         });
+        return null;
+      }
+      /**
+       * 宿主层让位判决回执（change report-host-standby-decisions）——**只读遥测**。
+       *
+       * 这里 MUST 只做三件事：校验、留存、返回。它 MUST NOT emit 任何事件、MUST NOT 触碰会话状态、
+       * MUST NOT 影响任何下发决策——槽位调度权在宿主层，云端读得到但 MUST NOT 据此否决。
+       *
+       * 为什么不能复用上面那条 `browser.status`：它只接受 absent/ready 两个取值，且状态未变化时
+       * 直接返回；让位被拒时浏览器始终 ready ⇒ 状态永不变化 ⇒ 整条消息连同诊断字段被静默丢弃。
+       */
+      case 'standby.decision': {
+        const decision = parseStandbyDecisionPayload(env.payload);
+        if (!decision) {
+          return makeEnvelope('error', env.id, this.clock(), {
+            code: 'invalid_standby_decision',
+            message: 'standby.decision 载荷不合法（verdict/reason/refusedCount/hintGeneratedAt/decidedAt）',
+          });
+        }
+        // 未接线消费方 = 云端本来就没在 welcome 里协商这条能力，正常边缘不会发；真发来了也只是丢弃，
+        // 绝不报错（旧客户端 / 灰度中途换端都可能出现，那不是故障）。
+        this.deps.hostStandbyDecisions?.record(
+          {
+            edgeId: session.edgeId ?? '',
+            ...(session.accountId ? { accountId: session.accountId } : {}),
+            ...(session.machineLabel ? { machineLabel: session.machineLabel } : {}),
+          },
+          decision,
+        );
         return null;
       }
       case 'ping':
@@ -1054,6 +1130,13 @@ export class DefaultMessageHandler implements MessageHandler {
         : []),
       ...((session.capabilities ?? []).includes(SEARCH_ACTIVITY_RECEIPT_CAPABILITY)
         ? [SEARCH_ACTIVITY_RECEIPT_CAPABILITY]
+        : []),
+      // 宿主层让位判决遥测（change report-host-standby-decisions）：**双向都要有**才协商——
+      // 边缘声明了自己会发，云端也真的接了消费方。缺任一侧就不回该能力位，边缘据此静默不上报、
+      // 不报错。灰度只能走这条路：客户端会被从源码重新编译装机而不抬版本号，版本号认不出装的是哪份代码。
+      ...((session.capabilities ?? []).includes(HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY)
+        && this.deps.hostStandbyDecisions
+        ? [HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY]
         : []),
       ...(this.deps.interactionInbox
         ? [

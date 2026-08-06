@@ -561,6 +561,12 @@ import {
   PanelAutomationHttpClient,
   registerPanelAutomationRoutes,
 } from './transport/panel-automation-http.js';
+import type { HostStandbyDecisionReader } from './kernel/host-standby-decision-port.js';
+import { HostStandbyDecisionStore } from './comm/host-standby-decision-store.js';
+import {
+  HostStandbyDecisionHttpClient,
+  registerHostStandbyDecisionRoutes,
+} from './transport/host-standby-decision-http.js';
 import {
   PanelPacingConfigHttpClient,
   PanelQuotaConfigHttpClient,
@@ -1088,6 +1094,11 @@ interface CompositionContext {
   };
   /** 面板方向的调度活跃三态读（task 1.3a）。 */
   dispatchActivityForPanel?: () => Promise<AutomationDispatchActivity>;
+  /**
+   * 宿主层让位判决遥测的持有方（change report-host-standby-decisions）。
+   * segC（边-云网关）构造：写侧喂给消息处理器，读侧经 automation 内部 API 交给面板。
+   */
+  hostStandbyDecisions?: HostStandbyDecisionStore;
   automationEdgeResumeAuthority?: EdgeResumeCommandPort;
   automationFacebookScopeAuthority?: FacebookScopeCommandPort;
   automationPublishUiUpdateAuthority?: PublishUiUpdateCommandPort;
@@ -2016,6 +2027,14 @@ async function startAutomationInternalApi(ctx: CompositionContext): Promise<void
     console.warn('[aidcp-cloud] automation 内部 API：risk-read 路由未注册（RiskControllerRegistry 不可用）');
   }
   registerPanelAutomationRoutes(httpServer, new PgPanelAutomationRead({ pool: ctx.automationPool }));
+  // 宿主层让位判决遥测（change report-host-standby-decisions）：只读路由。持有方在边-云网关段构造。
+  const hostStandbyDecisions = crossSegment(
+    ctx.hostStandbyDecisions,
+    '宿主层让位判决只读路由注册',
+    '自动化段（边-云网关）',
+    '面板将读不到「哪台机器上的哪个环境卡住了」；让位判决本身不受影响',
+  );
+  if (hostStandbyDecisions) registerHostStandbyDecisionRoutes(httpServer, hostStandbyDecisions);
   registerPanelConfigRoutes(httpServer, {
     quota: createQuotaConfigPanel({ store: ctx.quotaConfigStore }),
     pacing: createPacingConfigPanel({ store: ctx.pacingConfigStore }),
@@ -6116,8 +6135,13 @@ async function segCAutomation(ctx: CompositionContext): Promise<void> {
         },
       }
     : undefined;
+  // 宿主层让位判决遥测（change report-host-standby-decisions）：**只读**当前态持有方。
+  //   写侧只有消息处理器（收下边缘回执）；读侧只有面板。它 MUST NOT 被接进任何下发决策路径——
+  //   槽位调度权在宿主层，云端读得到但绝不据此否决。挂 ctx 供 automation 内部 API 暴露成只读路由。
+  ctx.hostStandbyDecisions = new HostStandbyDecisionStore();
   const handler = new DefaultMessageHandler({
     configMirrorGate,
+    hostStandbyDecisions: ctx.hostStandbyDecisions,
     planner,
     llm,
     cache,
@@ -9578,6 +9602,20 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
     mode === 'api'
       ? new PanelAutomationHttpClient(automationHttp)
       : new PgPanelAutomationRead({ pool: automationPool });
+  // 宿主层让位判决遥测的只读取用（change report-host-standby-decisions）。同上分道：
+  //   - monolith / core：直接读边-云网关段那个进程内持有方；
+  //   - api：segC 未跑 ⇒ 经 automation internal HTTP 取当前态。
+  // 取不到（跑了 api 段却没跑 segC、且非 api 模式）⇒ crossSegment 响亮记一笔并留空，
+  // 面板对应端点回「不可用」而不是空列表——「读不到」MUST NOT 被呈现成「没有环境卡住」。
+  const hostStandbyDecisionRead: HostStandbyDecisionReader | undefined =
+    mode === 'api'
+      ? new HostStandbyDecisionHttpClient(automationHttp)
+      : crossSegment(
+          ctx.hostStandbyDecisions,
+          '面板读取宿主层让位判决当前态',
+          '自动化段（边-云网关）',
+          '面板该端点将回 503；让位判决与其执行完全不受影响',
+        );
 
   // ── 面板 API 层（管理后台后端，进程内、独立端口、JWT）──────────────────────
   // 未设置 AIDCP_PANEL_PORT 则禁用（默认不开新端口）；启动失败非致命，绝不连累边-云闭环。
@@ -9597,6 +9635,9 @@ async function segDApiServing(ctx: CompositionContext): Promise<void> {
             getView: () => requireSegment(interactionPermissionOverview, 'interactionPermissionOverview', 'automation'),
           },
           revocation: new TokenRevocationStore(),
+          // 宿主层让位判决遥测（change report-host-standby-decisions）：**只读**注入。
+          // 缺席时字段省略 ⇒ 该端点回 503，绝不把「读不到」呈现成「没有环境卡住」。
+          ...(hostStandbyDecisionRead ? { hostStandbyDecisions: hostStandbyDecisionRead } : {}),
           // change cloud-coupling-phase5 P5-1：面板的风控写改成异步命令端口（提交 + 回读），
           // 不再注入 RiskController registry。写只发生在 automation 的单写者回调里。
           riskCommands,
