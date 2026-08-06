@@ -1,22 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import {
   InternalHttpClient,
   InternalHttpServer,
   INTERNAL_HTTP_TIMEOUT_CEILING_MS,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   PUBLISH_GENERATION_ROUTES,
   PUBLISH_GENERATION_POLL_SEGMENT_CEILING_MS,
   PublishGenerationHttpClient,
   registerPublishGenerationRoutes,
-} from '../../src/transport/publish-generation-http.js';
+} from '@automation/transport/publish-generation-http.js';
 import type {
   PublishGenerationPort,
   SchedulerTriggerResult,
-} from '../../src/kernel/publish-generation-types.js';
-import type { TriggerInput } from '../../src/kernel/publish-pipeline-types.js';
+} from '@kernel/kernel/publish-generation-types.js';
+import type { TriggerInput } from '@kernel/kernel/publish-pipeline-types.js';
 
 /** 样本终态：结构上满足 SchedulerTriggerResult（含 approvalCard 联合的一个合法枝）。 */
 const SAMPLE: SchedulerTriggerResult = {
@@ -111,26 +110,20 @@ test('慢 trigger（client 多轮）：小 pollSegmentMs 下循环 poll 直到 d
 });
 
 /**
- * 组合根接线不变量：单次调用超时 MUST > 分段 long-poll 预算。
+ * 超时预算不变量：单次调用超时 MUST > 分段 long-poll 预算。
  * 落回默认 15s 时，每一段 poll 都会在服务端回 `{done:false}` 之前被客户端切断 ⇒ 每次跨服务发帖生成
- * 都在 15s 确定性失败（core 模式的硬阻断，typecheck 抓不到——它只是个缺省参数）。
+ * 都在 15s 确定性失败。
+ *
+ * 事实源翻转后（invert-split-fact-source 5.6）：「组装根真的显式接线 180s」那一半已由属主仓
+ * 自己的 `aidcp-automation/test/transport/publish-generation-http.test.ts` 按派生组装根
+ * （automation-main.ts）正向钉住，本仓不再读已冻结的单体 `src/server.ts`；这里只保留两个常量
+ * 之间的预算关系。
  */
-test('组合根：跨服务生成客户端显式接线 180s 超时（> 150s 分段轮询，绝不落 15s 默认）', async () => {
+test('超时预算：单次调用天花板 180s 且严格大于单段 long-poll 挂起上限', () => {
   assert.equal(INTERNAL_HTTP_TIMEOUT_CEILING_MS, 180_000);
   assert.ok(
     INTERNAL_HTTP_TIMEOUT_CEILING_MS > PUBLISH_GENERATION_POLL_SEGMENT_CEILING_MS,
     '单次调用超时必须严格大于单段 long-poll 挂起上限',
-  );
-  const source = await readFile(new URL('../../src/server.ts', import.meta.url), 'utf8');
-  const at = source.indexOf('new PublishGenerationHttpClient(');
-  assert.ok(at >= 0, '组合根必须存在 HTTP 生成客户端的构造点');
-  const ctor = source.slice(at, at + 500);
-  const wired = /new InternalHttpClient\([^)]*timeoutMs:\s*([A-Za-z_$][\w$]*)/.exec(ctor);
-  assert.ok(wired, '生成客户端 MUST 显式传 timeoutMs（缺省 15s ⇒ 每次跨服务生成确定性超时）');
-  assert.equal(
-    wired[1],
-    'INTERNAL_HTTP_TIMEOUT_CEILING_MS',
-    '复用既有 180s 单一来源常量（与 model-call 天花板同源），不新写魔数',
   );
 });
 

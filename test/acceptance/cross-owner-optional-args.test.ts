@@ -19,11 +19,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
-import type { CuratedNoteSink } from '../../src/agents/curated-note-evaluator.js';
+import type { CuratedNoteSink } from '@automation/agents/curated-note-evaluator.js';
 import {
   createCoverFormSensor,
   type CoverFormSensor,
-} from '../../src/publish-agent/cover-form-sensor.js';
+} from '@content/publish-agent/cover-form-sensor.js';
+
+import { ownedSourcePath } from '../helpers/sibling-repos.js';
 
 /** T 上**必选**键的集合：可选键映射成 never 被过滤掉。 */
 type RequiredKeysOf<T> = {
@@ -57,7 +59,7 @@ test('AC-XOPT-1：判形口两个方法都必选，且真实实现两个都给',
 
 test('AC-XOPT-2：两个调用点不得再给 senseAt 兜底或非空断言', async () => {
   const transcriber = await readFile(
-    new URL('../../src/publish-agent/text-card-transcriber.ts', import.meta.url),
+    ownedSourcePath('content', 'publish-agent/text-card-transcriber.ts'),
     'utf8',
   );
   // 曾经的写法：`deps.formSensor.senseAt ? await … : { status: 'error', … }`。
@@ -71,7 +73,9 @@ test('AC-XOPT-2：两个调用点不得再给 senseAt 兜底或非空断言', as
     '那个兜底错误态是缺席的伪装，不得回来',
   );
 
-  const server = await readFile(new URL('../../src/server.ts', import.meta.url), 'utf8');
+  // 事实源翻转后（invert-split-fact-source 5.6 re-anchor）：转写链的属主组装根在
+  // aidcp-content 的 src/server.ts —— 单体那份已冻结、不再部署，读它等于读死照片。
+  const server = await readFile(ownedSourcePath('content', 'server.ts'), 'utf8');
   // 曾经的写法是用非空断言把「接口上可选」硬撑过去，缺席即运行时 TypeError，而不是编译期就说清楚。
   // ⚠️ 源码扫描**连注释一起扫**：这一条第一次跑就被组装根里一句复述该写法的注释判红。
   // 所以被禁的写法在这里只出现一次（就是下面那个 includes 的实参），别在任何注释里复述它。

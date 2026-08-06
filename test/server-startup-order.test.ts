@@ -1,124 +1,76 @@
+/**
+ * P4（cloud-coupling-phase4-runtime-ports）：可选注入端口的机械守卫 —— 派生根形态。
+ *
+ * 这些端口不注入时的语义是「恒不停手 / 预览退化成诚实说明」——与端口引入前逐位一致，所以漏接线
+ * 既不抛错、也不会被 typecheck 抓到，只会在生产上静默失去一整层闸。单体版守卫自己的注释写着
+ * 「物理拆仓后本断言 MUST 跟着复制到 automation 仓并指向它自己的组合根」，而那次复制没有发生 ——
+ * 本文件就是那份缺失的守卫，落在集成仓、经兄弟仓路径读**现役**组装根
+ * （invert-split-fact-source 5.6 re-anchor）。
+ *
+ * 单体版的其余五条启动顺序断言已删除，各自的家：
+ *  - 「先建连接运行时登记处再监听」「hello 不提前起业务」→ 派生根把登记处做成边缘接入层的
+ *    构造参数、监听推迟到 `edgeAccess.start()`（automation-main 的启动外壳），并由
+ *    aidcp-automation 的组合根用例（automation-main / automation-connection-runtime /
+ *    composition-root-4a-mode-wiring，后者真启动整根）看守；
+ *  - 「委托恢复先于就绪宣告」→ 收敛进 `DelegatedTaskWorker.start()` 自身（先收敛遗留 claim
+ *    再开泵，automation-main 的启动外壳 await 它）；
+ *  - 「risk 缺席不连带禁其它路由」→ aidcp-automation `served-route-inventory` + automation-main；
+ *  - 「飞书接收器注入持久审批写权威」→ aidcp-api `feishu-ws-receiver.test.ts` 与
+ *    api-composition-root-4a。
+ *
+ * 单体版 P4 的第四个端口（提示词预览接收发布/配图 builders）**按裁定退休**：拆分后渲染器在
+ * 内容/自动化进程，api 面板预览显式声明 rendererElsewhereNote（restore-panel-capability-wiring
+ * 批次 3 的诚实缺席），不再是「必须接线」的口——它的缺席有具名说明，不是静默丢失。
+ */
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-test('Edge WebSocket starts only after connection runtime registry is ready', async () => {
-  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
-  const runtimeReady = source.indexOf("runtimes = new ConnectionRuntimeRegistry({");
-  const listen = source.indexOf('await server.start();');
-  assert.ok(runtimeReady >= 0 && listen >= 0, 'startup landmarks must exist');
-  assert.ok(runtimeReady < listen, 'Cloud must not accept hello before runtimes.onHandshake is initialized');
-});
+import { siblingRepoRoot } from './helpers/sibling-repos.js';
 
-test('hello handler does not activate business runtime until onEdgeRegistered post-welcome callback', async () => {
-  const [handler, registry, server] = await Promise.all([
-    readFile(new URL('../src/comm/handler.ts', import.meta.url), 'utf8'),
-    readFile(new URL('../src/orchestrator/connection-runtime.ts', import.meta.url), 'utf8'),
-    readFile(new URL('../src/server.ts', import.meta.url), 'utf8'),
-  ]);
-  assert.equal(
-    handler.includes("this.bus(session).emit('edge.hello'"),
-    false,
-    'hello request handling must not start persona-dependent business work before welcome',
-  );
-  const admission = registry.slice(registry.indexOf('async onHandshake('), registry.indexOf('onWelcomed('));
-  assert.equal(admission.includes('buildDispatcher('), false, 'pre-welcome admission must not construct dispatcher');
-  assert.match(server, /onEdgeRegistered:[\s\S]*runtimes\?\.onWelcomed\(session\)/);
-});
+const automationSrc = (rel: string) =>
+  readFile(join(siblingRepoRoot('aidcp-automation'), 'src', rel), 'utf8');
 
-test('delegated worker startup recovery finishes before its execution pump is announced ready', async () => {
-  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
-  const workerStart = source.indexOf("await worker.start(readEnvNumber('AIDCP_DELEGATED_TASK_POLL_MS'");
-  const readyLog = source.indexOf('DelegatedTaskWorker 已启动');
-  assert.ok(workerStart >= 0 && readyLog >= 0, 'delegated worker startup landmarks must exist');
-  assert.ok(workerStart < readyLog, 'interrupted claims must recover before worker readiness is announced');
-});
-
-test('automation internal API keeps non-risk owner routes when risk registry is unavailable', async () => {
-  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
-  const start = source.indexOf('async function startAutomationInternalApi(');
-  const end = source.indexOf('\nasync function startContentReadApi(', start);
-  assert.ok(start >= 0 && end > start, 'automation internal API composition must exist');
-  const body = source.slice(start, end);
-  assert.doesNotMatch(body, /if\s*\(\s*!registry\s*\)\s*(?:\{[^}]*\}\s*)?return\b/);
-  for (const registration of [
-    'registerPanelAutomationRoutes(',
-    'registerPanelConfigRoutes(',
-    'registerFacebookGroupOpsRoutes(',
-    'registerGroupRouteRoutes(',
-    'registerAlertResolutionRoutes(',
-  ]) {
-    assert.ok(
-      body.includes(registration),
-      `${registration} must stay in the automation internal API composition`,
-    );
-  }
-  assert.ok(
-    body.indexOf('registerPanelAutomationRoutes(') > body.indexOf("console.warn('[aidcp-cloud] automation 内部 API：risk-read"),
-    'non-risk owner routes must be registered after the optional risk-read branch, not nested inside it',
-  );
-});
-
-test('every Feishu receiver production composition injects the durable approval write authority', async () => {
-  const [source, feishuOwner] = await Promise.all([
-    readFile(new URL('../src/server.ts', import.meta.url), 'utf8'),
-    readFile(
-      new URL('../src/feishu/api-owner-composition.ts', import.meta.url),
-      'utf8',
-    ),
-  ]);
-  const compositions = [
-    ...feishuOwner.matchAll(/new FeishuWsReceiver\(\{([\s\S]*?)\n      \}\);/g),
-  ].map((match) => match[1] ?? '');
-  assert.ok(compositions.length > 0, 'production must compose at least one Feishu receiver');
-  for (const composition of compositions) {
-    assert.match(
-      composition,
-      /\bwriteApproval:\s*input\.writeApproval/,
-      'Feishu receiver must receive the explicit approval write port owned by its API composition',
-    );
-  }
-  const ingress = source.slice(
-    source.indexOf('const feishuIngress = await feishuOwner.startIngress({'),
-    source.indexOf('\n  ctx.botChatsProvider = feishuIngress.botChatsProvider;'),
-  );
-  assert.ok(ingress.length > 0, 'API composition must start Feishu ingress');
+test('P4: 配置镜像停手闸真的交到消息处理器手里（automation 边缘接入层）', async () => {
+  const source = await automationSrc('automation-edge-access.ts');
+  const at = source.indexOf('new DefaultMessageHandler({');
+  assert.ok(at >= 0, '边缘接入层必须构造消息处理器');
   assert.match(
-    ingress,
-    /\bwriteApproval:\s*\([\s\S]{0,180}writeApprovalDecision\(/,
-    'API composition must feed Feishu ingress the shared durable approval authority',
+    source.slice(at, at + 400),
+    /configMirrorGate:\s*options\.configMirrorGate,/,
+    '消息处理器必须收到停手闸 —— 漏接不报错，只是镜像过期时整层闸静默消失',
+  );
+});
+
+test('P4: 配置镜像停手闸真的交到角色调度器手里（automation 连接调度层）', async () => {
+  const source = await automationSrc('automation-connection-dispatcher.ts');
+  assert.match(
+    source,
+    /configMirrorGate:\s*deps\.configMirrorGate,/,
+    '调度器构造选项必须带停手闸',
   );
   assert.match(
     source,
-    /await import\([\s\S]{0,100}\.\/feishu\/api-owner-composition\.js/,
-    'Feishu owner stack must be loaded dynamically only by API-containing modes',
+    /new RoleDispatcher\(o\)\)\)\(options\)/,
+    '构造选项必须真的流进 RoleDispatcher（改了接线形状请同步本断言）',
   );
 });
 
-/**
- * P4（cloud-coupling-phase4-runtime-ports）：四个**可选**注入端口的唯一机械守卫。
- *
- * 它们不注入时的语义是「恒不停手 / 预览退化成诚实说明」——与端口引入前逐位一致，所以漏接线
- * 既不抛错、也不会被 typecheck 抓到，只会在生产上静默失去一整层闸或一整页预览。这条断言读
- * 组合根源码，把「实现确实交到了消费方手里」钉死在编译期之外的一道上。
- *
- * ⚠️ 物理拆仓后每个仓有自己的 server.ts，本断言 MUST 跟着复制到 automation 仓并指向它自己的组合根，
- * 否则守卫在拆仓当天蒸发、可选端口回到裸奔。
- */
-test('P4 optional runtime ports are actually wired at the composition root', async () => {
-  const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
+test('P4: 风控底座拿到的是真实的镜像过期读数，不是永远新鲜的桩', async () => {
+  // automation-risk-foundation 已把 mirrorStale 做成必填参数（在场由编译期保证）；
+  // 这里守的是喂进去的是**真读数**——一个 `() => false` 的桩同样能过 typecheck，
+  // 而它的含义是「镜像永远新鲜」，闸恒开。
+  const main = await automationSrc('automation-main.ts');
   assert.match(
-    source,
-    /const configMirrorGate: ConfigMirrorGatePort = \{/,
-    'composition root must build exactly one config-mirror halt adapter',
+    main,
+    /mirrorStale:\s*\(mirrorKey\)\s*=>\s*configMirrorGate\.isStale\(mirrorKey\)/,
+    '风控底座的 mirrorStale 必须委托停手闸的真实读数',
   );
-  const handler = source.slice(source.indexOf('new DefaultMessageHandler({'));
-  assert.match(handler.slice(0, 400), /\n {4}configMirrorGate,\n/, 'message handler must receive the halt gate');
-  const dispatcher = source.slice(source.indexOf('return new RoleDispatcher({'));
-  assert.match(dispatcher.slice(0, 400), /\n {6}configMirrorGate,\n/, 'role dispatcher must receive the halt gate');
-  const registry = source.slice(source.indexOf('new RiskControllerRegistry('));
-  assert.match(registry.slice(0, 900), /\n {4}mirrorStale: \(/, 'risk registry must pass the staleness reader through');
-  const preview = source.slice(source.indexOf('createRolePromptProvider('));
-  assert.match(preview.slice(0, 1600), /publishPreviewBuilders: PUBLISH_PREVIEW_BUILDERS/, 'prompt preview must receive the publish builders');
-  assert.match(preview.slice(0, 1600), /imagePromptPreviewBuilders: IMAGE_PROMPT_PREVIEW_BUILDERS/, 'prompt preview must receive the image builders');
+  const foundation = await automationSrc('automation-risk-foundation.ts');
+  assert.match(
+    foundation,
+    /mirrorStale:\s*options\.mirrorStale,/,
+    '风控底座必须把读数原样传进注册表，不得在中途换成常量',
+  );
 });

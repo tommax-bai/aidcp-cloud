@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import type { Pool } from 'pg';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
-import type { InteractionSyncBatchPayload } from '../../src/kernel/interaction-types.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { PgInteractionApiWrites } from '@api/interactions/interaction-api-writes.js';
+import type { InteractionSyncBatchPayload } from '@kernel/kernel/interaction-types.js';
 import {
   INTERACTION_TEST_EXECUTION_TARGET,
   allowAllAuthGate,
@@ -168,17 +168,26 @@ test('classifying recovery keeps the stale threshold in the SQL predicate', asyn
   ]);
 });
 
-test('the 30s recovery cycle resets stale classifying jobs before scanning new and queued work', async () => {
-  const source = await readFile(new URL('../../src/server.ts', import.meta.url), 'utf8');
-  const start = source.indexOf('const drainInteractionRecovery');
-  const end = source.indexOf('const interactionRecoveryTimer', start);
-  assert.ok(start >= 0 && end > start);
+test('the recovery cycle resets stale classifying jobs before scanning new and queued work', async () => {
+  // 事实源翻转后（invert-split-fact-source 5.6 re-anchor）：恢复扫描的现役落点在
+  // aidcp-automation 的交互装配层（`automation-interaction.ts` 的 drainRecovery，
+  // 其注释自证「三段与单体逐字同序」）。单体 `src/server.ts` 已冻结、不再部署。
+  // 属主仓自身没有这条顺序守卫，故它留在本集成仓。
+  const { siblingRepoRoot } = await import('../helpers/sibling-repos.js');
+  const { join } = await import('node:path');
+  const source = await readFile(
+    join(siblingRepoRoot('aidcp-automation'), 'src', 'automation-interaction.ts'),
+    'utf8',
+  );
+  const start = source.indexOf('const drainRecovery');
+  const end = source.indexOf('recoveryTimer = setTimer', start);
+  assert.ok(start >= 0 && end > start, '恢复扫描的段落锚点失效——先确认它搬去了哪里');
   const cycle = source.slice(start, end);
   const reset = cycle.indexOf('recoverStalledClassifyingJobs');
   const drafts = cycle.indexOf('pendingGenerationJobs');
   const queued = cycle.indexOf('pendingQueuedJobs');
   assert.ok(reset >= 0 && reset < drafts && drafts < queued);
-  assert.match(cycle, /Date\.now\(\) - interactionAiTimeoutMs \* 2/);
+  assert.match(cycle, /Date\.now\(\) - aiTimeoutMs \* 2/);
 });
 
 test('deadline purges Cloud data without Edge receipt and a late receipt is recorded separately', async () => {
