@@ -24,7 +24,9 @@
  * ## 口径复用，不写第三份
  *
  * 写操作（INSERT / UPDATE / DELETE / CREATE TABLE / ALTER TABLE）与读引用（FROM / JOIN）
- * 一律走边界门禁那份扫描器 `boundary-scan.ts` 的 `scanSqlSource`，逐字同源。
+ * 一律走 `sql-scan.ts` 的 `scanSqlSource`——2026-08-06 cutover 前它逐字同源于边界门禁的
+ * `boundary-scan.ts`；单体门禁退役后那份扫描器随之删除（唯一实现活在 aidcp-automation），
+ * `sql-scan.ts` 是从它逐字析出的存活子集，「与边界门禁逐字同源」的约束随门禁一并失效。
  * 本文件只补**迁移文件里独有、而 src/ 里几乎不出现**的那几种引用形态（下面 `MIGRATION_REF_PATTERNS`
  * 逐条列出理由）—— 少了它们这道闸会漏掉本 change 要抓的那一类：`CREATE INDEX … ON <表>`
  * 正是 `0030` 的全部内容，而 `scanSqlSource` 的写模式里没有 create_index。
@@ -33,7 +35,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { REPO_ROOT, scanSqlSource } from './boundary-scan.js';
+import { REPO_ROOT, scanSqlSource } from './sql-scan.js';
 
 /**
  * 迁移独有的表引用形态。每条都锚定到完整语法，且都是**在库里那张表不存在时会当场报错**的形态

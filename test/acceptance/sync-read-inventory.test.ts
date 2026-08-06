@@ -8,7 +8,7 @@ import {
   SYNC_READ_STREAM_DEFINITIONS,
   type SyncReadStream,
 } from '@kernel/kernel/sync-read-snapshot.js';
-import { readJson } from './helpers/boundary-scan.js';
+import { readJson } from './helpers/sql-scan.js';
 import { ownedSourcePath, siblingRepoRoot, type OwnerLayer } from '../helpers/sibling-repos.js';
 
 /**
