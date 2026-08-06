@@ -27,6 +27,9 @@
  */
 
 import { createHash } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import pg from 'pg';
 
 import {
@@ -38,11 +41,11 @@ import {
 import {
   LEDGER_MIGRATION_NAME,
   loadMigrationFiles,
-  migrationsDir,
 } from '../src/schema/migration-files.js';
 import {
   filesForOwners,
   loadMigrationOwnerScopes,
+  loadTableOwnership,
   scopeDeclarationsToOwners,
   type MigrationOwnerIndex,
 } from '../src/schema/migration-owners.js';
@@ -59,6 +62,22 @@ import { declaredObjects, diffSchema, readActualSchema } from '../src/schema/sch
 import { runtimeSchemaName } from '../src/kernel/schema-name.js';
 
 const { Client } = pg;
+
+/**
+ * 本脚本所在仓的仓根。**两个输入都必须显式传，绝不吃默认值。**
+ *
+ * `migrationsDir()` 与 `tableOwnershipPath()` 的默认值是「模块文件往上两级」——在事实源仓里
+ * 指对了地方，而这一族已并入共享包 `aidcp-transport`：派生仓从 `node_modules/<包>/dist/schema/`
+ * 装载同一个函数，同一句话指向的是**包自己的目录**，那里既没有 `migrations/` 也没有
+ * `boundaries/`。本脚本三仓同源、四仓同跑，故基准只能取自**脚本自己的位置**：
+ * `scripts/` 往上一级恒为本仓仓根，事实源仓与派生仓逐字同解。
+ *
+ * 形态与 `src/*-schema-gate-startup.ts` 里那道启动期契约门一致（那边先撞过这个坑）。
+ * 漏传的后果不是报错而是**读到零条迁移**，契约门会据此说「通过」——这正是它存在要拦的那种无声错。
+ */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const MIGRATIONS_DIR = path.join(REPO_ROOT, 'migrations');
+const TABLE_OWNERSHIP_FILE = path.join(REPO_ROOT, 'boundaries', 'table-ownership.json');
 
 /** 整批互斥用的固定 advisory lock key（库级；任何 aidcp 迁移执行器共用这一把）。 */
 export const MIGRATION_ADVISORY_LOCK_KEY = 4788219350114677;
@@ -171,7 +190,7 @@ function printErrors(errors: { code: string; version: string; detail: string }[]
 async function commandStatus(client: pg.Client, files: MigrationFile[]): Promise<number> {
   const ledger = await readLedger(client);
   const plan = planMigrations(files, ledger.rows);
-  console.log(`迁移目录：${migrationsDir()}；本属主组范围 ${files.length} 个文件`);
+  console.log(`迁移目录：${MIGRATIONS_DIR}；本属主组范围 ${files.length} 个文件`);
   console.log(ledger.present ? `账本 schema_migrations：${ledger.rows.length} 行` : '账本 schema_migrations：不存在（尚未 bootstrap，跑 migrate up 或 migrate baseline 建立）');
   const maxApplied = ledger.rows.map((r) => r.version).sort(compareVersions).at(-1);
   if (maxApplied) console.log(`账本最高版本：${maxApplied}`);
@@ -371,7 +390,10 @@ async function main(): Promise<void> {
   }
 
   // 属主判据不可用即退出：退化成「不分属主、全库一把梭」会把一个属主的迁移灌进另一个属主的库。
-  const { index, files, tableOwners } = await loadMigrationOwnerScopes(() => loadMigrationFiles());
+  const { index, files, tableOwners } = await loadMigrationOwnerScopes(
+    () => loadMigrationFiles(MIGRATIONS_DIR),
+    () => loadTableOwnership(TABLE_OWNERSHIP_FILE),
+  );
   if (index.residue.length > 0) {
     console.log(`残留迁移（头声明为空、计入全部属主）${index.residue.length} 条：${index.residue.join(', ')}`);
   }
