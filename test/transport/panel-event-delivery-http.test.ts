@@ -5,17 +5,17 @@ import {
   PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
   type PanelEventDelivery,
   type PanelEventDeliveryPort,
-} from '../../src/kernel/panel-event-delivery-port.js';
+} from '@kernel/kernel/panel-event-delivery-port.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   PANEL_EVENT_DELIVERY_ROUTES,
   PanelEventDeliveryHttpClient,
   registerPanelEventDeliveryRoutes,
-} from '../../src/transport/panel-event-delivery-http.js';
+} from '@automation/transport/panel-event-delivery-http.js';
 
 const SAMPLE: PanelEventDelivery = {
   contractVersion: PANEL_EVENT_DELIVERY_CONTRACT_VERSION,

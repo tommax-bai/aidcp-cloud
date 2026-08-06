@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { ApiSyncReadMirrors } from '../../src/config/api-sync-read-mirrors.js';
-import { makeSyncReadFactEnvelope } from '../../src/kernel/sync-read-facts.js';
-import { AutomationSyncReadMirrors } from '../../src/transport/automation-sync-read-mirrors.js';
-import { RISK_ACTIONS, type ActionQuota } from '../../src/kernel/risk-contract.js';
+import { ApiSyncReadMirrors } from '@api/config/api-sync-read-mirrors.js';
+import { makeSyncReadFactEnvelope } from '@kernel/kernel/sync-read-facts.js';
+import { AutomationSyncReadMirrors } from '@automation/transport/automation-sync-read-mirrors.js';
+import { RISK_ACTIONS, type ActionQuota } from '@kernel/kernel/risk-contract.js';
 
 test('A3/A4 distinguish known zero/empty from unknown and stale evidence', () => {
   let now = 100;

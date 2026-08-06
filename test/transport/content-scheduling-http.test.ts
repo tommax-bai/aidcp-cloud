@@ -8,13 +8,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   CONTENT_SCHEDULING_ROUTES,
   ContentSchedulingHttpClient,
   registerContentSchedulingRoutes,
-} from '../../src/transport/content-scheduling-http.js';
-import type { ContentSchedulingAutomationPort } from '../../src/kernel/content-scheduling-port.js';
+} from '@automation/transport/content-scheduling-http.js';
+import type { ContentSchedulingAutomationPort } from '@kernel/kernel/content-scheduling-port.js';
 
 const TOKEN = 'content-scheduling-token';
 

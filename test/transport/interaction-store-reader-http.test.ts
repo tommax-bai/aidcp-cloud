@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import {
   InternalHttpClient,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   INTERACTION_STORE_READER_ROUTES,
   InteractionStoreReaderHttpClient,
   registerInteractionStoreReaderRoutes,
-} from '../../src/transport/interaction-store-reader-http.js';
-import type { InteractionStoreReaderPort } from '../../src/kernel/interaction-types.js';
+} from '@automation/transport/interaction-store-reader-http.js';
+import type { InteractionStoreReaderPort } from '@kernel/kernel/interaction-types.js';
 
 const ALL_METHODS = [
   'getAuth', 'getSyncFreshness', 'listInteractions', 'listReplyPreviewContexts',

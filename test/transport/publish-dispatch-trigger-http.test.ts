@@ -1,22 +1,37 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  PUBLISH_DISPATCH_TRIGGER_CONTRACT_VERSION,
-  PublishDispatchTriggerError,
-  type PublishApprovalView,
-  type PublishDispatchTriggerInput,
-} from '../../src/kernel/publish-approval-contract.js';
-import { createPublishDispatchTriggerReceiver } from '../../src/publish-agent/publish-dispatch-trigger.js';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import type {
+  PublishApprovalView,
+  PublishDispatchTriggerInput,
+} from '@kernel/kernel/publish-approval-contract.js';
+import { createPublishDispatchTriggerReceiver } from '@automation/publish-agent/publish-dispatch-trigger.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   PUBLISH_DISPATCH_TRIGGER_ROUTES,
   PublishDispatchTriggerHttpClient,
   registerPublishDispatchTriggerRoutes,
-} from '../../src/transport/publish-dispatch-trigger-http.js';
+} from '@automation/transport/publish-dispatch-trigger-http.js';
+import { siblingRepoRoot } from '../helpers/sibling-repos.js';
+
+// Dual-instance reality (invert-split-fact-source): both the receiver (@automation/publish-agent)
+// and the HTTP client (@automation/transport) under test resolve `aidcp-kernel` from
+// aidcp-automation/node_modules (DIST), while the test's @kernel alias would load the kernel
+// repo SRC — two distinct class objects, so `instanceof` against the alias copy is always false.
+// Load the contract exactly as aidcp-automation resolves it (exports map: `./*.js` -> `./dist/*.js`).
+const { PUBLISH_DISPATCH_TRIGGER_CONTRACT_VERSION, PublishDispatchTriggerError } = (await import(
+  pathToFileURL(
+    join(
+      siblingRepoRoot('aidcp-automation'),
+      'node_modules', 'aidcp-kernel', 'dist', 'kernel', 'publish-approval-contract.js',
+    ),
+  ).href
+)) as typeof import('@kernel/kernel/publish-approval-contract.js');
 
 const CALLER_TOKEN = 'publish-trigger-test-token';
 

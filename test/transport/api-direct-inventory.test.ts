@@ -7,8 +7,8 @@ import {
   API_DIRECT_TOKEN_ENV,
   AUTOMATION_COMMAND_TOKEN_ENV,
   CONTENT_COMMAND_TOKEN_ENV,
-} from '../../src/kernel/api-direct-port.js';
-import { API_DIRECT_ROUTE_INVENTORY } from '../../src/transport/api-direct-http.js';
+} from '@kernel/kernel/api-direct-port.js';
+import { API_DIRECT_ROUTE_INVENTORY } from '@automation/transport/api-direct-http.js';
 import {
   deriveSurface,
   SURFACE_BINDINGS,

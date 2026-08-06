@@ -1,13 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   OpenAiCompatVisionClient,
   ProviderKeyMissingError,
   type OpenAiCompatVisionClientOptions,
   type VisionChatMessage,
-} from '../../src/llm/index.js';
+} from '@content/llm/index.js';
+import { siblingRepoRoot } from '../helpers/sibling-repos.js';
+
 // 直连 kernel 取同名类：用来钉死「错误族只有一份定义」（见文件末的跨出口同一性断言）。
-import { ProviderKeyMissingError as KernelProviderKeyMissingError } from '../../src/kernel/llm-errors.js';
+// 拆仓后的双实例现实（invert-split-fact-source）：content SRC 把 `aidcp-kernel` 解析到
+// aidcp-content/node_modules 的 DIST，而 @kernel 别名会加载 kernel 仓的 SRC——两个类对象。
+// 同一性断言必须取 content 实际解析到的那一份（exports map: `./*.js` → `./dist/*.js`）。
+const { ProviderKeyMissingError: KernelProviderKeyMissingError } = (await import(
+  pathToFileURL(
+    join(siblingRepoRoot('aidcp-content'), 'node_modules', 'aidcp-kernel', 'dist', 'kernel', 'llm-errors.js'),
+  ).href
+)) as typeof import('@kernel/kernel/llm-errors.js');
 
 type Rec = { calls: number; url?: string; auth?: string; body?: Record<string, unknown> };
 

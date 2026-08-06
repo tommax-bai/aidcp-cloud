@@ -1,5 +1,5 @@
 import { test } from 'node:test';
-import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 import {
@@ -8,7 +8,7 @@ import {
   normalizeCuratedReferenceImageFormGuess,
   isCuratedCoverForm,
   type CuratedReferenceImageFormGuess,
-} from '../../src/cache/curated-content-store.js';
+} from '@content/cache/curated-content-store.js';
 
 /** 可控返回 rowCount、记录 (sql, params) 的 pool 桩（不依赖真 PG）。 */
 function controllablePool(handler: (sql: string, params: unknown[]) => { rows?: unknown[]; rowCount?: number }): {

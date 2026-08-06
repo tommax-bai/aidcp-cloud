@@ -3,18 +3,18 @@ import { test } from 'node:test';
 import {
   API_DIRECT_CONTRACT_VERSION,
   type PublishUiUpdateCommandInput,
-} from '../../src/kernel/api-direct-port.js';
-import { ApiDirectHttpError } from '../../src/transport/api-direct-http-common.js';
+} from '@kernel/kernel/api-direct-port.js';
+import { ApiDirectHttpError } from '@automation/transport/api-direct-http-common.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   PUBLISH_UI_UPDATE_COMMAND_ROUTES,
   PublishUiUpdateCommandHttpClient,
   registerPublishUiUpdateCommandRoutes,
-} from '../../src/transport/paired-command-http.js';
+} from '@automation/transport/paired-command-http.js';
 
 const TOKEN = 'automation-command-token';
 

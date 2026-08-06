@@ -1,16 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { PanelAutomationReader } from '../../src/kernel/panel-automation-types.js';
+import type { PanelAutomationReader } from '@kernel/kernel/panel-automation-types.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   PANEL_AUTOMATION_ROUTES,
   PanelAutomationHttpClient,
   registerPanelAutomationRoutes,
-} from '../../src/transport/panel-automation-http.js';
+} from '@automation/transport/panel-automation-http.js';
 
 const ALL_METHODS = [
   'todayActionTotals',

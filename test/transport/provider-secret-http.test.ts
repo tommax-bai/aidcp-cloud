@@ -7,13 +7,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   PROVIDER_SECRET_ROUTES,
   ProviderSecretHttpClient,
   registerProviderSecretRoutes,
-} from '../../src/transport/provider-secret-http.js';
-import type { ProviderSecretReader } from '../../src/kernel/provider-secret-port.js';
+} from '@automation/transport/provider-secret-http.js';
+import type { ProviderSecretReader } from '@kernel/kernel/provider-secret-port.js';
 
 async function withServer(
   local: ProviderSecretReader,

@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import {
   InternalHttpClient,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   PUBLISH_STATUS_ROUTES,
   PublishStatusHttpClient,
   registerPublishStatusRoutes,
-} from '../../src/transport/publish-status-http.js';
+} from '@automation/transport/publish-status-http.js';
 import type {
   PublishQueueStatus,
   PublishStatusReader,
-} from '../../src/kernel/publish-status-types.js';
+} from '@kernel/kernel/publish-status-types.js';
 
 /** 一个含 running run 的状态样本（载荷 unknown，只测传输往返不构造管线全字段）。 */
 function runningStatus(): PublishQueueStatus {

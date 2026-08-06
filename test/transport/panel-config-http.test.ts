@@ -9,19 +9,19 @@ import type {
   QuotaConfigCatalogView,
   ResumeConfigView,
   SessionLimitView,
-} from '../../src/kernel/config-panel-ports.js';
+} from '@kernel/kernel/config-panel-ports.js';
 import {
   PanelPacingConfigHttpClient,
   PanelQuotaConfigHttpClient,
   PanelResumeConfigHttpClient,
   PanelSessionLimitsHttpClient,
   registerPanelConfigRoutes,
-} from '../../src/transport/panel-config-http.js';
+} from '@automation/transport/panel-config-http.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 
 const quotaView: QuotaConfigCatalogView = {
   quotas: [{

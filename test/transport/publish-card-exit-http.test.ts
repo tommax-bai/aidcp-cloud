@@ -12,13 +12,13 @@ import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   PUBLISH_CARD_EXIT_ROUTES,
   PublishCardExitHttpClient,
   registerPublishCardExitRoutes,
-} from '../../src/transport/publish-card-exit-http.js';
-import type { PublishCardExitPort } from '../../src/kernel/publish-card-exit-port.js';
+} from '@automation/transport/publish-card-exit-http.js';
+import type { PublishCardExitPort } from '@kernel/kernel/publish-card-exit-port.js';
 
 const APPROVAL_CALLER_TOKEN = 'publish-card-exit-approval-test-token';
 

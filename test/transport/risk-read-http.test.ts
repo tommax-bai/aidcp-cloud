@@ -1,17 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   RISK_READ_ROUTES,
   RiskReadHttpClient,
   registerRiskReadRoutes,
-} from '../../src/transport/risk-read-http.js';
+} from '@automation/transport/risk-read-http.js';
 import type {
   RiskReadPort,
   RiskStateView,
   WindowQuotasView,
   SlowStartViewData,
-} from '../../src/kernel/risk-read-types.js';
+} from '@kernel/kernel/risk-read-types.js';
 
 function sampleState(accountId: string): RiskStateView {
   return {

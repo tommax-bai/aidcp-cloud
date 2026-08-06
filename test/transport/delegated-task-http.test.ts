@@ -4,23 +4,23 @@ import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   DELEGATED_TASK_ROUTES,
   DelegatedTaskHttpClient,
   registerDelegatedTaskRoutes,
-} from '../../src/transport/delegated-task-http.js';
-import { ApiDirectHttpError, apiDirectEnvelope } from '../../src/transport/api-direct-http-common.js';
+} from '@automation/transport/delegated-task-http.js';
+import { ApiDirectHttpError, apiDirectEnvelope } from '@automation/transport/api-direct-http-common.js';
 import {
   isDelegatedTaskServiceError,
   restoreDelegatedTaskServiceError,
-} from '../../src/kernel/operator-command-port.js';
+} from '@kernel/kernel/operator-command-port.js';
 import {
   DelegatedTaskServiceError,
   type DelegatedTask,
   type DelegatedTaskIntent,
   type DelegatedTaskServicePort,
-} from '../../src/kernel/delegated-task-types.js';
+} from '@kernel/kernel/delegated-task-types.js';
 
 const TOKEN = 'delegated-task-test-token';
 const TARGET = 'dev' as const;

@@ -9,13 +9,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   PIPELINE_LOG_ROUTES,
   PipelineLogHttpClient,
   registerPipelineLogRoutes,
-} from '../../src/transport/pipeline-log-http.js';
-import type { PipelineLogEntry, PipelineLogSink } from '../../src/kernel/pipeline-log-contract.js';
+} from '@automation/transport/pipeline-log-http.js';
+import type { PipelineLogEntry, PipelineLogSink } from '@kernel/kernel/pipeline-log-contract.js';
 
 function entry(): PipelineLogEntry {
   return {

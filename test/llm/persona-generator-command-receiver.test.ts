@@ -3,8 +3,8 @@ import test from 'node:test';
 import {
   PersonaGeneratorCommandReceiver,
   PersonaGeneratorReceiptCapacityError,
-} from '../../src/llm/persona-generator-command-receiver.js';
-import type { PersonaGenerateOutcome } from '../../src/kernel/persona-ports.js';
+} from '@content/llm/persona-generator-command-receiver.js';
+import type { PersonaGenerateOutcome } from '@kernel/kernel/persona-ports.js';
 
 const GENERATED: PersonaGenerateOutcome = {
   ok: true,

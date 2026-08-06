@@ -1,22 +1,35 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  PUBLISH_APPROVAL_AUTHORITY_CONTRACT_VERSION,
-  PublishApprovalAuthorityError,
-  type PublishApprovalView,
-} from '../../src/kernel/publish-approval-contract.js';
-import { createPublishApprovalAuthorityService } from '../../src/publish-agent/publish-approval-api.js';
-import type { ApprovalDecisionRow } from '../../src/publish-agent/publish-approval-store.js';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import type { PublishApprovalView } from '@kernel/kernel/publish-approval-contract.js';
+import { createPublishApprovalAuthorityService } from '@api/publish-agent/publish-approval-api.js';
+import type { ApprovalDecisionRow } from '@api/publish-agent/publish-approval-store.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   PUBLISH_APPROVAL_AUTHORITY_ROUTES,
   PublishApprovalAuthorityHttpClient,
   registerPublishApprovalAuthorityRoutes,
-} from '../../src/transport/publish-approval-authority-http.js';
+} from '@automation/transport/publish-approval-authority-http.js';
+import { siblingRepoRoot } from '../helpers/sibling-repos.js';
+
+// Dual-instance reality (invert-split-fact-source): the @automation transport SRC under test
+// resolves `aidcp-kernel` from aidcp-automation/node_modules (DIST), while the test's @kernel
+// alias would load the kernel repo SRC — two distinct class objects, so `instanceof` against
+// the alias copy is always false. Load the contract exactly as aidcp-automation resolves it
+// (kernel exports map: `./*.js` -> `./dist/*.js`).
+const { PUBLISH_APPROVAL_AUTHORITY_CONTRACT_VERSION, PublishApprovalAuthorityError } = (await import(
+  pathToFileURL(
+    join(
+      siblingRepoRoot('aidcp-automation'),
+      'node_modules', 'aidcp-kernel', 'dist', 'kernel', 'publish-approval-contract.js',
+    ),
+  ).href
+)) as typeof import('@kernel/kernel/publish-approval-contract.js');
 
 const CALLER_TOKEN = 'approval-authority-test-token';
 

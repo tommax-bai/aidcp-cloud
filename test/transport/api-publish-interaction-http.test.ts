@@ -7,7 +7,7 @@ import {
   type InteractionApiWritesPort,
   type InteractionAuthAuthorityPort,
   type ReplyConfigResolverPort,
-} from '../../src/kernel/api-direct-port.js';
+} from '@kernel/kernel/api-direct-port.js';
 import {
   AUTOMATION_PUBLISH_LOG_ROUTES,
   EDGE_PUBLISH_COMMAND_ROUTES,
@@ -24,13 +24,13 @@ import {
   registerInteractionApiWritesRoutes,
   registerInteractionAuthRoutes,
   registerReplyConfigResolverRoutes,
-} from '../../src/transport/api-publish-interaction-http.js';
+} from '@automation/transport/api-publish-interaction-http.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
-import { ApiDirectHttpError } from '../../src/transport/api-direct-http-common.js';
+} from '@automation/transport/internal-http.js';
+import { ApiDirectHttpError } from '@automation/transport/api-direct-http-common.js';
 
 const TOKEN = 'api-publish-interaction-token';
 

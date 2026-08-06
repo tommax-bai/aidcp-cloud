@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import {
   InternalHttpClient,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   CURATED_CONTENT_ROUTES,
   CuratedContentHttpClient,
   registerCuratedContentRoutes,
-} from '../../src/transport/curated-content-http.js';
+} from '@automation/transport/curated-content-http.js';
 import type {
   CuratedContentReader,
   CuratedPanelRow,
-} from '../../src/kernel/curated-content-types.js';
+} from '@kernel/kernel/curated-content-types.js';
 
 function sampleRow(id: number, accountId: string): CuratedPanelRow {
   return {

@@ -7,14 +7,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   PUBLISH_LOG_ROUTES,
   PublishLogHttpClient,
   registerPublishLogRoutes,
-} from '../../src/transport/publish-log-http.js';
-import type { PublishLogWriter } from '../../src/kernel/publish-log-writer-port.js';
-import type { PublishRecord } from '../../src/kernel/publish-pipeline-types.js';
+} from '@automation/transport/publish-log-http.js';
+import type { PublishLogWriter } from '@kernel/kernel/publish-log-writer-port.js';
+import type { PublishRecord } from '@kernel/kernel/publish-pipeline-types.js';
 
 function sampleRecord(): PublishRecord {
   return {

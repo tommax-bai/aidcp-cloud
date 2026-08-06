@@ -6,14 +6,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   ROLE_MODEL_SELECTION_ROUTES,
   PollingRoleModelSelectionMirror,
   RoleModelSelectionHttpClient,
   registerRoleModelSelectionRoutes,
-} from '../../src/transport/role-model-selection-http.js';
-import type { RoleModelSelectionSnapshot } from '../../src/kernel/role-model-selection-port.js';
+} from '@automation/transport/role-model-selection-http.js';
+import type { RoleModelSelectionSnapshot } from '@kernel/kernel/role-model-selection-port.js';
 
 const FALLBACK = { provider: 'dashscope', model: 'qwen-plus' };
 const silent = { warn() {} };

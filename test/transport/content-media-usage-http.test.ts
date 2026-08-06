@@ -15,16 +15,16 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { DeploymentTarget } from '../../src/deployment-target.js';
-import { isContentPortError } from '../../src/kernel/content-port-error.js';
-import type { FacebookPublishMediaPort } from '../../src/kernel/facebook-publish-media-port.js';
+import type { DeploymentTarget } from '@kernel/deployment-target.js';
+import { isContentPortError } from '@kernel/kernel/content-port-error.js';
+import type { FacebookPublishMediaPort } from '@kernel/kernel/facebook-publish-media-port.js';
 import {
   llmUsageBucketStart,
   type LlmUsageIncrement,
   type LlmUsageRecordingPort,
-} from '../../src/kernel/llm-usage-recording-port.js';
-import { FacebookPublishMediaError } from '../../src/publish-agent/facebook-publish-media-store.js';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+} from '@kernel/kernel/llm-usage-recording-port.js';
+import { FacebookPublishMediaError } from '@content/publish-agent/facebook-publish-media-store.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   FACEBOOK_PUBLISH_MEDIA_AUTHORITY_ROUTES,
   FacebookPublishMediaAuthorityHttpClient,
@@ -32,7 +32,7 @@ import {
   LlmUsageRecordingAuthorityHttpClient,
   registerFacebookPublishMediaAuthorityRoutes,
   registerLlmUsageRecordingAuthorityRoutes,
-} from '../../src/transport/content-media-usage-http.js';
+} from '@automation/transport/content-media-usage-http.js';
 
 const TOKEN = 'content-internal-token';
 

@@ -1,20 +1,41 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-import {
-  PUBLISH_APPROVAL_DECISION_WRITER_CONTRACT_VERSION,
-  PublishApprovalDecisionWriterError,
-  type PublishApprovalDecisionWriteInput,
-  type PublishApprovalDecisionWriterPort,
-} from '../../src/kernel/publish-approval-contract.js';
-import { createPublishApprovalDecisionWriter } from '../../src/publish-agent/publish-approval-api.js';
-import { ApprovalExecutionTargetError } from '../../src/publish-agent/publish-approval-store.js';
-import { InternalHttpClient, InternalHttpError, InternalHttpServer } from '../../src/transport/internal-http.js';
+import type {
+  PublishApprovalDecisionWriteInput,
+  PublishApprovalDecisionWriterPort,
+} from '@kernel/kernel/publish-approval-contract.js';
+import { createPublishApprovalDecisionWriter } from '@api/publish-agent/publish-approval-api.js';
+import { ApprovalExecutionTargetError } from '@api/publish-agent/publish-approval-store.js';
+import { InternalHttpClient, InternalHttpError, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   PUBLISH_APPROVAL_DECISION_WRITER_ROUTES,
   PublishApprovalDecisionWriterHttpClient,
   registerPublishApprovalDecisionWriterRoutes,
-} from '../../src/transport/publish-approval-decision-http.js';
+} from '@automation/transport/publish-approval-decision-http.js';
+import { siblingRepoRoot } from '../helpers/sibling-repos.js';
+
+// Dual-instance reality (invert-split-fact-source): each sibling repo resolves `aidcp-kernel`
+// from its OWN node_modules (DIST), and the test's @kernel alias would load a third copy (the
+// kernel repo SRC) — `instanceof` only holds against the copy of the layer that throws. This
+// test exercises two layers: the @api owner adapter (throws aidcp-api's copy) and the
+// @automation HTTP client (rethrows aidcp-automation's copy), so it loads both
+// (kernel exports map: `./*.js` -> `./dist/*.js`).
+function kernelContractAsSeenBy(repo: 'aidcp-api' | 'aidcp-automation') {
+  return import(
+    pathToFileURL(
+      join(siblingRepoRoot(repo), 'node_modules', 'aidcp-kernel', 'dist', 'kernel', 'publish-approval-contract.js'),
+    ).href
+  ) as Promise<typeof import('@kernel/kernel/publish-approval-contract.js')>;
+}
+const { PublishApprovalDecisionWriterError: ApiDecisionWriterError } =
+  await kernelContractAsSeenBy('aidcp-api');
+const {
+  PUBLISH_APPROVAL_DECISION_WRITER_CONTRACT_VERSION,
+  PublishApprovalDecisionWriterError: AutomationDecisionWriterError,
+} = await kernelContractAsSeenBy('aidcp-automation');
 
 const input: PublishApprovalDecisionWriteInput = {
   requestId: 'publish-42',
@@ -86,7 +107,7 @@ test('decision writer owner adapter 拒绝 target mismatch 与不完整决策上
   await assert.rejects(
     () => local.writeDecision({ ...input, executionTarget: 'ol' }),
     (err: unknown) =>
-      err instanceof PublishApprovalDecisionWriterError &&
+      err instanceof ApiDecisionWriterError &&
       err.code === 'approval_decision_target_mismatch',
   );
   await assert.rejects(
@@ -95,7 +116,7 @@ test('decision writer owner adapter 拒绝 target mismatch 与不完整决策上
       context: { ...input.context, decidedBy: '' },
     }),
     (err: unknown) =>
-      err instanceof PublishApprovalDecisionWriterError &&
+      err instanceof ApiDecisionWriterError &&
       err.code === 'approval_decision_invalid_request',
   );
 });
@@ -110,7 +131,7 @@ test('decision writer 将跨 target 全局唯一冲突稳定映射为 unavailabl
   await assert.rejects(
     () => local.writeDecision(input),
     (err: unknown) =>
-      err instanceof PublishApprovalDecisionWriterError &&
+      err instanceof ApiDecisionWriterError &&
       err.code === 'approval_decision_unavailable' &&
       err.message === 'execution_target_conflict_or_unavailable',
   );
@@ -118,7 +139,7 @@ test('decision writer 将跨 target 全局唯一冲突稳定映射为 unavailabl
     await assert.rejects(
       () => client.writeDecision(input),
       (err: unknown) =>
-        err instanceof PublishApprovalDecisionWriterError &&
+        err instanceof AutomationDecisionWriterError &&
         err.code === 'approval_decision_unavailable' &&
         err.message === 'execution_target_conflict_or_unavailable',
     );
@@ -165,7 +186,7 @@ test('decision writer route 在 owner write 前拒绝 missing/wrong token', asyn
       await assert.rejects(
         () => new PublishApprovalDecisionWriterHttpClient(http, 'wrong-token').writeDecision(input),
         (err: unknown) =>
-          err instanceof PublishApprovalDecisionWriterError &&
+          err instanceof AutomationDecisionWriterError &&
           err.code === 'approval_decision_result_unknown',
       );
       assert.equal(writes, 0);
@@ -183,7 +204,7 @@ test('decision writer mutation 的断链与畸形响应都报告 result_unknown'
   await assert.rejects(
     () => unavailable.writeDecision(input),
     (err: unknown) =>
-      err instanceof PublishApprovalDecisionWriterError &&
+      err instanceof AutomationDecisionWriterError &&
       err.code === 'approval_decision_result_unknown',
   );
 
@@ -193,7 +214,7 @@ test('decision writer mutation 的断链与畸形响应都报告 result_unknown'
       await assert.rejects(
         () => client.writeDecision(input),
         (err: unknown) =>
-          err instanceof PublishApprovalDecisionWriterError &&
+          err instanceof AutomationDecisionWriterError &&
           err.code === 'approval_decision_result_unknown',
       );
     },

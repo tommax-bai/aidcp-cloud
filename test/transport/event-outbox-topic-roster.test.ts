@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { CONFIG_MIRROR_BUMP_TOPIC } from '../../src/kernel/config-mirror-bump-types.js';
-import { INTERACTION_AUDIT_OUTBOX_TOPIC } from '../../src/kernel/interaction-audit-outbox.js';
-import { SYNC_READ_CHANGED_TOPIC } from '../../src/kernel/sync-read-snapshot.js';
-import { PANEL_EVENT_OUTBOX_TOPIC } from '../../src/transport/eventbus-outbox-bridge.js';
+import { CONFIG_MIRROR_BUMP_TOPIC } from '@kernel/kernel/config-mirror-bump-types.js';
+import { INTERACTION_AUDIT_OUTBOX_TOPIC } from '@kernel/kernel/interaction-audit-outbox.js';
+import { SYNC_READ_CHANGED_TOPIC } from '@kernel/kernel/sync-read-snapshot.js';
+import { PANEL_EVENT_OUTBOX_TOPIC } from '@automation/transport/eventbus-outbox-bridge.js';
 import {
   assertOutboxRetentionCoverage,
   EVENT_OUTBOX_RETENTION_ROSTER,
@@ -12,8 +12,8 @@ import {
   EVENT_OUTBOX_TOPICS,
   outboxTopicsRequiringRetention,
   reviewOutboxRetentionCoverage,
-} from '../../src/transport/event-outbox-topic-roster.js';
-import { RISK_COMMAND_TOPIC } from '../../src/transport/risk-command-outbox.js';
+} from '@automation/transport/event-outbox-topic-roster.js';
+import { RISK_COMMAND_TOPIC } from '@automation/transport/risk-command-outbox.js';
 
 // 登记表里的主题名是**手抄**的（避免在这张表上拉出跨属主 import 图）。
 // 手抄名单会与事实源漂移，本仓有前科 —— 所以这条引用断言才是它成立的前提：

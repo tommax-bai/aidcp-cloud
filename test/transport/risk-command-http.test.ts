@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { RiskCommandPort } from '../../src/kernel/risk-command-types.js';
-import { InternalHttpClient, InternalHttpError, InternalHttpServer } from '../../src/transport/internal-http.js';
+import type { RiskCommandPort } from '@kernel/kernel/risk-command-types.js';
+import { InternalHttpClient, InternalHttpError, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   RISK_COMMAND_ROUTES,
   RiskCommandHttpClient,
   registerRiskCommandRoutes,
-} from '../../src/transport/risk-command-http.js';
+} from '@automation/transport/risk-command-http.js';
 
 function localPort(calls: string[]): RiskCommandPort {
   return {

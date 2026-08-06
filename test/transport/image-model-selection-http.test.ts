@@ -9,14 +9,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   IMAGE_MODEL_SELECTION_ROUTES,
   ImageModelSelectionHttpClient,
   PollingImageModelSelectionMirror,
   registerImageModelSelectionRoutes,
-} from '../../src/transport/image-model-selection-http.js';
-import type { ImageModelSelection } from '../../src/kernel/image-model-selection-port.js';
+} from '@automation/transport/image-model-selection-http.js';
+import type { ImageModelSelection } from '@kernel/kernel/image-model-selection-port.js';
 
 const FALLBACK: ImageModelSelection = { imageProvider: 'dashscope', imageModel: 'wanx-v1' };
 const silent = { warn() {} };

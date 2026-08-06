@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { ApiSyncReadMirrors } from '../../src/config/api-sync-read-mirrors.js';
-import { syncReadPayloadDigest } from '../../src/kernel/sync-read-snapshot.js';
-import { PgAutomationSyncReadGenerationStore } from '../../src/transport/automation-sync-read-generation-store.js';
+import { ApiSyncReadMirrors } from '@api/config/api-sync-read-mirrors.js';
+import { syncReadPayloadDigest } from '@kernel/kernel/sync-read-snapshot.js';
+import { PgAutomationSyncReadGenerationStore } from '@automation/transport/automation-sync-read-generation-store.js';
 import {
   AutomationSyncReadSnapshotSource,
   type AutomationSyncReadRuntimeSources,
-} from '../../src/transport/automation-sync-read-source.js';
+} from '@automation/transport/automation-sync-read-source.js';
 import {
   createSyncReadChangedHandler,
   SyncReadChangedOutbox,
-} from '../../src/transport/sync-read-changed-outbox.js';
+} from '@automation/transport/sync-read-changed-outbox.js';
 
 test('runtime generation survives owner process restart and continues an API checkpoint cursor', async () => {
   const durable = generationPool();

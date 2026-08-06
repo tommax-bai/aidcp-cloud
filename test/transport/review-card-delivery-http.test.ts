@@ -7,13 +7,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
 import {
   REVIEW_CARD_DELIVERY_ROUTES,
   ReviewCardDeliveryHttpClient,
   registerReviewCardDeliveryRoutes,
-} from '../../src/transport/review-card-delivery-http.js';
-import type { ReviewCardDeliveryPort } from '../../src/kernel/review-card-delivery-port.js';
+} from '@automation/transport/review-card-delivery-http.js';
+import type { ReviewCardDeliveryPort } from '@kernel/kernel/review-card-delivery-port.js';
 
 const silent = { warn() {} };
 

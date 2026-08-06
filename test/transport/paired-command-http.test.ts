@@ -8,13 +8,13 @@ import {
   type EdgeResumeCommandPort,
   type FacebookScopeCommandPort,
   type PersonaGeneratorAuthorityPort,
-} from '../../src/kernel/api-direct-port.js';
-import { ApiDirectHttpError } from '../../src/transport/api-direct-http-common.js';
+} from '@kernel/kernel/api-direct-port.js';
+import { ApiDirectHttpError } from '@automation/transport/api-direct-http-common.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 import {
   EDGE_RESUME_COMMAND_ROUTES,
   FACEBOOK_SCOPE_COMMAND_ROUTES,
@@ -25,7 +25,7 @@ import {
   registerEdgeResumeCommandRoutes,
   registerFacebookScopeCommandRoutes,
   registerPersonaGeneratorCommandRoutes,
-} from '../../src/transport/paired-command-http.js';
+} from '@automation/transport/paired-command-http.js';
 
 const AUTOMATION_TOKEN = 'automation-command-token';
 const CONTENT_TOKEN = 'content-command-token';

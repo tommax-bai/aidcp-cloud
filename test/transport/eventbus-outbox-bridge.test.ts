@@ -19,14 +19,14 @@ import {
   encodePanelEventPayload,
   toJsonSafe,
   type EventBusLike,
-} from '../../src/transport/eventbus-outbox-bridge.js';
-import type { OutboxQueryable } from '../../src/transport/event-outbox.js';
-import { PANEL_FRAME_MAX_BYTES } from '../../src/kernel/panel-frame-limits.js';
+} from '@automation/transport/eventbus-outbox-bridge.js';
+import type { OutboxQueryable } from '@automation/transport/event-outbox.js';
+import { PANEL_FRAME_MAX_BYTES } from '@kernel/kernel/panel-frame-limits.js';
 import {
   PANEL_EVENT_DELIVERY_CONTRACT_VERSION,
   type PanelEventDelivery,
-} from '../../src/kernel/panel-event-delivery-port.js';
-import { PANEL_WS_MAX_FRAME_BYTES } from '../../src/panel/panel-ws.js';
+} from '@kernel/kernel/panel-event-delivery-port.js';
+import { PANEL_WS_MAX_FRAME_BYTES } from '@api/panel/panel-ws.js';
 
 const silent = { log() {}, warn() {} };
 

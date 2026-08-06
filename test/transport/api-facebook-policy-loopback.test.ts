@@ -5,23 +5,23 @@ import type pg from 'pg';
 import {
   createApiSyncReadSnapshotSource,
   type FacebookOperationPolicyBaselineStore,
-} from '../../src/config/api-sync-read-source.js';
-import type { FacebookOperationPolicyBaseProjection } from '../../src/kernel/facebook-operation-policy-resolution.js';
+} from '@api/config/api-sync-read-source.js';
+import type { FacebookOperationPolicyBaseProjection } from '@kernel/kernel/facebook-operation-policy-resolution.js';
 import {
   isSyncReadFactPayload,
   type FacebookSlowStartPolicySnapshot,
-} from '../../src/kernel/sync-read-facts.js';
-import { RISK_ACTIONS, type ActionQuota } from '../../src/kernel/risk-contract.js';
+} from '@kernel/kernel/sync-read-facts.js';
+import { RISK_ACTIONS, type ActionQuota } from '@kernel/kernel/risk-contract.js';
 import {
   SYNC_READ_SNAPSHOT_ROUTE,
   SyncReadSnapshotHttpClient,
   registerSyncReadSnapshotRoute,
-} from '../../src/transport/sync-read-snapshot-http.js';
+} from '@automation/transport/sync-read-snapshot-http.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 
 const TOKEN = 'facebook-policy-loopback-token';
 const BASELINE: FacebookOperationPolicyBaseProjection = {

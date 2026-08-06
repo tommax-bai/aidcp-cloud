@@ -7,7 +7,7 @@ import {
   type EnvironmentHandshakePort,
   type OffboardAdmissionLedgerPort,
   type StructuredNotificationDeliveryPort,
-} from '../../src/kernel/api-direct-port.js';
+} from '@kernel/kernel/api-direct-port.js';
 import {
   ACCOUNT_PERSONA_ROUTES,
   AUTOMATION_CONFIG_COMMANDS_ROUTES,
@@ -33,15 +33,15 @@ import {
   registerNotificationContactsRoutes,
   registerOffboardAdmissionLedgerRoutes,
   registerStructuredNotificationRoutes,
-} from '../../src/transport/api-aux-authority-http.js';
+} from '@automation/transport/api-aux-authority-http.js';
 import {
   ApiDirectHttpError,
-} from '../../src/transport/api-direct-http-common.js';
+} from '@automation/transport/api-direct-http-common.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 
 const TOKEN = 'api-aux-token';
 

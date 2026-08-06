@@ -11,10 +11,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pg from 'pg';
 
-import { PgAccountProjectionStore } from '../../src/transport/account-projection-store.js';
-import type { AccountIdentityProjectionRow } from '../../src/kernel/account-projection-types.js';
-import { makeSyncReadFactEnvelope } from '../../src/kernel/sync-read-facts.js';
-import { syncReadPayloadDigest } from '../../src/kernel/sync-read-snapshot.js';
+import { PgAccountProjectionStore } from '@automation/transport/account-projection-store.js';
+import type { AccountIdentityProjectionRow } from '@kernel/kernel/account-projection-types.js';
+import { makeSyncReadFactEnvelope } from '@kernel/kernel/sync-read-facts.js';
+import { syncReadPayloadDigest } from '@kernel/kernel/sync-read-snapshot.js';
 
 interface Call {
   sql: string;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { FacebookGroupOpsPort } from '../../src/kernel/facebook-group-ops-types.js';
+import type { FacebookGroupOpsPort } from '@kernel/kernel/facebook-group-ops-types.js';
 import type {
   FacebookGroupAccountProgress,
   FacebookGroupJoinRecentScheduledResult,
@@ -10,17 +10,17 @@ import type {
   FacebookGroupTargetFacets,
   FacebookGroupTargetListResult,
   FacebookGroupTargetRow,
-} from '../../src/kernel/facebook-group-types.js';
+} from '@kernel/kernel/facebook-group-types.js';
 import {
   FACEBOOK_GROUP_OPS_ROUTES,
   FacebookGroupOpsHttpClient,
   registerFacebookGroupOpsRoutes,
-} from '../../src/transport/facebook-group-ops-http.js';
+} from '@automation/transport/facebook-group-ops-http.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 
 const ALL_METHODS = [
   'listTargets',

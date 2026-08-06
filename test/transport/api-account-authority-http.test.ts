@@ -5,7 +5,7 @@ import {
   type AccountOwnershipAuthorityPort,
   type AccountRosterAuthorityPort,
   type AccountRuntimeAuthorityPort,
-} from '../../src/kernel/api-direct-port.js';
+} from '@kernel/kernel/api-direct-port.js';
 import {
   ACCOUNT_OWNERSHIP_ROUTES,
   ACCOUNT_ROSTER_ROUTES,
@@ -16,13 +16,13 @@ import {
   registerAccountOwnershipRoutes,
   registerAccountRosterRoutes,
   registerAccountRuntimeRoutes,
-} from '../../src/transport/api-account-authority-http.js';
-import { ApiDirectHttpError } from '../../src/transport/api-direct-http-common.js';
+} from '@automation/transport/api-account-authority-http.js';
+import { ApiDirectHttpError } from '@automation/transport/api-direct-http-common.js';
 import {
   InternalHttpClient,
   InternalHttpError,
   InternalHttpServer,
-} from '../../src/transport/internal-http.js';
+} from '@automation/transport/internal-http.js';
 
 const TOKEN = 'api-direct-account-token';
 
