@@ -213,8 +213,16 @@ export const REQUIRED_SCHEMA_VERSION = '0109_content_schedule_hour_claim_env_key
  * 第一版曾在 `ContentScheduleStore` 的启动 DDL 里加同一句 `DROP NOT NULL` 想绕开硬依赖，
  * 被 `AC-SCHEMA-DDL-OWNER-01/02` 当场拦下：运行时 DDL 是只减不增的棘轮，新增 DDL 的落点只能是
  * migrations/。**那道闸是对的** —— 绕过硬依赖的代价是把 schema 真相分散回运行期。
+ *
+ * 注：`0112_panel_hardening_indexes_automation` / `0113_panel_hardening_indexes_content`
+ * （change restore-derived-migration-executability）把 `0030_panel_hardening_indexes` 那三个
+ * 跨属主索引拆回各自的库。两条都是幂等建索引（`IF NOT EXISTS`；这里刻意不写出连着的 DDL 关键字，
+ * 否则 AC-SCHEMA-DDL-OWNER-02 的「文本命中」棘轮会把这句注释计成一处新的运行时 DDL），
+ * dev / ol 上索引早已存在
+ * ⇒ 幂等空转、零 DDL 变化，**故只抬 KNOWN_MAX、不抬 REQUIRED**：抬 REQUIRED 会让两个既有环境
+ * 在跑 `migrate up` 之前一路判 behind，而它们的 schema 本来就是对的。
  */
-export const KNOWN_MAX_SCHEMA_VERSION = '0111_facebook_consumption_obligation_per_type';
+export const KNOWN_MAX_SCHEMA_VERSION = '0113_panel_hardening_indexes_content';
 
 export type SchemaGateMode = 'warn' | 'enforce';
 

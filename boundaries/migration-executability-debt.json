@@ -1,0 +1,65 @@
+{
+  "purpose": "可执行性静态闸（AC-SCHEMA-EXEC-*）的存量欠账清单。判据：对每个属主 O、每条执行范围含 O 的迁移 M，M 引用的每张表都必须由某条执行范围也含 O 的迁移创建。这里逐条登记的是本 change 落地当天已经存在、且不在本 change 处置范围内的违规。",
+  "whyNotFixedHere": "这 8 条与 0030_panel_hardening_indexes 同类但不同形态：0030 是一条只建索引、不建表的跨属主迁移，可以整条判为「记账不执行」再由两条接替迁移建回；而这 8 条各自**都在为自己的属主建真实对象**，只是同一个文件里还顺手碰了另一个属主的表。把它们判成记账不执行，等于让它们自己那批表/列也一起消失，接替迁移要把整批 DDL 逐字重抄一遍——那是另一件事的工作量与风险，MUST NOT 混进本 change 顺手做掉。本 change 的交付是「机制 + 闸 + 0030」，这 8 条由闸看住不再增长，逐条消除另立。",
+  "ratchet": "只减不增：entries.length MUST ≤ sealedCount；实测违规集合 MUST 与 entries 逐条相等（多一条 = 新欠账，当场判失败；少一条 = 已消除，MUST 在同一提交里删条目并下调 sealedCount，不留空位给新违规回填）。",
+  "consequence": "在场的每一条都意味着：全新属主库跑 migrate up 时会在该条迁移上停住（relation … does not exist），整批拒绝。dev / ol 不受影响——那两个环境三属主共用一个库，三家的表都在。",
+  "sealedCount": 8,
+  "entries": [
+    {
+      "owner": "api",
+      "version": "0039_interaction_inbox",
+      "missingTables": ["risk_counters"],
+      "basis": "执行范围 automation+api（它建的 15 张表分属两家）。DO 块里 `WHERE conrelid = 'risk_counters'::regclass` 与随后的 `ALTER TABLE risk_counters ADD CONSTRAINT risk_counters_action_check`：risk_counters 属 automation，由 0002_risk_control 创建，而 0002 的执行范围只有 automation。全新 api 库跑到这里，regclass 转换直接抛错。",
+      "eliminatedBy": null
+    },
+    {
+      "owner": "api",
+      "version": "0061_risk_writer_ownership_and_outbox",
+      "missingTables": ["risk_counters"],
+      "basis": "执行范围 automation+api（它声明了 accounts.execution_target，accounts 属 api）。`ALTER TABLE risk_counters ADD COLUMN IF NOT EXISTS outbox_id` 与 `CREATE UNIQUE INDEX … ON risk_counters`：无 IF EXISTS 守卫，全新 api 库上表不存在即报错。",
+      "eliminatedBy": null
+    },
+    {
+      "owner": "api",
+      "version": "0070_baseline_self_heal_columns",
+      "missingTables": ["delegated_tasks"],
+      "basis": "执行范围 automation+api（它把四张分属两家的表的自愈补列收在一个文件里）。`ALTER TABLE delegated_tasks ADD COLUMN IF NOT EXISTS origin_chat_id` 与两条 `CREATE INDEX … ON delegated_tasks`：delegated_tasks 属 automation（0038_delegated_tasks 建，执行范围只有 automation）。",
+      "eliminatedBy": null
+    },
+    {
+      "owner": "automation",
+      "version": "0067_baseline_facebook_tables",
+      "missingTables": ["publish_log"],
+      "basis": "执行范围 content+automation+api。`account_facebook_publish_image_set.used_by_publish_log_id INTEGER REFERENCES publish_log(id)`：外键目标 publish_log 属 api，由 0001_publish_log 建、执行范围只有 api。文件头自己也写着「MUST 排在 0065（accounts）与 0001（publish_log）之后」——那条顺序要求在共库期成立，拆库后在 automation / content 库里则无论如何都满足不了。",
+      "eliminatedBy": null
+    },
+    {
+      "owner": "automation",
+      "version": "0070_baseline_self_heal_columns",
+      "missingTables": ["account_content_schedule", "contact_comment_attempts", "publish_log"],
+      "basis": "同 api 那条的镜像：这三张表都属 api，而本文件在 automation 库里也要执行（它带着 delegated_tasks 的补列）。三处都是无守卫的 `ALTER TABLE … ADD COLUMN` / `UPDATE`。",
+      "eliminatedBy": null
+    },
+    {
+      "owner": "content",
+      "version": "0005_account_id_columns",
+      "missingTables": ["publish_log"],
+      "basis": "执行范围 content+api（它同时给 concepts 与 publish_log 加 account_id）。concepts 属 content、publish_log 属 api，两张表由各自属主的迁移创建，于是这一条在两个库里各缺一半：content 库缺 publish_log，api 库缺 concepts（api 侧未报出是因为 concepts 由 0000_baseline 建，而 0000 的执行范围含 api）。",
+      "eliminatedBy": null
+    },
+    {
+      "owner": "content",
+      "version": "0057_publish_draft_refinement_jobs",
+      "missingTables": ["publish_log"],
+      "basis": "`record_id INT NOT NULL REFERENCES publish_log(id) ON DELETE CASCADE`：本表 publish_draft_refinement_jobs 属 content，外键却指向属 api 的 publish_log。**这一条与其它七条性质不同**：它不是「一个文件装了两家的 DDL」，而是一条**跨属主外键**——物理拆库后两张表不在同一个库里，这个外键无论迁移怎么排都建不出来。消除它需要先裁定两张表的属主划分（或去掉这条外键），属 §4.7 归属层的事，不是迁移排序的事。",
+      "eliminatedBy": null
+    },
+    {
+      "owner": "content",
+      "version": "0067_baseline_facebook_tables",
+      "missingTables": ["publish_log"],
+      "basis": "同 automation 那条：同一条 `REFERENCES publish_log(id)` 在 content 库里同样建不出来。",
+      "eliminatedBy": null
+    }
+  ]
+}

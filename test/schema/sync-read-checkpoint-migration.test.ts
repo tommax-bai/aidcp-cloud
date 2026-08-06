@@ -5,8 +5,8 @@ import { test } from 'node:test';
 
 import { loadMigrationFiles } from '../../src/schema/migration-files.js';
 import {
-  attributeMigrations,
-  loadTableOwnership,
+  executionVersionsForOwner,
+  loadMigrationOwnerScopes,
   versionsForOwner,
 } from '../../src/schema/migration-owners.js';
 import { KNOWN_MAX_SCHEMA_VERSION } from '../../src/schema/schema-contract.js';
@@ -86,8 +86,7 @@ test('0082/0083 are expand-only owner-local checkpoint tables with no business p
 });
 
 test('checkpoint migrations remain owner-local when owner databases split', async () => {
-  const files = await loadMigrationFiles();
-  const index = attributeMigrations(files, await loadTableOwnership());
+  const { index } = await loadMigrationOwnerScopes(() => loadMigrationFiles());
   const api = versionsForOwner(index, 'api');
   const automation = versionsForOwner(index, 'automation');
   assert.ok(api.includes('0082_api_sync_read_consumer_checkpoint'));
@@ -155,11 +154,19 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   // 消费链的动作表是 automation 属主，故重定义其唯一索引的迁移只进 automation 组。
   assert.ok(automation.includes('0111_facebook_consumption_obligation_per_type'));
   assert.ok(!api.includes('0111_facebook_consumption_obligation_per_type'));
+  // 0030 那三个跨属主索引被拆回各自的库。这两条只声明索引、声明里不带表名，故**账本范围**是
+  // 全部属主（分发按账本范围，MUST NOT 因执行范围收窄就从派生仓删文件），而**执行范围**各自只有
+  // 一家——这正是「账本范围 ≠ 执行范围」在真语料上的判例。
+  const apiExec = executionVersionsForOwner(index, 'api');
+  const automationExec = executionVersionsForOwner(index, 'automation');
+  const contentExec = executionVersionsForOwner(index, 'content');
+  assert.ok(api.includes('0112_panel_hardening_indexes_automation'));
+  assert.ok(automationExec.includes('0112_panel_hardening_indexes_automation'));
+  assert.ok(!apiExec.includes('0112_panel_hardening_indexes_automation'));
+  assert.ok(contentExec.includes('0113_panel_hardening_indexes_content'));
+  assert.ok(!automationExec.includes('0113_panel_hardening_indexes_content'));
   // 每加一条迁移都要在这里同步抬。
-  assert.equal(
-    KNOWN_MAX_SCHEMA_VERSION,
-    '0111_facebook_consumption_obligation_per_type',
-  );
+  assert.equal(KNOWN_MAX_SCHEMA_VERSION, '0113_panel_hardening_indexes_content');
 });
 
 test('0085 keeps runtime owner generations durable, target-scoped and payload-free', async () => {

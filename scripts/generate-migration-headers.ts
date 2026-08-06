@@ -24,6 +24,7 @@ import path from 'node:path';
 
 import { findAddedColumns } from '../src/schema/ddl-objects.js';
 import { loadMigrationFiles, migrationsDir } from '../src/schema/migration-files.js';
+import { loadLegacyOwnerOverrides } from '../src/schema/migration-owners.js';
 import { parseMigrationHeader, versionOf } from '../src/schema/migration-plan.js';
 
 /**
@@ -217,6 +218,25 @@ async function main(): Promise<void> {
   const files = await loadMigrationFiles();
   const live = simulate(files);
 
+  /**
+   * **不重写守卫**（change restore-derived-migration-executability 任务 5.5）。两类文件永不重写：
+   *
+   *  ① **冻结集合内的迁移**（`migrations/legacy-owner-overrides.json` 的 `frozenVersions`，
+   *     即本机制落地前已存在、在 dev / ol 账本里都已入账的那批）。校验和是整文件 sha256，
+   *     改一个字节就是 `migration_checksum_mismatch` **整批拒绝**，两个环境的迁移命令当场全停。
+   *     具体触发路径不是假设：`0112` / `0113` 接替 `0030_panel_hardening_indexes` 建同名索引，
+   *     生成器按「每个对象归**最后**创建它的那个文件」重算时就会想去改 `0030` 的头。
+   *
+   *  ② **带 `-- aidcp:owner=` 头的迁移**（本机制之后的新迁移）。它们的对象声明是**人判结论**：
+   *     「把一条跨属主迁移的产物拆给两条接替迁移各自声明」这件事，生成器的模型表达不了
+   *     （`CREATE INDEX IF NOT EXISTS` 命中已存在对象时按设计判 no-op、归属留在最早那条），
+   *     重写会把人写的声明清空。与既有的「已有 kind 是人工审阅过的结论 MUST 保留」同一条纪律。
+   *
+   * 守卫只挡**重写**，不挡给缺头的新文件补头。
+   */
+  const frozen = new Set((await loadLegacyOwnerOverrides()).frozenVersions);
+  const skipped: string[] = [];
+
   const byOwner = new Map<string, string[]>();
   for (const obj of live.values()) {
     const list = byOwner.get(obj.owner) ?? [];
@@ -231,6 +251,10 @@ async function main(): Promise<void> {
     const existing = parseMigrationHeader(file.content);
     const hasHeader = Boolean(existing.kind) && /aidcp:objects=/.test(file.content);
     if (hasHeader && !rewrite) continue;
+    if (hasHeader && (frozen.has(version) || existing.owners !== undefined)) {
+      skipped.push(`${version}（${frozen.has(version) ? '已入账本的冻结集合' : '带 -- aidcp:owner= 头的人判声明'}）`);
+      continue;
+    }
 
     const body = hasHeader ? stripHeaderLines(file.content) : file.content;
     const sql = stripSqlComments(body);
@@ -251,6 +275,11 @@ async function main(): Promise<void> {
     console.log(`${version}: kind=${kind}, objects=${objects.length}`);
     if (write) await writeFile(path.join(migrationsDir(), file.name), next, 'utf8');
     changed += 1;
+  }
+  if (skipped.length > 0) {
+    // 跳过 MUST 打出来：一个说不清自己没动哪些文件的生成器，与「悄悄改了校验和」同样危险。
+    console.log(`不重写守卫跳过 ${skipped.length} 个文件：`);
+    for (const s of skipped) console.log(`  = ${s}`);
   }
   console.log(`${write ? '已写入' : '待写入'} ${changed} 个文件（共 ${files.length}）`);
   if (!write) console.log('（干跑；加 --write 落盘）');

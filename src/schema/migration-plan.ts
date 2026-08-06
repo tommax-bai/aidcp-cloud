@@ -87,6 +87,17 @@ export interface MigrationHeader {
   /** 头里写了 kind 但值不是 expand/contract 时，原样带出用于报错 */
   rawKind?: string;
   objects: MigrationObject[];
+  /**
+   * `-- aidcp:owner=<owner>[,<owner>]` 声明的**执行范围**（原样字符串，此处不校验取值）。
+   *
+   * 本文件刻意不校验：属主枚举住在 kernel，而本模块 MUST 保持零依赖以便脱库单测。
+   * 合法性由 `migration-owners.ts` 判——非法值即失败，MUST NOT 当作「没写」放过去：
+   * 那会让一条拼错属主名的迁移悄悄退回按对象声明推断，正是本机制要消灭的静默路径。
+   *
+   * 没写这一行时为 `undefined`；写了但一个 token 都没有时为**空数组**。两者语义不同
+   * （「没声明」vs「声明了哪个库都不执行」），MUST NOT 压成同一态。
+   */
+  owners?: string[];
 }
 
 export type MigrationObjectType = 'table' | 'column' | 'index' | 'constraint';
@@ -99,6 +110,8 @@ export interface MigrationObject {
 
 const KIND_LINE = /^[ \t]*--[ \t]*aidcp:kind[ \t]*=[ \t]*([A-Za-z_]+)[ \t]*$/gm;
 const OBJECTS_LINE = /^[ \t]*--[ \t]*aidcp:objects[ \t]*=[ \t]*(.+)$/gm;
+/** `-- aidcp:owner=` 允许写空值（声明「哪个库都不执行」），故值段是 `(.*)` 而非 `(.+)`。 */
+const OWNER_LINE = /^[ \t]*--[ \t]*aidcp:owner[ \t]*=[ \t]*(.*)$/gm;
 
 /**
  * 解析迁移文件头的结构化声明。
@@ -108,6 +121,7 @@ const OBJECTS_LINE = /^[ \t]*--[ \t]*aidcp:objects[ \t]*=[ \t]*(.+)$/gm;
 export function parseMigrationHeader(content: string): MigrationHeader {
   KIND_LINE.lastIndex = 0;
   OBJECTS_LINE.lastIndex = 0;
+  OWNER_LINE.lastIndex = 0;
   const kindMatch = KIND_LINE.exec(content);
   const rawKind = kindMatch?.[1];
   const kind: MigrationKind | undefined =
@@ -132,7 +146,20 @@ export function parseMigrationHeader(content: string): MigrationHeader {
       objects.push({ type, name });
     }
   }
-  return { kind, rawKind, objects };
+
+  // 执行范围头：多行取并集（与 objects 同形），去重后保序。写了几行都算「声明过」。
+  let owners: string[] | undefined;
+  let om: RegExpExecArray | null;
+  while ((om = OWNER_LINE.exec(content)) !== null) {
+    owners ??= [];
+    for (const raw of om[1].split(',')) {
+      const token = raw.trim();
+      if (!token) continue;
+      if (!owners.includes(token)) owners.push(token);
+    }
+  }
+
+  return { kind, rawKind, objects, owners };
 }
 
 export function planMigrations(files: MigrationFile[], ledger: LedgerRow[]): MigrationPlan {

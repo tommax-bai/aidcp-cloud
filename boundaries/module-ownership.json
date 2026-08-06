@@ -2410,6 +2410,11 @@
     "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
   },
   {
+    "path": "src/schema/migration-apply.ts",
+    "layer": "automation",
+    "note": "【待定稿裁决】change restore-derived-migration-executability 新增：单条迁移的施加动作（执行范围内发 SQL、范围外只写账本行）。从 scripts/migrate.ts 里析出，理由是那十几行装着本机制最危险的两种失败（范围外却发了 SQL / 执行了却没记账），而 CLI 脚本在模块层就 main()、根本没法脱库单测。层随 src/schema/ 目录规则判 automation：它唯一写的表是 schema_migrations（属主 automation，每个库都有的账本表），故不产生跨属主写；不 import pg（客户端按最小接口注入）。只被 scripts/migrate.ts 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"
+  },
+  {
     "path": "src/schema/migration-files.ts",
     "layer": "automation",
     "note": "【待定稿裁决】同上：只被 src/schema/ 内部、scripts/ 与测试导入，不产生跨层边。请求回写 §4.7 见 docpatch R4"

@@ -1,0 +1,214 @@
+{
+  "purpose": "历史迁移的执行范围人判名册（封闭、只减不增）。执行范围解析顺序见 src/schema/migration-owners.ts 文件头：① 文件内 -- aidcp:owner= 头 → ② 本名册 → ③ 对象声明能定位到表 → ④ 失败并指名。",
+  "whyNotInFileHeaders": "这 13 条全部 ≤ 0069、在 dev 与 ol 的账本里都已入账，而校验和是整文件 sha256、账本行与磁盘不一致即 migration_checksum_mismatch 整批拒绝。往它们里加一行头声明，两个环境的迁移命令会当场全停。故历史只能走名册，新迁移一律用文件内头。",
+  "ratchet": "entries 只减不增（entries.length MUST ≤ sealedEntryCount，由 loadLegacyOwnerOverrides 机械断言）；每条 version MUST 属于 frozenVersions；新迁移写进名册即失败。",
+  "frozenBasis": "本 change（restore-derived-migration-executability）落地前 aidcp-cloud/migrations 磁盘上已存在的全部 110 条迁移，实测于 2026-08-06 master 343c464。用显式清单而非文件 mtime / git 首次出现时间：前者可审、可重放，后者不可。",
+  "sealedEntryCount": 13,
+  "entries": [
+    {
+      "version": "0021_account_nickname",
+      "owners": [
+        "api"
+      ],
+      "basis": "唯一语句 `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS nickname TEXT`；accounts 在 boundaries/table-ownership.json 里 owner=api。"
+    },
+    {
+      "version": "0027_account_group_chat_info",
+      "owners": [
+        "api"
+      ],
+      "basis": "唯一语句 `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS group_chat_info TEXT`；accounts owner=api。"
+    },
+    {
+      "version": "0030_content_schedule_group_comments",
+      "owners": [
+        "api"
+      ],
+      "basis": "两条 `ALTER TABLE account_content_schedule ADD COLUMN`（owner=api）+ `CREATE TABLE IF NOT EXISTS group_comment_attempts` 及其索引（owner=api）。全部四处引用同属 api。"
+    },
+    {
+      "version": "0030_panel_hardening_indexes",
+      "owners": [],
+      "supersededBy": [
+        "0112_panel_hardening_indexes_automation",
+        "0113_panel_hardening_indexes_content"
+      ],
+      "basis": "三条 CREATE INDEX 分别落在 risk_counters / interaction_feed（owner=automation）与 llm_token_usage（owner=content）上，在任何单一属主库里都跑不通（空库实跑即停在此：relation \"risk_counters\" does not exist）。字节不可改（已入 dev/ol 账本），故记账不执行，索引由两条接替迁移在正确的库里建回。接替迁移沿用同名索引：migrate verify 的对账按「每条声明逐条查在不在库里」判，declaredObjects 是可重复的扁平表、diffSchema 的多余项用集合判，同一对象被两个版本声明不会误判（实读 src/schema/schema-inspect.ts 确认，非推测）。"
+    },
+    {
+      "version": "0040_customer_env_authority",
+      "owners": [
+        "api"
+      ],
+      "basis": "建 client_env_scope_audit、对 client_env_scope 做 LOCK/INSERT/DELETE/ADD CONSTRAINT/建索引、向 client_environments INSERT；三张表 owner 均为 api。"
+    },
+    {
+      "version": "0043_client_env_provisioning_intents",
+      "owners": [
+        "api"
+      ],
+      "basis": "建 client_env_provisioning_intents（外键指向 client_users）并在 DO 块里按 client_env_scope 的约束与索引做前置断言；三张表 owner 均为 api。"
+    },
+    {
+      "version": "0044_account_slow_start_since",
+      "owners": [
+        "api"
+      ],
+      "basis": "唯一语句 `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS slow_start_since TIMESTAMPTZ`；accounts owner=api。"
+    },
+    {
+      "version": "0045_wechat_store_and_circuit",
+      "owners": [
+        "automation"
+      ],
+      "basis": "`DROP INDEX IF EXISTS idx_interaction_offboards_purge` + 在 interaction_offboards 上重建该部分索引；interaction_offboards owner=automation。"
+    },
+    {
+      "version": "0046_interaction_idempotency_active_unique",
+      "owners": [
+        "automation"
+      ],
+      "basis": "全部三条语句作用于 interaction_send_attempts（DROP CONSTRAINT / 建部分唯一索引 / DROP COLUMN）；该表 owner=automation。"
+    },
+    {
+      "version": "0050_wechat_group_reply_config_privileges",
+      "owners": [
+        "api"
+      ],
+      "basis": "DO 块读 interaction_reply_configs 的属主角色，再把三张 interaction_reply_scope* / interaction_reply_config_scopes 的权限授给它；四张表 owner 均为 api。注意它的失败形态与其它条不同——表属主查不到时是显式 RAISE EXCEPTION（`interaction_reply_configs owner not found`）而不是 relation does not exist，但同样整批停。"
+    },
+    {
+      "version": "0051_retire_account_reply_configs",
+      "owners": [
+        "api"
+      ],
+      "basis": "一个事务里对 interaction_audit_events / reply_templates / reply_rules / account_reply_profiles / interaction_reply_config_versions / interaction_reply_configs 六张表做 DELETE；六张表 owner 均为 api。"
+    },
+    {
+      "version": "0055_first_class_search_activity",
+      "owners": [
+        "automation"
+      ],
+      "basis": "改 risk_counters 的 action CHECK 约束 + 向 quota_config INSERT 三行 search 配额；两张表 owner 均为 automation。"
+    },
+    {
+      "version": "0069_identity_not_null_constraints",
+      "owners": [
+        "api"
+      ],
+      "basis": "两条 `ALTER TABLE client_environments ALTER COLUMN … SET NOT NULL`；client_environments owner=api。"
+    }
+  ],
+  "frozenVersions": [
+    "0000_baseline_identity_and_corpus_tables",
+    "0001_publish_log",
+    "0002_bot_chats",
+    "0002_risk_control",
+    "0003_risk_interactions",
+    "0004_publish_agent",
+    "0005_account_id_columns",
+    "0006_alerts",
+    "0007_model_config",
+    "0008_role_config",
+    "0009_role_category_config",
+    "0010_quota_config",
+    "0011_persona_config",
+    "0013_llm_token_usage",
+    "0014_publish_post_url",
+    "0015_session_config",
+    "0016_notification_contacts",
+    "0017_publish_log_images",
+    "0018_text_provider",
+    "0019_interaction_feed",
+    "0020_resume_config",
+    "0021_account_nickname",
+    "0022_global_safety_config",
+    "0023_engagement_ratio_config",
+    "0024_weekly_active_window",
+    "0025_image_provider",
+    "0026_role_thinking_mode",
+    "0027_account_group_chat_info",
+    "0028_content_schedule",
+    "0029_content_schedule_comments",
+    "0030_content_schedule_group_comments",
+    "0030_panel_hardening_indexes",
+    "0031_pacing_floor_config",
+    "0032_publish_source_reference",
+    "0033_llm_billing_cost_estimates",
+    "0034_facebook_comment_config",
+    "0035_facebook_comment_audit",
+    "0036_rename_group_chat_info_to_contact_info",
+    "0037_facebook_comment_mode_templates",
+    "0037_session_join_group_budget",
+    "0038_delegated_tasks",
+    "0038_first_post_onboarding",
+    "0039_interaction_inbox",
+    "0040_customer_env_authority",
+    "0041_interaction_recovery_offboarding",
+    "0042_interaction_runtime_control_application",
+    "0043_client_env_provisioning_intents",
+    "0044_account_slow_start_since",
+    "0045_wechat_store_and_circuit",
+    "0046_interaction_idempotency_active_unique",
+    "0047_xhs_native_scheduled_publish",
+    "0048_wechat_group_reply_config",
+    "0049_offboard_cleanup_grants",
+    "0050_wechat_group_reply_config_privileges",
+    "0051_retire_account_reply_configs",
+    "0052_delegated_task_execution_target",
+    "0053_content_schedule_hour_claims",
+    "0054_account_activity_schedule",
+    "0055_first_class_search_activity",
+    "0056_scoped_approval_policy",
+    "0057_publish_draft_refinement_jobs",
+    "0061_risk_writer_ownership_and_outbox",
+    "0062_config_mirror_version",
+    "0063_publish_approval_decision",
+    "0064_schema_migrations_ledger",
+    "0067_baseline_facebook_tables",
+    "0068_baseline_persona_auto_fill_tables",
+    "0069_identity_not_null_constraints",
+    "0070_baseline_self_heal_columns",
+    "0071_baseline_surviving_orphan_tables",
+    "0072_baseline_surviving_orphan_columns",
+    "0073_publish_execution_state",
+    "0074_event_outbox",
+    "0075_event_outbox_topic_cursor",
+    "0076_config_mirror_bump_inbox",
+    "0077_automation_account_projection",
+    "0078_client_env_cleanup_admission",
+    "0079_risk_command_outcome",
+    "0080_restricted_recovery_outcome",
+    "0081_offboard_admission_claims",
+    "0082_api_sync_read_consumer_checkpoint",
+    "0083_automation_sync_read_consumer_checkpoint",
+    "0084_automation_account_projection_sync_read",
+    "0085_automation_sync_read_owner_generation",
+    "0086_session_config_global_sync_read_revision",
+    "0087_automation_account_projection_shared_cursor",
+    "0088_client_environment_proxy_authority",
+    "0089_facebook_global_scope_regional_templates",
+    "0090_facebook_comment_mode_configured",
+    "0091_facebook_comment_config_snapshot_revision",
+    "0092_facebook_rule_mode_config",
+    "0093_facebook_rule_mode_runtime",
+    "0094_facebook_rule_two_tier_config",
+    "0095_facebook_rule_two_tier_runtime",
+    "0096_facebook_rule_fallback_comment_state",
+    "0097_environment_level_rule_mode_and_approval",
+    "0098_facebook_group_join_daily_cap_50",
+    "0099_operator_command_receipt",
+    "0100_facebook_operation_and_group_comment_policy",
+    "0101_facebook_rule_policy_revision_runtime",
+    "0102_facebook_consumption_runtime",
+    "0103_facebook_operation_global_policy",
+    "0104_facebook_reel_mode_cadence",
+    "0105_facebook_primary_browse_surface",
+    "0106_automation_sync_read_facebook_operation_policy",
+    "0107_facebook_slow_start_reel_like_cadence",
+    "0108_facebook_operation_policy_snapshot_revision",
+    "0109_content_schedule_hour_claim_env_key_optional",
+    "0110_facebook_global_policy_single_scope",
+    "0111_facebook_consumption_obligation_per_type"
+  ]
+}

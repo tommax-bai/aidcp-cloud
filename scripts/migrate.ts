@@ -38,14 +38,18 @@ import {
   resolveOwnerPgConfig,
   type PgOwner,
 } from '../src/kernel/pg-owner-connection-resolver.js';
+import { applyMigration } from '../src/schema/migration-apply.js';
 import {
   LEDGER_MIGRATION_NAME,
   loadMigrationFiles,
 } from '../src/schema/migration-files.js';
 import {
+  LEGACY_OWNER_OVERRIDES_NAME,
   filesForOwners,
+  loadLegacyOwnerOverrides,
   loadMigrationOwnerScopes,
   loadTableOwnership,
+  recordOnlyVersionsForOwners,
   scopeDeclarationsToOwners,
   type MigrationOwnerIndex,
 } from '../src/schema/migration-owners.js';
@@ -78,6 +82,7 @@ const { Client } = pg;
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MIGRATIONS_DIR = path.join(REPO_ROOT, 'migrations');
 const TABLE_OWNERSHIP_FILE = path.join(REPO_ROOT, 'boundaries', 'table-ownership.json');
+const LEGACY_OWNER_OVERRIDES_FILE = path.join(MIGRATIONS_DIR, LEGACY_OWNER_OVERRIDES_NAME);
 
 /** 整批互斥用的固定 advisory lock key（库级；任何 aidcp 迁移执行器共用这一把）。 */
 export const MIGRATION_ADVISORY_LOCK_KEY = 4788219350114677;
@@ -100,8 +105,16 @@ function connectionFingerprint(config: pg.ClientConfig): string {
 interface OwnerGroup {
   owners: PgOwner[];
   config: pg.ClientConfig;
-  /** 组内各属主迁移范围的并集，复合序 */
+  /** **账本范围**：组内各属主账本范围的并集，复合序。账本行与分发都按它 */
   files: MigrationFile[];
+  /**
+   * 本组里**记账但不执行**的版本（账本范围内、执行范围外）。
+   *
+   * 这一集合就是「执行范围 ≠ 账本范围」在执行器里的全部体现：这些条目照写账本行，
+   * 但**一条 SQL 都不发**。MUST NOT 因此把它们从 `files` 里剔掉 —— 剔掉就等于账本里没有它们，
+   * 于是拆库后执行器把它当 pending 重放、乱序闸把它判成失序整批拒绝，正是账本范围要防的两件事。
+   */
+  recordOnly: Set<string>;
 }
 
 /** 按连接目标把属主分组；今天三属主同组 ⇒ 一组、范围 = 全部迁移。 */
@@ -114,16 +127,39 @@ function buildOwnerGroups(files: MigrationFile[], owners: readonly PgOwner[], in
     if (existing) existing.owners.push(owner);
     else byFingerprint.set(key, { owners: [owner], config });
   }
-  return [...byFingerprint.values()].map((group) => ({
-    ...group,
-    files: filesForOwners(files, index, group.owners),
-  }));
+  return [...byFingerprint.values()].map((group) => {
+    const scoped = filesForOwners(files, index, group.owners);
+    return {
+      ...group,
+      files: scoped,
+      recordOnly: new Set(
+        recordOnlyVersionsForOwners(index, scoped.map((f) => versionOf(f.name)), group.owners),
+      ),
+    };
+  });
 }
 
 function describeGroup(group: OwnerGroup): string {
   const vars = group.owners.map(pgOwnerUrlEnvVar).filter((name) => readEnvString(name));
   const target = vars.length > 0 ? `专属库（${vars.join(' / ')} 已设）` : '共享回落库（属主 URL 未设）';
-  return `属主 ${group.owners.join('+')} → ${target}；范围 ${group.files.length} 条迁移`;
+  const executable = group.files.length - group.recordOnly.size;
+  return (
+    `属主 ${group.owners.join('+')} → ${target}；账本范围 ${group.files.length} 条迁移` +
+    `（执行 ${executable} · 记账不执行 ${group.recordOnly.size}）`
+  );
+}
+
+/**
+ * 「记账但未执行」清单 MUST 每次原样打出（沿用残留清单那条纪律）。
+ *
+ * 不打的话，这套机制最危险的失败形态就完全不可见：一条迁移被误标成记账不执行，库里少了对象，
+ * 而账本、状态、契约门三处都显示「已处置」——那正是本仓第一红线禁止的静默假成功。
+ */
+function reportRecordOnly(group: OwnerGroup): void {
+  if (group.recordOnly.size === 0) return;
+  const versions = [...group.recordOnly].sort(compareVersions);
+  console.log(`记账但不执行 ${versions.length} 条（在本组的库里只写账本行、一条 SQL 都不发）：`);
+  for (const v of versions) console.log(`  = ${v}`);
 }
 
 /**
@@ -187,16 +223,20 @@ function printErrors(errors: { code: string; version: string; detail: string }[]
   for (const e of errors) console.error(`  [${e.code}] ${e.version}: ${e.detail}`);
 }
 
-async function commandStatus(client: pg.Client, files: MigrationFile[]): Promise<number> {
+async function commandStatus(client: pg.Client, group: OwnerGroup): Promise<number> {
+  const files = group.files;
   const ledger = await readLedger(client);
   const plan = planMigrations(files, ledger.rows);
-  console.log(`迁移目录：${MIGRATIONS_DIR}；本属主组范围 ${files.length} 个文件`);
+  console.log(`迁移目录：${MIGRATIONS_DIR}；本属主组账本范围 ${files.length} 个文件`);
   console.log(ledger.present ? `账本 schema_migrations：${ledger.rows.length} 行` : '账本 schema_migrations：不存在（尚未 bootstrap，跑 migrate up 或 migrate baseline 建立）');
   const maxApplied = ledger.rows.map((r) => r.version).sort(compareVersions).at(-1);
   if (maxApplied) console.log(`账本最高版本：${maxApplied}`);
   console.log(`已应用且校验和一致：${plan.skipped.length}`);
   console.log(`待应用：${plan.pending.length}`);
-  for (const p of plan.pending) console.log(`  + ${p.version} (kind=${p.kind})`);
+  for (const p of plan.pending) {
+    const mark = group.recordOnly.has(p.version) ? '记账不执行' : `kind=${p.kind}`;
+    console.log(`  + ${p.version} (${mark})`);
+  }
   if (plan.ledgerOnly.length > 0) {
     console.log(`账本有、磁盘无（库比本构建新的线索）：${plan.ledgerOnly.length}`);
     for (const v of plan.ledgerOnly) console.log(`  ! ${v}`);
@@ -209,7 +249,8 @@ async function commandStatus(client: pg.Client, files: MigrationFile[]): Promise
   return 0;
 }
 
-async function commandUp(client: pg.Client, files: MigrationFile[], flags: Flags): Promise<number> {
+async function commandUp(client: pg.Client, group: OwnerGroup, flags: Flags): Promise<number> {
+  const files = group.files;
   await ensureLedger(client, files);
 
   const locked = await client.query<{ locked: boolean }>(
@@ -245,27 +286,21 @@ async function commandUp(client: pg.Client, files: MigrationFile[], flags: Flags
     const by = appliedBy(flags);
 
     for (const migration of plan.pending) {
-      const startedAt = Date.now();
+      // 执行范围外：**只写账本行、一条语句都不发**（判定与写入都在 src/schema/migration-apply.ts，
+      // 那里可以脱库单测；这里只负责整批语义与打印）。
+      const recordOnly = group.recordOnly.has(migration.version);
       try {
-        await client.query('BEGIN');
-        await client.query(migration.content);
-        await client.query(
-          `INSERT INTO schema_migrations (version, name, checksum, kind, applied_by, applied_from_target, duration_ms, baseline)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,false)`,
-          [
-            migration.version,
-            migration.name,
-            migration.checksum,
-            migration.kind,
-            migration.kind === 'contract' ? `${by} (--allow-contract)` : by,
-            target.value,
-            Date.now() - startedAt,
-          ],
+        const receipt = await applyMigration(client, migration, {
+          recordOnly,
+          appliedBy: by,
+          appliedFromTarget: target.value,
+        });
+        console.log(
+          receipt.executed
+            ? `applied ${migration.version} (kind=${migration.kind}, ${receipt.durationMs}ms)`
+            : `record-only ${migration.version}（本组不在其执行范围内，未发出任何 SQL）`,
         );
-        await client.query('COMMIT');
-        console.log(`applied ${migration.version} (kind=${migration.kind}, ${Date.now() - startedAt}ms)`);
       } catch (err) {
-        await client.query('ROLLBACK').catch(() => undefined);
         console.error(`迁移失败并停止整批：${migration.version}`);
         console.error(`  原始数据库错误：${err instanceof Error ? err.message : String(err)}`);
         console.error('  已成功的条目保留在账本中；修复后重跑 migrate up 从失败处继续。');
@@ -393,9 +428,18 @@ async function main(): Promise<void> {
   const { index, files, tableOwners } = await loadMigrationOwnerScopes(
     () => loadMigrationFiles(MIGRATIONS_DIR),
     () => loadTableOwnership(TABLE_OWNERSHIP_FILE),
+    () => loadLegacyOwnerOverrides(LEGACY_OWNER_OVERRIDES_FILE),
   );
   if (index.residue.length > 0) {
-    console.log(`残留迁移（头声明为空、计入全部属主）${index.residue.length} 条：${index.residue.join(', ')}`);
+    console.log(
+      `对象声明定位不到表、账本范围计入全部属主的迁移 ${index.residue.length} 条：${index.residue.join(', ')}` +
+        `\n  （它们的**执行范围**另由 migrations/${LEGACY_OWNER_OVERRIDES_NAME} 名册逐条给出，与本行无关）`,
+    );
+  }
+  if (index.recordedNotExecuted.length > 0) {
+    console.log(
+      `全局「记账不执行」${index.recordedNotExecuted.length} 条：${index.recordedNotExecuted.join(', ')}`,
+    );
   }
 
   const owners = flags.owner ? [flags.owner] : PG_OWNERS;
@@ -403,13 +447,14 @@ async function main(): Promise<void> {
   let worst = 0;
   for (const group of groups) {
     console.log(`── ${describeGroup(group)} ──`);
+    reportRecordOnly(group);
     const client = new Client(group.config);
     await client.connect();
     try {
       let code = 1;
       const scope: OwnerScope = { owners: group.owners, index, tableOwners };
-      if (command === 'status') code = await commandStatus(client, group.files);
-      else if (command === 'up') code = await commandUp(client, group.files, flags);
+      if (command === 'status') code = await commandStatus(client, group);
+      else if (command === 'up') code = await commandUp(client, group, flags);
       else if (command === 'verify') code = await commandVerify(client, group.files, scope);
       else if (command === 'baseline') code = await commandBaseline(client, group.files, flags, scope);
       worst = Math.max(worst, code);

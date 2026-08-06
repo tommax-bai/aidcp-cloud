@@ -326,10 +326,21 @@ export async function runSchemaContractGate(options?: {
     const groups = buildGroups(owners, options);
     console.log(`[${service}] schema 契约门（${mode}） ${describeTargets(groups, owners)}`);
     if (index.residue.length > 0) {
-      // 残留 = 头声明为空、判不出属主、按安全方向计入全部属主的那批（见 migration-owners.ts 文件头第 2 点）。
+      // 对象声明定位不到表 ⇒ **账本范围**计入全部属主（见 migration-owners.ts 文件头第 2 点）。
+      // 措辞刻意不再说「残留」：那个词曾附带一个已被空库实跑证伪的前提（「不持有任何存活对象」），
+      // 而这批迁移里 12 条仍在对真实的表执行 DDL/DML。它们的**执行范围**由封闭名册逐条给出。
       // 启动日志只报数（逐条清单由 `npm run migrate status` 打），但绝不省略这一行。
       console.log(
-        `[${service}] schema 契约门（${mode}） 残留迁移（头声明为空、计入全部属主）${index.residue.length} 条，逐条见 npm run migrate status`,
+        `[${service}] schema 契约门（${mode}） 对象声明定位不到表、账本范围计入全部属主的迁移 ` +
+          `${index.residue.length} 条（执行范围另由名册给出），逐条见 npm run migrate status`,
+      );
+    }
+    if (index.recordedNotExecuted.length > 0) {
+      // 「记账不执行」是本机制最危险的失败形态所在：标错一条，库里少了对象，而账本、状态、
+      // 契约门三处都显示「已处置」。故启动日志里逐条打出来，绝不只报数。
+      console.log(
+        `[${service}] schema 契约门（${mode}） 记账不执行 ${index.recordedNotExecuted.length} 条：` +
+          index.recordedNotExecuted.join(', '),
       );
     }
 
