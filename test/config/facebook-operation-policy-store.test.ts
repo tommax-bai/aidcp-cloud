@@ -532,10 +532,10 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
     },
   };
 
-  const store = new FacebookOperationPolicyStore({
+  const makeStore = (executionTarget: 'dev' | 'ol' | undefined) => new FacebookOperationPolicyStore({
     pool,
-    schemaProber: readySchema(options.executionTarget !== undefined),
-    executionTarget: options.executionTarget,
+    schemaProber: readySchema(executionTarget !== undefined),
+    executionTarget,
     mirrorVersionBumper,
     environmentResolver: (accountId) => ({
       ok: true,
@@ -561,9 +561,18 @@ function database(options: { executionTarget?: 'dev' | 'ol' } = {}) {
     },
   });
 
+  const store = makeStore(options.executionTarget);
+
   return {
     pool,
     store,
+    /**
+     * 在**同一份数据**上再造一个「跑在另一个部署目标里的进程」。
+     *
+     * 「两个目标读到同一份配置」这件事，只有共用同一个库才证明得了：
+     * 各起一套夹具、各自播一份同样的种子，即使实现仍按部署目标分行也会全绿。
+     */
+    storeOnSameData: makeStore,
     environments,
     get policies() { return policies; },
     get audits() { return audits; },
@@ -734,6 +743,25 @@ describe('FacebookOperationPolicyStore', () => {
       assert.equal(stale.current?.revision, 2);
     }
     assert.equal(db.globalAudits.length, 1, 'stale CAS must not create an audit row');
+    // 「具名拒绝 + 回最新投影」只是一半；另一半是**那一行确实没被动过**。
+    // 合并成一份之后这条更要紧：过期写一旦落地，覆盖的是两个运行目标共用的那一行。
+    // 上面这次过期写带的是 currentGlobal（revision 1 时的旧值），若被写下去，
+    // 下面这几格会退回旧值而审计表照样只有一行——正是「静默覆盖」的形状。
+    assert.deepEqual(
+      {
+        revision: db.globalRow.revision,
+        ruleViews: db.globalRow.rule_views_per_like,
+        totalDays: db.globalRow.slow_start_total_days,
+        updatedBy: db.globalRow.updated_by,
+      },
+      {
+        revision: 2,
+        ruleViews: 6,
+        totalDays: 14,
+        updatedBy: 'panel:alice',
+      },
+      'stale CAS must leave the merged row exactly as the winning write left it',
+    );
   });
 
   it('rejects malformed target-global daily caps before opening a transaction', async () => {
@@ -1832,5 +1860,79 @@ describe('FacebookOperationPolicyStore', () => {
     assert.equal(view.slowStart.state, 'active');
     assert.equal(view.effectiveMode, 'slow_start');
     assert.equal(view.blocker, null);
+  });
+
+  // —— change unify-facebook-global-policy-across-targets §4：合并成一份之后的跨目标语义 ——
+  //
+  // 这两条的承重点都在「**同一份数据**、两个不同部署目标的进程」。各起一套夹具、各播一份同样的
+  // 种子是证不出东西的：实现即使仍按部署目标分行，那样写也会全绿。
+
+  it('两个部署目标的进程从同一份数据读到同一份全局策略，逐格相同且 revision 相同', async () => {
+    const db = database({ executionTarget: 'dev' });
+    const olStore = db.storeOnSameData('ol');
+    await db.store.init();
+    await olStore.init();
+
+    const fromDev = db.store.getGlobal();
+    const fromOl = olStore.getGlobal();
+    assert.ok(fromDev, 'dev 侧应读到全局策略');
+    assert.ok(fromOl, 'ol 侧应读到同一份全局策略');
+
+    // `executionTarget` 是**唯一**允许不同的一格，且它现在的含义是「你正在通过哪个目标的接口读」，
+    // 不是「这份配置属于谁」。实现刻意不回传作用域键：后台对该字段有 ['dev','ol'] 硬闸，
+    // 回一个它不认识的值不是报错、是整页打不开。
+    assert.equal(fromDev.executionTarget, 'dev');
+    assert.equal(fromOl.executionTarget, 'ol');
+
+    // 其余逐格相同——包括 revision。revision 必须是同一条序列，否则两边各自 CAS、
+    // 「谁也没覆盖谁」这个保证就不成立了。
+    const { executionTarget: _devTarget, ...devRest } = fromDev;
+    const { executionTarget: _olTarget, ...olRest } = fromOl;
+    assert.deepEqual(olRest, devRest);
+    assert.equal(fromOl.revision, fromDev.revision);
+  });
+
+  it('一个目标写入的冷启动完成事实，另一个目标视角同样读到已完成', async () => {
+    const db = database({ executionTarget: 'dev' });
+    const olStore = db.storeOnSameData('ol');
+    await db.store.init();
+    await olStore.init();
+
+    const enabled = await db.store.writeEnvironment(
+      'env-unbound',
+      {
+        expectedRevision: 0,
+        mode: 'slow_start',
+        requestId: 'cross-target-enable',
+        requiredOwnerUserId: 'customer-a',
+      },
+      'client:customer-a',
+    );
+    assert.ok(enabled.ok);
+
+    assert.equal(
+      (await olStore.getSlowStartProgressForEnv('env-unbound'))?.slowStartProgress.completed,
+      false,
+      '写入之前，另一目标视角应如实读到未完成',
+    );
+
+    const completed = await db.store.writeSlowStartProgress(
+      'env-unbound',
+      {
+        expectedRevision: enabled.view.policyRevision,
+        day: 4,
+        completed: true,
+        requestId: 'cross-target-complete',
+        requiredOwnerUserId: 'customer-a',
+      },
+      'client:customer-a',
+    );
+    assert.ok(completed.ok);
+
+    // 这一条正是那次真实事故的形态：dev 侧标了毕业，ol 侧仍显示未完成、配额继续被冷启动曲线夹住，
+    // 而两边各自都在如实汇报自己那份事实 ⇒ 没有任何一处报错。
+    const fromOl = await olStore.getSlowStartProgressForEnv('env-unbound');
+    assert.equal(fromOl?.slowStartProgress.completed, true, '另一目标视角必须同样读到已完成');
+    assert.equal(fromOl?.slowStartProgress.day, 4);
   });
 });
