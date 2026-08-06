@@ -1,9 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { NoteOpener } from '../../src/agents/note-opener.js';
-import { SessionContext } from '../../src/agents/session-context.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { NoteOpener } from '@automation/agents/note-opener.js';
+import { SessionContext } from '@automation/agents/session-context.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

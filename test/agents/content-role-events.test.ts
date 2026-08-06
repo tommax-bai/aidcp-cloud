@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { EventBus } from '../../src/event-bus/index.js';
-import type { EventMap, RoleEventMap } from '../../src/event-bus/types.js';
-import type { ContentRoleEventMap, RoleEventSource } from '../../src/kernel/role-runtime.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import type { EventMap, RoleEventMap } from '@automation/event-bus/types.js';
+import type { ContentRoleEventMap, RoleEventSource } from '@kernel/kernel/role-runtime.js';
 
 /**
  * 总线实际派发的事件全集 = 边缘上报事件表 ∪ 角色事件表（与 `EventBus` 内部的 `AllEventMap` 同源）。

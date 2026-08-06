@@ -3,11 +3,11 @@ import { test } from 'node:test';
 import type {
   PendingPublishPreview,
   PublishUiUpdateCommandInput,
-} from '../../src/kernel/api-direct-port.js';
+} from '@kernel/kernel/api-direct-port.js';
 import {
   PublishUiUpdateCommandReceiver,
   PublishUiUpdateReceiptCapacityError,
-} from '../../src/comm/publish-ui-update-command-receiver.js';
+} from '@automation/comm/publish-ui-update-command-receiver.js';
 
 function preview(accountId = 'acct-1', contentVersion = 3): PendingPublishPreview {
   return {

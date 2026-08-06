@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { ContentRole } from '../../src/agents/content-role.js';
-import { EventBus } from '../../src/event-bus/index.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { ContentRole } from '@automation/agents/content-role.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 /**
  * 人设注入的构造契约（change split-cloud-automation-production-runtime · task 2.7 层④）。

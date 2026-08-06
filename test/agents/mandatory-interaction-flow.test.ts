@@ -1,15 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { ContentCuratorRole, type NoteData } from '../../src/agents/content-curator-role.js';
-import { ContentEvaluator } from '../../src/agents/content-evaluator.js';
-import { DeepReader } from '../../src/agents/deep-reader.js';
-import { CommentReviewer } from '../../src/agents/comment-reviewer.js';
-import { InteractionAppraiserRole } from '../../src/agents/interaction-appraiser-role.js';
-import { CommentAppraiser } from '../../src/agents/comment-appraiser.js';
-import { SessionContext } from '../../src/agents/session-context.js';
-import type { CommentAppraisedPayload, InteractionCompletedPayload, QualityRejectPayload } from '../../src/event-bus/types.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { ContentCuratorRole, type NoteData } from '@automation/agents/content-curator-role.js';
+import { ContentEvaluator } from '@automation/agents/content-evaluator.js';
+import { DeepReader } from '@automation/agents/deep-reader.js';
+import { CommentReviewer } from '@automation/agents/comment-reviewer.js';
+import { InteractionAppraiserRole } from '@automation/agents/interaction-appraiser-role.js';
+import { CommentAppraiser } from '@automation/agents/comment-appraiser.js';
+import { SessionContext } from '@automation/agents/session-context.js';
+import type { CommentAppraisedPayload, InteractionCompletedPayload, QualityRejectPayload } from '@automation/event-bus/types.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const soul: Soul = {

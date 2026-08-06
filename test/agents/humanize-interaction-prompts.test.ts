@@ -6,15 +6,15 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { InteractionAppraiserRole } from '../../src/agents/interaction-appraiser-role.js';
-import { ContentEvaluator } from '../../src/agents/content-evaluator.js';
-import { CommentAppraiser } from '../../src/agents/comment-appraiser.js';
-import { CommentComposer } from '../../src/agents/comment-composer.js';
-import { CommentDeAiFlavor } from '../../src/agents/comment-de-ai-flavor.js';
-import { SessionContext } from '../../src/agents/session-context.js';
-import type { NoteData } from '../../src/agents/content-curator-role.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { InteractionAppraiserRole } from '@automation/agents/interaction-appraiser-role.js';
+import { ContentEvaluator } from '@automation/agents/content-evaluator.js';
+import { CommentAppraiser } from '@automation/agents/comment-appraiser.js';
+import { CommentComposer } from '@automation/agents/comment-composer.js';
+import { CommentDeAiFlavor } from '@automation/agents/comment-de-ai-flavor.js';
+import { SessionContext } from '@automation/agents/session-context.js';
+import type { NoteData } from '@automation/agents/content-curator-role.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: '大厂做 LLM 落地', tone: '技术向、偶尔幽默' },

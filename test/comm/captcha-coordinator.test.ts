@@ -7,14 +7,14 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { CaptchaCoordinator } from '../../src/comm/captcha-coordinator.js';
-import type { EdgePusher, EdgeSession } from '../../src/comm/ws-server.js';
-import type { Envelope } from '../../src/comm/protocol.js';
-import { RiskController } from '../../src/risk/index.js';
-import type { FeishuCard } from '../../src/feishu/types.js';
+import { CaptchaCoordinator } from '@automation/comm/captcha-coordinator.js';
+import type { EdgePusher, EdgeSession } from '@automation/comm/ws-server.js';
+import type { Envelope } from '@automation/comm/protocol.js';
+import { RiskController } from '@automation/risk/index.js';
+import type { FeishuCard } from '@api/feishu/types.js';
 // change feishu-contract-seam：协调器只交出结构化 AlertData；测试在下发口本地重建飞书卡以保留原有卡结构断言。
-import { buildAlertCard } from '../../src/feishu/cards.js';
-import type { AlertData } from '../../src/alerts/alert-notification.js';
+import { buildAlertCard } from '@api/feishu/cards.js';
+import type { AlertData } from '@automation/alerts/alert-notification.js';
 
 class FakePusher implements EdgePusher {
   readonly paused: string[] = [];

@@ -4,13 +4,13 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { CuratedNoteEvaluator } from '../../src/agents/curated-note-evaluator.js';
-import type { CuratedObservation } from '../../src/kernel/curated-content-types.js';
-import type { NoteDetailData } from '../../src/kernel/note-detail.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { TextCardTranscriber } from '../../src/kernel/text-card-transcriber-port.js';
-import { ContentPortError } from '../../src/kernel/content-port-error.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { CuratedNoteEvaluator } from '@automation/agents/curated-note-evaluator.js';
+import type { CuratedObservation } from '@kernel/kernel/curated-content-types.js';
+import type { NoteDetailData } from '@kernel/kernel/note-detail.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { TextCardTranscriber } from '@kernel/kernel/text-card-transcriber-port.js';
+import { ContentPortError } from '@kernel/kernel/content-port-error.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

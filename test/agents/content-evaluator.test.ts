@@ -1,11 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { ContentEvaluator } from '../../src/agents/content-evaluator.js';
-import type { VisibleCard } from '../../src/agents/content-evaluator.js';
-import { SessionContext } from '../../src/agents/session-context.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { ContentValuablePayload, ContentNoValuablePayload } from '../../src/event-bus/types.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { ContentEvaluator } from '@automation/agents/content-evaluator.js';
+import type { VisibleCard } from '@automation/agents/content-evaluator.js';
+import { SessionContext } from '@automation/agents/session-context.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { ContentValuablePayload, ContentNoValuablePayload } from '@automation/event-bus/types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

@@ -5,19 +5,19 @@ import {
   FacebookConsumptionModeCoordinator,
   createStrictFacebookConsumptionGroupSelector,
   type FacebookConsumptionCoordinatorRuntimePort,
-} from '../../src/orchestrator/facebook-consumption-mode-coordinator.js';
+} from '@automation/orchestrator/facebook-consumption-mode-coordinator.js';
 import {
   FACEBOOK_GROUP_COMMENT_POLICY_BOUNDS,
   type FacebookGroupCommentPolicyView,
-} from '../../src/config/facebook-group-comment-policy-store.js';
+} from '@api/config/facebook-group-comment-policy-store.js';
 import type {
   FacebookConsumptionActionReceiptInput,
   FacebookConsumptionActionTarget,
   FacebookConsumptionActionType,
   FacebookConsumptionActionView,
   FacebookConsumptionOutcome,
-} from '../../src/orchestrator/facebook-consumption-mode-types.js';
-import type { FacebookGroupMembershipRow } from '../../src/comment-agent/facebook-group-store.js';
+} from '@automation/orchestrator/facebook-consumption-mode-types.js';
+import type { FacebookGroupMembershipRow } from '@automation/comment-agent/facebook-group-store.js';
 
 const NOW = Date.parse('2026-07-30T08:00:00.000Z');
 const GROUP_NEW = 'https://www.facebook.com/groups/new-join';
@@ -678,7 +678,7 @@ describe('FacebookConsumptionModeCoordinator', () => {
         triggerForMode: async (
           accountId: string,
           options: Parameters<
-            import('../../src/orchestrator/facebook-consumption-mode-coordinator.js').FacebookConsumptionCommentExecutorPort['triggerForMode']
+            import('@automation/orchestrator/facebook-consumption-mode-coordinator.js').FacebookConsumptionCommentExecutorPort['triggerForMode']
           >[1],
         ) => {
           commentCalls += 1;

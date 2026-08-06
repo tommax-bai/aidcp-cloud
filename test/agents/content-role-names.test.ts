@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
-import { ConceptExtractorRole } from '../../src/agents/concept-extractor-role.js';
-import { CuratedCommentEvaluator } from '../../src/agents/curated-comment-evaluator.js';
-import { CuratedNoteEvaluator } from '../../src/agents/curated-note-evaluator.js';
-import { PersonaGenerator } from '../../src/agents/persona-generator.js';
-import { ValuableCommentArchivist } from '../../src/agents/valuable-comment-archivist.js';
-import type { RoleName } from '../../src/event-bus/types.js';
-import { ROLE_CATALOG } from '../../src/config/role-catalog.js';
+import { ConceptExtractorRole } from '@automation/agents/concept-extractor-role.js';
+import { CuratedCommentEvaluator } from '@automation/agents/curated-comment-evaluator.js';
+import { CuratedNoteEvaluator } from '@automation/agents/curated-note-evaluator.js';
+import { PersonaGenerator } from '@content/agents/persona-generator.js';
+import { ValuableCommentArchivist } from '@automation/agents/valuable-comment-archivist.js';
+import type { RoleName } from '@automation/event-bus/types.js';
+import { ROLE_CATALOG } from '@api/config/role-catalog.js';
 
 /**
  * content 侧角色名的**合同夹具**（change cloud-coupling-phase0）。

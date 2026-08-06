@@ -5,12 +5,12 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { CommentScheduler, outcomeToReceipt, humanGroupLabel, joinOnlyReceipt, joinCommentReceipt, commentOutcomeReason } from '../../src/comment-agent/comment-scheduler.js';
-import { EdgeTaskLeaseError } from '../../src/comm/edge-task-lease-client.js';
-import type { CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import { ContentPortError } from '../../src/kernel/content-port-error.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { CommentScheduler, outcomeToReceipt, humanGroupLabel, joinOnlyReceipt, joinCommentReceipt, commentOutcomeReason } from '@automation/comment-agent/comment-scheduler.js';
+import { EdgeTaskLeaseError } from '@automation/comm/edge-task-lease-client.js';
+import type { CommentSchedulerDeps } from '@automation/comment-agent/comment-scheduler.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import { ContentPortError } from '@kernel/kernel/content-port-error.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: 'x', tone: '理性' },
@@ -722,7 +722,7 @@ describe('CommentScheduler /comment --force (manual-comment-force-flag)', () => 
 
 // ── facebook-scheduled-comment 2.2/2.3：runFacebookTargetedTask 影子先行编排（纯云，物理不发） ──
 describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () => {
-  type Audit = import('../../src/comment-agent/facebook-comment-audit-store.js').FacebookCommentAuditRow;
+  type Audit = import('@automation/comment-agent/facebook-comment-audit-store.js').FacebookCommentAuditRow;
   function fbDeps(over: Partial<CommentSchedulerDeps> & {
     keywords?: string[]; containers?: string[]; auto?: boolean; shadow?: boolean;
     commentMode?: 'generated' | 'template'; commentTemplates?: string[];
@@ -864,7 +864,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
 
 // ── facebook-scheduled-comment 真发接线（task 4.x）：容器搜索 → 开帖 → 提交 + 服务器确认 ──
 describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => {
-  type Audit = import('../../src/comment-agent/facebook-comment-audit-store.js').FacebookCommentAuditRow;
+  type Audit = import('@automation/comment-agent/facebook-comment-audit-store.js').FacebookCommentAuditRow;
   const PERMALINK = 'https://www.facebook.com/groups/1/posts/2';
 
   /** FB 真发流水线的假边端：按命令类型 emit 对应上报到同一私有总线；可配搜索失败/开帖失败/提交结果/候选集。 */

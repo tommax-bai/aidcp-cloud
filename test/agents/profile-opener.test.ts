@@ -1,9 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { ProfileOpener } from '../../src/agents/profile-opener.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
-import type { ProfileEnteredPayload } from '../../src/event-bus/types.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { ProfileOpener } from '@automation/agents/profile-opener.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
+import type { ProfileEnteredPayload } from '@automation/event-bus/types.js';
 
 const mockSoul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

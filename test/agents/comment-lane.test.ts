@@ -4,19 +4,19 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
-import { CommentAppraiser } from '../../src/agents/comment-appraiser.js';
-import { CommentComposer } from '../../src/agents/comment-composer.js';
-import { CommentDeAiFlavor } from '../../src/agents/comment-de-ai-flavor.js';
-import { CommentApprovalGate, type CommentApprovalPort } from '../../src/agents/comment-approval-gate.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { CommentAppraiser } from '@automation/agents/comment-appraiser.js';
+import { CommentComposer } from '@automation/agents/comment-composer.js';
+import { CommentDeAiFlavor } from '@automation/agents/comment-de-ai-flavor.js';
+import { CommentApprovalGate, type CommentApprovalPort } from '@automation/agents/comment-approval-gate.js';
 import {
   DEFAULT_COMMENT_LLM_TIMEOUT_MS,
   DEFAULT_COMMENT_SUBLINE_TIMEOUT_MS,
   RoleDispatcher,
-} from '../../src/orchestrator/role-dispatcher.js';
-import type { NoteData } from '../../src/agents/content-curator-role.js';
-import type { LlmCallOpts } from '../../src/llm/qwen.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+} from '@automation/orchestrator/role-dispatcher.js';
+import type { NoteData } from '@automation/agents/content-curator-role.js';
+import type { LlmCallOpts } from '@content/llm/qwen.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI爱好者', background: '技术博主', tone: '友好' },

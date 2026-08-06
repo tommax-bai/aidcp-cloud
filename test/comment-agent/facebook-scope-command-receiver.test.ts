@@ -1,16 +1,33 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { FacebookGroupScopeError } from '../../src/kernel/facebook-group-types.js';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type {
   FacebookGroupImportResult,
   ReplaceFacebookGroupTargetScopesResult,
-} from '../../src/kernel/facebook-group-types.js';
+} from '@kernel/kernel/facebook-group-types.js';
+import { siblingRepoRoot } from '../helpers/sibling-repos.js';
+
+// Dual-module-instance guard (invert-split-fact-source): the SUT at
+// @automation/* resolves aidcp-kernel from ITS OWN node_modules (dist),
+// while the @kernel/* alias points at the sibling kernel SRC — a different
+// module instance. Errors constructed from the alias would never satisfy the
+// receiver's internal `instanceof FacebookGroupScopeError` check, so the
+// runtime class must come from the same dist module the SUT loads
+// (package exports map "./*.js" -> "./dist/*.js"). Type imports above stay on
+// the alias: types are erased and carry no instance identity.
+const { FacebookGroupScopeError } = (await import(
+  pathToFileURL(join(
+    siblingRepoRoot('aidcp-automation'),
+    'node_modules', 'aidcp-kernel', 'dist', 'kernel', 'facebook-group-types.js',
+  )).href
+)) as typeof import('@kernel/kernel/facebook-group-types.js');
 import {
   FacebookRosterRefreshError,
   FacebookScopeCommandReceiver,
   FacebookScopeReceiptCapacityError,
   type FacebookScopeCommandOwner,
-} from '../../src/comment-agent/facebook-scope-command-receiver.js';
+} from '@automation/comment-agent/facebook-scope-command-receiver.js';
 
 const IMPORT_RESULT: FacebookGroupImportResult = {
   imported: 1,

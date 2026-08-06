@@ -6,14 +6,14 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { EventBus } from '../../src/event-bus/index.js';
+import { EventBus } from '@automation/event-bus/index.js';
 import {
   CommentScheduler,
   targetedOutcomeToReceipt,
   TARGETED_SEARCH_TERM_MAX_LEN,
-} from '../../src/comment-agent/comment-scheduler.js';
-import type { CommentSchedulerDeps } from '../../src/comment-agent/comment-scheduler.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+} from '@automation/comment-agent/comment-scheduler.js';
+import type { CommentSchedulerDeps } from '@automation/comment-agent/comment-scheduler.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: 'x', tone: '理性' },

@@ -5,9 +5,9 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { CommentTargetPicker } from '../../src/agents/comment-target-picker.js';
-import type { CommentCandidateCard } from '../../src/agents/comment-target-picker.js';
-import type { Soul } from '../../src/kernel/soul-types.js';
+import { CommentTargetPicker } from '@automation/agents/comment-target-picker.js';
+import type { CommentCandidateCard } from '@automation/agents/comment-target-picker.js';
+import type { Soul } from '@kernel/kernel/soul-types.js';
 
 const soul: Soul = {
   identity: { name: 'TestBot', role: 'AI研发工程师', background: '技术博主', tone: '理性' },
