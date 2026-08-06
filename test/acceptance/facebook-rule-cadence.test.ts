@@ -11,7 +11,6 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 import {
@@ -23,10 +22,9 @@ import {
   FACEBOOK_RULE_LEGACY_DEFINITION_ID,
   FACEBOOK_RULE_VIEW_THRESHOLD,
   facebookRuleRoundIncludesJoin,
-} from '../../src/kernel/facebook-rule-mode-types.js';
+} from '@kernel/kernel/facebook-rule-mode-types.js';
 
-const migration = (name: string) =>
-  readFile(new URL(`../../migrations/${name}`, import.meta.url), 'utf8');
+import { readMigration as migration } from '../helpers/migration-union.js';
 
 test('AC-FBRULE-01 新运行时定义号稳定且不再编码节奏', () => {
   assert.equal(FACEBOOK_RULE_RUNTIME_DEFINITION_ID, 'facebook_rule_cadence');
@@ -65,7 +63,7 @@ test('AC-FBRULE-04 只点赞的轮次终结为 not_scheduled、释放单飞、�
   //   假失败——借用 not_started / structural_skip 会让一半轮次在后台显示成「本该做却没做成」；
   //   活锁——轮次不终结 ⇒ 活跃轮次指针不清 ⇒ 确认浏览在写去重账本之前被短路 ⇒ 账号彻底停摆；
   //   诚实原因——blocker 三阶段共用一列，终结时补写任何值都会抹掉点赞为什么被抑制。
-  const { RoleDispatcher } = await import('../../src/orchestrator/role-dispatcher.js');
+  const { RoleDispatcher } = await import('@automation/orchestrator/role-dispatcher.js');
   const patches: Array<Record<string, unknown>> = [];
   let joinCalls = 0;
   const likeOnlySequence = 1;

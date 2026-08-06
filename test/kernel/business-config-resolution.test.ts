@@ -15,17 +15,17 @@ import {
   resolveEffectiveActiveWeekMask,
   resolveEffectiveContentActiveMask,
   resolveEffectiveContentSchedule,
-} from '../../src/kernel/content-schedule-resolution.js';
+} from '@kernel/kernel/content-schedule-resolution.js';
 import {
   DEFAULT_HOT_LEAD_GATE_CONFIG,
   resolveHotLeadGateConfig,
-} from '../../src/kernel/hot-lead-gate-config.js';
+} from '@kernel/kernel/hot-lead-gate-config.js';
 import {
   coerceFacebookCommentMode,
   facebookCommentModeFromWire,
   facebookCommentModeToWire,
   resolveEffectiveFacebookCommentConfig,
-} from '../../src/kernel/facebook-comment-config-types.js';
+} from '@kernel/kernel/facebook-comment-config-types.js';
 
 const FULL_MASK = '1'.repeat(168);
 const NIGHT_MASK = '0'.repeat(84) + '1'.repeat(84);
@@ -154,8 +154,10 @@ test('线缆写法与领域写法是**不同字面量**，跨进程消费方必�
  */
 test('三个业务配置的生效判定只有一份：每个取数口都真的委托给 kernel 那个符号', async () => {
   const { readFile } = await import('node:fs/promises');
+  // 事实源翻转后按属主仓现读：kernel/** 在 aidcp-kernel，config/** 归 api。
+  const { ownedSourcePath } = await import('../helpers/sibling-repos.js');
   const read = (path: string) =>
-    readFile(new URL(`../../src/${path}`, import.meta.url), 'utf8');
+    readFile(ownedSourcePath(path.startsWith('kernel/') ? 'kernel' : 'api', path), 'utf8');
 
   /** 取出类方法体（2 空格缩进的类成员，到同缩进的收尾大括号为止）。 */
   const methodBody = (source: string, method: string): string => {

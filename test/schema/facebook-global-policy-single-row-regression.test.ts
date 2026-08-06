@@ -12,11 +12,16 @@
 
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-const srcDir = fileURLToPath(new URL('../../src/', import.meta.url));
+import { BUSINESS_REPOS, siblingRepoRoot } from '../helpers/sibling-repos.js';
+
+/**
+ * 事实源翻转后「全部业务 src」＝兄弟仓 src 树的并集（kernel 也算：单体的 src/kernel
+ * 本来就在旧扫描范围里）。同一文件被分发到多个仓时会出现重名条目——按 rel 去重后判定。
+ */
+const SCANNED_REPOS = [...BUSINESS_REPOS, 'aidcp-kernel'] as const;
 
 /** 三张主表；正则用负向前瞻把同名前缀的审计表排除在外。 */
 const COLLAPSED_TABLES = [
@@ -35,6 +40,23 @@ async function tsFiles(dir: string): Promise<string[]> {
   return out;
 }
 
+interface ScannedFile {
+  /** Path relative to the owning repo's src/ — same shape the monolith scan reported. */
+  rel: string;
+  full: string;
+}
+
+async function unionSrcFiles(): Promise<ScannedFile[]> {
+  const out: ScannedFile[] = [];
+  for (const repo of SCANNED_REPOS) {
+    const srcRoot = path.join(siblingRepoRoot(repo), 'src');
+    for (const full of await tsFiles(srcRoot)) {
+      out.push({ rel: path.relative(srcRoot, full), full });
+    }
+  }
+  return out;
+}
+
 /** 抽出全部模板字符串（本仓的 SQL 一律写在反引号里）。 */
 function templateLiterals(content: string): string[] {
   return [...content.matchAll(/`(?:[^`\\]|\\[\s\S])*`/g)].map((m) => m[0]);
@@ -43,12 +65,12 @@ function templateLiterals(content: string): string[] {
 describe('facebook 全局策略单行化的反回归', () => {
   it('三张主表的任何一条 SQL 里都不再出现 execution_target', async () => {
     const offenders: string[] = [];
-    for (const file of await tsFiles(srcDir)) {
-      const content = await readFile(file, 'utf8');
+    for (const { rel, full } of await unionSrcFiles()) {
+      const content = await readFile(full, 'utf8');
       for (const literal of templateLiterals(content)) {
         if (!COLLAPSED_TABLES.some((re) => re.test(literal))) continue;
         if (!/execution_target/.test(literal)) continue;
-        offenders.push(`${path.relative(srcDir, file)}: ${literal.slice(0, 90).replace(/\s+/g, ' ')}…`);
+        offenders.push(`${rel}: ${literal.slice(0, 90).replace(/\s+/g, ' ')}…`);
       }
     }
     assert.deepEqual(
@@ -59,29 +81,29 @@ describe('facebook 全局策略单行化的反回归', () => {
   });
 
   it('作用域常量模块已删除，且没有人再引它', async () => {
-    const files = await tsFiles(srcDir);
+    const files = await unionSrcFiles();
     assert.equal(
-      files.filter((f) => f.endsWith('facebook-global-policy-scope.ts')).length,
+      files.filter((f) => f.rel.endsWith('facebook-global-policy-scope.ts')).length,
       0,
       '分行键消失之后，一个恒为同一个值的行键常量没有对应的列可选，MUST NOT 继续留着传参',
     );
     const referencing: string[] = [];
-    for (const file of files) {
-      const content = await readFile(file, 'utf8');
+    for (const { rel, full } of files) {
+      const content = await readFile(full, 'utf8');
       if (/facebook-global-policy-scope|FACEBOOK_GLOBAL_POLICY_SCOPE/.test(content)) {
-        referencing.push(path.relative(srcDir, file));
+        referencing.push(rel);
       }
     }
-    assert.deepEqual(referencing, []);
+    assert.deepEqual([...new Set(referencing)], []);
   });
 
   it('两张审计表上的运行目标字段刻意留着：这道闸 MUST NOT 顺手把它也判成违规', async () => {
     const auditWrites: string[] = [];
-    for (const file of await tsFiles(srcDir)) {
-      const content = await readFile(file, 'utf8');
+    for (const { rel, full } of await unionSrcFiles()) {
+      const content = await readFile(full, 'utf8');
       for (const literal of templateLiterals(content)) {
         if (!/facebook_(operation_global|group_comment)_policy_audit/.test(literal)) continue;
-        if (/execution_target/.test(literal)) auditWrites.push(path.relative(srcDir, file));
+        if (/execution_target/.test(literal)) auditWrites.push(rel);
       }
     }
     assert.deepEqual(

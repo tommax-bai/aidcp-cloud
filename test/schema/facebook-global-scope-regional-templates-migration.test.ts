@@ -1,15 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
+import { readMigration } from '../helpers/migration-union.js';
+
 test('0089 migrates only snapshotted targets to global and preserves OL-compatible scope facts', async () => {
-  const sql = await readFile(
-    new URL(
-      '../../migrations/0089_facebook_global_scope_regional_templates.sql',
-      import.meta.url,
-    ),
-    'utf8',
-  );
+  const sql = await readMigration('0089_facebook_global_scope_regional_templates.sql');
 
   assert.match(sql, /ADD COLUMN IF NOT EXISTS account_scope_mode TEXT NOT NULL DEFAULT 'restricted'/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS facebook_region_comment_template_config/);
@@ -43,13 +38,7 @@ test('0089 migrates only snapshotted targets to global and preserves OL-compatib
 });
 
 test('0090 preserves existing persisted modes as explicit and defaults future rows to unconfigured', async () => {
-  const sql = await readFile(
-    new URL(
-      '../../migrations/0090_facebook_comment_mode_configured.sql',
-      import.meta.url,
-    ),
-    'utf8',
-  );
+  const sql = await readMigration('0090_facebook_comment_mode_configured.sql');
 
   assert.match(sql, /ADD COLUMN IF NOT EXISTS comment_mode_configured BOOLEAN/);
   assert.match(
@@ -61,13 +50,7 @@ test('0090 preserves existing persisted modes as explicit and defaults future ro
 });
 
 test('0091 advances the facebook comment snapshot cursor after the payload shape changes', async () => {
-  const sql = await readFile(
-    new URL(
-      '../../migrations/0091_facebook_comment_config_snapshot_revision.sql',
-      import.meta.url,
-    ),
-    'utf8',
-  );
+  const sql = await readMigration('0091_facebook_comment_config_snapshot_revision.sql');
 
   assert.match(sql, /-- aidcp:kind=expand/);
   assert.match(sql, /-- aidcp:objects=table:config_mirror_version/);

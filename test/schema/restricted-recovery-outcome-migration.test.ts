@@ -1,11 +1,10 @@
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const migrationUrl = new URL('../../migrations/0080_restricted_recovery_outcome.sql', import.meta.url);
+import { readMigration } from '../helpers/migration-union.js';
 
 test('0080 只做 nullable additive recovery/env/resume 阶段列与 state check 扩展', async () => {
-  const sql = await readFile(migrationUrl, 'utf8');
+  const sql = await readMigration('0080_restricted_recovery_outcome.sql');
   assert.match(sql, /-- aidcp:kind=expand/);
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|COLUMN)\b/i);
   assert.doesNotMatch(sql, /\bCREATE\s+TABLE\b/i);

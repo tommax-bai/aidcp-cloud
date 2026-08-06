@@ -9,31 +9,26 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFile } from 'node:fs/promises';
 import {
   FACEBOOK_RULE_DEFINITION_ID,
   FACEBOOK_RULE_DEFINITION_VERSION,
   FACEBOOK_RULE_LEGACY_DEFINITION_ID,
   FACEBOOK_RULE_LEGACY_DEFINITION_VERSION,
-} from '../../src/kernel/facebook-rule-mode-types.js';
+} from '@kernel/kernel/facebook-rule-mode-types.js';
 
-const MIGRATION = new URL(
-  '../../migrations/0097_environment_level_rule_mode_and_approval.sql',
-  import.meta.url,
-);
+import { readMigration } from '../helpers/migration-union.js';
+
+const MIGRATION = '0097_environment_level_rule_mode_and_approval.sql';
 
 /** 账号键旧表的定义身份现状由这条迁移决定；新表必须与它逐条对齐。 */
-const ACCOUNT_KEYED_TWO_TIER = new URL(
-  '../../migrations/0094_facebook_rule_two_tier_config.sql',
-  import.meta.url,
-);
+const ACCOUNT_KEYED_TWO_TIER = '0094_facebook_rule_two_tier_config.sql';
 
 function stripSqlComments(sql: string): string {
   return sql.split('\n').map((line) => line.replace(/--.*$/, '')).join('\n');
 }
 
 test('0097 是 expand：建环境键表 + 加跳过原因列，不删旧账号键表也不加 NOT NULL', async () => {
-  const raw = await readFile(MIGRATION, 'utf8');
+  const raw = await readMigration(MIGRATION);
   assert.match(raw, /aidcp:kind=expand/);
   assert.match(raw, /aidcp:objects=table:facebook_rule_mode_environment_config,table:environment_comment_approval_policy/);
 
@@ -56,8 +51,8 @@ test('0097 是 expand：建环境键表 + 加跳过原因列，不删旧账号�
 
 test('0097 新表的定义身份与账号键旧表逐条对齐：DEFAULT 跟当前定义、CHECK 新旧都接受', async () => {
   const [sql, accountKeyed] = await Promise.all([
-    readFile(MIGRATION, 'utf8').then(stripSqlComments),
-    readFile(ACCOUNT_KEYED_TWO_TIER, 'utf8').then(stripSqlComments),
+    readMigration(MIGRATION).then(stripSqlComments),
+    readMigration(ACCOUNT_KEYED_TWO_TIER).then(stripSqlComments),
   ]);
 
   // DEFAULT 必须是**代码常量当前值**。钉死成字面量而不引用常量，就会在下一次换节奏时静默过期。
@@ -104,7 +99,7 @@ test('0097 新表的定义身份与账号键旧表逐条对齐：DEFAULT 跟当�
 });
 
 test('0097 回填只认唯一绑定：多环境与跨客户争用都不回填', async () => {
-  const sql = stripSqlComments(await readFile(MIGRATION, 'utf8'));
+  const sql = stripSqlComments(await readMigration(MIGRATION));
   // 绑定判据：环境个数与归属客户数都按 DISTINCT 计（避免一对多把计数放大成假冲突）。
   const bindings = sql.match(/WITH bindings AS \([\s\S]*?\)\n/g) ?? [];
   assert.equal(bindings.length, 4, '两次回填 + 两次跳过标注各自带同一份绑定判据');
@@ -121,7 +116,7 @@ test('0097 回填只认唯一绑定：多环境与跨客户争用都不回填', 
 });
 
 test('0097 跳过的行写具名原因，三种判据齐全且可被查询出来', async () => {
-  const sql = stripSqlComments(await readFile(MIGRATION, 'utf8'));
+  const sql = stripSqlComments(await readMigration(MIGRATION));
   for (const table of ['facebook_rule_mode_config', 'account_comment_approval_policy']) {
     const updates = sql.match(
       new RegExp(`UPDATE ${table} c\\n\\s*SET env_backfill_skip_reason = resolved\\.skip_reason[\\s\\S]*?;`),
@@ -136,7 +131,7 @@ test('0097 跳过的行写具名原因，三种判据齐全且可被查询出来
 });
 
 test('0097 一个字都不碰进度 / 浏览去重 / 批次终态三张账号键表', async () => {
-  const raw = await readFile(MIGRATION, 'utf8');
+  const raw = await readMigration(MIGRATION);
   const sql = stripSqlComments(raw);
   for (const table of ['facebook_rule_progress', 'facebook_rule_view_fact', 'facebook_rule_batch']) {
     assert.doesNotMatch(sql, new RegExp(table), `${table} 按设计保持账号键，MUST NOT 出现在本迁移的可执行 SQL 里`);

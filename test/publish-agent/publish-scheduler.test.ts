@@ -1,9 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { PublishScheduler } from '../../src/publish-agent/publish-scheduler.js';
-import type { PublishSchedulerDeps } from '../../src/publish-agent/publish-scheduler.js';
-import { ContentPortError, isContentPortError } from '../../src/kernel/content-port-error.js';
+import { PublishScheduler } from '@automation/publish-agent/publish-scheduler.js';
+
+import { ownedSourcePath } from '../helpers/sibling-repos.js';
+import type { PublishSchedulerDeps } from '@automation/publish-agent/publish-scheduler.js';
+import { ContentPortError, isContentPortError } from '@kernel/kernel/content-port-error.js';
 
 const T = 1700000000000;
 const HOUR = 3_600_000;
@@ -583,7 +585,7 @@ describe('概念富方法回落：只认 unsupported_method', () => {
   });
 
   it('源码里不再有 typeof 在场探针，端口面上富方法不带可选标记', async () => {
-    const source = await readFile(new URL('../../src/publish-agent/publish-scheduler.ts', import.meta.url), 'utf8');
+    const source = await readFile(ownedSourcePath('automation', 'publish-agent/publish-scheduler.ts'), 'utf8');
     assert.ok(
       !/getNewConceptsWithSourceSince\?\(/.test(source),
       '端口上富方法必选；留 `?` 等于留一张假的安全网（跨进程后客户端类恒定义着它）',

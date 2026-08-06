@@ -1,31 +1,17 @@
-import { readFile } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-const migrationUrl = new URL(
-  '../../migrations/0100_facebook_operation_and_group_comment_policy.sql',
-  import.meta.url,
-);
-const globalMigrationUrl = new URL(
-  '../../migrations/0103_facebook_operation_global_policy.sql',
-  import.meta.url,
-);
-const reelCadenceMigrationUrl = new URL(
-  '../../migrations/0104_facebook_reel_mode_cadence.sql',
-  import.meta.url,
-);
-const surfaceMigrationUrl = new URL(
-  '../../migrations/0105_facebook_primary_browse_surface.sql',
-  import.meta.url,
-);
-const slowStartReelLikeMigrationUrl = new URL(
-  '../../migrations/0107_facebook_slow_start_reel_like_cadence.sql',
-  import.meta.url,
-);
+import { readMigration } from '../helpers/migration-union.js';
+
+const migrationUrl = '0100_facebook_operation_and_group_comment_policy.sql';
+const globalMigrationUrl = '0103_facebook_operation_global_policy.sql';
+const reelCadenceMigrationUrl = '0104_facebook_reel_mode_cadence.sql';
+const surfaceMigrationUrl = '0105_facebook_primary_browse_surface.sql';
+const slowStartReelLikeMigrationUrl = '0107_facebook_slow_start_reel_like_cadence.sql';
 
 describe('facebook operation policy migration', () => {
   it('allocates a global revision after the fixed schema version in every seed row', async () => {
-    const sql = await readFile(migrationUrl, 'utf8');
+    const sql = await readMigration(migrationUrl);
     assert.match(
       sql,
       /CREATE SEQUENCE IF NOT EXISTS facebook_operation_policy_revision_seq[\s\S]*NO CYCLE;/,
@@ -50,7 +36,7 @@ describe('facebook operation policy migration', () => {
   });
 
   it('adds target-global values, inherited cadence source and target-scoped sticky graduation', async () => {
-    const sql = await readFile(globalMigrationUrl, 'utf8');
+    const sql = await readMigration(globalMigrationUrl);
     assert.match(
       sql,
       /ADD COLUMN IF NOT EXISTS cadence_source TEXT NOT NULL DEFAULT 'environment'/,
@@ -82,7 +68,7 @@ describe('facebook operation policy migration', () => {
   });
 
   it('adds only global Reel cadence fields with safe defaults for every Facebook mode', async () => {
-    const sql = await readFile(reelCadenceMigrationUrl, 'utf8');
+    const sql = await readMigration(reelCadenceMigrationUrl);
     assert.match(
       sql,
       /ALTER TABLE facebook_operation_global_policy[\s\S]*ADD COLUMN IF NOT EXISTS persona_reel_views_per_like[\s\S]*DEFAULT 4/,
@@ -104,7 +90,7 @@ describe('facebook operation policy migration', () => {
   });
 
   it('adds a global-only slow-start Reel like cadence with a safe bounded default', async () => {
-    const sql = await readFile(slowStartReelLikeMigrationUrl, 'utf8');
+    const sql = await readMigration(slowStartReelLikeMigrationUrl);
     assert.match(
       sql,
       /ALTER TABLE facebook_operation_global_policy[\s\S]*ADD COLUMN IF NOT EXISTS slow_start_reel_views_per_like INTEGER NOT NULL DEFAULT 15/,
@@ -118,7 +104,7 @@ describe('facebook operation policy migration', () => {
   });
 
   it('seeds every existing Facebook environment to an independently audited Reels surface', async () => {
-    const sql = await readFile(surfaceMigrationUrl, 'utf8');
+    const sql = await readMigration(surfaceMigrationUrl);
     assert.match(
       sql,
       /CREATE TABLE IF NOT EXISTS facebook_primary_browse_surface_policy[\s\S]*primary_surface\s+TEXT NOT NULL DEFAULT 'reels'[\s\S]*revision\s+BIGINT NOT NULL DEFAULT 1/,

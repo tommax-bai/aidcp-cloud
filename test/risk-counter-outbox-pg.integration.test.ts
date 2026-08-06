@@ -7,11 +7,11 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 
-import { PgRiskCounterOutboxStore } from '../src/risk/risk-counter-outbox-store.js';
+import { PgRiskCounterOutboxStore } from '@automation/risk/risk-counter-outbox-store.js';
 import { OUTBOX_URL_ENV, resolveIntegrationDatabase } from './helpers/pg-test-database-guard.js';
+import { readMigration } from './helpers/migration-union.js';
 
 const target = resolveIntegrationDatabase(OUTBOX_URL_ENV);
 const connectionString = target.enabled ? target.connectionString : undefined;
@@ -35,11 +35,8 @@ test(
       // 0061 also adds accounts.execution_target; keep only that unrelated prerequisite local,
       // then execute the canonical risk migrations so this test cannot drift from deployed DDL.
       await pool.query('CREATE TABLE accounts (account_id TEXT PRIMARY KEY)');
-      await pool.query(await readFile(new URL('../migrations/0002_risk_control.sql', import.meta.url), 'utf8'));
-      await pool.query(await readFile(
-        new URL('../migrations/0061_risk_writer_ownership_and_outbox.sql', import.meta.url),
-        'utf8',
-      ));
+      await pool.query(await readMigration('0002_risk_control.sql'));
+      await pool.query(await readMigration('0061_risk_writer_ownership_and_outbox.sql'));
       const index = await pool.query<{ predicate: string | null }>(
         `SELECT pg_get_expr(indpred, indrelid) AS predicate
            FROM pg_index

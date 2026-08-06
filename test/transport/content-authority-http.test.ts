@@ -11,13 +11,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { DeploymentTarget } from '../../src/deployment-target.js';
-import { ContentPortError, isContentPortError } from '../../src/kernel/content-port-error.js';
-import { CuratedContentUnavailableError } from '../../src/kernel/curated-content-types.js';
-import type { ConceptPoolPort } from '../../src/kernel/concept-pool-port.js';
-import type { CuratedSelectionPort } from '../../src/kernel/curated-selection-port.js';
-import { InternalHttpClient, InternalHttpServer } from '../../src/transport/internal-http.js';
-import type { CuratedPanelRow, CuratedTargetReader } from '../../src/kernel/curated-content-types.js';
+import type { DeploymentTarget } from '@kernel/deployment-target.js';
+import { ContentPortError, isContentPortError } from '@kernel/kernel/content-port-error.js';
+import { CuratedContentUnavailableError } from '@kernel/kernel/curated-content-types.js';
+import type { ConceptPoolPort } from '@kernel/kernel/concept-pool-port.js';
+import type { CuratedSelectionPort } from '@kernel/kernel/curated-selection-port.js';
+import { InternalHttpClient, InternalHttpServer } from '@automation/transport/internal-http.js';
+import type { CuratedPanelRow, CuratedTargetReader } from '@kernel/kernel/curated-content-types.js';
 import {
   CONCEPT_POOL_AUTHORITY_ROUTES,
   CURATED_SELECTION_AUTHORITY_ROUTES,
@@ -31,8 +31,8 @@ import {
   registerConceptPoolAuthorityRoutes,
   registerCuratedSelectionAuthorityRoutes,
   registerCuratedWriteAuthorityRoutes,
-} from '../../src/transport/content-authority-http.js';
-import type { CuratedWritePort } from '../../src/kernel/curated-write-port.js';
+} from '@automation/transport/content-authority-http.js';
+import type { CuratedWritePort } from '@kernel/kernel/curated-write-port.js';
 
 const TOKEN = 'content-internal-token';
 
@@ -337,8 +337,9 @@ test('content 属主端口的失败映射层只有一份，取用方一律 impor
     'callContentAuthority',
   ];
 
+  const { ownedSourcePath } = await import('../helpers/sibling-repos.js');
   const wire = await readFile(
-    new URL('../../src/transport/content-authority-wire.ts', import.meta.url),
+    ownedSourcePath('automation', 'transport/content-authority-wire.ts'),
     'utf8',
   );
   for (const symbol of shared) {
@@ -351,7 +352,7 @@ test('content 属主端口的失败映射层只有一份，取用方一律 impor
 
   for (const file of consumers) {
     const source = await readFile(
-      new URL(`../../src/transport/${file}`, import.meta.url),
+      ownedSourcePath('automation', `transport/${file}`),
       'utf8',
     );
     assert.match(

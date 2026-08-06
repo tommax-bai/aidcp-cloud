@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { DELEGATED_TASK_SCHEMA_SQL, PgDelegatedTaskStore } from '../../src/delegated-task/store.js';
+import { DELEGATED_TASK_SCHEMA_SQL, PgDelegatedTaskStore } from '@automation/delegated-task/store.js';
+
+import { readMigration } from '../helpers/migration-union.js';
 
 test('delegated task schema indexes account-scoped curated rewrite trigger lookups', () => {
   assert.match(DELEGATED_TASK_SCHEMA_SQL, /idx_delegated_tasks_curated_publish_id[\s\S]*account_id[\s\S]*source_constraints->>'curatedId'[\s\S]*WHERE action = 'publish_post'/);
@@ -19,11 +20,8 @@ test('delegated task schema backfills legacy rows to dev and partitions queue in
   assert.match(DELEGATED_TASK_SCHEMA_SQL, /idx_delegated_tasks_target_ownership[\s\S]*execution_target, account_id, action_family/);
 });
 
-test('explicit delegated task migration preserves the same target boundary as startup schema', () => {
-  const migration = readFileSync(
-    new URL('../../migrations/0052_delegated_task_execution_target.sql', import.meta.url),
-    'utf8',
-  );
+test('explicit delegated task migration preserves the same target boundary as startup schema', async () => {
+  const migration = await readMigration('0052_delegated_task_execution_target.sql');
   assert.match(migration, /UPDATE delegated_tasks\s+SET execution_target\s*=\s*'dev'\s+WHERE execution_target IS NULL/);
   assert.match(migration, /ALTER COLUMN execution_target SET NOT NULL/);
   assert.match(migration, /CHECK \(execution_target IN \('dev','ol'\)\)/);

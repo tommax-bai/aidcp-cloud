@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
-import { ensureCapabilitySchema } from '../../src/schema/schema-capability.js';
+import { ensureCapabilitySchema } from '@automation/schema/schema-capability.js';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import pg from 'pg';
-import { ClientUserStore } from '../../src/client-auth/client-user-store.js';
-import { PgOffboardMaterializationOps } from '../../src/interactions/offboard-write-adapter.js';
-import { PgClientEnvAutomationRead } from '../../src/interactions/client-env-automation-read.js';
-import { PgInteractionApiWrites } from '../../src/interactions/interaction-api-writes.js';
-import { parseSyncBatchPayload } from '../../src/interactions/contract.js';
-import { InteractionStore } from '../../src/interactions/interaction-store.js';
-import { PgInteractionAuthGate } from '../../src/interactions/interaction-auth-gate.js';
-import { shanghaiDayStartMs } from '../../src/time/shanghai-day.js';
+import { ClientUserStore } from '@api/client-auth/client-user-store.js';
+import { PgOffboardMaterializationOps } from '@automation/interactions/offboard-write-adapter.js';
+import { PgClientEnvAutomationRead } from '@automation/interactions/client-env-automation-read.js';
+import { PgInteractionApiWrites } from '@api/interactions/interaction-api-writes.js';
+import { parseSyncBatchPayload } from '@automation/interactions/contract.js';
+import { InteractionStore } from '@automation/interactions/interaction-store.js';
+import { readMigration } from '../helpers/migration-union.js';
+import { PgInteractionAuthGate } from '@api/interactions/interaction-auth-gate.js';
+import { shanghaiDayStartMs } from '@kernel/time/shanghai-day.js';
 import { INTERACTION_URL_ENV, resolveIntegrationDatabase } from '../helpers/pg-test-database-guard.js';
 
 import { INTERACTION_TEST_EXECUTION_TARGET } from '../helpers/interaction-store-test-deps.js';
@@ -62,10 +63,7 @@ test('PostgreSQL: authoritative env ownership is unique and cross-customer inter
         (user_id,env_key,label,platform,source,assigned_by)
         VALUES ('user-a','env-auth-b','伪造归属','wechat_channels','client','user-a')`);
       // Runtime init is probe-only; re-run the canonical migration to prove its legacy cleanup is idempotent.
-      await pool.query(await readFile(
-        new URL('../../migrations/0040_customer_env_authority.sql', import.meta.url),
-        'utf8',
-      ));
+      await pool.query(await readMigration('0040_customer_env_authority.sql'));
       assert.equal((await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM client_env_scope
         WHERE user_id='user-a' AND env_key='env-auth-b'`)).rows[0].n, 0);
       const legacyAudit = (await pool.query<{ source: string; reason: string }>(

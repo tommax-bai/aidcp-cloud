@@ -11,19 +11,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { DefaultMessageHandler, type AnchorStore } from '../../src/comm/handler.js';
-import type { EdgeSession } from '../../src/comm/ws-server.js';
+import { DefaultMessageHandler, type AnchorStore } from '@automation/comm/handler.js';
+import type { EdgeSession } from '@automation/comm/ws-server.js';
 import {
   HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY,
   makeEnvelope,
   type StandbyDecisionPayload,
   type WelcomePayload,
-} from '../../src/comm/protocol.js';
-import { HostStandbyDecisionStore } from '../../src/comm/host-standby-decision-store.js';
-import { buildBrowserStandbyHint } from '../../src/comm/browser-standby.js';
-import { EventBus } from '../../src/event-bus/index.js';
-import { SimplePlanner } from '../../src/planner/index.js';
-import type { LlmClient } from '../../src/llm/qwen.js';
+} from '@automation/comm/protocol.js';
+import { HostStandbyDecisionStore } from '@automation/comm/host-standby-decision-store.js';
+import { buildBrowserStandbyHint } from '@automation/comm/browser-standby.js';
+import { EventBus } from '@automation/event-bus/index.js';
+import { SimplePlanner } from '@automation/planner/index.js';
+import type { LlmClient } from '@content/llm/qwen.js';
+import { ownedSourcePath } from '../helpers/sibling-repos.js';
 
 const noopCache = {
   get: async () => null,
@@ -204,15 +205,16 @@ test('standby-decision: 未接消费方时收到回执也不报错（灰度中�
 
 test('standby-decision: 消费方 MUST NOT 出现在任何下发决策路径上', () => {
   // 这是本 change 最需要防的失败模式：它「看起来只是多读一个字段」。
+  // 事实源翻转后现读 automation 属主仓：这五条下发决策路径全归 automation。
   const dispatchPaths = [
-    'src/comm/browser-standby.ts',       // 待机提示的产出
-    'src/orchestrator/role-dispatcher.ts', // 命令下发
-    'src/risk/risk-controller.ts',       // 风控裁决
-    'src/risk/risk-state-machine.ts',
-    'src/comm/ui-snapshot.ts',           // 提示推送
+    'comm/browser-standby.ts',       // 待机提示的产出
+    'orchestrator/role-dispatcher.ts', // 命令下发
+    'risk/risk-controller.ts',       // 风控裁决
+    'risk/risk-state-machine.ts',
+    'comm/ui-snapshot.ts',           // 提示推送
   ];
   for (const file of dispatchPaths) {
-    const source = readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
+    const source = readFileSync(ownedSourcePath('automation', file), 'utf8');
     for (const forbidden of ['host-standby-decision', 'HostStandbyDecision', 'hostStandbyDecisions']) {
       assert.equal(
         source.includes(forbidden),
@@ -224,7 +226,7 @@ test('standby-decision: 消费方 MUST NOT 出现在任何下发决策路径上'
 });
 
 test('standby-decision: 处理分支只做「校验 + 留存」，不 emit、不改会话状态', () => {
-  const source = readFileSync(new URL('../../src/comm/handler.ts', import.meta.url), 'utf8');
+  const source = readFileSync(ownedSourcePath('automation', 'comm/handler.ts'), 'utf8');
   const at = source.indexOf("case 'standby.decision': {");
   assert.notEqual(at, -1, '未找到 standby.decision 处理分支');
   const branch = source.slice(at, source.indexOf('\n      }', at));
@@ -235,7 +237,7 @@ test('standby-decision: 处理分支只做「校验 + 留存」，不 emit、不
 });
 
 test('standby-decision: 只读端口没有写侧路由（没有强制让位 / 禁止让位这种东西）', () => {
-  const source = readFileSync(new URL('../../src/transport/host-standby-decision-http.ts', import.meta.url), 'utf8');
+  const source = readFileSync(ownedSourcePath('automation', 'transport/host-standby-decision-http.ts'), 'utf8');
   const routes = source.slice(source.indexOf('HOST_STANDBY_DECISION_ROUTES'), source.indexOf('} as const;'));
   assert.equal(routes.split(':').length - 1, 1, '本通道只该有一条读路由');
   assert.ok(routes.includes('list'));

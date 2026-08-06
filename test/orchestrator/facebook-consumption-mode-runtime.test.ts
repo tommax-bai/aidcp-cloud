@@ -1,11 +1,10 @@
-import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type pg from 'pg';
-import type { SchemaProber } from '../../src/kernel/schema-capability-contract.js';
+import type { SchemaProber } from '@kernel/kernel/schema-capability-contract.js';
 import {
   FacebookConsumptionModeRuntimeStore,
-} from '../../src/orchestrator/facebook-consumption-mode-runtime-store.js';
+} from '@automation/orchestrator/facebook-consumption-mode-runtime-store.js';
 import {
   FacebookConsumptionMode,
   advanceFacebookConsumptionCounters,
@@ -13,11 +12,13 @@ import {
   classifyFacebookConsumptionJoinReceipt,
   classifyFacebookConsumptionLikeReceipt,
   validateFacebookConsumptionPolicy,
-} from '../../src/orchestrator/facebook-consumption-mode.js';
+} from '@automation/orchestrator/facebook-consumption-mode.js';
 import type {
   FacebookConsumptionActionView,
   FacebookConsumptionPolicySnapshot,
-} from '../../src/orchestrator/facebook-consumption-mode-types.js';
+} from '@automation/orchestrator/facebook-consumption-mode-types.js';
+
+import { readMigration } from '../helpers/migration-union.js';
 
 interface MemoryProgress {
   account_id: string;
@@ -1339,10 +1340,7 @@ describe('FacebookConsumptionModeRuntimeStore durable state machine', () => {
 
 describe('facebook consumption migration contract', () => {
   it('redefines the active-action index per action type without renaming it', async () => {
-    const sql = await readFile(
-      new URL('../../migrations/0111_facebook_consumption_obligation_per_type.sql', import.meta.url),
-      'utf8',
-    );
+    const sql = await readMigration('0111_facebook_consumption_obligation_per_type.sql');
     // 名字不变是硬要求：启动期契约门按名字查索引，改名会让回滚到旧码的进程起不来。
     assert.match(
       sql,
@@ -1354,10 +1352,7 @@ describe('facebook consumption migration contract', () => {
   });
 
   it('persists exact content URLs and enforces one active action per account and target', async () => {
-    const sql = await readFile(
-      new URL('../../migrations/0102_facebook_consumption_runtime.sql', import.meta.url),
-      'utf8',
-    );
+    const sql = await readMigration('0102_facebook_consumption_runtime.sql');
     assert.match(sql, /facebook_consumption_progress/);
     assert.match(sql, /facebook_consumption_view_fact[\s\S]*content_url\s+TEXT NOT NULL/);
     assert.match(sql, /facebook_consumption_action[\s\S]*content_url\s+TEXT/);

@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import {
   DRAFT_REFINEMENT_SCHEMA_SQL,
   DraftRefinementStore,
-} from '../../src/publish-agent/draft-refinement.js';
+} from '@content/publish-agent/draft-refinement.js';
+
+import { readMigration } from '../helpers/migration-union.js';
 
 function row(target: 'dev' | 'ol' = 'dev') {
   return {
@@ -28,16 +29,13 @@ function row(target: 'dev' | 'ol' = 'dev') {
   };
 }
 
-test('refinement schema requires explicit dev/ol target and target-scoped indexes', () => {
+test('refinement schema requires explicit dev/ol target and target-scoped indexes', async () => {
   assert.match(DRAFT_REFINEMENT_SCHEMA_SQL, /execution_target\s+TEXT NOT NULL CHECK \(execution_target IN \('dev','ol'\)\)/);
   assert.doesNotMatch(DRAFT_REFINEMENT_SCHEMA_SQL, /execution_target[^\n]*DEFAULT/);
   assert.match(DRAFT_REFINEMENT_SCHEMA_SQL, /idx_publish_draft_refinement_target_claim[\s\S]*execution_target, status/);
   assert.match(DRAFT_REFINEMENT_SCHEMA_SQL, /idx_publish_draft_refinement_one_active[\s\S]*execution_target, record_id/);
 
-  const migration = readFileSync(
-    new URL('../../migrations/0057_publish_draft_refinement_jobs.sql', import.meta.url),
-    'utf8',
-  );
+  const migration = await readMigration('0057_publish_draft_refinement_jobs.sql');
   assert.match(migration, /execution_target\s+TEXT NOT NULL CHECK \(execution_target IN \('dev','ol'\)\)/);
   assert.doesNotMatch(migration, /execution_target[^\n]*DEFAULT/);
 });

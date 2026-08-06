@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+
+import { readMigration } from '../helpers/migration-union.js';
 
 test('Facebook rule migrations keep API config and target-scoped runtime in separate owner files', async () => {
   const [config, runtime] = await Promise.all([
-    readFile(new URL('../../migrations/0092_facebook_rule_mode_config.sql', import.meta.url), 'utf8'),
-    readFile(new URL('../../migrations/0093_facebook_rule_mode_runtime.sql', import.meta.url), 'utf8'),
+    readMigration('0092_facebook_rule_mode_config.sql'),
+    readMigration('0093_facebook_rule_mode_runtime.sql'),
   ]);
 
   assert.match(config, /aidcp:kind=expand/);
@@ -37,8 +38,8 @@ test('Facebook rule migrations keep API config and target-scoped runtime in sepa
 
 test('two-tier cadence migrations widen in place, resolve constraint names dynamically, and backfill config only', async () => {
   const [configRaw, runtimeRaw] = await Promise.all([
-    readFile(new URL('../../migrations/0094_facebook_rule_two_tier_config.sql', import.meta.url), 'utf8'),
-    readFile(new URL('../../migrations/0095_facebook_rule_two_tier_runtime.sql', import.meta.url), 'utf8'),
+    readMigration('0094_facebook_rule_two_tier_config.sql'),
+    readMigration('0095_facebook_rule_two_tier_runtime.sql'),
   ]);
   // 必须先剥注释再断言禁用语句：这两个文件的注释里逐字写着它们**不该**用的写法，
   // 不剥就会被自己的说明文字判成违规（本仓扫描器同类假阳性的老坑）。

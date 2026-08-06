@@ -15,12 +15,12 @@ import {
   FACEBOOK_PRIMARY_BROWSE_SURFACE_UNAVAILABLE_BLOCKER,
   resolveFacebookOperationBase,
   type FacebookOperationPolicyBaseProjection,
-} from '../../src/kernel/facebook-operation-policy-resolution.js';
+} from '@kernel/kernel/facebook-operation-policy-resolution.js';
 import {
   isSyncReadFactPayload,
   type FacebookSlowStartPolicySnapshot,
-} from '../../src/kernel/sync-read-facts.js';
-import { RISK_ACTIONS, type ActionQuota } from '../../src/kernel/risk-contract.js';
+} from '@kernel/kernel/sync-read-facts.js';
+import { RISK_ACTIONS, type ActionQuota } from '@kernel/kernel/risk-contract.js';
 
 /** 曲线夹具按动作名单派生，不手写十个键 —— 手写的那种漏一项时自己不会说话。 */
 const SLOW_START: FacebookSlowStartPolicySnapshot = {
@@ -237,8 +237,14 @@ test('基线载荷校验：三个枚举按取值表判，缺字段 / 越界值�
  */
 test('基线判定与基线合成各只有一份：属主与快照消费方都委托过去', async () => {
   const { readFile } = await import('node:fs/promises');
-  const read = (path: string) =>
-    readFile(new URL(`../../src/${path}`, import.meta.url), 'utf8');
+  // 事实源翻转后按属主仓现读：kernel/** 在 aidcp-kernel，config/** 归 api，
+  // transport/automation-sync-read-mirrors.ts 归 automation。
+  const { ownedSourcePath } = await import('../helpers/sibling-repos.js');
+  const ownerOf = (path: string) =>
+    path.startsWith('kernel/') ? 'kernel' as const
+      : path.startsWith('transport/') ? 'automation' as const
+        : 'api' as const;
+  const read = (path: string) => readFile(ownedSourcePath(ownerOf(path), path), 'utf8');
 
   const kernelSource = await read('kernel/facebook-operation-policy-resolution.ts');
   assert.match(

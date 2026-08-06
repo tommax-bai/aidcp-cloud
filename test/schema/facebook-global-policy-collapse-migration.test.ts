@@ -4,17 +4,12 @@
  * 由部署后的验收项给出，两者 MUST 都做，MUST NOT 用其中一个冒充另一个。
  */
 
-import { readFile, readdir } from 'node:fs/promises';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-const migrationUrl = new URL(
-  '../../migrations/0114_facebook_global_policy_collapse_target.sql',
-  import.meta.url,
-);
-const migrationsDir = new URL('../../migrations/', import.meta.url);
+import { readMigration, unionMigrationFiles } from '../helpers/migration-union.js';
 
-const read = () => readFile(migrationUrl, 'utf8');
+const read = () => readMigration('0114_facebook_global_policy_collapse_target.sql');
 
 /** 只保留 SQL 语句本体：本迁移注释密度高，不剥注释会把「注释里提到审计表」判成 DDL。 */
 function stripComments(sql: string): string {
@@ -129,11 +124,12 @@ describe('facebook global policy collapse migration', () => {
   });
 
   it('每条 aidcp:retires MUST 命中一条更早的真实声明（写错名字不会报错，只会白减一个）', async () => {
-    const names = (await readdir(new URL('.', migrationsDir))).filter((n) => n.endsWith('.sql'));
+    const files = (await unionMigrationFiles())
+      .filter((file) => file.name.endsWith('.sql'))
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     const declared = new Set<string>();
     const retires: { token: string; version: string }[] = [];
-    for (const name of names.sort()) {
-      const content = await readFile(new URL(name, migrationsDir), 'utf8');
+    for (const { name, content } of files) {
       for (const line of content.matchAll(/^--\s*aidcp:objects=(.+)$/gm)) {
         for (const token of line[1].split(',')) if (token.trim()) declared.add(token.trim());
       }

@@ -1,21 +1,22 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
-const migrationUrl = new URL('../../migrations/0039_interaction_inbox.sql', import.meta.url);
-const authorityMigrationUrl = new URL('../../migrations/0040_customer_env_authority.sql', import.meta.url);
-const recoveryMigrationUrl = new URL('../../migrations/0041_interaction_recovery_offboarding.sql', import.meta.url);
-const runtimeControlMigrationUrl = new URL('../../migrations/0042_interaction_runtime_control_application.sql', import.meta.url);
-const provisioningMigrationUrl = new URL('../../migrations/0043_client_env_provisioning_intents.sql', import.meta.url);
-const storeCircuitMigrationUrl = new URL('../../migrations/0045_wechat_store_and_circuit.sql', import.meta.url);
-const activeIdempotencyMigrationUrl = new URL('../../migrations/0046_interaction_idempotency_active_unique.sql', import.meta.url);
-const groupReplyConfigMigrationUrl = new URL('../../migrations/0048_wechat_group_reply_config.sql', import.meta.url);
-const cleanupGrantMigrationUrl = new URL('../../migrations/0049_offboard_cleanup_grants.sql', import.meta.url);
-const groupReplyConfigPrivilegesMigrationUrl = new URL('../../migrations/0050_wechat_group_reply_config_privileges.sql', import.meta.url);
-const retireAccountReplyConfigsMigrationUrl = new URL('../../migrations/0051_retire_account_reply_configs.sql', import.meta.url);
+import { readMigration } from '../helpers/migration-union.js';
+
+const migrationUrl = '0039_interaction_inbox.sql';
+const authorityMigrationUrl = '0040_customer_env_authority.sql';
+const recoveryMigrationUrl = '0041_interaction_recovery_offboarding.sql';
+const runtimeControlMigrationUrl = '0042_interaction_runtime_control_application.sql';
+const provisioningMigrationUrl = '0043_client_env_provisioning_intents.sql';
+const storeCircuitMigrationUrl = '0045_wechat_store_and_circuit.sql';
+const activeIdempotencyMigrationUrl = '0046_interaction_idempotency_active_unique.sql';
+const groupReplyConfigMigrationUrl = '0048_wechat_group_reply_config.sql';
+const cleanupGrantMigrationUrl = '0049_offboard_cleanup_grants.sql';
+const groupReplyConfigPrivilegesMigrationUrl = '0050_wechat_group_reply_config_privileges.sql';
+const retireAccountReplyConfigsMigrationUrl = '0051_retire_account_reply_configs.sql';
 
 test('0039 creates the dedicated inbound domain and never writes outbound interaction_feed', async () => {
-  const sql = await readFile(migrationUrl, 'utf8');
+  const sql = await readMigration(migrationUrl);
   const withoutComments = sql.replace(/--.*$/gm, '');
   for (const table of [
     'interaction_threads', 'interaction_messages', 'interaction_reply_jobs', 'interaction_send_attempts',
@@ -28,7 +29,7 @@ test('0039 creates the dedicated inbound domain and never writes outbound intera
 });
 
 test('0039 freezes job/attempt idempotency, active uniqueness and write-off defaults', async () => {
-  const sql = await readFile(migrationUrl, 'utf8');
+  const sql = await readMigration(migrationUrl);
   assert.match(sql, /inbound_message_id\s+TEXT NOT NULL UNIQUE/);
   assert.match(sql, /idempotency_key\s+TEXT NOT NULL UNIQUE CHECK \(idempotency_key ~ '\^\[a-f0-9\]\{64\}\$'\)/);
   assert.match(sql, /UNIQUE \(reply_job_id, attempt_no\)/);
@@ -42,7 +43,7 @@ test('0039 freezes job/attempt idempotency, active uniqueness and write-off defa
 });
 
 test('0039 scope indexes and CAS columns keep accountId/envKey on reads and writes', async () => {
-  const sql = await readFile(migrationUrl, 'utf8');
+  const sql = await readMigration(migrationUrl);
   assert.match(sql, /UNIQUE \(id, account_id, env_key\)/);
   assert.match(sql, /idx_interaction_threads_scope_time[\s\S]*\(account_id, env_key, last_message_at DESC, id DESC\)/);
   assert.match(sql, /idx_interaction_messages_scope_thread_time[\s\S]*\(account_id, env_key, thread_id, platform_created_at DESC, id DESC\)/);
@@ -54,7 +55,7 @@ test('0039 scope indexes and CAS columns keep accountId/envKey on reads and writ
 });
 
 test('0040 archives/removes customer self-claims and freezes globally unique active env ownership', async () => {
-  const sql = await readFile(authorityMigrationUrl, 'utf8');
+  const sql = await readMigration(authorityMigrationUrl);
   assert.match(sql, /INSERT INTO client_environments[\s\S]*FROM client_env_scope/,
     'legacy environment metadata must be preserved in the authoritative registry');
   assert.match(sql, /INSERT INTO client_env_scope_audit[\s\S]*legacy_self_claim/);
@@ -64,7 +65,7 @@ test('0040 archives/removes customer self-claims and freezes globally unique act
 });
 
 test('0041 adds durable recovery/offboarding and releases only account-level ambiguous serialization', async () => {
-  const sql = await readFile(recoveryMigrationUrl, 'utf8');
+  const sql = await readMigration(recoveryMigrationUrl);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_offboards/);
   assert.match(sql, /purge_due_at[\s\S]*30 days/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_offboard_audit/);
@@ -81,14 +82,14 @@ test('0041 adds durable recovery/offboarding and releases only account-level amb
 });
 
 test('0042 persists the exact runtime-control version Edge reports as applied', async () => {
-  const sql = await readFile(runtimeControlMigrationUrl, 'utf8');
+  const sql = await readMigration(runtimeControlMigrationUrl);
   assert.match(sql, /ALTER TABLE interaction_auth_state/);
   assert.match(sql, /ADD COLUMN IF NOT EXISTS runtime_controls_version INTEGER/);
   assert.match(sql, /runtime_controls_version IS NULL OR runtime_controls_version >= 0/);
 });
 
 test('0043 adds one-time provisioning intents without weakening authoritative unique ownership', async () => {
-  const sql = await readFile(provisioningMigrationUrl, 'utf8');
+  const sql = await readMigration(provisioningMigrationUrl);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS client_env_provisioning_intents/);
   assert.match(sql, /proof_hash\s+CHAR\(64\)\s+NOT NULL/);
   assert.match(sql, /state IN \('pending','completed','expired'\)/);
@@ -100,13 +101,13 @@ test('0043 adds one-time provisioning intents without weakening authoritative un
 });
 
 test('0045 indexes every non-terminal offboard state for time-bounded Cloud purge', async () => {
-  const sql = await readFile(storeCircuitMigrationUrl, 'utf8');
+  const sql = await readMigration(storeCircuitMigrationUrl);
   assert.match(sql, /DROP INDEX IF EXISTS idx_interaction_offboards_purge/);
   assert.match(sql, /WHERE state IN \('pending_edge','dispatched','tombstoned'\)/);
 });
 
 test('0046 limits idempotency uniqueness to active attempts and removes the unused retryable marker', async () => {
-  const sql = await readFile(activeIdempotencyMigrationUrl, 'utf8');
+  const sql = await readMigration(activeIdempotencyMigrationUrl);
   assert.match(sql, /DROP CONSTRAINT IF EXISTS interaction_send_attempts_idempotency_key_key/);
   assert.match(sql, /uq_interaction_send_attempts_active_idem[\s\S]*idempotency_key[\s\S]*WHERE status IN \('created','dispatched','ambiguous'\)/);
   assert.match(sql, /DROP COLUMN IF EXISTS retryable/);
@@ -115,7 +116,7 @@ test('0046 limits idempotency uniqueness to active attempts and removes the unus
 });
 
 test('0048 adds stable group/default config scopes without deleting legacy account config', async () => {
-  const sql = await readFile(groupReplyConfigMigrationUrl, 'utf8');
+  const sql = await readMigration(groupReplyConfigMigrationUrl);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS interaction_reply_config_scopes/);
   assert.match(sql, /scope_type\s+TEXT NOT NULL CHECK \(scope_type IN \('group','default'\)\)/);
   assert.match(sql, /uq_reply_config_scope_default[\s\S]*WHERE scope_type = 'default'/);
@@ -130,7 +131,7 @@ test('0048 adds stable group/default config scopes without deleting legacy accou
 });
 
 test('0049 adds hashed use-once offboard cleanup grants without storing bearer tokens', async () => {
-  const sql = await readFile(cleanupGrantMigrationUrl, 'utf8');
+  const sql = await readMigration(cleanupGrantMigrationUrl);
   assert.match(sql, /cleanup_grant_jti_hash CHAR\(64\)/);
   assert.match(sql, /cleanup_grant_edge_id TEXT/);
   assert.match(sql, /cleanup_grant_expires_at TIMESTAMPTZ/);
@@ -140,7 +141,7 @@ test('0049 adds hashed use-once offboard cleanup grants without storing bearer t
 });
 
 test('0050 grants group-scoped reply config access to the existing runtime role', async () => {
-  const sql = await readFile(groupReplyConfigPrivilegesMigrationUrl, 'utf8');
+  const sql = await readMigration(groupReplyConfigPrivilegesMigrationUrl);
   assert.match(sql, /pg_get_userbyid\(c\.relowner\)/);
   assert.match(sql, /c\.relname = 'interaction_reply_configs'/);
   assert.match(sql, /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE/);
@@ -150,7 +151,7 @@ test('0050 grants group-scoped reply config access to the existing runtime role'
 });
 
 test('0051 clears only retired account strategy data and keeps runtime/scoped/interaction domains', async () => {
-  const sql = await readFile(retireAccountReplyConfigsMigrationUrl, 'utf8');
+  const sql = await readMigration(retireAccountReplyConfigsMigrationUrl);
   for (const table of ['reply_templates', 'reply_rules', 'account_reply_profiles',
     'interaction_reply_config_versions', 'interaction_reply_configs']) {
     assert.match(sql, new RegExp(`DELETE FROM ${table} WHERE platform = 'wechat_channels'`));

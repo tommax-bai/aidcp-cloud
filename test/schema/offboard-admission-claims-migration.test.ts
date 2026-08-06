@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
-const migrationUrl = new URL('../../migrations/0081_offboard_admission_claims.sql', import.meta.url);
+import { readMigration } from '../helpers/migration-union.js';
 
 test('0081 只做 additive claim/CAS、command receipt 与 snapshot cursor state', async () => {
-  const sql = await readFile(migrationUrl, 'utf8');
+  const sql = await readMigration('0081_offboard_admission_claims.sql');
   assert.match(sql, /-- aidcp:kind=expand/);
   assert.doesNotMatch(sql, /\bDROP\s+(?:TABLE|COLUMN)\b/i);
   for (const column of [

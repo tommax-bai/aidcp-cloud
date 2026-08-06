@@ -1,19 +1,18 @@
 // aidcp:test-owner=cloud
 import assert from 'node:assert/strict';
-import { readFile, readdir } from 'node:fs/promises';
 import { test } from 'node:test';
 
-import { loadMigrationFiles } from '../../src/schema/migration-files.js';
 import {
   executionVersionsForOwner,
   loadMigrationOwnerScopes,
   versionsForOwner,
-} from '../../src/schema/migration-owners.js';
-import { KNOWN_MAX_SCHEMA_VERSION } from '../../src/schema/schema-contract.js';
+} from '@automation/schema/migration-owners.js';
 import {
   SYNC_READ_STREAM_DEFINITIONS,
   type SyncReadStream,
-} from '../../src/kernel/sync-read-snapshot.js';
+} from '@kernel/kernel/sync-read-snapshot.js';
+
+import { readMigration, unionMigrationFiles } from '../helpers/migration-union.js';
 
 const migrations = [
   {
@@ -46,10 +45,7 @@ const migrations = [
 
 test('0082/0083 are expand-only owner-local checkpoint tables with no business payload', async () => {
   for (const migration of migrations) {
-    const sql = await readFile(
-      new URL(`../../migrations/${migration.name}.sql`, import.meta.url),
-      'utf8',
-    );
+    const sql = await readMigration(`${migration.name}.sql`);
     assert.match(sql, /-- aidcp:kind=expand/);
     assert.match(
       sql,
@@ -86,7 +82,7 @@ test('0082/0083 are expand-only owner-local checkpoint tables with no business p
 });
 
 test('checkpoint migrations remain owner-local when owner databases split', async () => {
-  const { index } = await loadMigrationOwnerScopes(() => loadMigrationFiles());
+  const { index } = await loadMigrationOwnerScopes(() => unionMigrationFiles());
   const api = versionsForOwner(index, 'api');
   const automation = versionsForOwner(index, 'automation');
   assert.ok(api.includes('0082_api_sync_read_consumer_checkpoint'));
@@ -169,18 +165,14 @@ test('checkpoint migrations remain owner-local when owner databases split', asyn
   assert.ok(api.includes('0114_facebook_global_policy_collapse_target'));
   assert.ok(!automation.includes('0114_facebook_global_policy_collapse_target'));
   assert.ok(apiExec.includes('0114_facebook_global_policy_collapse_target'));
-  // 每加一条迁移都要在这里同步抬。
-  assert.equal(KNOWN_MAX_SCHEMA_VERSION, '0114_facebook_global_policy_collapse_target');
+  // 单体时代这里还钉着「KNOWN_MAX_SCHEMA_VERSION == 最新迁移名，每加一条同步手抬」。
+  // 事实源翻转后该常量在每个派生仓里是**机器派生、按仓收窄**的
+  // （sync-split-repos:derived_schema_version，automation 那份的注释明写 do not hand-edit），
+  // 「手忘了抬」这个被守的失败模式已不存在，逐字面量断言只会跨仓异步变红 —— 按 5.6 裁定移除。
 });
 
 test('0085 keeps runtime owner generations durable, target-scoped and payload-free', async () => {
-  const sql = await readFile(
-    new URL(
-      '../../migrations/0085_automation_sync_read_owner_generation.sql',
-      import.meta.url,
-    ),
-    'utf8',
-  );
+  const sql = await readMigration('0085_automation_sync_read_owner_generation.sql');
   assert.match(sql, /-- aidcp:kind=expand/);
   assert.match(
     sql,
@@ -198,13 +190,7 @@ test('0085 keeps runtime owner generations durable, target-scoped and payload-fr
 });
 
 test('0086 keeps A1 owner revision on session_config_global rather than a parallel authority', async () => {
-  const sql = await readFile(
-    new URL(
-      '../../migrations/0086_session_config_global_sync_read_revision.sql',
-      import.meta.url,
-    ),
-    'utf8',
-  );
+  const sql = await readMigration('0086_session_config_global_sync_read_revision.sql');
   assert.match(sql, /-- aidcp:kind=expand/);
   assert.match(sql, /ALTER TABLE session_config_global/);
   assert.match(sql, /sync_read_revision NUMERIC NOT NULL DEFAULT 0/);
@@ -214,13 +200,7 @@ test('0086 keeps A1 owner revision on session_config_global rather than a parall
 });
 
 test('0087 stores the B4 shared cursor on the shared projection state row', async () => {
-  const sql = await readFile(
-    new URL(
-      '../../migrations/0087_automation_account_projection_shared_cursor.sql',
-      import.meta.url,
-    ),
-    'utf8',
-  );
+  const sql = await readMigration('0087_automation_account_projection_shared_cursor.sql');
   assert.match(sql, /-- aidcp:kind=expand/);
   assert.match(sql, /ALTER TABLE automation_account_projection_state/);
   assert.match(sql, /sync_read_cursor NUMERIC/);
@@ -245,15 +225,12 @@ test('0087 stores the B4 shared cursor on the shared projection state row', asyn
  * 故这里按**流定义**算出应有集合去比对，而不是再写一份人肉清单。
  */
 test('检查点表允许的流名 MUST 覆盖全部 automation 消费流（第四份手抄副本的防漂移闸）', async () => {
-  const files = (await readdir(new URL('../../migrations/', import.meta.url)))
-    .filter((name) => name.endsWith('.sql'))
-    .sort();
+  const files = (await unionMigrationFiles())
+    .filter((file) => file.name.endsWith('.sql'))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const allowed = new Set<string>();
   for (const file of files) {
-    const sql = await readFile(
-      new URL(`../../migrations/${file}`, import.meta.url),
-      'utf8',
-    );
+    const sql = file.content;
     if (!sql.includes('automation_sync_read_consumer_checkpoint')) continue;
     const block = sql.match(/stream\s+IN\s*\(([^)]*)\)/i);
     if (!block) continue;

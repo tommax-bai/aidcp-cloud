@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { describe, test } from 'node:test';
+
+import { readMigration } from './helpers/migration-union.js';
 
 /**
  * change unify-facebook-global-policy-across-targets §4.2 / §4.3 / §4.6 —— 迁移的合并取值规则。
@@ -14,10 +15,7 @@ import { describe, test } from 'node:test';
  * 方向反了在真库上同样不报错，只是数值不同 —— 所以「跑得通」本来也拦不住它们。
  */
 
-const MIGRATION = new URL(
-  '../migrations/0110_facebook_global_policy_single_scope.sql',
-  import.meta.url,
-);
+const MIGRATION = '0110_facebook_global_policy_single_scope.sql';
 
 /** 抠出某个 INSERT ... SELECT 语句块，避免断言跨语句串味。 */
 function statementFor(sql: string, table: string): string {
@@ -30,7 +28,7 @@ function statementFor(sql: string, table: string): string {
 
 describe('0110 合并取值规则', () => {
   test('完成事实按环境取更早的完成时刻，MUST NOT 取更晚', async () => {
-    const sql = await readFile(MIGRATION, 'utf8');
+    const sql = await readMigration(MIGRATION);
     const statement = statementFor(sql, 'facebook_environment_slow_start_completion');
 
     // 取更早：完成是既成事实，早一点只是让它早点走安全限额；
@@ -42,7 +40,7 @@ describe('0110 合并取值规则', () => {
   });
 
   test('完成事实只从既有记录里合并，且不覆盖已存在的合并行', async () => {
-    const sql = await readFile(MIGRATION, 'utf8');
+    const sql = await readMigration(MIGRATION);
     const statement = statementFor(sql, 'facebook_environment_slow_start_completion');
 
     // 只读非合并行 —— 否则再跑一次会把上一轮的合并结果当作输入，自己喂自己。
@@ -53,7 +51,7 @@ describe('0110 合并取值规则', () => {
 
   for (const table of ['facebook_operation_global_policy', 'facebook_group_comment_policy']) {
     test(`${table}：两侧都有取 dev，只有一侧则取那一侧`, async () => {
-      const sql = await readFile(MIGRATION, 'utf8');
+      const sql = await readMigration(MIGRATION);
       const statement = statementFor(sql, table);
 
       // 优先级必须把 dev 排在前（CASE ... WHEN 'dev' THEN 0 ELSE 1）。
@@ -76,7 +74,7 @@ describe('0110 合并取值规则', () => {
   }
 
   test('合并行的 revision 接在现有序列之后，两侧不各起一条', async () => {
-    const sql = await readFile(MIGRATION, 'utf8');
+    const sql = await readMigration(MIGRATION);
     for (const table of ['facebook_operation_global_policy', 'facebook_group_comment_policy']) {
       const statement = statementFor(sql, table);
       // 取全表 max+1：合并之后 revision 是**一条**序列，CAS 才拦得住两侧并发写。
@@ -89,7 +87,7 @@ describe('0110 合并取值规则', () => {
   });
 
   test('本迁移只放宽、不删除：dev / ol 两行与分行列都还在，回滚才有落点', async () => {
-    const sql = await readFile(MIGRATION, 'utf8');
+    const sql = await readMigration(MIGRATION);
     // 收缩（删列 / 删行）按目录纪律是独立 change、独立部署、可单独回滚，
     // MUST NOT 与 expand 同批交付。这里出现任何一种都说明两段被合并了。
     assert.doesNotMatch(sql, /DROP\s+COLUMN\s+execution_target/i);

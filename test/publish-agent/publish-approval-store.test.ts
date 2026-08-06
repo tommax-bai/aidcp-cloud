@@ -8,12 +8,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import {
   ApprovalExecutionTargetError,
   PUBLISH_APPROVAL_SCHEMA_SQL,
   PublishApprovalStore,
-} from '../../src/publish-agent/publish-approval-store.js';
+} from '@api/publish-agent/publish-approval-store.js';
+
+import { readMigration } from '../helpers/migration-union.js';
 
 function decisionRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -71,7 +72,7 @@ function txPool(handler: (sql: string, args: unknown[]) => { rows: unknown[]; ro
   return { sqls, pool: pool as never };
 }
 
-test('schema: 活跃行唯一索引承担 first-writer-wins；target 有 CHECK 且无默认值', () => {
+test('schema: 活跃行唯一索引承担 first-writer-wins；target 有 CHECK 且无默认值', async () => {
   assert.match(
     PUBLISH_APPROVAL_SCHEMA_SQL,
     /CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_approval_decision_active[\s\S]*?\(request_id\)[\s\S]*?WHERE dispatch_state <> 'void'/,
@@ -79,10 +80,7 @@ test('schema: 活跃行唯一索引承担 first-writer-wins；target 有 CHECK �
   assert.match(PUBLISH_APPROVAL_SCHEMA_SQL, /execution_target\s+TEXT NOT NULL CHECK \(execution_target IN \('dev','ol'\)\)/);
   assert.doesNotMatch(PUBLISH_APPROVAL_SCHEMA_SQL, /execution_target[^\n]*DEFAULT/);
 
-  const migration = readFileSync(
-    new URL('../../migrations/0063_publish_approval_decision.sql', import.meta.url),
-    'utf8',
-  );
+  const migration = await readMigration('0063_publish_approval_decision.sql');
   assert.match(
     migration,
     /CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_approval_decision_active[\s\S]*?WHERE dispatch_state <> 'void'/,
