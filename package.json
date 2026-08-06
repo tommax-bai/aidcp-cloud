@@ -11,11 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test 'test/**/*.test.ts'",
     "test:acceptance": "tsx --test test/acceptance/*.test.ts",
-    "test:pg": "AIDCP_PG_INTEGRATION=1 tsx --test --test-concurrency=1 'test/**/*.integration.test.ts'",
-    "migrate": "tsx --env-file=.env scripts/migrate.ts",
-    "start": "tsx --env-file=.env src/server.ts",
-    "trigger:like": "tsx src/cli/trigger-like.ts",
-    "test:feishu": "tsx --env-file=.env src/cli/test-feishu.ts"
+    "test:pg": "AIDCP_PG_INTEGRATION=1 tsx --test --test-concurrency=1 'test/**/*.integration.test.ts'"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.66.0",
