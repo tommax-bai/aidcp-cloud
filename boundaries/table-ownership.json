@@ -120,6 +120,7 @@
     { "table": "reply_templates", "owner": "api", "basis": "§5.1「互动域配置与查询面（reply_templates）」→ aidcp-api" },
     { "table": "resume_config", "owner": "automation", "basis": "历史表名，已被 resume_config_global 取代（migrations/0020）；随 §5.1 四类限频配置 → aidcp-automation。保留登记以覆盖 migrations 的 CREATE TABLE 全集" },
     { "table": "resume_config_global", "owner": "automation", "basis": "§5.1 具名四类限频配置之一 → aidcp-automation" },
+    { "table": "restricted_policy_config", "owner": "automation", "basis": "受限处置策略全局单行配置（migrations/0116 头声明 owner=automation，复刻 resume_config_global 形态）→ aidcp-automation" },
     { "table": "risk_counters", "owner": "automation", "basis": "§5.1 具名 risk_counters → aidcp-automation 的 RiskController 单写。注：本表保留清理 DELETE 写点在属主一侧的 src/risk/pg-risk-store.ts；change retention-local-purge 已把驱动方从面板层 src/panel/retention-sweeper.ts（api）收回本属主——现由该 store 自己 init() 里的日频定时器自驱（只调既有 purgeCountersOlderThan，不碰风控单写状态/归属），原「api 跨域调属主 purge」的跨边界形态已消除（见 §5.1 第 9 项与 §12 阶段 1 退出判据「跨域清理」）" },
     { "table": "risk_counter_outbox", "owner": "automation", "basis": "§5.1「最终风险状态（risk_state、risk_counters）」域的同事务记账 outbox → aidcp-automation 的 RiskController 单写。§5.1 未具名；由 change risk-state-cross-process-integrity 新增（src/risk/pg-risk-store.ts + migrations/0061）。MUST 回写 §5.1" },
     { "table": "risk_interactions", "owner": "automation", "basis": "§5.1「最终风险状态」域 → aidcp-automation" },
