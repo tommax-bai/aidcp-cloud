@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.sync.batch",
+  "type": "wechat_channels.inbox.sync.batch",
   "id": "sync-comment-envelope-001",
   "ts": 1784044802000,
   "payload": {

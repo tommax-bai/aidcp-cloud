@@ -388,7 +388,7 @@ test('approved command is persisted as one attempt and dispatched to one account
   assert.equal(createCalls, 1);
   assert.equal(markedDispatched, true);
   assert.equal(pushed.length, 1);
-  assert.equal(pushed[0].type, 'interaction.reply.send');
+  assert.equal(pushed[0].type, 'wechat_channels.inbox.reply.send');
   assert.deepEqual(pushed[0].payload, {
     jobId: 'job_comment_100', attemptId: 'attempt_comment_100_1',
     idempotencyKey: 'e0e055e5abfced94f0e808eb5745a36b5f9f7aecc75c2d0377f5b2f692ae2ae9',
@@ -501,7 +501,7 @@ test('startup/reconnect recovery emits verification-only reconcile and never rep
     controllerFor: () => undefined, metrics: new InteractionMetrics(), env: {}, clock: () => now,
   });
   assert.equal(await sender.reconcileRecoverable(base.thread.accountId, 'edge-recovery'), 1);
-  assert.deepEqual(pushed.map((envelope) => envelope.type), ['interaction.reply.reconcile']);
+  assert.deepEqual(pushed.map((envelope) => envelope.type), ['wechat_channels.inbox.reply.reconcile']);
   assert.deepEqual((pushed[0].payload as { attempts: Array<{ command: unknown }> }).attempts[0].command, command);
 });
 
@@ -530,7 +530,7 @@ test('browser foreground control requires the negotiated capability and pushes a
 
   const requestId = await sender.requestBrowserControl({ accountId: 'acct_wc_demo', envKey: 'env_wc_demo', action: 'open' });
   assert.deepEqual(resolutions, [['acct_wc_demo', 'interaction_browser_control_v1']]);
-  assert.equal(pushed[0].type, 'interaction.browser.control');
+  assert.equal(pushed[0].type, 'wechat_channels.inbox.browser.control');
   assert.deepEqual(pushed[0].payload, {
     requestId,
     envKey: 'env_wc_demo',

@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.sync.request",
+  "type": "wechat_channels.inbox.sync.request",
   "id": "test-reset-sync-envelope-001",
   "ts": 1784044802500,
   "payload": {

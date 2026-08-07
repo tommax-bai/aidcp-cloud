@@ -82,7 +82,7 @@ test('PostgreSQL: batch idempotency/rollback, job+attempt races, ambiguous recov
         identity: { externalId: 'finder_demo_public', displayName: '示例视频号', identityHash: `sha256:${'1'.repeat(64)}` },
         runtimeControlsVersion: 0, checkedAt: 1784044002000, reasonCode: null,
       });
-      const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
+      const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-inbox/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
       const payload = parseSyncBatchPayload(fixture.payload);
       assert.ok(payload);
 
@@ -395,7 +395,7 @@ test('PostgreSQL: circuit reset, replay-safe thread states and periodic classify
         version: cleared.version, circuitReset: true, circuitWasOpen: true, previousConsecutiveFailures: 3,
       });
 
-      const raw = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
+      const raw = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-inbox/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
       const fixture = parseSyncBatchPayload(raw.payload);
       assert.ok(fixture);
       const oldKinds = ['ignored', 'escalated', 'replied'] as const;
@@ -606,7 +606,7 @@ test('PostgreSQL mock Edge E2E: sync → list/detail → generate/approve/send �
       await store.updateRuntimeControls({ accountId: 'acct_wc_e2e', expectedVersion: 0, actor: 'admin',
         commentsReadEnabled: true, commentsReplyEnabled: true, dmReadEnabled: false, dmSendTextEnabled: false,
         dmSendImageEnabled: false, writePaused: false });
-      const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
+      const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-inbox/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8')) as { payload: unknown };
       const parsed = parseSyncBatchPayload(fixture.payload);
       assert.ok(parsed);
       const payload = { ...parsed, batchId: 'batch-e2e', envKey: 'env_wc_e2e', accountId: 'acct_wc_e2e' };
@@ -630,7 +630,7 @@ test('PostgreSQL mock Edge E2E: sync → list/detail → generate/approve/send �
       const dispatched = await sender.dispatchQueued({ accountId: 'acct_wc_e2e', envKey: 'env_wc_e2e',
         jobId: queued.id, expectedVersion: queued.version });
       assert.equal((await store.getJobContext('acct_wc_e2e', 'env_wc_e2e', queued.id))?.job.state, 'sending');
-      assert.equal(pushed[0]?.type, 'interaction.reply.send');
+      assert.equal(pushed[0]?.type, 'wechat_channels.inbox.reply.send');
       const command = pushed[0].payload as { idempotencyKey: string };
       await inbox.onReplyResult({ jobId: queued.id, attemptId: dispatched.attemptId,
         idempotencyKey: command.idempotencyKey, envKey: 'env_wc_e2e', accountId: 'acct_wc_e2e',

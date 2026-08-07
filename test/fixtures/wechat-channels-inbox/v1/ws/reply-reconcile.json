@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.reply.reconcile",
+  "type": "wechat_channels.inbox.reply.reconcile",
   "id": "reconcile-envelope-001",
   "ts": 1784044820000,
   "payload": {

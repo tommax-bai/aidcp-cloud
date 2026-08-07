@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.browser.control",
+  "type": "wechat_channels.inbox.browser.control",
   "id": "browser-control-envelope-001",
   "ts": 1784044845000,
   "payload": {

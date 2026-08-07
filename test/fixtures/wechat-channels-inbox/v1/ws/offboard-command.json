@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.offboard.command",
+  "type": "wechat_channels.inbox.offboard.command",
   "id": "offboard-envelope-001",
   "ts": 1784044830000,
   "payload": {

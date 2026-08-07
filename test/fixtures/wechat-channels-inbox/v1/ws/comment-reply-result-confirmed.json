@@ -1,8 +1,8 @@
 {
   "v": 2,
-  "type": "interaction.reply.result.ack",
+  "type": "wechat_channels.inbox.reply.result",
   "id": "reply-comment-envelope-001",
-  "ts": 1784044811100,
+  "ts": 1784044811000,
   "payload": {
     "jobId": "job_comment_100",
     "attemptId": "attempt_comment_100_1",
@@ -10,8 +10,13 @@
     "envKey": "env_wc_demo",
     "accountId": "acct_wc_demo",
     "platform": "wechat_channels",
-    "status": "accepted",
+    "channel": "comment",
+    "status": "confirmed",
+    "externalMessageId": "comment-reply-demo-101",
+    "errorCategory": null,
     "errorCode": null,
-    "receivedAt": 1784044811100
+    "verification": "platform_ack",
+    "retryAfterMs": null,
+    "finishedAt": 1784044811000
   }
 }

@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.reply.result",
+  "type": "wechat_channels.inbox.reply.result",
   "id": "reply-dm-envelope-001",
   "ts": 1784044825000,
   "payload": {

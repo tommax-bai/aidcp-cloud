@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.auth.status",
+  "type": "wechat_channels.inbox.auth.status",
   "id": "auth-status-profile-in-use-001",
   "ts": 1784044802000,
   "payload": {

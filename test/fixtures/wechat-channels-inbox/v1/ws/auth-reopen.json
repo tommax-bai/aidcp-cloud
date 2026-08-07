@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.auth.reopen",
+  "type": "wechat_channels.inbox.auth.reopen",
   "id": "auth-reopen-envelope-001",
   "ts": 1784044830000,
   "payload": {

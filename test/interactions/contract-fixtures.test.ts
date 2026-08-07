@@ -20,7 +20,7 @@ import type {
   InteractionSyncBatchPayload,
 } from '@kernel/kernel/interaction-types.js';
 
-const fixtureRoot = new URL('../fixtures/wechat-channels-interaction/v1/ws/', import.meta.url);
+const fixtureRoot = new URL('../fixtures/wechat-channels-inbox/v1/ws/', import.meta.url);
 
 async function fixture(name: string) {
   const raw = await readFile(new URL(name, fixtureRoot), 'utf8');
@@ -71,27 +71,27 @@ test('frozen v1 WS fixtures are accepted by strict Cloud consumers', async () =>
   assert.equal(parseAuthStatusPayload({ ...(auth.payload as object), reasonCode: 'invented' }), null);
 
   const expectedTypes: Record<string, string> = {
-    'hello.json': 'hello', 'welcome.json': 'welcome', 'auth-status-active.json': 'interaction.auth.status',
-    'auth-status-profile-in-use.json': 'interaction.auth.status',
-    'auth-reopen.json': 'interaction.auth.reopen', 'sync-request.json': 'interaction.sync.request',
-    'test-reset-sync-request.json': 'interaction.sync.request',
-    'browser-control-open.json': 'interaction.browser.control',
-    'comment-sync-batch.json': 'interaction.sync.batch', 'dm-sync-batch.json': 'interaction.sync.batch',
-    'comment-sync-ack.json': 'interaction.sync.ack', 'dm-sync-ack.json': 'interaction.sync.ack',
-    'comment-reply-send.json': 'interaction.reply.send', 'dm-reply-send.json': 'interaction.reply.send',
-    'comment-reply-result-confirmed.json': 'interaction.reply.result',
-    'dm-reply-result-ambiguous.json': 'interaction.reply.result',
-    'comment-reply-result-ack.json': 'interaction.reply.result.ack',
-    'reply-reconcile.json': 'interaction.reply.reconcile',
-    'reply-reconcile-result.json': 'interaction.reply.reconcile.result',
-    'offboard-command.json': 'interaction.offboard.command',
-    'offboard-result.json': 'interaction.offboard.result',
-    'offboard-ack.json': 'interaction.offboard.ack',
+    'hello.json': 'hello', 'welcome.json': 'welcome', 'auth-status-active.json': 'wechat_channels.inbox.auth.status',
+    'auth-status-profile-in-use.json': 'wechat_channels.inbox.auth.status',
+    'auth-reopen.json': 'wechat_channels.inbox.auth.reopen', 'sync-request.json': 'wechat_channels.inbox.sync.request',
+    'test-reset-sync-request.json': 'wechat_channels.inbox.sync.request',
+    'browser-control-open.json': 'wechat_channels.inbox.browser.control',
+    'comment-sync-batch.json': 'wechat_channels.inbox.sync.batch', 'dm-sync-batch.json': 'wechat_channels.inbox.sync.batch',
+    'comment-sync-ack.json': 'wechat_channels.inbox.sync.ack', 'dm-sync-ack.json': 'wechat_channels.inbox.sync.ack',
+    'comment-reply-send.json': 'wechat_channels.inbox.reply.send', 'dm-reply-send.json': 'wechat_channels.inbox.reply.send',
+    'comment-reply-result-confirmed.json': 'wechat_channels.inbox.reply.result',
+    'dm-reply-result-ambiguous.json': 'wechat_channels.inbox.reply.result',
+    'comment-reply-result-ack.json': 'wechat_channels.inbox.reply.result.ack',
+    'reply-reconcile.json': 'wechat_channels.inbox.reply.reconcile',
+    'reply-reconcile-result.json': 'wechat_channels.inbox.reply.reconcile.result',
+    'offboard-command.json': 'wechat_channels.inbox.offboard.command',
+    'offboard-result.json': 'wechat_channels.inbox.offboard.result',
+    'offboard-ack.json': 'wechat_channels.inbox.offboard.ack',
   };
   for (const [name, type] of Object.entries(expectedTypes)) {
     const envelope = await fixture(name);
     assert.equal(envelope.type, type, name);
-    if (type.startsWith('interaction.')) {
+    if (type.startsWith('wechat_channels.inbox.')) {
       assert.equal((envelope.payload as { platform?: string }).platform, 'wechat_channels', name);
     }
   }
@@ -140,11 +140,11 @@ test('mock Edge hello → sync batch/ack → confirmed result uses frozen v1 map
   const auth = await handler.handle(await fixture('auth-status-active.json'), session);
   assert.equal(auth, null);
   const ack = await handler.handle(await fixture('comment-sync-batch.json'), session);
-  assert.equal(ack?.type, 'interaction.sync.ack');
+  assert.equal(ack?.type, 'wechat_channels.inbox.sync.ack');
   assert.equal((ack?.payload as InteractionSyncAckPayload).status, 'accepted');
   assert.equal((ack?.payload as InteractionSyncAckPayload).persisted.messages, 1);
   const confirmed = await handler.handle(await fixture('comment-reply-result-confirmed.json'), session);
-  assert.equal(confirmed?.type, 'interaction.reply.result.ack');
+  assert.equal(confirmed?.type, 'wechat_channels.inbox.reply.result.ack');
   assert.equal(persisted!.batchId, 'batch-comment-001');
   assert.equal(result!.status, 'confirmed');
   assert.deepEqual(seen, ['auth', 'batch', 'result']);
@@ -225,14 +225,14 @@ test('durable reply/offboard results receive scope-bound duplicate-safe acknowle
   const session: EdgeSession = { sessionId: 'recovery-edge', accountId: 'acct_wc_demo', platform: 'wechat_channels',
     capabilities: ['interaction_inbox_v1', 'interaction_reply_recovery_v1', 'interaction_offboarding_v1'] };
   const baseResult = (await fixture('comment-reply-result-confirmed.json')).payload as InteractionReplyResultPayload;
-  const first = await handler.handle(makeEnvelope('interaction.reply.result', 'result-1', 1, baseResult), session);
-  const duplicate = await handler.handle(makeEnvelope('interaction.reply.result', 'result-2', 2, baseResult), session);
-  assert.equal(first?.type, 'interaction.reply.result.ack');
+  const first = await handler.handle(makeEnvelope('wechat_channels.inbox.reply.result', 'result-1', 1, baseResult), session);
+  const duplicate = await handler.handle(makeEnvelope('wechat_channels.inbox.reply.result', 'result-2', 2, baseResult), session);
+  assert.equal(first?.type, 'wechat_channels.inbox.reply.result.ack');
   assert.equal((first?.payload as { status: string }).status, 'accepted');
   assert.equal((duplicate?.payload as { status: string }).status, 'duplicate');
   assert.equal(first?.id, 'result-1');
 
-  const reconcile = await handler.handle(makeEnvelope('interaction.reply.reconcile.result', 'reconcile-1', 3, {
+  const reconcile = await handler.handle(makeEnvelope('wechat_channels.inbox.reply.reconcile.result', 'reconcile-1', 3, {
     reconcileId: 'reconcile-1', envKey: baseResult.envKey, accountId: baseResult.accountId,
     platform: 'wechat_channels', attempts: [{ jobId: baseResult.jobId, attemptId: baseResult.attemptId,
       idempotencyKey: baseResult.idempotencyKey, state: 'result_replayed', observedAt: 3 }], finishedAt: 3,
@@ -242,11 +242,11 @@ test('durable reply/offboard results receive scope-bound duplicate-safe acknowle
 
   const offboardPayload = { offboardId: 'offboard-1', envKey: baseResult.envKey, accountId: baseResult.accountId,
     platform: 'wechat_channels' as const, status: 'cleared' as const, errorCode: null, finishedAt: 4 };
-  const offboard = await handler.handle(makeEnvelope('interaction.offboard.result', 'offboard-result-1', 4,
+  const offboard = await handler.handle(makeEnvelope('wechat_channels.inbox.offboard.result', 'offboard-result-1', 4,
     offboardPayload), session);
-  const offboardDuplicate = await handler.handle(makeEnvelope('interaction.offboard.result', 'offboard-result-2', 5,
+  const offboardDuplicate = await handler.handle(makeEnvelope('wechat_channels.inbox.offboard.result', 'offboard-result-2', 5,
     offboardPayload), session);
-  assert.equal(offboard?.type, 'interaction.offboard.ack');
+  assert.equal(offboard?.type, 'wechat_channels.inbox.offboard.ack');
   assert.equal((offboard?.payload as { status: string }).status, 'accepted');
   assert.equal((offboardDuplicate?.payload as { status: string }).status, 'duplicate');
 });

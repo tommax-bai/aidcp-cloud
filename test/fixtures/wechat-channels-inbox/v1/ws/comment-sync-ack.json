@@ -1,6 +1,6 @@
 {
   "v": 2,
-  "type": "interaction.sync.ack",
+  "type": "wechat_channels.inbox.sync.ack",
   "id": "sync-comment-envelope-001",
   "ts": 1784044802100,
   "payload": {
