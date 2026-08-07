@@ -97,6 +97,8 @@ describe('AC-PERSONA 强制账号人设（系统不存在默认/兜底人设）'
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
       resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
       resolveSingleAccountId: async () => 'acc-none',
+      // 批 6b：getPlatform 转必须接线（缺席 fail-closed），夹具照生产装配补齐。
+      getPlatform: () => 'xiaohongshu',
       personaBinding: () => 'unbound',
       orchestrator: { trigger: async (input) => { triggered.push(input); return { status: 'draft' }; } },
       soul: {} as PublishSchedulerDeps['soul'],

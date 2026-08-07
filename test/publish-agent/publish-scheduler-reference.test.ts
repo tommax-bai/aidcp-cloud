@@ -25,6 +25,8 @@ function build() {
     publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
     resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
     resolveSingleAccountId: async () => 'acc-test',
+    // 批 6b：getPlatform 转必须接线（缺席 fail-closed），夹具照生产装配补齐。
+    getPlatform: () => 'xiaohongshu',
     orchestrator: {
       trigger: async (input) => {
         inputs.push(input);
@@ -145,6 +147,8 @@ describe('triggerManual referenceNote（洗稿参照）', () => {
       publishLog: { getMostRecentPublishTime: async () => null, recentPublishedContents: async () => [] },
       resolveRisk: async () => ({ canDo: () => true, explain: () => ({ allowed: true }), getState: () => ({ status: 'normal', quotaLevel: 'normal' }) }),
       resolveSingleAccountId: async () => 'acc-test',
+    // 批 6b：getPlatform 转必须接线（缺席 fail-closed），夹具照生产装配补齐。
+    getPlatform: () => 'xiaohongshu',
       personaBinding: () => 'unbound',
       orchestrator: { trigger: async () => ({ status: 'draft' }) },
       soul: {} as PublishSchedulerDeps['soul'],

@@ -123,7 +123,7 @@ test('platform registry: identity capture strategy is exhaustive and platform-sp
   });
   assert.deepEqual(identityCaptureStrategyForPlatform('facebook'), {
     supported: true,
-    command: 'identity.read_current',
+    command: 'identity.read_current_page',
     restore: 'none',
     capability: 'identity_read_current_v1',
   });

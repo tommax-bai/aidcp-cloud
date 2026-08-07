@@ -16,6 +16,8 @@ function makeDraft(over: Partial<DispatchDraft> = {}): DispatchDraft {
   return {
     recordId: 7,
     accountId: 'acct-A',
+    // 批 6b：平台静默缺省清零（draft 无 platform 即 fail-closed），夹具照生产数据补齐。
+    platform: 'xiaohongshu',
     title: 'vLLM 部署踩坑',
     content: '昨天试了 vLLM 跑 14B',
     imageUrl: 'https://example.com/a.png',
