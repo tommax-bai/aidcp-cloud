@@ -212,13 +212,16 @@ test('7.3 拉取面同样不得把「未知」压成权威的未绑：/my-enviro
 test('4.8 传输层出口闸：unknown 只拦新的平台动作，租约归还 / 快照 / 验证码协助照常放行', () => {
   const category = (type: string) => automationOperationDescriptorFor(type as never)?.category ?? null;
   // 收尾与控制面：扣住它们 = 浏览器槽位不归还、在跑会话无法自然收敛、在线边缘被误报成离线。
+  // ⚠ 双源现实（2026-08-07 词汇批 6 记）：豁免名单经 @api 的 kernel v0.1.1 解析（旧名 edge.task.* /
+  // note.close / navigation.back），类别经 @automation 现行登记表解析（新名）。api pin 抬升（既有线头）
+  // 后，名单半边须整体换 task.* / {p}.navigation.back 新名。
   for (const type of ['edge.task.release', 'edge.task.acquire', 'captcha.assist.capture', 'captcha.assist.click',
-    'ui.snapshot', 'pacing.update', 'interaction.browser.control', 'note.close', 'navigation.back']) {
+    'ui.push_snapshot', 'pacing.update', 'wechat_channels.inbox.browser.control', 'note.close', 'navigation.back']) {
     assert.equal(allowsTransportWhenGateUnknown(type, category(type)), true, `${type} 在 unknown 下必须放行`);
   }
-  // 新的真实平台动作：这才是停手要拦的那一类。
-  for (const type of ['note.open', 'interaction.like', 'interaction.comment', 'group.join', 'publish.command',
-    'page.scroll', 'search.execute', 'interaction.reply.send']) {
+  // 新的真实平台动作：这才是停手要拦的那一类（名字取现行协议形；未知名同样拦下，两代皆 false）。
+  for (const type of ['xiaohongshu.note.open', 'xiaohongshu.note.like', 'facebook.note.comment', 'facebook.group.join',
+    'xiaohongshu.publish.command', 'xiaohongshu.feed.scroll', 'facebook.search.execute', 'wechat_channels.inbox.reply.send']) {
     assert.equal(allowsTransportWhenGateUnknown(type, category(type)), false, `${type} 在 unknown 下必须拦下`);
   }
 });

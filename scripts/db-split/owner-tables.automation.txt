@@ -1,6 +1,6 @@
 # generated from boundaries/table-ownership.json — DO NOT EDIT BY HAND
 # regenerate: npx tsx scripts/db-split/generate-owner-table-lists.ts
-# owner=automation count=57
+# owner=automation count=58
 alerts
 anchor_staging
 anchors
@@ -47,6 +47,7 @@ liked_notes
 operator_command_receipt
 pacing_floor_config
 quota_config
+restricted_policy_config
 resume_config
 resume_config_global
 risk_command_outcome
