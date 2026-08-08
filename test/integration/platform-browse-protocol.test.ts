@@ -171,7 +171,7 @@ describe('C1b feed 自愈：Facebook 到底切 Reels，其他平台保持 refres
     assert.equal(after.filter(
       (command) => command.action === 'scroll'
         && command.reason === 'resume_redrive'
-        && command.params?.targetSurface === 'reels',
+        && command.surface === 'reels',
     ).length, 1);
     assert.ok(!actionsOf(after).includes('refresh'), 'Facebook feed_exhausted 不再刷新同一普通 Feed');
   });
@@ -184,7 +184,7 @@ describe('C1b feed 自愈：Facebook 到底切 Reels，其他平台保持 refres
     assert.ok(actionsOf(after).includes('refresh'), '非 Facebook 保持立即 refresh 换新批');
     assert.equal(after.some(
       (command) => command.reason === 'resume_redrive'
-        && command.params?.targetSurface === 'reels',
+        && command.surface === 'reels',
     ), false);
   });
 });

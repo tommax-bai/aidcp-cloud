@@ -17,7 +17,7 @@ const llm = { complete: async () => '{"verdict":"skip","reason":"test"}' };
 const isReelsRedrive = (command: EdgeCommand): boolean =>
   command.action === 'scroll'
   && command.reason === 'resume_redrive'
-  && command.params?.targetSurface === 'reels';
+  && command.surface === 'reels';
 
 interface FakeTimer { fn: () => void; ms: number; cancelled: boolean; fired: boolean }
 
@@ -106,7 +106,7 @@ test('权威钉定的会话中途改配置 → 本场不改钉（复判 MUST NOT
 
   assert.equal(issued.length, 1, '重驱恰好一条');
   assert.equal(
-    issued[0]!.params?.targetSurface,
+    issued[0]!.surface,
     'reels',
     '裁决已改成 feed，但本场仍用启动时钉的 reels——新配置只对下一场生效',
   );

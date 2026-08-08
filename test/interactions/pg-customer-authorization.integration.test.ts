@@ -274,7 +274,7 @@ test('PostgreSQL: unbind/termination revoke first, retry offline cleanup, tombst
       assert.equal((await users.setScope('user-term', [{ envKey: 'env-term-a' }, { envKey: 'env-term-b' }], 'admin')).ok, true);
 
       const rawFixture = JSON.parse(await readFile(
-        new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8',
+        new URL('../fixtures/wechat-channels-inbox/v1/ws/comment-sync-batch.json', import.meta.url), 'utf8',
       )) as { payload: unknown };
       const fixture = parseSyncBatchPayload(rawFixture.payload);
       assert.ok(fixture);
@@ -607,7 +607,7 @@ test('PostgreSQL: admin revocation removes ownership before cleanup and late bin
         checkedAt: Date.now(), reasonCode: null,
       });
       assert.equal(await users.hasPendingRevocationHold('acct-revoke-late'), true);
-      const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-interaction/v1/ws/comment-sync-batch.json',
+      const fixture = JSON.parse(await readFile(new URL('../fixtures/wechat-channels-inbox/v1/ws/comment-sync-batch.json',
         import.meta.url), 'utf8')) as { payload: unknown };
       const parsed = parseSyncBatchPayload(fixture.payload);
       assert.ok(parsed);

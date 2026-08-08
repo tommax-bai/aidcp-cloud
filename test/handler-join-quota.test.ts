@@ -96,8 +96,8 @@ test('回执不带 clicked → 不计（clicked 是可选字段，缺失 ≠ 点
   assert.equal(got.length, 0);
 });
 
-test('边缘协议名 group.join 归一后同样按 clicked 判（不因动作名口径漏判）', async () => {
-  const got = await feed({ action: 'group.join', ok: false, reason: 'pending', clicked: true });
+test('边缘协议名 facebook.group.join 归一后同样按 clicked 判（不因动作名口径漏判）', async () => {
+  const got = await feed({ action: 'facebook.group.join', ok: false, reason: 'pending', clicked: true });
   assert.equal(got.length, 1);
   assert.equal(got[0].action, 'join_group', '云端角色关联键是 join_group，不是协议消息名');
 });

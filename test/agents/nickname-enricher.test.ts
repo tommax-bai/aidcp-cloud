@@ -19,7 +19,7 @@ const SELF_PROFILE_PLAN: NicknameCapturePlan = {
   restore: 'feed',
 };
 const CURRENT_PAGE_PLAN: NicknameCapturePlan = {
-  command: 'identity.read_current',
+  command: 'identity.read_current_page',
   restore: 'none',
 };
 
@@ -91,7 +91,7 @@ function observed(
   nickname?: string,
   accountId = REAL,
 ): void {
-  const current = request.command === 'identity.read_current';
+  const current = request.command === 'identity.read_current_page';
   bus.emit('identity.observed.arrived', {
     observation: {
       captureId: request.captureId,

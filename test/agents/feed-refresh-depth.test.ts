@@ -104,12 +104,18 @@ describe('FeedScroller 深度到阈值改刷新（feed-refresh-on-depth）', () 
   });
 });
 
-describe('command-bridge：refresh → feed.refresh 信封（feed-refresh-on-depth）', () => {
-  it('edgeCommandToEnvelope 把 action=refresh 映射为 feed.refresh 且透传 reason + thinkMs', () => {
-    const env = edgeCommandToEnvelope({ action: 'refresh', reason: 'feed_refresh', params: { thinkMs: 700 } });
-    assert.equal(env.type, 'feed.refresh');
+describe('command-bridge：refresh → {platform}.feed.refresh 信封（feed-refresh-on-depth × 词汇批 4）', () => {
+  it('edgeCommandToEnvelope 按平台把 action=refresh 映射为 {platform}.feed.refresh 且透传 reason + thinkMs', () => {
+    const env = edgeCommandToEnvelope({ action: 'refresh', reason: 'feed_refresh', params: { thinkMs: 700 } }, 'xiaohongshu');
+    assert.equal(env.type, 'xiaohongshu.feed.refresh');
     const payload = env.payload as { reason?: string; thinkMs?: number };
     assert.equal(payload.reason, 'feed_refresh');
     assert.equal(payload.thinkMs, 700);
+
+    const fb = edgeCommandToEnvelope({ action: 'refresh', reason: 'feed_refresh' }, 'facebook');
+    assert.equal(fb.type, 'facebook.feed.refresh');
+
+    // 平台缺席时翻译响亮失败——补空即决策，桥不代答。
+    assert.throws(() => edgeCommandToEnvelope({ action: 'refresh', reason: 'feed_refresh' }));
   });
 });

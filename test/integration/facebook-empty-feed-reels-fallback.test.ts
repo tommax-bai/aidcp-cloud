@@ -13,7 +13,7 @@ const llm = { complete: async () => '{"verdict":"skip","reason":"test"}' };
 const isReelsRedrive = (command: EdgeCommand): boolean =>
   command.action === 'scroll'
   && command.reason === 'resume_redrive'
-  && command.params?.targetSurface === 'reels';
+  && command.surface === 'reels';
 
 test('Facebook Reels 主入口在四种运行方式下都先丢弃首批 Feed 并只发配置入口命令', () => {
   const modes = ['persona', 'slow_start', 'facebook_rule', 'consumption'] as const;
@@ -124,7 +124,7 @@ test('任务结束统一重驱复用本场钉住的 Feed/Reels 目标，不读�
     assert.deepEqual(commands.slice(base), [{
       action: 'scroll',
       reason: 'resume_redrive',
-      params: { targetSurface: primarySurface },
+      surface: primarySurface,
     }]);
     dispatcher.endSession('test');
   }

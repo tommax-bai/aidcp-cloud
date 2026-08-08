@@ -109,7 +109,7 @@ test('reply profiles accept legacy data and normalize bounded knowledge document
 test('dedicated AI roles consume frozen fixtures and reject malformed structured output', async () => {
   const names = ['classifier-comment-output.json','polisher-comment-output.json','reviewer-comment-output.json'];
   const outputs = await Promise.all(names.map(async (name) => JSON.parse(await readFile(
-    new URL(`../fixtures/wechat-channels-interaction/v1/ai/${name}`, import.meta.url), 'utf8')) as unknown));
+    new URL(`../fixtures/wechat-channels-inbox/v1/ai/${name}`, import.meta.url), 'utf8')) as unknown));
   const accountIds: Array<string | undefined> = [];
   const prompts: string[] = [];
   const llm: LlmClient = { complete: async (prompt, options) => {

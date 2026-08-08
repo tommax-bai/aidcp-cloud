@@ -25,18 +25,21 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
+/** 词汇批 4：本文件断言命令**序列**（搜→开→评），平台段由 edge-steps/桥/契约测试钉死——此处剥前缀归一。 */
+const commandName = (type: string): string => type.replace(/^(?:xiaohongshu|facebook)\./, '');
+
 /** 假边端：按命令类型同步 emit 对应上报，跑通 happy path。 */
 function fakeEdge(bus: EventBus) {
   return {
     pushToEdges: (envelope: unknown): number => {
       const env = envelope as Envelope;
-      if (env.type === 'search.execute') {
+      if (commandName(env.type) === 'search.execute') {
         bus.emit('page.cards.arrived', { cards: [{ index: 0, title: 'RAG 实战', noteId: 'n1', collectCount: 900 }], ts: 0 } as never);
-      } else if (env.type === 'note.open') {
+      } else if (commandName(env.type) === 'note.open') {
         bus.emit('note.detail.arrived', { detail: { noteId: 'n1', title: 'RAG 实战', content: '正文', likeCount: 10, collectCount: 9 }, ts: 0 } as never);
-      } else if (env.type === 'note.scroll_comments') {
+      } else if (commandName(env.type) === 'note.scroll_comments') {
         bus.emit('action.completed', { action: 'scroll_comments', ok: true, candidates: [{ text: '学到了' }], ts: 0 } as never);
-      } else if (env.type === 'interaction.comment') {
+      } else if (commandName(env.type) === 'note.comment') {
         bus.emit('action.completed', { action: 'comment', ok: true, ts: 0 } as never);
       }
       return 1;
@@ -183,7 +186,7 @@ describe('CommentScheduler.triggerManual', () => {
         resolveConnection: () => ({ bus, edgeId: 'e1' }),
         pusher: {
           pushToEdges: (env: unknown) => {
-            if ((env as Envelope).type === 'search.execute') searchExecutes++;
+            if (commandName((env as Envelope).type) === 'search.execute') searchExecutes++;
             return fe.pushToEdges(env);
           },
         },
@@ -483,7 +486,7 @@ describe('CommentScheduler edge acquire failure', () => {
       baseDeps({
         pusher: {
           pushToEdges: (envelope: unknown) => {
-            if ((envelope as Envelope).type === 'search.execute') searchCommands++;
+            if (commandName((envelope as Envelope).type) === 'search.execute') searchCommands++;
             return 1;
           },
         },
@@ -517,7 +520,7 @@ describe('CommentScheduler edge acquire failure', () => {
       baseDeps({
         pusher: {
           pushToEdges: (envelope: unknown) => {
-            if ((envelope as Envelope).type === 'search.execute') searchCommands++;
+            if (commandName((envelope as Envelope).type) === 'search.execute') searchCommands++;
             return 1;
           },
         },
@@ -737,10 +740,10 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
       pusher: {
         pushToEdges: (env: unknown) => {
           const e = env as { type: string; payload?: Record<string, unknown> };
-          posted.push(e.type);
-          if (e.type === 'search.execute') {
+          posted.push(commandName(e.type));
+          if (commandName(e.type) === 'search.execute') {
             bus.emit('page.cards.arrived', { cards: [{ index: 0, noteId: 'https://fb.com/g/1/posts/9' }], ts: 0 } as never);
-          } else if (e.type === 'note.open') {
+          } else if (commandName(e.type) === 'note.open') {
             const payload = e.payload as { url?: string; selection?: string };
             bus.emit('note.detail.arrived', {
               detail: {
@@ -752,7 +755,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
               },
               ts: 0,
             } as never);
-          } else if (e.type === 'interaction.comment') {
+          } else if (commandName(e.type) === 'note.comment') {
             bus.emit('action.completed', { action: 'comment', ok: true, ts: 0 } as never);
           }
           return 1;
@@ -796,7 +799,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
       const r = await new CommentScheduler(deps).triggerManual('fb-1');
       assert.equal(r.ok, true);
       await tick();
-      assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+      assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
       assert.equal(audits.at(-1)?.outcome, 'commented');
     } finally {
       if (previousAuto === undefined) delete process.env.AIDCP_FB_COMMENT_AUTO;
@@ -820,7 +823,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'contains_url');
-    assert.ok(!posted.includes('interaction.comment'));
+    assert.ok(!posted.includes('note.comment'));
   });
 
   it('撰写为空 → compose_skipped(empty_compose)，绝不提交', async () => {
@@ -829,7 +832,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook shadow-first)', () 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'empty_compose');
-    assert.ok(!posted.includes('interaction.comment'));
+    assert.ok(!posted.includes('note.comment'));
   });
 
   // 注：该 quota_denied 测试**不带** manualOverride → 模型的是「自动排期评论」路径（ContentScheduler 的 priority:automatic 调用），
@@ -918,8 +921,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       pushToEdges: (envelope: unknown): number => {
         const env = envelope as Envelope;
         envelopes.push(env);
-        posted.push(env.type);
-        if (env.type === 'search.execute') {
+        posted.push(commandName(env.type));
+        if (commandName(env.type) === 'search.execute') {
           if (cfg.searchFail) {
             bus.emit('action.completed', { action: 'search', ok: false, reason: cfg.searchFail, ts: 0 } as never);
           } else {
@@ -929,7 +932,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
               ts: 0,
             } as never);
           }
-        } else if (env.type === 'note.open') {
+        } else if (commandName(env.type) === 'note.open') {
           const payload = env.payload as { url?: string; selection?: string };
           const url = payload.selection === 'first_commentable_group_post'
             ? cfg.firstPostTarget ?? PERMALINK
@@ -949,7 +952,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
               ts: 0,
             } as never);
           }
-        } else if (env.type === 'interaction.comment') {
+        } else if (commandName(env.type) === 'note.comment') {
           const s = cfg.submit ?? { ok: true };
           bus.emit('action.completed', { action: 'comment', ok: s.ok, ...(s.reason ? { reason: s.reason } : {}), ts: 0 } as never);
         }
@@ -1031,7 +1034,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
     // §5.4 防重复真发：提交派发前已打 attempted 去重标记（与成功计数解耦）。
     assert.deepEqual(dedupRecorded, [PERMALINK]);
     // 群名自动回填：边缘回传真名 → 调 resolveContainerName（url→真名）；审计用群名、不用 id。
@@ -1049,8 +1052,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.deepEqual(posted, ['note.open', 'interaction.comment']);
-    const open = envelopes.find((env) => env.type === 'note.open');
+    assert.deepEqual(posted, ['note.open', 'note.comment']);
+    const open = envelopes.find((env) => commandName(env.type) === 'note.open');
     assert.equal(open?.payload.selection, 'first_commentable_group_post');
     assert.equal(open?.payload.container, 'https://www.facebook.com/groups/1');
     assert.equal(open?.payload.url, undefined);
@@ -1081,9 +1084,9 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
 
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.deepEqual(posted, ['note.open', 'interaction.comment']);
+    assert.deepEqual(posted, ['note.open', 'note.comment']);
     assert.deepEqual(approvals, [targetRef]);
-    assert.equal(envelopes.find((env) => env.type === 'interaction.comment')?.payload.noteId, targetRef);
+    assert.equal(envelopes.find((env) => commandName(env.type) === 'note.comment')?.payload.noteId, targetRef);
     assert.deepEqual(dedupRecorded, [targetRef]);
   });
 
@@ -1127,9 +1130,9 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     if (!result.triggered) return;
     assert.equal(result.result.outcome, 'commented');
     assert.deepEqual(phases, ['target', 'dispatch']);
-    assert.deepEqual(posted, ['note.open', 'interaction.comment']);
-    assert.equal(envelopes.some((env) => env.type === 'search.execute'), false);
-    const open = envelopes.find((env) => env.type === 'note.open');
+    assert.deepEqual(posted, ['note.open', 'note.comment']);
+    assert.equal(envelopes.some((env) => commandName(env.type) === 'search.execute'), false);
+    const open = envelopes.find((env) => commandName(env.type) === 'note.open');
     assert.equal(open?.payload.selection, 'first_commentable_group_post');
     assert.equal(open?.payload.container, 'https://www.facebook.com/groups/historical-1');
     assert.equal(open?.payload.joinFirst, undefined);
@@ -1177,7 +1180,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(beforeSubmit, 0);
     assert.deepEqual(dedupChecked, [PERMALINK]);
     assert.deepEqual(posted, ['note.open']);
-    assert.equal(envelopes.some((env) => env.type === 'interaction.comment'), false);
+    assert.equal(envelopes.some((env) => commandName(env.type) === 'note.comment'), false);
     assert.deepEqual(composeArgs, [], 'dedupe rejection must stop before composition');
     assert.deepEqual(dedupRecorded, [], 'a read-side dedupe hit must not write another marker');
   });
@@ -1211,8 +1214,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       'dispatch_suppressed:consumption_before_submit_rejected',
     );
     assert.deepEqual(posted, ['note.open']);
-    assert.equal(envelopes.some((env) => env.type === 'interaction.comment'), false);
-    assert.equal(envelopes.some((env) => env.type === 'search.execute'), false);
+    assert.equal(envelopes.some((env) => commandName(env.type) === 'note.comment'), false);
+    assert.equal(envelopes.some((env) => commandName(env.type) === 'search.execute'), false);
   });
 
   it('consumption mode re-reads the final risk gate after target selection and sends zero submit commands when it closes', async () => {
@@ -1281,8 +1284,8 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     // 解冻自治浏览把页面滚走、已授权评论提交被挡（对抗复核 wf_933f178c）。
     assert.ok((leaseReqs[0].leaseMs ?? 0) > 180_000 + 90_000, `keep-open leaseMs 必须严格覆盖撰写+人审最坏耗时，实际=${leaseReqs[0].leaseMs}`);
     // 三条命令都带 lease taskId（否则边端持租约期把评论自己的命令也挡死 → 自锁）
-    for (const t of ['search.execute', 'note.open', 'interaction.comment']) {
-      const env = base.envelopes.find((e) => e.type === t);
+    for (const t of ['search.execute', 'note.open', 'note.comment']) {
+      const env = base.envelopes.find((e) => commandName(e.type) === t);
       assert.ok(env, `应下发 ${t}`);
       assert.equal((env!.payload as { taskId?: string }).taskId, 'fb-task-1', `${t} 必须带 lease taskId`);
     }
@@ -1310,7 +1313,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     let searchCommands = 0;
     const deps: CommentSchedulerDeps = {
       ...base.deps,
-      pusher: { pushToEdges: (env: unknown) => { if ((env as Envelope).type === 'search.execute') searchCommands++; return 1; } },
+      pusher: { pushToEdges: (env: unknown) => { if (commandName((env as Envelope).type) === 'search.execute') searchCommands++; return 1; } },
       edgeTaskLeases: {
         withLease: async () => { throw new EdgeTaskLeaseError('acquire_timeout', 'edge task acquire timeout taskId=t edge=e-fb'); },
       },
@@ -1329,7 +1332,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'approval_rejected_or_timeout');
-    assert.ok(!posted.includes('interaction.comment'), '未接线人审 → 绝不提交评论');
+    assert.ok(!posted.includes('note.comment'), '未接线人审 → 绝不提交评论');
   });
 
   it('旧 AIDCP_FB_COMMENT_REVIEW_ALL=false 不能关闭人审', async () => {
@@ -1353,7 +1356,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'approval_rejected_or_timeout');
-    assert.ok(!posted.includes('interaction.comment'), 'manualOverride 不绕人审 → 无 approval 时绝不提交');
+    assert.ok(!posted.includes('note.comment'), 'manualOverride 不绕人审 → 无 approval 时绝不提交');
   });
 
   it('账号全局免审覆盖飞书手工 /comment：旁路通知、无按钮审批、仍走真实提交确认', async () => {
@@ -1374,7 +1377,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(notices.length, 1);
     assert.equal(notices[0].originChatId, 'oc_command');
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.ok(posted.includes('interaction.comment'));
+    assert.ok(posted.includes('note.comment'));
   });
 
   it('账号全局免审覆盖飞书手工 /comment：通知失败仍提交，不回退按钮审批', async () => {
@@ -1389,7 +1392,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(reviewCalled, false);
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.ok(posted.includes('interaction.comment'));
+    assert.ok(posted.includes('note.comment'));
   });
 
   // ── change manual-comment-force-flag：FB --force 跳过 weak_relevance（仍守内容安全校验 + 人审 + 放开每帖去重） ──
@@ -1399,7 +1402,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'weak_relevance', '零重叠 → 默认路径判 weak_relevance');
-    assert.ok(!posted.includes('interaction.comment'));
+    assert.ok(!posted.includes('note.comment'));
   });
 
   it('FB --force → 跳过 weak_relevance：零重叠草稿也过相关性闸，经人审后真发 commented', async () => {
@@ -1407,7 +1410,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await new CommentScheduler({ ...deps, facebookCompose: async () => '天气不错今天' }).triggerManual('fb-1', { force: true });
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented', '--force 跳过 weak_relevance → 过相关性闸、人审通过后真发');
-    assert.ok(posted.includes('interaction.comment'));
+    assert.ok(posted.includes('note.comment'));
   });
 
   it('FB --force 不放开内容安全校验 → 含链接草稿仍 compose_skipped/contains_url，绝不发', async () => {
@@ -1416,7 +1419,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'contains_url', 'force 只放开相关性，链接安全校验照拦');
-    assert.ok(!posted.includes('interaction.comment'));
+    assert.ok(!posted.includes('note.comment'));
   });
 
   it('FB --force 放开每帖去重 → 已评过的帖也能再评（默认路径 all_deduped 不评）', async () => {
@@ -1427,7 +1430,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       await tick();
       assert.equal(audits.at(-1)?.outcome, 'no_strong_candidate');
       assert.equal(audits.at(-1)?.reason, 'all_deduped');
-      assert.ok(!posted.includes('interaction.comment'));
+      assert.ok(!posted.includes('note.comment'));
     }
     // force：放开去重 → 取第一个候选、再评成功。
     {
@@ -1435,7 +1438,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       await new CommentScheduler(deps).triggerManual('fb-1', { force: true });
       await tick();
       assert.equal(audits.at(-1)?.outcome, 'commented', '--force 放开去重 → 已评过的帖再评');
-      assert.ok(posted.includes('interaction.comment'));
+      assert.ok(posted.includes('note.comment'));
     }
   });
 
@@ -1488,7 +1491,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     }).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.equal(envelopes.find((e) => e.type === 'search.execute')?.payload.container, 'https://www.facebook.com/groups/joined-1');
+    assert.equal(envelopes.find((e) => commandName(e.type) === 'search.execute')?.payload.container, 'https://www.facebook.com/groups/joined-1');
     assert.deepEqual(marked, [{ accountId: 'fb-1', groupUrl: 'https://www.facebook.com/groups/joined-1' }]);
   });
 
@@ -1576,7 +1579,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(audits.at(-1)?.outcome, 'commented');
     assert.equal(approvals[0].noteId, PERMALINK);
     assert.equal(approvals[0].text, '这家手冲咖啡很不错\nLINE ID: abc123');
-    const submit = envelopes.find((e) => e.type === 'interaction.comment');
+    const submit = envelopes.find((e) => commandName(e.type) === 'note.comment');
     assert.equal(submit?.payload.text, '这家手冲咖啡很不错');
     assert.equal(submit?.payload.groupChatCode, 'LINE ID: abc123');
   });
@@ -1601,7 +1604,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(composeCalled, false);
     assert.equal(audits.at(-1)?.outcome, 'commented');
     assert.equal(approvals[0], '这家手冲咖啡很不错');
-    assert.equal(envelopes.find((e) => e.type === 'interaction.comment')?.payload.text, '这家手冲咖啡很不错');
+    assert.equal(envelopes.find((e) => commandName(e.type) === 'note.comment')?.payload.text, '这家手冲咖啡很不错');
   });
 
   it('显式生成模式保持权威，不读取区域通用模板', async () => {
@@ -1638,7 +1641,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.deepEqual(regionResolutionCalls, ['https://www.facebook.com/groups/1']);
     assert.deepEqual(approvals, ['这家区域咖啡很不错']);
     assert.equal(
-      envelopes.find((e) => e.type === 'interaction.comment')?.payload.text,
+      envelopes.find((e) => commandName(e.type) === 'note.comment')?.payload.text,
       '这家区域咖啡很不错',
     );
   });
@@ -1671,7 +1674,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.ok(posted.includes('interaction.comment'));
+    assert.ok(posted.includes('note.comment'));
   });
 
   it('生成模式：正文含联系方式仍 contains_contact，绝不靠 contact lane 救回', async () => {
@@ -1686,7 +1689,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'contains_contact');
-    assert.ok(!posted.includes('interaction.comment'));
+    assert.ok(!posted.includes('note.comment'));
   });
 
   it('模板联系评论：模板正文与账号联系方式分离，人审后以 groupChatCode 下发', async () => {
@@ -1704,7 +1707,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
     assert.equal(approvals[0], '这家手冲咖啡很不错\nLINE ID: abc123');
-    const submit = envelopes.find((e) => e.type === 'interaction.comment');
+    const submit = envelopes.find((e) => commandName(e.type) === 'note.comment');
     assert.equal(submit?.payload.text, '这家手冲咖啡很不错');
     assert.equal(submit?.payload.groupChatCode, 'LINE ID: abc123');
   });
@@ -1719,7 +1722,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     // 撰写只发生一次，且在开帖（note.open）之后（命令序列证明顺序）。
     assert.equal(composeArgs.length, 1);
-    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
     // 撰写器吃到了帖子正文 + 他人评论（读了再写）。
     assert.equal(composeArgs[0].postText, 'Foto de Rio Piedras en los años 50');
     assert.deepEqual(composeArgs[0].comments, ['Y en esta época están en su máximo esplendor', 'Qué recuerdos']);
@@ -1812,9 +1815,9 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       },
     }).triggerManual('fb-1', { joinFirst: true });
     await tick();
-    assert.equal(envelopes.find((e) => e.type === 'search.execute')?.payload.container, JOINED);
+    assert.equal(envelopes.find((e) => commandName(e.type) === 'search.execute')?.payload.container, JOINED);
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
     assert.equal(cards.at(-1)?.ok, true);
     assert.equal(cards.at(-1)?.level, 'success');
     assert.match(cards.at(-1)!.title, /加群 \+ 评论成功/);
@@ -1935,7 +1938,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(specificArg, URL, '加入的是指定群 url');
     assert.equal(newCalled, 0, '绝不回落到「下一个库内群」');
-    assert.equal(envelopes.find((e) => e.type === 'search.execute')?.payload.container, URL);
+    assert.equal(envelopes.find((e) => commandName(e.type) === 'search.execute')?.payload.container, URL);
     assert.equal(audits.at(-1)?.outcome, 'commented');
   });
 
@@ -1947,7 +1950,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       facebookJoinSpecificGroup: async (_a, url) => ({ triggered: true, outcome: 'already_member', groupUrl: url }),
     }).triggerManual('fb-1', { joinFirst: true, joinGroupUrl: URL });
     await tick();
-    assert.equal(envelopes.find((e) => e.type === 'search.execute')?.payload.container, URL);
+    assert.equal(envelopes.find((e) => commandName(e.type) === 'search.execute')?.payload.container, URL);
     assert.equal(audits.at(-1)?.outcome, 'commented');
   });
 
@@ -1990,7 +1993,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.ok(!audits.some((a) => a.outcome === 'quota_denied'), '手动命令绝不因风控/速率配额被拒');
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
   });
 
   it('普通 /comment 不再被旧 AIDCP_FB_COMMENT_AUTO=false 静默 no-op', async () => {
@@ -2000,7 +2003,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     try {
       await new CommentScheduler(deps).triggerManual('fb-1', { manualOverride: true });
       await tick();
-      assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+      assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
     } finally {
       if (previous === undefined) delete process.env.AIDCP_FB_COMMENT_AUTO;
       else process.env.AIDCP_FB_COMMENT_AUTO = previous;
@@ -2022,7 +2025,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(joinOpts?.manual, true, '加群调度器收到 manual:true（加群侧亦跳过会话额度/风控配额）');
     assert.equal(audits.at(-1)?.outcome, 'commented', '加群成功后群内评论亦跳过评论配额闸');
-    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
   });
 
   it('加群评论按人工授权真发并仍过校验/确认', async () => {
@@ -2036,7 +2039,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     }).triggerManual('fb-1', { joinFirst: true });
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
     assert.equal(cards.at(-1)?.level, 'success');
   });
 
@@ -2044,7 +2047,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     const { deps, posted } = fbFlowDeps({ submit: { ok: true } });
     await new CommentScheduler(deps).triggerManual('fb-1');
     await tick();
-    assert.deepEqual(posted, ['search.execute', 'note.open', 'interaction.comment']);
+    assert.deepEqual(posted, ['search.execute', 'note.open', 'note.comment']);
   });
 
   it('加群评论：非会员结局（gated_skip）→ 不评论、诚实黄卡、不下发任何评论命令', async () => {
@@ -2108,7 +2111,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     }).triggerManual('fb-1', { joinFirst: true, injectContact: true });
     await tick();
     assert.equal(approvals[0].text, '这家手冲咖啡很不错\nLINE ID: abc123');
-    const submit = envelopes.find((e) => e.type === 'interaction.comment');
+    const submit = envelopes.find((e) => commandName(e.type) === 'note.comment');
     assert.equal(submit?.payload.groupChatCode, 'LINE ID: abc123');
     assert.equal(cards.at(-1)?.level, 'success');
     assert.match(cards.at(-1)!.message, /带联系方式/);
@@ -2204,7 +2207,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(soulReads, 0, '模板链路一次都不读人设');
     assert.deepEqual(approvals, ['这家手冲咖啡很不错'], '仍走审批策略');
     assert.equal(audits.at(-1)?.outcome, 'commented', '仍以平台确认为准记真实终态');
-    assert.equal(envelopes.find((e) => e.type === 'interaction.comment')?.payload.text, '这家手冲咖啡很不错');
+    assert.equal(envelopes.find((e) => commandName(e.type) === 'note.comment')?.payload.text, '这家手冲咖啡很不错');
   });
 
   it('规则批次 + 未显式选择正文方案（默认模板）+ 未绑人设 → 放行并用区域通用模板', async () => {
@@ -2246,7 +2249,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
       assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
       assert.equal(audits.at(-1)?.reason, reason);
       assert.equal(composeCalled, 0);
-      assert.ok(!posted.includes('interaction.comment'));
+      assert.ok(!posted.includes('note.comment'));
     }
   });
 
@@ -2269,7 +2272,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'too_long');
-    assert.ok(!posted.includes('interaction.comment'));
+    assert.ok(!posted.includes('note.comment'));
   });
 
   it('规则批次 + 模板正文带链接/联系方式 → 照发（运营手写、内容归其负责）', async () => {
@@ -2286,7 +2289,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     }).triggerManual('fb-rule', { joinFirst: true, source: 'facebook_rule_batch' });
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
-    assert.ok(posted.includes('interaction.comment'));
+    assert.ok(posted.includes('note.comment'));
   });
 
   it('规则批次 + 模板正文 + --contact → 联系方式仍与正文分离注入，人审见合体、提交走 groupChatCode', async () => {
@@ -2307,7 +2310,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     await tick();
     assert.equal(audits.at(-1)?.outcome, 'commented');
     assert.equal(approvals[0], '这家手冲咖啡很不错\nLINE ID: abc123');
-    const submit = envelopes.find((e) => e.type === 'interaction.comment');
+    const submit = envelopes.find((e) => commandName(e.type) === 'note.comment');
     assert.equal(submit?.payload.text, '这家手冲咖啡很不错');
     assert.equal(submit?.payload.groupChatCode, 'LINE ID: abc123');
   });
@@ -2358,7 +2361,7 @@ describe('CommentScheduler runFacebookTargetedTask (facebook real send)', () => 
     assert.equal(composeCalled, 0, '真发前的方案硬闸挡住生成器');
     assert.equal(audits.at(-1)?.outcome, 'compose_skipped');
     assert.equal(audits.at(-1)?.reason, 'comment_body_scheme_generated');
-    assert.ok(!posted.includes('interaction.comment'));
+    assert.ok(!posted.includes('note.comment'));
   });
 
   it('例外不外溢：同一账号经飞书手工 /comment（无来源标记）触发，未绑人设仍诚实拒绝', async () => {
