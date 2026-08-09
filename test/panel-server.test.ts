@@ -472,7 +472,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
         return { ok: false, reason: 'revision_conflict', current: operationView() };
       }
       operationRevision += 1;
-      baseMode = input.mode === 'slow_start' ? 'persona' : input.mode;
+      baseMode = input.mode === 'slow_start' ? 'consumption' : input.mode;
       effectiveMode = input.mode;
       return { ok: true, view: operationView() };
     },
@@ -571,7 +571,7 @@ test('Facebook operation/group policy APIs expose CAS truth and unified slow-sta
       }),
       {
         ...operationView(),
-        baseMode: 'persona',
+        baseMode: 'consumption',
         effectiveMode: 'slow_start',
         policyRevision: 1,
       },

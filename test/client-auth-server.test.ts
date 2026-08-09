@@ -300,7 +300,7 @@ function makeFakeStore(): {
       if (input.platform === 'facebook') {
         provisionedOperationPolicies.set(input.envKey, {
           baseMode: resolvedMode === 'slow_start'
-            ? 'persona'
+            ? 'consumption'
             : resolvedMode,
           effectiveMode: null,
           policyRevision: provisionedOperationPolicies.size + 1,
@@ -1073,7 +1073,7 @@ test('归属完成：统一模式/legacy/no-field 均返回初始 policy，新�
       for (const [envKey, extra, expectedBase] of [
         ['new-consumption', { facebookOperationMode: 'consumption' }, 'consumption'],
         ['legacy-rule', { facebookRuleModeEnabled: true }, 'rule'],
-        ['legacy-slow', { slowStartEnabled: true }, 'persona'],
+        ['legacy-slow', { slowStartEnabled: true }, 'consumption'],
         ['legacy-none', {}, 'persona'],
       ] as const) {
         const response = await complete(envKey, extra);
@@ -2154,7 +2154,7 @@ function makeFacebookOperationPolicyDep(options: {
         };
       }
       currentRevision += 1;
-      currentMode = input.mode === 'slow_start' ? 'persona' : input.mode;
+      currentMode = input.mode === 'slow_start' ? 'consumption' : input.mode;
       slowStartState = input.mode === 'slow_start' ? 'active' : 'off';
       updatedAt = '2026-07-30T08:00:00.000Z';
       return { ok: true as const, view: view(envKey) };

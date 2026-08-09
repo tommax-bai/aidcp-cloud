@@ -968,7 +968,7 @@ describe('FacebookOperationPolicyStore', () => {
 
     assert.equal(saved.ok, true);
     if (saved.ok) {
-      assert.equal(saved.view.baseMode, 'persona');
+      assert.equal(saved.view.baseMode, 'consumption');
       assert.equal(saved.view.effectiveMode, null, 'unbound config has no execution object');
       assert.equal(saved.view.binding.state, 'unbound');
       assert.equal(saved.view.slowStart.state, 'active');
@@ -1015,7 +1015,7 @@ describe('FacebookOperationPolicyStore', () => {
     );
     assert.equal(completed.ok, true);
     assert.ok(completed.ok);
-    assert.equal(completed.projection.operationPolicy.baseMode, 'persona');
+    assert.equal(completed.projection.operationPolicy.baseMode, 'consumption');
     assert.equal(completed.projection.operationPolicy.slowStart.state, 'graduated');
     assert.deepEqual(completed.projection.slowStartProgress, {
       day: 4,
@@ -1052,7 +1052,7 @@ describe('FacebookOperationPolicyStore', () => {
       completed: false,
     });
     assert.equal(db.environments.get('env-unbound')!.slowStartCompletedAt, null);
-    assert.equal(db.policies.get('env-unbound')?.base_mode, 'persona');
+    assert.equal(db.policies.get('env-unbound')?.base_mode, 'consumption');
     assert.equal(db.slowStartRefreshes, 3);
     assert.deepEqual(db.bumps.slice(-3), [
       'content_schedule',
@@ -1177,7 +1177,7 @@ describe('FacebookOperationPolicyStore', () => {
     );
     assert.equal(enabled.ok, true);
     assert.ok(db.environments.get('env-fb')!.slowStartSince);
-    assert.equal(db.policies.get('env-fb')?.base_mode, 'persona');
+    assert.equal(db.policies.get('env-fb')?.base_mode, 'consumption');
     assert.equal(db.audits.length, 1);
 
     const rule = await db.store.writeEnvironment(
@@ -1542,7 +1542,10 @@ describe('FacebookOperationPolicyStore', () => {
     assert.deepEqual(denied, { ok: false, reason: 'environment_not_owned' });
   });
 
-  it('legacy rule toggle follows effective slow-start state and ignores account-binding duplication', async () => {
+  it('legacy rule toggle refuses to clobber the consumption resumable base once slow start ends', async () => {
+    // 慢启动写入的可恢复基线现在默认 consumption（change default-consumption-after-slow-start）。
+    // 消费基线只能经统一模式 API 改写、legacy 布尔开关不得成为第二权威——这道守卫既有，
+    // 本 change 只是让「慢启动结束后的环境」也落进它命中的场景。
     for (const inactiveSlowStart of [
       {
         state: 'graduated' as const,
@@ -1570,6 +1573,10 @@ describe('FacebookOperationPolicyStore', () => {
       assert.ok(db.environments.get('env-fb')?.slowStartSince);
       db.store.bindSlowStartResolver(async () => inactiveSlowStart);
       db.store.bindEnvironmentSlowStartResolver(async () => inactiveSlowStart.state);
+      const before = {
+        revisions: db.revisionAllocations,
+        audits: db.audits.length,
+      };
 
       const enabled = await db.store.writeLegacyRuleMode(
         'env-fb',
@@ -1581,12 +1588,15 @@ describe('FacebookOperationPolicyStore', () => {
         },
         'client_rule_compat:customer-a',
       );
-      assert.equal(enabled.ok, true);
-      if (enabled.ok) {
-        assert.equal(enabled.changed, true);
-        assert.equal(enabled.view.baseMode, 'rule');
-        assert.equal(enabled.view.effectiveMode, 'rule');
+      assert.equal(enabled.ok, false);
+      if (!enabled.ok) {
+        assert.equal(enabled.reason, 'mode_conflict');
+        assert.equal(enabled.current?.baseMode, 'consumption');
       }
+      assert.deepEqual(
+        { revisions: db.revisionAllocations, audits: db.audits.length },
+        before,
+      );
     }
 
     const duplicate = database();
@@ -1820,36 +1830,6 @@ describe('FacebookOperationPolicyStore', () => {
     );
     assert.deepEqual(result, { ok: false, reason: 'unsupported_platform' });
     assert.equal(db.audits.length, 0);
-  });
-
-  it('api-mode wiring (no account slow-start resolver) still reports ramping for a bound environment', async () => {
-    // getForEnv 是客户 HTTP 读写口的唯一取值处，而那个口跑在 api 进程：api 只跑 segA/segD，
-    // `bindSlowStartResolver` 在 segCAutomation、根本不执行。这里刻意**不注入** slowStartResolver
-    // 复现那个接线形态。若已绑账号的环境改回去问账号投影，它恒答 unknown ⇒ 凡跑过一次（因而绑了
-    // 账号）的环境，客户端「运行方式」一律回落显示底模式、且设置冷启动后回读永远对不上。
-    const db = database();
-    await db.store.init();
-    const seeded = await db.store.writeEnvironment(
-      'env-fb',
-      { expectedRevision: 0, mode: 'slow_start', requestId: 'api-mode-seed' },
-      'panel:alice',
-    );
-    assert.equal(seeded.ok, true);
-    assert.ok(db.environments.get('env-fb')?.accountId, '前置：该环境已绑账号（= 跑过至少一次）');
-
-    const apiModeStore = new FacebookOperationPolicyStore({
-      pool: db.pool,
-      schemaProber: readySchema(),
-      environmentResolver: () => ({ ok: true, envKey: 'env-fb' }),
-      environmentSlowStartResolver: async ({ completedAt }) => (completedAt == null ? 'active' : 'graduated'),
-    });
-    await apiModeStore.init();
-    const view = await apiModeStore.getForEnv('env-fb');
-    assert.ok(view);
-    assert.equal(view.binding.state, 'bound');
-    assert.equal(view.slowStart.state, 'active');
-    assert.equal(view.effectiveMode, 'slow_start');
-    assert.equal(view.blocker, null);
   });
 
   // —— change unify-facebook-global-policy-across-targets §4：合并成一份之后的跨目标语义 ——
